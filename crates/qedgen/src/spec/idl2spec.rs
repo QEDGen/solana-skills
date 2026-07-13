@@ -200,12 +200,17 @@ pub(crate) fn render(idl: &Idl, analyses: &[InstructionAnalysis]) -> String {
         .map(|t| t.name.clone())
         .collect();
 
-    // Collect PDA info: account_name → pda_name
+    // Collect PDA info: account_name → pda_name. Seedless PDA markers
+    // (Codama `pdaValueNode` carries no seed data, #197) are excluded —
+    // an empty `pda <name> []` declaration doesn't parse, so those degrade
+    // to a TODO comment at the declaration site instead.
     let mut pda_names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut seen_pdas: HashSet<String> = HashSet::new();
     for ix in &idl.instructions {
         for acct in &ix.accounts {
-            if acct.pda.is_some() && seen_pdas.insert(acct.name.clone()) {
+            if acct.pda.as_ref().is_some_and(|p| !p.seeds.is_empty())
+                && seen_pdas.insert(acct.name.clone())
+            {
                 pda_names.insert(acct.name.clone(), acct.name.clone());
             }
         }
@@ -214,7 +219,7 @@ pub(crate) fn render(idl: &Idl, analyses: &[InstructionAnalysis]) -> String {
     // ── Header ───────────────────────────────────────────────────────────
     writeln!(
         s,
-        "// Generated from Anchor IDL — review and complete TODO items"
+        "// Generated from IDL (Anchor or Codama IR) — review and complete TODO items"
     )
     .unwrap();
     writeln!(s, "//").unwrap();
@@ -235,8 +240,16 @@ pub(crate) fn render(idl: &Idl, analyses: &[InstructionAnalysis]) -> String {
     // with `pragma sbpf { ... }`.
     writeln!(s, "spec {}", program_name).unwrap();
     writeln!(s).unwrap();
-    writeln!(s, "// TODO: Replace with deployed program ID").unwrap();
-    writeln!(s, "program_id \"11111111111111111111111111111111\"").unwrap();
+    // The IDL's own address is authoritative when present (Anchor 0.30+
+    // root `address`, Codama `program.publicKey`); only fall back to the
+    // TODO placeholder without one.
+    match idl.address.as_deref() {
+        Some(addr) => writeln!(s, "program_id \"{}\"", addr).unwrap(),
+        None => {
+            writeln!(s, "// TODO: Replace with deployed program ID").unwrap();
+            writeln!(s, "program_id \"11111111111111111111111111111111\"").unwrap();
+        }
+    }
     writeln!(s).unwrap();
 
     // ── State / Account blocks ───────────────────────────────────────────
@@ -307,7 +320,20 @@ pub(crate) fn render(idl: &Idl, analyses: &[InstructionAnalysis]) -> String {
             if let Some(pda) = &acct.pda {
                 if seen_pdas.insert(acct.name.clone()) {
                     let seeds = render_pda_seeds(pda);
-                    writeln!(s, "pda {} [{}]", acct.name, seeds.join(", ")).unwrap();
+                    if seeds.is_empty() {
+                        // Codama `pdaValueNode` marks the account PDA but
+                        // carries no seed data (#197) — an empty seed list
+                        // doesn't parse, so leave the derivation to the user.
+                        writeln!(
+                            s,
+                            "// TODO: `{}` is a PDA but the IDL carries no seeds — declare\n\
+                             // them: pda {} [\"<literal>\", <account_or_arg>, ...]",
+                            acct.name, acct.name
+                        )
+                        .unwrap();
+                    } else {
+                        writeln!(s, "pda {} [{}]", acct.name, seeds.join(", ")).unwrap();
+                    }
                 }
             }
         }
@@ -696,5 +722,127 @@ mod tests {
         assert!(content.contains("pda escrow"));
         assert!(content.contains("\"escrow\""));
         assert!(content.contains("initializer"));
+    }
+
+    /// #197: a Codama IR tree (the IDL format Pinocchio programs ship)
+    /// normalizes into the same Anchor-shaped `Idl` — camelCase names
+    /// snake_cased, type nodes lowered, omitted single-byte discriminator
+    /// lifted, accountNode data structs exposed as `types`.
+    const CODAMA_IDL: &str = r#"{
+      "kind": "rootNode",
+      "standard": "codama",
+      "version": "1.0.0",
+      "program": {
+        "kind": "programNode",
+        "name": "ctxGate",
+        "publicKey": "Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS",
+        "version": "0.1.0",
+        "instructions": [
+          {
+            "kind": "instructionNode",
+            "name": "setThreshold",
+            "docs": ["Update the gate threshold"],
+            "arguments": [
+              {
+                "kind": "instructionArgumentNode",
+                "name": "discriminator",
+                "type": { "kind": "numberTypeNode", "format": "u8" },
+                "defaultValue": { "kind": "numberValueNode", "number": 1 },
+                "defaultValueStrategy": "omitted"
+              },
+              {
+                "kind": "instructionArgumentNode",
+                "name": "newThreshold",
+                "type": { "kind": "numberTypeNode", "format": "u64" }
+              }
+            ],
+            "accounts": [
+              {
+                "kind": "instructionAccountNode",
+                "name": "settings",
+                "isWritable": true,
+                "isSigner": false,
+                "defaultValue": { "kind": "pdaValueNode" }
+              },
+              { "kind": "instructionAccountNode", "name": "admin", "isSigner": true, "isWritable": false }
+            ]
+          }
+        ],
+        "accounts": [
+          {
+            "kind": "accountNode",
+            "name": "settings",
+            "data": {
+              "kind": "structTypeNode",
+              "fields": [
+                { "kind": "structFieldTypeNode", "name": "admin", "type": { "kind": "publicKeyTypeNode" } },
+                { "kind": "structFieldTypeNode", "name": "threshold", "type": { "kind": "numberTypeNode", "format": "u64" } }
+              ]
+            }
+          }
+        ],
+        "definedTypes": [],
+        "errors": [
+          { "kind": "errorNode", "name": "notActive", "code": 6000, "message": "settings not active" }
+        ],
+        "pdas": []
+      }
+    }"#;
+
+    #[test]
+    fn codama_ir_normalizes_to_anchor_shaped_idl() {
+        let tmp = std::env::temp_dir().join(format!("codama_{}.json", std::process::id()));
+        std::fs::write(&tmp, CODAMA_IDL).unwrap();
+        let (idl, analyses) = idl::parse_idl(&tmp).unwrap();
+        let _ = std::fs::remove_file(&tmp);
+
+        assert_eq!(idl.metadata.name, "ctxGate");
+        assert_eq!(
+            idl.address.as_deref(),
+            Some("Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS")
+        );
+        let ix = &idl.instructions[0];
+        assert_eq!(ix.name, "set_threshold", "camelCase name snake_cased");
+        assert_eq!(
+            ix.discriminator,
+            vec![1],
+            "omitted numberValueNode arg lifted"
+        );
+        assert_eq!(
+            ix.args.len(),
+            1,
+            "omitted discriminator arg dropped from args"
+        );
+        assert_eq!(ix.args[0].name, "new_threshold");
+        assert_eq!(ix.args[0].ty, serde_json::json!("u64"));
+        let settings = &ix.accounts[0];
+        assert!(settings.writable && !settings.signer && settings.pda.is_some());
+        let admin = &ix.accounts[1];
+        assert!(admin.signer && !admin.writable);
+        // accountNode data struct exposed as a state-layout candidate.
+        let ty = idl.types.iter().find(|t| t.name == "Settings").unwrap();
+        assert_eq!(ty.ty.fields.len(), 2);
+        assert_eq!(idl.errors[0].name, "NotActive");
+        // Signer inference flows through the shared analysis.
+        assert_eq!(analyses[0].signers, vec!["admin".to_string()]);
+    }
+
+    #[test]
+    fn codama_ir_renders_qedspec_scaffold() {
+        let tmp = std::env::temp_dir().join(format!("codama_r_{}.json", std::process::id()));
+        std::fs::write(&tmp, CODAMA_IDL).unwrap();
+        let (idl, analyses) = idl::parse_idl(&tmp).unwrap();
+        let _ = std::fs::remove_file(&tmp);
+        let spec = render(&idl, &analyses);
+        assert!(spec.contains("set_threshold"), "handler present:\n{spec}");
+        assert!(
+            spec.contains("threshold : U64") && spec.contains(": Pubkey"),
+            "state fields lowered from the accountNode struct:\n{spec}"
+        );
+        assert!(
+            spec.contains("program_id \"Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS\""),
+            "Codama program.publicKey becomes the program_id:\n{spec}"
+        );
+        assert!(spec.contains("NotActive"), "error surfaced:\n{spec}");
     }
 }

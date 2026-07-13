@@ -400,13 +400,27 @@ pub(crate) fn format_lint_warning(warning: &check::CompletenessWarning) -> Strin
     out
 }
 
+/// The runtime-agnostic source scanners — arithmetic-symbol, lifecycle,
+/// paired-validator — merged into EVERY `--program` probe envelope. They
+/// are framework-neutral by construction (regex over `*.rs`), but until
+/// #196 they were wired only into the Pinocchio branch, so Anchor/Native
+/// runs returned zero per-site findings from scanners that would have
+/// fired on them verbatim.
+pub(crate) fn runtime_agnostic_findings(prog_root: &Path) -> Result<Vec<probe::Finding>> {
+    let mut findings = arithmetic_symbol_probe::scan_program(prog_root)?;
+    findings.extend(paired_validator_probe::scan_program(prog_root)?);
+    findings.extend(lifecycle_probe::scan_program(prog_root)?);
+    Ok(findings)
+}
+
 /// Anchor (and Quasar) probe path used by `qedgen probe --program <root>`.
 /// Mirrors the Pinocchio branch's shape: runs the runtime-specific
 /// extractor, clusters proto-clauses, optionally materializes the audit
-/// working set, and prints the schema-v3 envelope. Anchor doesn't emit
-/// per-site findings yet — the auditor SKILL.md handles them at the
-/// agent layer via Read+Grep, while the scaffold-to-spec interview
-/// works off the extractor's clusters directly.
+/// working set, and prints the schema-v3 envelope. Per-site findings come
+/// from the runtime-agnostic scanners (#196); Anchor-specific site
+/// discovery stays at the agent layer (auditor SKILL.md via Read+Grep),
+/// while the scaffold-to-spec interview works off the extractor's
+/// clusters directly.
 pub(crate) fn run_anchor_probe(
     prog_root: &Path,
     runtime_final: probe::Runtime,
@@ -448,7 +462,7 @@ pub(crate) fn run_anchor_probe(
         runtime: Some(runtime_final),
         handlers: handlers_opt,
         applicable_categories: Some(applicable),
-        findings: Vec::new(),
+        findings: runtime_agnostic_findings(prog_root)?,
         clusters,
         dispatcher_kind: None,
     };
@@ -523,7 +537,7 @@ pub(crate) fn run_native_probe(
         runtime: Some(runtime_final),
         handlers,
         applicable_categories: Some(applicable),
-        findings: Vec::new(),
+        findings: runtime_agnostic_findings(prog_root)?,
         clusters,
         dispatcher_kind,
     };
@@ -557,9 +571,45 @@ pub(crate) fn narrow_shank_handler(
 
 #[cfg(test)]
 mod tests {
-    use super::{expand_ci_template, format_lint_warning, redirect_kani_impl_to_src};
+    use super::{
+        expand_ci_template, format_lint_warning, redirect_kani_impl_to_src,
+        runtime_agnostic_findings,
+    };
     use crate::check::{CompletenessWarning, Severity};
     use std::path::PathBuf;
+
+    /// #196: the runtime-agnostic scanners fire on an ANCHOR-shaped crate —
+    /// they used to be wired only into the Pinocchio probe branch, leaving
+    /// Anchor/Native `--program` runs with zero per-site findings.
+    #[test]
+    fn agnostic_findings_fire_on_anchor_shaped_source() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        // The canonical silent_success_arithmetic shape (timestamp-shaped
+        // saturating_sub + downstream gating comparison) inside an
+        // Anchor-flavored handler.
+        std::fs::write(
+            dir.path().join("src/lib.rs"),
+            r#"
+use anchor_lang::prelude::*;
+pub fn process_transfer(ctx: Context<T>, current_ts: i64) -> Result<()> {
+    let elapsed = current_ts.saturating_sub(*period_start_ts);
+    if elapsed >= period_length {
+        advance_period(ctx)?;
+    }
+    Ok(())
+}
+"#,
+        )
+        .unwrap();
+        let findings = runtime_agnostic_findings(dir.path()).unwrap();
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.category_tag == "silent_success_arithmetic"),
+            "agnostic scanner must fire on Anchor-shaped source; got {findings:#?}"
+        );
+    }
 
     #[test]
     fn kani_impl_path_redirects_tests_to_src_for_pinocchio() {
