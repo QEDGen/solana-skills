@@ -15,7 +15,8 @@ use regex::Regex;
 use std::path::Path;
 
 use crate::probe::scan_util::{
-    self, byte_offset_to_line, enclosing_fn_body, is_test_fn_name, line_is_commented, make_id,
+    self, byte_offset_to_line, enclosing_fn_body, floor_char_boundary, is_test_fn_name,
+    line_is_commented, make_id,
 };
 use crate::probe::{Category, Finding, Reproducer, Severity};
 
@@ -77,7 +78,7 @@ pub(crate) fn scan_silent_success_arithmetic(rel_file: &Path, source: &str) -> V
         let fn_name = enclosing_fn_name(source, m.start());
         // The "elapsed >= threshold opens an effect" tell must appear
         // within the next ~400 chars.
-        let window = &source[m.end()..source.len().min(m.end() + 400)];
+        let window = &source[m.end()..floor_char_boundary(source, m.end() + 400)];
         if !window_has_gating_comparison(window) {
             continue;
         }
@@ -176,7 +177,7 @@ pub(crate) fn scan_graceful_error_as_dos(rel_file: &Path, source: &str) -> Vec<F
         }
         // Err arm must exit: `?` or `return Err` within ~160 chars
         // (propagation may chain through `.ok_or(_else)`).
-        let window = &source[m.end()..source.len().min(m.end() + 160)];
+        let window = &source[m.end()..floor_char_boundary(source, m.end() + 160)];
         if !window.contains('?') && !window.contains("return Err") {
             continue;
         }
@@ -281,14 +282,14 @@ pub(crate) fn scan_unchecked_arith_with_fund_flow(rel_file: &Path, source: &str)
         }
         // Adjacent `->` / `<-` flags non-arithmetic shapes (return
         // types, pointer-like patterns).
-        let surrounding_start = m.start().saturating_sub(2);
+        let surrounding_start = floor_char_boundary(source, m.start().saturating_sub(2));
         let surrounding = &source[surrounding_start..m.end()];
         if surrounding.contains("->") || surrounding.contains("<-") {
             continue;
         }
         // Reject sites already inside a `checked_*` / `saturating_*` /
         // `wrapping_*` call (check the ~80 preceding chars).
-        let before_start = m.start().saturating_sub(80);
+        let before_start = floor_char_boundary(source, m.start().saturating_sub(80));
         let before = &source[before_start..m.start()];
         if before.contains("checked_")
             || before.contains("saturating_")
@@ -496,7 +497,7 @@ fn is_timestamp_shape(recv: &str) -> bool {
 fn window_has_gating_comparison(window: &str) -> bool {
     let cmp = Regex::new(r">=|>").expect("static regex");
     if let Some(m) = cmp.find(window) {
-        let after = &window[m.end()..window.len().min(m.end() + 120)];
+        let after = &window[m.end()..floor_char_boundary(window, m.end() + 120)];
         return after.contains('{')
             || after.contains("return ")
             || after.contains("Ok(")
@@ -803,5 +804,41 @@ fn loop_through(ctx: Context, items: &[u64]) -> Result<()> {
         assert!(!is_timestamp_shape("balance"));
         assert!(!is_timestamp_shape("amount"));
         assert!(!is_timestamp_shape("fee_lamports"));
+    }
+
+    /// #187: a multi-byte char (`—`) just before a match made the
+    /// backward context window (`m.start() - 2`) split the char and panic
+    /// the slice. The exact sanitized repro from the issue — must scan
+    /// without panicking (and the commented line yields no finding).
+    #[test]
+    fn utf8_boundary_before_match_does_not_panic() {
+        let src = "#![no_std]\n\n// \u{2014} amount + 1\npub fn generic_handler(amount: u64) -> u64 {\n    amount\n}\n";
+        let findings = scan_unchecked_arith_with_fund_flow(&p("lib.rs"), src);
+        assert!(
+            findings.is_empty(),
+            "commented shape must not fire; got {findings:#?}"
+        );
+    }
+
+    /// #187 (forward windows): multi-byte chars downstream of a match must
+    /// not panic the `end + 400` / `end + 160` / `end + 120` context
+    /// slices. Three paddings guarantee at least one window edge lands
+    /// mid-char regardless of match length.
+    #[test]
+    fn utf8_boundary_after_match_does_not_panic() {
+        for pad in 0..3usize {
+            let src = format!(
+                "fn process(current_ts: i64) -> Result<(), ()> {{\n    \
+                 let elapsed = current_ts.saturating_sub(start_ts);\n    \
+                 if elapsed >= period {{ advance()?; }}\n    \
+                 let total = balance_amount + 100;\n{}{}\n}}\n",
+                " ".repeat(pad),
+                "\u{2014}".repeat(300),
+            );
+            // Exercise all three scanners over the same dash-heavy source.
+            let _ = scan_silent_success_arithmetic(&p("a.rs"), &src);
+            let _ = scan_graceful_error_as_dos(&p("a.rs"), &src);
+            let _ = scan_unchecked_arith_with_fund_flow(&p("a.rs"), &src);
+        }
     }
 }
