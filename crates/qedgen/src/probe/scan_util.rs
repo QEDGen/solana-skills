@@ -9,6 +9,19 @@
 use regex::Regex;
 use std::path::Path;
 
+/// Snap a byte index DOWN to the nearest char boundary (also clamps to
+/// `s.len()`). The probes take fixed-byte context windows around a regex
+/// match (`start - 2`, `end + 400`, …); an arithmetic offset can land inside
+/// a multi-byte char (an `—` in a comment) and panic the slice (#187). The
+/// window sizes are heuristic, so shrinking by ≤3 bytes is always safe.
+pub(crate) fn floor_char_boundary(s: &str, idx: usize) -> usize {
+    let mut idx = idx.min(s.len());
+    while !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
 /// Resolve a byte offset to a 1-indexed line number.
 pub(crate) fn byte_offset_to_line(source: &str, offset: usize) -> u32 {
     let prefix = &source[..offset.min(source.len())];
@@ -185,5 +198,17 @@ mod tests {
         assert!(is_test_fn_name("it_works"));
         assert!(is_test_fn_name("transfer_test"));
         assert!(!is_test_fn_name("process_transfer"));
+    }
+
+    /// #187: window offsets snap DOWN to a char boundary and clamp to len.
+    #[test]
+    fn floor_char_boundary_snaps_and_clamps() {
+        let s = "ab\u{2014}cd"; // — occupies bytes 2..5
+        assert_eq!(floor_char_boundary(s, 0), 0);
+        assert_eq!(floor_char_boundary(s, 2), 2);
+        assert_eq!(floor_char_boundary(s, 3), 2);
+        assert_eq!(floor_char_boundary(s, 4), 2);
+        assert_eq!(floor_char_boundary(s, 5), 5);
+        assert_eq!(floor_char_boundary(s, 99), s.len());
     }
 }
