@@ -48,7 +48,26 @@ fn map_type(value: &serde_json::Value) -> String {
                     return name.to_string();
                 }
             }
-            // Complex types (option, vec, array, etc.) — fallback
+            // Container types → the DSL's `Option T` / `Vec T` field forms
+            // (G9/G10). Anchor IDLs use `{"option"|"vec": <inner>}` and
+            // `{"array": [<inner>, N]}`; the Codama normalizer emits the same
+            // shapes. Recurse into the element so `Option<Pubkey>` renders
+            // `Option Pubkey` (not the old lossy `U64` — which silently
+            // mistyped e.g. a mint's `Option<Pubkey>` authority field).
+            if let Some(inner) = obj.get("option") {
+                return format!("Option {}", map_type(inner));
+            }
+            if let Some(inner) = obj.get("vec") {
+                return format!("Vec {}", map_type(inner));
+            }
+            if let Some(serde_json::Value::Array(parts)) = obj.get("array") {
+                // Fixed-length arrays have no DSL type; degrade to `Vec T`
+                // (element type preserved, length dropped — better than U64).
+                if let Some(inner) = parts.first() {
+                    return format!("Vec {}", map_type(inner));
+                }
+            }
+            // Genuinely unknown object shape — last-resort scalar.
             "U64".into()
         }
         _ => "U64".into(),
@@ -638,8 +657,24 @@ mod tests {
     }
 
     #[test]
-    fn map_type_complex_fallback() {
-        assert_eq!(map_type(&serde_json::json!({"vec": "u8"})), "U64");
+    fn map_type_container_types() {
+        // Container shapes recurse into the element (#197 real-world fidelity
+        // from p-token: an `Option<Pubkey>` authority field was mistyped U64).
+        assert_eq!(map_type(&serde_json::json!({"vec": "u8"})), "Vec U8");
+        assert_eq!(
+            map_type(&serde_json::json!({"option": "publicKey"})),
+            "Option Pubkey"
+        );
+        assert_eq!(
+            map_type(&serde_json::json!({"array": ["u8", 32]})),
+            "Vec U8"
+        );
+        assert_eq!(
+            map_type(&serde_json::json!({"option": {"defined": "Hook"}})),
+            "Option Hook"
+        );
+        // A genuinely unknown object shape still degrades to a scalar.
+        assert_eq!(map_type(&serde_json::json!({"mystery": 1})), "U64");
     }
 
     #[test]
