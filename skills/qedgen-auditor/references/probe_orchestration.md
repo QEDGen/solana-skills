@@ -104,7 +104,7 @@ Crucible has three entry points:
 
 1. **Protocol mode, Phase 1:** start immediately when runtime metadata exposes a
    spec-less harness, including an IDL where the runtime requires one. This
-   covers only the mechanical state-diff suite below.
+   covers only the mechanical state-diff suite above.
 2. **Skeleton mode, Phase 1:** start after literal, source-anchored clauses are
    merged into `skeleton.qedspec`. Do not wait for a finding or user interview.
 3. **Domain mode, Phase 3:** re-run after the user ratifies derived/semantic
