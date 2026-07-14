@@ -1,0 +1,286 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qedgen.dev/schemas/auditor/domain-dossier-v1.schema.json",
+  "title": "QEDGen Auditor Domain Dossier",
+  "$comment": "Stable candidate IDs must be unique across all seven domain candidate arrays plus structural candidates; scripts/check-auditor-domain-artifacts.sh enforces this cross-array constraint.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "schema_uri",
+    "audit_id",
+    "target",
+    "handlers",
+    "structural_candidates",
+    "asset_flows",
+    "quantities",
+    "paired_operations",
+    "lifecycle_edges",
+    "authority_capabilities",
+    "economic_equations",
+    "external_assumptions"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "schema_uri": { "const": "https://qedgen.dev/schemas/auditor/domain-dossier-v1.schema.json" },
+    "audit_id": { "$ref": "#/$defs/stableId" },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["program_root", "runtime", "mode"],
+      "properties": {
+        "program_root": { "type": "string", "minLength": 1 },
+        "runtime": {
+          "enum": ["anchor", "pinocchio", "native-rust", "quasar", "qedgen-codegen", "sbpf", "unknown"]
+        },
+        "mode": { "enum": ["spec-aware", "spec-less"] },
+        "spec": { "type": ["string", "null"] },
+        "source_commit": { "type": ["string", "null"] }
+      }
+    },
+    "handlers": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/handlerFact" }
+    },
+    "structural_candidates": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/structuralCandidate" }
+    },
+    "asset_flows": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/assetFlow" }
+    },
+    "quantities": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/quantity" }
+    },
+    "paired_operations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/pairedOperation" }
+    },
+    "lifecycle_edges": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/lifecycleEdge" }
+    },
+    "authority_capabilities": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/authorityCapability" }
+    },
+    "economic_equations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/economicEquation" }
+    },
+    "external_assumptions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/externalAssumption" }
+    }
+  },
+  "$defs": {
+    "stableId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]*$"
+    },
+    "structuralId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+    },
+    "sourceAnchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "line_start"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "line_start": { "type": "integer", "minimum": 1 },
+        "line_end": { "type": "integer", "minimum": 1 },
+        "symbol": { "type": ["string", "null"] },
+        "excerpt": { "type": ["string", "null"] }
+      }
+    },
+    "candidateMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["confidence", "ratification", "source_anchors", "verification_lanes"],
+      "properties": {
+        "confidence": { "enum": ["literal", "derived", "semantic"] },
+        "ratification": { "enum": ["auto", "user", "rejected", "bug", "pending"] },
+        "rationale": { "type": ["string", "null"] },
+        "source_anchors": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/sourceAnchor" }
+        },
+        "verification_lanes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "enum": ["manual", "mollusk", "miri", "crucible"] }
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "ratification": { "const": "auto" } }, "required": ["ratification"] },
+          "then": { "properties": { "confidence": { "const": "literal" } } }
+        },
+        {
+          "if": { "properties": { "ratification": { "const": "rejected" } }, "required": ["ratification"] },
+          "then": { "properties": { "rationale": { "type": "string", "minLength": 1 } }, "required": ["rationale"] }
+        },
+        {
+          "if": { "properties": { "ratification": { "const": "bug" } }, "required": ["ratification"] },
+          "then": { "properties": { "rationale": { "type": "string", "minLength": 1 } }, "required": ["rationale"] }
+        }
+      ]
+    },
+    "structuralCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "scope", "summary", "suggested_syntax", "probe_confidence", "ratification", "finding_ids", "evidence_count"],
+      "properties": {
+        "id": { "$ref": "#/$defs/structuralId" },
+        "kind": { "type": "string", "minLength": 1 },
+        "scope": { "type": "string", "minLength": 1 },
+        "summary": { "type": "string", "minLength": 1 },
+        "suggested_syntax": { "type": "string", "minLength": 1 },
+        "probe_confidence": { "enum": ["high", "medium", "low"] },
+        "ratification": { "enum": ["pending", "user", "rejected", "bug"] },
+        "rationale": { "type": ["string", "null"] },
+        "finding_ids": { "type": "array", "items": { "type": "string" } },
+        "evidence_count": { "type": "integer", "minimum": 0 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "ratification": { "const": "rejected" } }, "required": ["ratification"] },
+          "then": { "properties": { "rationale": { "type": "string", "minLength": 1 } }, "required": ["rationale"] }
+        },
+        {
+          "if": { "properties": { "ratification": { "const": "bug" } }, "required": ["ratification"] },
+          "then": { "properties": { "rationale": { "type": "string", "minLength": 1 } }, "required": ["rationale"] }
+        }
+      ]
+    },
+    "handlerFact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "source_path", "accounts_type", "args"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "source_path": { "type": ["string", "null"] },
+        "accounts_type": { "type": ["string", "null"] },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "qedspec_type"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "qedspec_type": { "type": ["string", "null"] }
+            }
+          }
+        }
+      }
+    },
+    "assetFlow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "handler", "asset", "source", "destination", "nominal_amount", "metadata"],
+      "properties": {
+        "id": { "$ref": "#/$defs/stableId" },
+        "handler": { "type": "string", "minLength": 1 },
+        "asset": { "type": "string", "minLength": 1 },
+        "source": { "type": "string", "minLength": 1 },
+        "destination": { "type": "string", "minLength": 1 },
+        "nominal_amount": { "type": "string", "minLength": 1 },
+        "delivered_amount": { "type": ["string", "null"] },
+        "fee_expression": { "type": ["string", "null"] },
+        "authority": { "type": ["string", "null"] },
+        "state_mutations": { "type": "array", "items": { "type": "string" } },
+        "metadata": { "$ref": "#/$defs/candidateMetadata" }
+      }
+    },
+    "quantity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "symbol", "unit", "scale", "rounding", "metadata"],
+      "properties": {
+        "id": { "$ref": "#/$defs/stableId" },
+        "symbol": { "type": "string", "minLength": 1 },
+        "unit": { "type": "string", "minLength": 1 },
+        "scale": { "type": "string", "minLength": 1 },
+        "rounding": { "enum": ["exact", "floor", "ceil", "nearest", "unknown"] },
+        "valid_range": { "type": ["string", "null"] },
+        "conversions": { "type": "array", "items": { "type": "string" } },
+        "metadata": { "$ref": "#/$defs/candidateMetadata" }
+      }
+    },
+    "pairedOperation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "left_operation", "right_operation", "relationship", "metadata"],
+      "properties": {
+        "id": { "$ref": "#/$defs/stableId" },
+        "left_operation": { "type": "string", "minLength": 1 },
+        "right_operation": { "type": "string", "minLength": 1 },
+        "relationship": { "type": "string", "minLength": 1 },
+        "left_handlers": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "right_handlers": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "metadata": { "$ref": "#/$defs/candidateMetadata" }
+      }
+    },
+    "lifecycleEdge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "account", "handler", "from", "to", "metadata"],
+      "properties": {
+        "id": { "$ref": "#/$defs/stableId" },
+        "account": { "type": "string", "minLength": 1 },
+        "handler": { "type": "string", "minLength": 1 },
+        "from": { "type": "string", "minLength": 1 },
+        "to": { "type": "string", "minLength": 1 },
+        "guards": { "type": "array", "items": { "type": "string" } },
+        "terminal": { "type": "boolean" },
+        "metadata": { "$ref": "#/$defs/candidateMetadata" }
+      }
+    },
+    "authorityCapability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "role", "identity_anchor", "handler", "effects", "metadata"],
+      "properties": {
+        "id": { "$ref": "#/$defs/stableId" },
+        "role": { "type": "string", "minLength": 1 },
+        "identity_anchor": { "type": "string", "minLength": 1 },
+        "handler": { "type": "string", "minLength": 1 },
+        "effects": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+        "limits": { "type": "array", "items": { "type": "string" } },
+        "revocation_path": { "type": ["string", "null"] },
+        "metadata": { "$ref": "#/$defs/candidateMetadata" }
+      }
+    },
+    "economicEquation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "expression", "scope", "tolerance", "unit_check", "metadata"],
+      "properties": {
+        "id": { "$ref": "#/$defs/stableId" },
+        "name": { "type": "string", "minLength": 1 },
+        "expression": { "type": "string", "minLength": 1 },
+        "scope": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+        "tolerance": { "type": "string", "minLength": 1 },
+        "unit_check": { "enum": ["compatible", "incompatible", "pending"] },
+        "metadata": { "$ref": "#/$defs/candidateMetadata" }
+      }
+    },
+    "externalAssumption": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "claim", "failure_effect", "metadata"],
+      "properties": {
+        "id": { "$ref": "#/$defs/stableId" },
+        "kind": { "enum": ["oracle", "token", "cpi", "clock", "keeper", "governance", "dependency", "other"] },
+        "claim": { "type": "string", "minLength": 1 },
+        "failure_effect": { "type": "string", "minLength": 1 },
+        "metadata": { "$ref": "#/$defs/candidateMetadata" }
+      }
+    }
+  }
+}

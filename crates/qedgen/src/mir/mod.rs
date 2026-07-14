@@ -658,7 +658,18 @@ pub struct LivenessMir {
 pub struct EnvironmentMir {
     pub name: Symbol,
     pub mutates: Vec<(Symbol, Ty)>,
+    pub external_fields: Vec<(Symbol, Symbol, Ty)>,
+    /// Legacy predicate list retained for byte-stable generators.
     pub constraints: Vec<Predicate>,
+    /// Typed, temporally classified constraint metadata. Empty for legacy
+    /// parsed specs which only supplied `constraints`.
+    pub typed_constraints: Vec<EnvironmentConstraintMir>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnvironmentConstraintMir {
+    pub predicate: Predicate,
+    pub class: crate::check::PropertyClass,
 }
 
 /// `ref_impl <name> (params) : <return_type> = <expr>` declaration; carries
@@ -986,7 +997,11 @@ pub fn lower(parsed: &ParsedSpec) -> Mir {
         accounts: lower_account_table(parsed),
         errors: lower_errors(parsed),
         imports: lower_imports(parsed),
-        handlers: parsed.handlers.iter().map(lower_handler).collect(),
+        handlers: parsed
+            .handlers
+            .iter()
+            .map(|handler| lower_handler(handler, parsed))
+            .collect(),
         invariants: lower_invariants(parsed),
         events: lower_events(parsed),
         constants: parsed.constants.clone(),
@@ -1071,7 +1086,7 @@ fn lower_account_states(parsed: &ParsedSpec) -> Vec<AccountStateMir> {
                         .iter()
                         .map(|(n, t)| FieldDecl {
                             name: n.clone(),
-                            ty: parse_ty(t),
+                            ty: parse_ty_resolved(t, parsed),
                         })
                         .collect(),
                 })
@@ -1081,7 +1096,7 @@ fn lower_account_states(parsed: &ParsedSpec) -> Vec<AccountStateMir> {
                 .iter()
                 .map(|(n, t)| FieldDecl {
                     name: n.clone(),
-                    ty: parse_ty(t),
+                    ty: parse_ty_resolved(t, parsed),
                 })
                 .collect();
             AccountStateMir {
@@ -1110,7 +1125,7 @@ fn lower_state(parsed: &ParsedSpec) -> StateAdt {
                     .iter()
                     .map(|(n, t)| FieldDecl {
                         name: n.clone(),
-                        ty: parse_ty(t),
+                        ty: parse_ty_resolved(t, parsed),
                     })
                     .collect(),
             })
@@ -1125,7 +1140,7 @@ fn lower_state(parsed: &ParsedSpec) -> StateAdt {
                     .iter()
                     .map(|(n, t)| FieldDecl {
                         name: n.clone(),
-                        ty: parse_ty(t),
+                        ty: parse_ty_resolved(t, parsed),
                     })
                     .collect(),
             }]
@@ -1325,7 +1340,7 @@ fn lower_ghosts(parsed: &ParsedSpec) -> Vec<GhostMir> {
         .map(|g| GhostMir {
             name: g.name.clone(),
             doc: g.doc.clone(),
-            ty: parse_ty(&g.ty),
+            ty: parse_ty_resolved(&g.ty, parsed),
             init: Expr::from_lean_rust(&g.init_lean, &g.init_rust),
             updates: g
                 .updates
@@ -1350,7 +1365,14 @@ fn lower_environments(parsed: &ParsedSpec) -> Vec<EnvironmentMir> {
             mutates: env
                 .mutates
                 .iter()
-                .map(|(name, ty)| (name.clone(), parse_ty(ty)))
+                .map(|(name, ty)| (name.clone(), parse_ty_resolved(ty, parsed)))
+                .collect(),
+            external_fields: env
+                .external_fields
+                .iter()
+                .map(|(object, field, ty)| {
+                    (object.clone(), field.clone(), parse_ty_resolved(ty, parsed))
+                })
                 .collect(),
             constraints: env
                 .constraints
@@ -1361,6 +1383,17 @@ fn lower_environments(parsed: &ParsedSpec) -> Vec<EnvironmentMir> {
                         lean,
                         env.constraints_rust.get(i).cloned().unwrap_or_default(),
                     ))
+                })
+                .collect(),
+            typed_constraints: env
+                .typed_constraints
+                .iter()
+                .map(|constraint| EnvironmentConstraintMir {
+                    predicate: Predicate(
+                        Expr::from_lean_rust(&constraint.lean_expr, &constraint.rust_expr)
+                            .with_tree(constraint.tree.clone()),
+                    ),
+                    class: constraint.class,
                 })
                 .collect(),
         })
@@ -1378,14 +1411,14 @@ fn lower_events(parsed: &ParsedSpec) -> Vec<EventDecl> {
                 .iter()
                 .map(|(n, t)| FieldDecl {
                     name: n.clone(),
-                    ty: parse_ty(t),
+                    ty: parse_ty_resolved(t, parsed),
                 })
                 .collect(),
         })
         .collect()
 }
 
-fn lower_handler(h: &crate::check::ParsedHandler) -> HandlerMir {
+fn lower_handler(h: &crate::check::ParsedHandler, parsed: &ParsedSpec) -> HandlerMir {
     let transition = match (&h.pre_status, &h.post_status) {
         (Some(pre), Some(post)) => Some((pre.clone(), post.clone())),
         _ => None,
@@ -1419,7 +1452,7 @@ fn lower_handler(h: &crate::check::ParsedHandler) -> HandlerMir {
         params: h
             .takes_params
             .iter()
-            .map(|(n, t)| (n.clone(), parse_ty(t)))
+            .map(|(n, t)| (n.clone(), parse_ty_resolved(t, parsed)))
             .collect(),
         accounts: h.accounts.iter().map(lower_account_binding).collect(),
         auth: lower_auth(h),
@@ -1700,6 +1733,22 @@ fn parse_field_path(s: &str) -> Path {
 /// `pub(crate)`: the adapter's tree builder (`chumsky_adapter::tree`)
 /// routes `TypeRef::Named` through it so `Custom` spellings stay
 /// consistent across lowering and tree annotation.
+fn parse_ty_resolved(s: &str, parsed: &ParsedSpec) -> Ty {
+    let mut resolved = s.trim();
+    let mut seen = std::collections::BTreeSet::new();
+    while seen.insert(resolved.to_string()) {
+        let Some((_, rhs)) = parsed
+            .type_aliases
+            .iter()
+            .find(|(name, _)| name == resolved)
+        else {
+            break;
+        };
+        resolved = rhs.trim();
+    }
+    parse_ty(resolved)
+}
+
 pub(crate) fn parse_ty(s: &str) -> Ty {
     match s.trim() {
         "U8" => Ty::U8,
@@ -2045,6 +2094,26 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
     fn lower_lending_pilot() {
         let mir = lower_fixture("examples/rust/lending/lending.qedspec");
         assert!(!mir.handlers.is_empty(), "lending has handlers");
+        let environment = mir
+            .environments
+            .iter()
+            .find(|environment| environment.name == "interest_rate_change")
+            .expect("lending environment");
+        assert_eq!(environment.constraints.len(), 1);
+        assert_eq!(environment.typed_constraints.len(), 1);
+        assert_eq!(
+            environment.typed_constraints[0].class,
+            crate::check::PropertyClass::Unary
+        );
+        assert!(environment.typed_constraints[0].predicate.0.tree.is_some());
+        assert_eq!(
+            environment.typed_constraints[0].predicate.0.lean, environment.constraints[0].0.lean,
+            "typed lowering must preserve the legacy Lean rendering"
+        );
+        assert_eq!(
+            environment.typed_constraints[0].predicate.0.rust, environment.constraints[0].0.rust,
+            "typed lowering must preserve the legacy Rust rendering"
+        );
         // Lending uses TokenTransfer for deposit/withdraw flows.
         let total_xfers: usize = mir
             .handlers
@@ -2067,6 +2136,32 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
                 h.name
             );
         }
+    }
+
+    #[test]
+    fn lower_environment_preserves_binary_constraint_tree() {
+        let parsed = crate::chumsky_adapter::parse_str(
+            r#"spec EnvironmentTree
+program_id "11111111111111111111111111111111"
+
+type State = { rate : U64, }
+type Error | Bad
+
+environment rate_change {
+  mutates rate : U64
+  constraint state.rate >= old(state.rate)
+}
+"#,
+        )
+        .expect("parse binary environment constraint");
+        let mir = lower(&parsed);
+        let environment = &mir.environments[0];
+        let typed = &environment.typed_constraints[0];
+
+        assert_eq!(typed.class, crate::check::PropertyClass::Binary);
+        assert!(matches!(typed.predicate.0.tree, Some(ExprTree::Cmp { .. })));
+        assert_eq!(typed.predicate.0.lean, environment.constraints[0].0.lean);
+        assert_eq!(typed.predicate.0.rust, environment.constraints[0].0.rust);
     }
 
     #[test]

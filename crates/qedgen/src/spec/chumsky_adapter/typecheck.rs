@@ -160,6 +160,9 @@ fn is_signed_int(t: &str) -> bool {
 pub fn typecheck_spec(spec: &a::Spec, parsed: &ParsedSpec) -> anyhow::Result<()> {
     let field_types = collect_field_types(parsed);
     let const_literals = collect_numeric_consts(spec);
+    let dimensions = validate_dimensions(parsed)?;
+    validate_external_fields(spec)?;
+    validate_environment_external_scope(spec)?;
 
     for Node { node, .. } in &spec.items {
         if let TopItem::Handler(h) = node {
@@ -169,6 +172,88 @@ pub fn typecheck_spec(spec: &a::Spec, parsed: &ParsedSpec) -> anyhow::Result<()>
                 .map(|p| (p.name.clone(), type_ref_to_string(&p.ty)))
                 .collect();
             typecheck_handler(h, &field_types, &param_types, &const_literals)?;
+            typecheck_handler_dimensions(
+                h,
+                &field_types,
+                &param_types,
+                &dimensions,
+                &const_literals,
+            )?;
+        } else {
+            let empty = std::collections::HashMap::new();
+            match node {
+                TopItem::Property(p) => check_expr_dimensions(
+                    &format!("property `{}`", p.name),
+                    &p.body.node,
+                    &field_types,
+                    &empty,
+                    &dimensions,
+                    &const_literals,
+                )?,
+                TopItem::Invariant(i) => {
+                    if let a::InvariantBody::Expr(body) = &i.body {
+                        check_expr_dimensions(
+                            &format!("invariant `{}`", i.name),
+                            &body.node,
+                            &field_types,
+                            &empty,
+                            &dimensions,
+                            &const_literals,
+                        )?;
+                    }
+                }
+                TopItem::Environment(env) => {
+                    let mut environment_fields = field_types.clone();
+                    let mut seen_external = std::collections::HashSet::new();
+                    for clause in &env.clauses {
+                        if let a::EnvClause::External { object, field, ty } = &clause.node {
+                            if object == "state" {
+                                anyhow::bail!(
+                                    "environment `{}` external object cannot use reserved namespace `state`",
+                                    env.name
+                                );
+                            }
+                            if !seen_external.insert((object.clone(), field.clone())) {
+                                anyhow::bail!(
+                                    "environment `{}` declares duplicate external field `{}.{}`",
+                                    env.name,
+                                    object,
+                                    field
+                                );
+                            }
+                            environment_fields.insert(field.clone(), type_ref_to_string(ty));
+                        }
+                    }
+                    for clause in &env.clauses {
+                        if let a::EnvClause::Constraint(expr) = &clause.node {
+                            check_expr_dimensions(
+                                &format!("environment `{}` constraint", env.name),
+                                &expr.node,
+                                &environment_fields,
+                                &empty,
+                                &dimensions,
+                                &const_literals,
+                            )?;
+                        }
+                    }
+                }
+                TopItem::RefImpl(r) => {
+                    let params = r
+                        .params
+                        .iter()
+                        .map(|p| (p.name.clone(), type_ref_to_string(&p.ty)))
+                        .collect();
+                    check_expr_dimensions(
+                        &format!("ref_impl `{}`", r.name),
+                        &r.body.node,
+                        &field_types,
+                        &params,
+                        &dimensions,
+                        &const_literals,
+                    )?;
+                }
+                _ => {}
+            }
         }
     }
 
@@ -178,6 +263,548 @@ pub fn typecheck_spec(spec: &a::Spec, parsed: &ParsedSpec) -> anyhow::Result<()>
     check_no_recursive_ref_impls(spec)?;
 
     Ok(())
+}
+
+fn validate_external_fields(spec: &a::Spec) -> anyhow::Result<()> {
+    let mut declarations = std::collections::HashMap::new();
+    for item in &spec.items {
+        let TopItem::Environment(environment) = &item.node else {
+            continue;
+        };
+        for clause in &environment.clauses {
+            let a::EnvClause::External { object, field, ty } = &clause.node else {
+                continue;
+            };
+            if object == "state" {
+                anyhow::bail!(
+                    "environment `{}` external object cannot use reserved namespace `state`",
+                    environment.name
+                );
+            }
+            let key = (object.clone(), field.clone());
+            let rendered = type_ref_to_string(ty);
+            if let Some(previous) = declarations.insert(key, rendered.clone()) {
+                if previous != rendered {
+                    anyhow::bail!(
+                        "external field `{}.{}` has conflicting types `{}` and `{}`",
+                        object,
+                        field,
+                        previous,
+                        rendered
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// External fields are scoped to the environment that declares them: the
+/// tree builder classifies a constraint path whose root is an external of a
+/// DIFFERENT environment as `Unresolved`, which then renders verbatim into
+/// uncompilable Kani/Lean artifacts with no other diagnostic. Reject it here.
+fn validate_environment_external_scope(spec: &a::Spec) -> anyhow::Result<()> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    // External object name -> environments that declare it.
+    let mut object_owners: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for item in &spec.items {
+        if let TopItem::Environment(env) = &item.node {
+            for clause in &env.clauses {
+                if let a::EnvClause::External { object, .. } = &clause.node {
+                    object_owners
+                        .entry(object.clone())
+                        .or_default()
+                        .insert(env.name.clone());
+                }
+            }
+        }
+    }
+
+    for item in &spec.items {
+        let TopItem::Environment(env) = &item.node else {
+            continue;
+        };
+        let local: BTreeSet<&str> = env
+            .clauses
+            .iter()
+            .filter_map(|clause| match &clause.node {
+                a::EnvClause::External { object, .. } => Some(object.as_str()),
+                _ => None,
+            })
+            .collect();
+        for clause in &env.clauses {
+            let a::EnvClause::Constraint(expr) = &clause.node else {
+                continue;
+            };
+            let mut roots = BTreeSet::new();
+            collect_path_roots(&expr.node, &mut roots);
+            for root in &roots {
+                if local.contains(root.as_str()) {
+                    continue;
+                }
+                if let Some(owners) = object_owners.get(root) {
+                    if let Some(other) = owners.iter().find(|owner| owner.as_str() != env.name) {
+                        anyhow::bail!(
+                            "environment `{}` constraint references external `{}`, which is \
+                             declared in environment `{}`. Externals are scoped to their own \
+                             environment — declare `external {}.<field> : <Ty>` inside `{}`, or \
+                             move the constraint.",
+                            env.name,
+                            root,
+                            other,
+                            root,
+                            env.name
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Collect the root identifier of every `Expr::Path` in `e`. Used to detect
+/// external namespace references in environment constraints.
+fn collect_path_roots(e: &a::Expr, out: &mut std::collections::BTreeSet<String>) {
+    use a::Expr::*;
+    let recur = |node: &a::Node<a::Expr>, out: &mut _| collect_path_roots(&node.node, out);
+    match e {
+        Int(_) | Bool(_) => {}
+        Path(p) => {
+            out.insert(p.root.clone());
+        }
+        Old(inner) | Not(inner) | Paren(inner) | Len(inner) => recur(inner, out),
+        Sum { body, .. } | Quant { body, .. } => recur(body, out),
+        BoolOp { lhs, rhs, .. } | Cmp { lhs, rhs, .. } | Arith { lhs, rhs, .. } => {
+            recur(lhs, out);
+            recur(rhs, out);
+        }
+        MulDivFloor { a, b, d } | MulDivCeil { a, b, d } | MulDivRoundHalfUp { a, b, d } => {
+            recur(a, out);
+            recur(b, out);
+            recur(d, out);
+        }
+        Contains { coll, elem } => {
+            recur(coll, out);
+            recur(elem, out);
+        }
+        QuantIn { coll, body, .. } => {
+            recur(coll, out);
+            recur(body, out);
+        }
+        Match { scrutinee, arms } => {
+            recur(scrutinee, out);
+            for arm in arms {
+                collect_path_roots(&arm.body.node, out);
+            }
+        }
+        Ctor { payload, .. } => {
+            if let Some(payload) = payload {
+                recur(payload, out);
+            }
+        }
+        RecordLit(fields) => {
+            for (_, value) in fields {
+                collect_path_roots(&value.node, out);
+            }
+        }
+        RecordUpdate { base, updates } => {
+            recur(base, out);
+            for (_, value) in updates {
+                collect_path_roots(&value.node, out);
+            }
+        }
+        IsVariant { scrutinee, .. } => recur(scrutinee, out),
+        App { args, .. } => {
+            for arg in args {
+                collect_path_roots(&arg.node, out);
+            }
+        }
+        Field { base, .. } => recur(base, out),
+        Let { value, body, .. } => {
+            recur(value, out);
+            recur(body, out);
+        }
+        IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            recur(cond, out);
+            recur(then_branch, out);
+            recur(else_branch, out);
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DimensionValue {
+    Literal,
+    Scalar,
+    Unit(String),
+    Other,
+}
+
+fn validate_dimensions(
+    parsed: &ParsedSpec,
+) -> anyhow::Result<std::collections::HashMap<String, String>> {
+    let mut out = std::collections::HashMap::new();
+    for dimension in &parsed.dimensions {
+        if !matches!(
+            dimension.base.as_str(),
+            "U8" | "U16" | "U32" | "U64" | "U128" | "I8" | "I16" | "I32" | "I64" | "I128"
+        ) {
+            anyhow::bail!(
+                "dimension `{}` must use an integer base type, found `{}`",
+                dimension.name,
+                dimension.base
+            );
+        }
+        if out
+            .insert(dimension.name.clone(), dimension.base.clone())
+            .is_some()
+        {
+            anyhow::bail!("duplicate dimension declaration `{}`", dimension.name);
+        }
+    }
+    Ok(out)
+}
+
+fn typecheck_handler_dimensions(
+    h: &a::HandlerDecl,
+    field_types: &std::collections::HashMap<String, String>,
+    param_types: &std::collections::HashMap<String, String>,
+    dimensions: &std::collections::HashMap<String, String>,
+    const_literals: &std::collections::HashMap<String, i128>,
+) -> anyhow::Result<()> {
+    let context = format!("handler `{}`", h.name);
+    for clause in &h.clauses {
+        match &clause.node {
+            a::HandlerClause::Effect(blocks) => {
+                for stmt in a::flatten_effect_blocks(blocks) {
+                    check_effect_dimensions(
+                        &context,
+                        stmt,
+                        field_types,
+                        param_types,
+                        dimensions,
+                        const_literals,
+                    )?;
+                }
+            }
+            a::HandlerClause::Requires { guard, .. } => check_expr_dimensions(
+                &format!("{context} requires"),
+                &guard.node,
+                field_types,
+                param_types,
+                dimensions,
+                const_literals,
+            )?,
+            a::HandlerClause::Ensures(expr) => check_expr_dimensions(
+                &format!("{context} ensures"),
+                &expr.node,
+                field_types,
+                param_types,
+                dimensions,
+                const_literals,
+            )?,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn check_effect_dimensions(
+    context: &str,
+    stmt: &a::EffectStmt,
+    field_types: &std::collections::HashMap<String, String>,
+    param_types: &std::collections::HashMap<String, String>,
+    dimensions: &std::collections::HashMap<String, String>,
+    const_literals: &std::collections::HashMap<String, i128>,
+) -> anyhow::Result<()> {
+    check_expr_dimensions(
+        context,
+        &stmt.rhs.node,
+        field_types,
+        param_types,
+        dimensions,
+        const_literals,
+    )?;
+    let Some(lhs_ty) = resolve_path_type(&stmt.lhs, field_types, param_types) else {
+        return Ok(());
+    };
+    let Some(lhs_unit) = dimensions
+        .get_key_value(lhs_ty)
+        .map(|(name, _)| name.clone())
+    else {
+        return Ok(());
+    };
+    match infer_dimension(
+        &stmt.rhs.node,
+        field_types,
+        param_types,
+        dimensions,
+        const_literals,
+    )? {
+        DimensionValue::Literal | DimensionValue::Other => Ok(()),
+        DimensionValue::Unit(rhs) if rhs == lhs_unit => Ok(()),
+        DimensionValue::Unit(rhs) => anyhow::bail!(
+            "{context} effect on `{}` has dimension mismatch: expected `{lhs_unit}`, found `{rhs}`",
+            render_path_human(&stmt.lhs)
+        ),
+        DimensionValue::Scalar => anyhow::bail!(
+            "{context} effect on `{}` has dimension mismatch: expected `{lhs_unit}`, found scalar integer",
+            render_path_human(&stmt.lhs)
+        ),
+    }
+}
+
+fn check_expr_dimensions(
+    context: &str,
+    expr: &Expr,
+    field_types: &std::collections::HashMap<String, String>,
+    param_types: &std::collections::HashMap<String, String>,
+    dimensions: &std::collections::HashMap<String, String>,
+    const_literals: &std::collections::HashMap<String, i128>,
+) -> anyhow::Result<()> {
+    if let Expr::Cmp { lhs, rhs, .. } = expr {
+        let left = infer_dimension(
+            &lhs.node,
+            field_types,
+            param_types,
+            dimensions,
+            const_literals,
+        )?;
+        let right = infer_dimension(
+            &rhs.node,
+            field_types,
+            param_types,
+            dimensions,
+            const_literals,
+        )?;
+        require_compatible(context, "comparison", left, right)?;
+    }
+    if matches!(
+        expr,
+        Expr::Arith { .. }
+            | Expr::MulDivFloor { .. }
+            | Expr::MulDivCeil { .. }
+            | Expr::MulDivRoundHalfUp { .. }
+    ) {
+        let _ = infer_dimension(expr, field_types, param_types, dimensions, const_literals)?;
+    }
+    let mut child_error = None;
+    crate::ast::for_each_child(expr, |child| {
+        if child_error.is_none() {
+            child_error = check_expr_dimensions(
+                context,
+                &child.node,
+                field_types,
+                param_types,
+                dimensions,
+                const_literals,
+            )
+            .err();
+        }
+    });
+    if let Some(err) = child_error {
+        return Err(err);
+    }
+    Ok(())
+}
+
+fn infer_dimension(
+    expr: &Expr,
+    field_types: &std::collections::HashMap<String, String>,
+    param_types: &std::collections::HashMap<String, String>,
+    dimensions: &std::collections::HashMap<String, String>,
+    const_literals: &std::collections::HashMap<String, i128>,
+) -> anyhow::Result<DimensionValue> {
+    use DimensionValue::*;
+    Ok(match expr {
+        Expr::Int(_) => Literal,
+        Expr::Path(path) => {
+            if numeric_literal_value(expr, const_literals).is_some() {
+                Literal
+            } else if let Some(ty) = resolve_path_type(path, field_types, param_types) {
+                if dimensions.contains_key(ty) {
+                    Unit(ty.to_string())
+                } else if is_integer_type(ty) {
+                    Scalar
+                } else {
+                    Other
+                }
+            } else {
+                Other
+            }
+        }
+        Expr::Old(inner) | Expr::Paren(inner) => infer_dimension(
+            &inner.node,
+            field_types,
+            param_types,
+            dimensions,
+            const_literals,
+        )?,
+        Expr::Arith { op, lhs, rhs } => {
+            let left = infer_dimension(
+                &lhs.node,
+                field_types,
+                param_types,
+                dimensions,
+                const_literals,
+            )?;
+            let right = infer_dimension(
+                &rhs.node,
+                field_types,
+                param_types,
+                dimensions,
+                const_literals,
+            )?;
+            match op {
+                a::ArithOp::Add | a::ArithOp::Sub | a::ArithOp::Mod => {
+                    combine_additive("arithmetic", left, right)?
+                }
+                a::ArithOp::Mul => combine_multiply(left, right)?,
+                a::ArithOp::Div => combine_divide(left, right)?,
+            }
+        }
+        Expr::MulDivFloor { a, b, d }
+        | Expr::MulDivCeil { a, b, d }
+        | Expr::MulDivRoundHalfUp { a, b, d } => {
+            let av = infer_dimension(
+                &a.node,
+                field_types,
+                param_types,
+                dimensions,
+                const_literals,
+            )?;
+            let bv = infer_dimension(
+                &b.node,
+                field_types,
+                param_types,
+                dimensions,
+                const_literals,
+            )?;
+            let dv = infer_dimension(
+                &d.node,
+                field_types,
+                param_types,
+                dimensions,
+                const_literals,
+            )?;
+            combine_divide(combine_multiply(av, bv)?, dv)?
+        }
+        Expr::Len(_) => Scalar,
+        Expr::Sum { body, .. } => infer_dimension(
+            &body.node,
+            field_types,
+            param_types,
+            dimensions,
+            const_literals,
+        )?,
+        Expr::IfThenElse {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let left = infer_dimension(
+                &then_branch.node,
+                field_types,
+                param_types,
+                dimensions,
+                const_literals,
+            )?;
+            let right = infer_dimension(
+                &else_branch.node,
+                field_types,
+                param_types,
+                dimensions,
+                const_literals,
+            )?;
+            combine_additive("conditional branches", left, right)?
+        }
+        _ => Other,
+    })
+}
+
+fn require_compatible(
+    context: &str,
+    operation: &str,
+    left: DimensionValue,
+    right: DimensionValue,
+) -> anyhow::Result<()> {
+    use DimensionValue::*;
+    match (&left, &right) {
+        (Other, _) | (_, Other) | (Literal, _) | (_, Literal) => Ok(()),
+        (Scalar, Scalar) => Ok(()),
+        (Unit(a), Unit(b)) if a == b => Ok(()),
+        _ => anyhow::bail!(
+            "{context} {operation} has dimension mismatch: `{}` versus `{}`",
+            dimension_label(&left),
+            dimension_label(&right)
+        ),
+    }
+}
+
+fn combine_additive(
+    operation: &str,
+    left: DimensionValue,
+    right: DimensionValue,
+) -> anyhow::Result<DimensionValue> {
+    use DimensionValue::*;
+    require_compatible("expression", operation, left.clone(), right.clone())?;
+    Ok(match (left, right) {
+        (Other, _) | (_, Other) => Other,
+        (Literal, value) | (value, Literal) => value,
+        (Scalar, Scalar) => Scalar,
+        (Unit(unit), Unit(_)) => Unit(unit),
+        _ => Other,
+    })
+}
+
+fn combine_multiply(left: DimensionValue, right: DimensionValue) -> anyhow::Result<DimensionValue> {
+    use DimensionValue::*;
+    Ok(match (left, right) {
+        (Other, _) | (_, Other) => Other,
+        (Literal, Literal) | (Literal, Scalar) | (Scalar, Literal) | (Scalar, Scalar) => Scalar,
+        (Unit(unit), Literal | Scalar) | (Literal | Scalar, Unit(unit)) => Unit(unit),
+        (Unit(a), Unit(b)) => anyhow::bail!(
+            "expression multiplication would create an unsupported compound dimension `{a}*{b}`"
+        ),
+    })
+}
+
+fn combine_divide(left: DimensionValue, right: DimensionValue) -> anyhow::Result<DimensionValue> {
+    use DimensionValue::*;
+    Ok(match (left, right) {
+        (Other, _) | (_, Other) => Other,
+        (Literal | Scalar, Literal | Scalar) => Scalar,
+        (Unit(unit), Literal | Scalar) => Unit(unit),
+        (Unit(a), Unit(b)) if a == b => Scalar,
+        (Unit(a), Unit(b)) => anyhow::bail!(
+            "expression division has dimension mismatch: `{a}` versus `{b}`"
+        ),
+        (Literal | Scalar, Unit(unit)) => anyhow::bail!(
+            "expression division by dimension `{unit}` would create an unsupported inverse dimension"
+        ),
+    })
+}
+
+fn dimension_label(value: &DimensionValue) -> &str {
+    match value {
+        DimensionValue::Literal => "numeric literal",
+        DimensionValue::Scalar => "scalar integer",
+        DimensionValue::Unit(unit) => unit,
+        DimensionValue::Other => "non-numeric value",
+    }
+}
+
+fn is_integer_type(ty: &str) -> bool {
+    matches!(
+        ty,
+        "U8" | "U16" | "U32" | "U64" | "U128" | "I8" | "I16" | "I32" | "I64" | "I128"
+    )
 }
 
 /// Collect every function name referenced as `Expr::App { func, .. }`
@@ -588,5 +1215,67 @@ handler bump : State.Active -> State.Active {
             names.contains(&"rebate"),
             "helper call under Let must be collected, got {names:?}"
         );
+    }
+
+    #[test]
+    fn nominal_dimensions_accept_same_unit_and_literals() {
+        let spec = r#"
+spec Units
+
+dimension Lamports = U64
+type State = { balance : Lamports, }
+type Error | Bad
+
+handler deposit(amount : Lamports) : State -> State {
+  permissionless
+  requires amount >= 0 else Bad
+  effect { balance += amount }
+}
+"#;
+        let parsed = crate::chumsky_adapter::parse_str(spec).expect("dimensioned spec");
+        assert_eq!(parsed.dimensions.len(), 1);
+        assert_eq!(parsed.dimensions[0].name, "Lamports");
+        assert!(parsed
+            .type_aliases
+            .contains(&("Lamports".to_string(), "U64".to_string())));
+    }
+
+    #[test]
+    fn nominal_dimensions_reject_cross_unit_arithmetic() {
+        let spec = r#"
+spec Units
+
+dimension Lamports = U64
+dimension Tokens = U64
+type State = { balance : Lamports, inventory : Tokens, }
+type Error | Bad
+
+handler broken : State -> State {
+  permissionless
+  requires state.balance + state.inventory >= 0 else Bad
+}
+"#;
+        let err = crate::chumsky_adapter::parse_str(spec).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("dimension mismatch"), "{message}");
+        assert!(message.contains("Lamports"), "{message}");
+        assert!(message.contains("Tokens"), "{message}");
+    }
+
+    #[test]
+    fn nominal_dimensions_reject_unit_scalar_assignment() {
+        let spec = r#"
+spec Units
+
+dimension Lamports = U64
+type State = { balance : Lamports, raw : U64, }
+
+handler broken : State -> State {
+  permissionless
+  effect { balance := state.raw }
+}
+"#;
+        let err = crate::chumsky_adapter::parse_str(spec).unwrap_err();
+        assert!(format!("{err:#}").contains("expected `Lamports`, found scalar integer"));
     }
 }

@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qedgen.dev/schemas/auditor/account-binding-overlay-v1.schema.json",
+  "title": "QEDGen Auditor Crucible Account Binding Overlay",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "schema_uri", "source_resolved_sequence_schema_uri", "audit_id", "handlers"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "schema_uri": { "const": "https://qedgen.dev/schemas/auditor/account-binding-overlay-v1.schema.json" },
+    "source_resolved_sequence_schema_uri": { "const": "https://qedgen.dev/schemas/auditor/resolved-domain-sequences-v1.schema.json" },
+    "audit_id": { "type": ["string", "null"] },
+    "handlers": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["accounts", "provenance"],
+        "properties": {
+          "accounts": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string",
+              "pattern": "^fixture:[A-Za-z0-9_][A-Za-z0-9_.-]*$"
+            }
+          },
+          "provenance": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["plan_id", "action", "provenance_candidate_ids"],
+                "properties": {
+                  "plan_id": { "type": "string", "minLength": 1 },
+                  "action": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["phase", "index"],
+                    "properties": {
+                      "phase": { "enum": ["setup", "forward", "reverse", "teardown"] },
+                      "index": { "type": "integer", "minimum": 0 }
+                    }
+                  },
+                  "provenance_candidate_ids": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

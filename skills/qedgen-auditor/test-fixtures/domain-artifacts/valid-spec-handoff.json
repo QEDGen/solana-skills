@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "schema_uri": "https://qedgen.dev/schemas/auditor/spec-handoff-v1.schema.json",
+  "spec_path": "fee-vault.qedspec",
+  "layers": {
+    "structural": [
+      {
+        "candidate_id": "AccountOwnerCheck:program",
+        "disposition": "emitted",
+        "spec_path": "fee-vault.qedspec",
+        "verification_lanes": ["check"]
+      }
+    ],
+    "domain": [
+      {
+        "candidate_id": "qty_fee_amount",
+        "kind": "quantity",
+        "disposition": "needs_authoring",
+        "verification_lanes": ["manual", "crucible"],
+        "authoring": {
+          "constructs": ["const", "mul_div_floor"],
+          "template": "const SCALE = 10000\nlet fee = mul_div_floor(amount, bps, SCALE)",
+          "notes": ["Nominal unit checking is not yet enforced by the type system."]
+        }
+      }
+    ],
+    "regression": []
+  },
+  "language_gaps": [
+    {
+      "candidate_id": "qty_fee_amount",
+      "reason": "dimensional_unit_types",
+      "disposition": "document_or_extend_language",
+      "current_language_support": "Numeric scales can be constants, but nominal units are not type checked."
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+spec DomainBoundary
+program_id "6bRRkRXokuEQs6sctPhSGjqEnEkPgbda16N1aajwH7bp"
+
+type State
+  | Active of { last_accepted : U64 }
+
+type Error
+  | AmountExceedsDomainLimit
+
+invariant accepted_amount_within_domain :
+  state.last_accepted <= 10
+
+handler accept (amount : U64) : State.Active -> State.Active {
+  permissionless
+  accounts {
+    authority : signer, writable
+  }
+  invariant accepted_amount_within_domain
+  effect { last_accepted := amount }
+}

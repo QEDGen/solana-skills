@@ -209,6 +209,16 @@ pub(super) fn expr_to_lean(e: &Expr, ctx: Ctx, consts: ConstTable, env: &TypeEnv
                 a_str, b_str, d_str, d_str
             )
         }
+        Expr::MulDivRoundHalfUp { a, b, d } => {
+            // For non-negative quantities and positive d, adding floor(d/2)
+            // implements nearest rounding with exact halves rounded upward.
+            let (a_str, b_str) = render_binary_with_coercion(&a.node, &b.node, ctx, consts, env);
+            let d_str = expr_to_lean(&d.node, ctx, consts, env);
+            format!(
+                "((({}) * ({}) + ({}) / 2) / ({}))",
+                a_str, b_str, d_str, d_str
+            )
+        }
         Expr::App { func, args } => {
             // `now()` is an axiomatized symbolic timestamp: the support
             // library declares `axiom now : Nat` (in scope because

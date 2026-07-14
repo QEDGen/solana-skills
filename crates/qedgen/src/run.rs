@@ -9,6 +9,61 @@ use crate::*;
 use anyhow::{Context as _, Result};
 use std::path::{Path, PathBuf};
 
+struct PreparedDomainSequenceReplay {
+    resolved: probe::domain_sequence_binding::ResolvedDomainSequenceDocument,
+    overlay: probe::domain_account_overlay::AccountBindingOverlay,
+    resolved_path: PathBuf,
+}
+
+fn resolve_domain_sequence_replay(
+    spec: &check::ParsedSpec,
+    sequences_path: &Path,
+    bindings_path: &Path,
+) -> Result<PreparedDomainSequenceReplay> {
+    let sequences: probe::domain_sequence::DomainSequenceDocument = serde_json::from_slice(
+        &std::fs::read(sequences_path)
+            .with_context(|| format!("reading domain sequences {}", sequences_path.display()))?,
+    )
+    .with_context(|| format!("parsing domain sequences {}", sequences_path.display()))?;
+    let bindings: probe::domain_sequence_binding::DomainSequenceBindings =
+        serde_json::from_slice(&std::fs::read(bindings_path).with_context(|| {
+            format!(
+                "reading domain sequence bindings {}",
+                bindings_path.display()
+            )
+        })?)
+        .with_context(|| {
+            format!(
+                "parsing domain sequence bindings {}",
+                bindings_path.display()
+            )
+        })?;
+    let resolved = probe::domain_sequence_binding::bind_domain_sequences(&sequences, &bindings)?;
+    let overlay = probe::domain_account_overlay::collapse_account_binding_overlay(spec, &resolved)?;
+
+    let resolved_path = sequences_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("resolved-domain-sequences.json");
+    let tmp_path = resolved_path.with_extension("json.tmp");
+    std::fs::write(&tmp_path, serde_json::to_vec_pretty(&resolved)?)
+        .with_context(|| format!("writing {}", tmp_path.display()))?;
+    std::fs::rename(&tmp_path, &resolved_path)
+        .with_context(|| format!("publishing {}", resolved_path.display()))?;
+    let overlay_path = resolved_path.with_file_name("account-binding-overlay.json");
+    let overlay_tmp = overlay_path.with_extension("json.tmp");
+    std::fs::write(&overlay_tmp, serde_json::to_vec_pretty(&overlay)?)
+        .with_context(|| format!("writing {}", overlay_tmp.display()))?;
+    std::fs::rename(&overlay_tmp, &overlay_path)
+        .with_context(|| format!("publishing {}", overlay_path.display()))?;
+
+    Ok(PreparedDomainSequenceReplay {
+        resolved,
+        overlay,
+        resolved_path,
+    })
+}
+
 /// #182 Shape-1: deliver the `qedgen_kani_prelude` crate beside a just-generated
 /// Kani harness and depend on it — but only when the harness actually references
 /// it. The Pubkey/div stubs (impl path) and the `mul_div` imports (spec-model
@@ -221,6 +276,10 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             program,
             runtime,
             fuzz,
+            crucible_mode,
+            domain_dossier,
+            domain_sequences,
+            domain_sequence_bindings,
             harness_dir,
             no_smoke,
             stateful,
@@ -254,7 +313,10 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 // Native (solana-program, no framework) routes through
                 // native_extractor; pattern coverage is narrower — see its
                 // module docs.
-                if matches!(runtime_final, probe::Runtime::Native) {
+                if matches!(
+                    runtime_final,
+                    probe::Runtime::Native | probe::Runtime::QedgenCodegen
+                ) {
                     return run_native_probe(
                         prog_root,
                         runtime_final,
@@ -270,6 +332,25 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                         prog_root.display(),
                         detected,
                     );
+                    if let Some(dir) = audit_dir.as_ref().filter(|_| emit_spec_candidates) {
+                        write_audit_working_set(
+                            dir,
+                            prog_root,
+                            &[],
+                            program_model::ProgramFramework::Native,
+                            run_helpers::dossier_runtime_label(&runtime_final),
+                            /*lenient_skeleton=*/ true,
+                        )?;
+                        run_helpers::mark_ordinary_probe_blocked(
+                            dir,
+                            "runtime-specific probe adapter is unavailable; source-derived domain artifacts were preserved",
+                            &format!(
+                                "qedgen probe --program {} --runtime native --emit-spec-candidates --audit-dir {}",
+                                prog_root.display(),
+                                dir.display()
+                            ),
+                        )?;
+                    }
                     let output = probe::run_bootstrap(prog_root)?;
                     println!("{}", serde_json::to_string_pretty(&output)?);
                     return Ok(());
@@ -296,6 +377,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                         prog_root,
                         clusters_ref,
                         program_model::ProgramFramework::Pinocchio,
+                        "pinocchio",
                         /*lenient_skeleton=*/ false,
                     )?;
                 }
@@ -333,6 +415,65 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             // run → triage pipeline and differ only in which `.qedspec` is
             // loaded and which invariant family is emitted.
             if let Some(budget_secs) = fuzz {
+                let requested_mode = crucible_mode;
+                match requested_mode {
+                    Some(CrucibleMode::Protocol) => {
+                        if root.is_none() || spec.is_some() {
+                            return Err(anyhow::anyhow!(
+                                "--crucible-mode protocol requires --root <project-path> and does not accept --spec"
+                            ));
+                        }
+                        if domain_dossier.is_some()
+                            || domain_sequences.is_some()
+                            || domain_sequence_bindings.is_some()
+                        {
+                            return Err(anyhow::anyhow!(
+                                "domain dossier and sequence inputs are only valid with --crucible-mode domain"
+                            ));
+                        }
+                    }
+                    Some(CrucibleMode::Skeleton) => {
+                        if spec.is_none() {
+                            return Err(anyhow::anyhow!(
+                                "--crucible-mode skeleton requires --spec <path>"
+                            ));
+                        }
+                        if domain_dossier.is_some()
+                            || domain_sequences.is_some()
+                            || domain_sequence_bindings.is_some()
+                        {
+                            return Err(anyhow::anyhow!(
+                                "domain dossier and sequence inputs are only valid with --crucible-mode domain"
+                            ));
+                        }
+                    }
+                    Some(CrucibleMode::Domain) => {
+                        let spec_path = spec.as_deref().ok_or_else(|| {
+                            anyhow::anyhow!("--crucible-mode domain requires --spec <path>")
+                        })?;
+                        let dossier_path = domain_dossier.as_deref().ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "--crucible-mode domain requires --domain-dossier <path>"
+                            )
+                        })?;
+                        let fact_count =
+                            crucible_probe::require_ratified_domain_facts(dossier_path, spec_path)?;
+                        eprintln!(
+                            "Crucible domain mode: loaded {fact_count} ratified domain fact(s) from {}.",
+                            dossier_path.display()
+                        );
+                    }
+                    None => {
+                        if domain_dossier.is_some()
+                            || domain_sequences.is_some()
+                            || domain_sequence_bindings.is_some()
+                        {
+                            return Err(anyhow::anyhow!(
+                                "domain dossier and sequence inputs require --crucible-mode domain"
+                            ));
+                        }
+                    }
+                }
                 let (
                     synthesised_spec,
                     synthesised_idl,
@@ -342,16 +483,29 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 ) = match (spec.clone(), root.clone()) {
                     (Some(spec_path), maybe_root) => {
                         let parsed = check::parse_spec_file(&spec_path)?;
+                        if matches!(requested_mode, Some(CrucibleMode::Domain)) {
+                            let dossier_path = domain_dossier
+                                .as_deref()
+                                .expect("domain arguments validated before spec parsing");
+                            crucible_probe::require_executable_domain_assertions(
+                                dossier_path,
+                                &spec_path,
+                                crucible_gen::executable_assertion_count(&parsed),
+                            )?;
+                            crucible_probe::mark_domain_lane_ready(dossier_path)?;
+                        }
                         let spec_parent = spec_path
                             .parent()
                             .map(|p| p.to_path_buf())
                             .unwrap_or_else(|| std::path::PathBuf::from("."));
                         // --spec + --root layers spec invariants on
                         // top of protocol-mode crash detection.
-                        let mode = if maybe_root.is_some() {
-                            crucible_gen::InvariantMode::Both
-                        } else {
-                            crucible_gen::InvariantMode::Spec
+                        let mode = match requested_mode {
+                            Some(CrucibleMode::Domain) => crucible_gen::InvariantMode::Both,
+                            Some(CrucibleMode::Skeleton) => crucible_gen::InvariantMode::Spec,
+                            Some(CrucibleMode::Protocol) => unreachable!("validated above"),
+                            None if maybe_root.is_some() => crucible_gen::InvariantMode::Both,
+                            None => crucible_gen::InvariantMode::Spec,
                         };
                         (parsed, None, spec_path, spec_parent, mode)
                     }
@@ -386,15 +540,69 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 } else {
                     project_root_for_idl.join("fuzz")
                 };
+                // `generate` appends the program-name leaf when the passed
+                // dir's leaf differs (harness_dir_for). Resolve to that same
+                // leaf HERE so the build cwd, seed corpus, and replay all read
+                // the directory generate actually wrote — otherwise a
+                // `--harness-dir` whose leaf ≠ program name looks one level
+                // too shallow and the Crucible build fails "no Cargo.toml".
                 let harness = harness_dir
                     .clone()
+                    .map(|dir| crucible_gen::harness_dir_for(&synthesised_spec, &dir))
                     .unwrap_or_else(|| harness_parent.join(&prog));
-                // Brownfield: emit the harness under `.qed/fuzz/<prog>/` if
-                // absent. Spec mode expects a prior `codegen --crucible`;
-                // never auto-regen.
-                if matches!(mode, crucible_gen::InvariantMode::Protocol) && !harness.exists() {
+                let prepared_domain_replay = match (
+                    requested_mode,
+                    domain_sequences.as_deref(),
+                    domain_sequence_bindings.as_deref(),
+                ) {
+                    (Some(CrucibleMode::Domain), Some(sequences), Some(bindings)) => Some(
+                        resolve_domain_sequence_replay(&synthesised_spec, sequences, bindings)?,
+                    ),
+                    (Some(CrucibleMode::Domain), None, None) => None,
+                    (Some(CrucibleMode::Domain), _, _) => {
+                        return Err(anyhow::anyhow!(
+                            "domain sequence replay requires both --domain-sequences and --domain-sequence-bindings"
+                        ));
+                    }
+                    _ => None,
+                };
+                // Auto-emit the harness only when it is ABSENT — for
+                // brownfield protocol runs and the first domain run. Never
+                // regenerate an existing harness: it may carry agent-filled
+                // `todo!()` account literals (or other manual fixes) that a
+                // silent regen would clobber. Plain spec/skeleton mode expects
+                // a prior `codegen --crucible` and likewise never auto-regens.
+                // To pick up changed bindings, delete the harness and re-run.
+                let auto_emits = matches!(mode, crucible_gen::InvariantMode::Protocol)
+                    || matches!(requested_mode, Some(CrucibleMode::Domain));
+                let generate_harness = auto_emits && !harness.exists();
+                if auto_emits && harness.exists() {
+                    eprintln!(
+                        "Reusing existing Crucible harness at {} (not regenerating; delete it to pick up spec or binding changes).",
+                        harness.display()
+                    );
+                }
+                // Absolute path to the built program so the harness loads it
+                // from any location (a `--harness-dir` outside the project
+                // can't reach it with the layout-relative fallback). The `.so`
+                // need not exist yet (budget-0 emit), so anchor on the project
+                // root — which does — rather than canonicalizing the `.so`.
+                let deploy_so = std::fs::canonicalize(&project_root_for_idl)
+                    .unwrap_or_else(|_| project_root_for_idl.clone())
+                    .join("target")
+                    .join("deploy")
+                    .join(format!("{prog}.so"));
+                if generate_harness {
                     std::fs::create_dir_all(&harness_parent)?;
-                    crucible_gen::generate(&synthesised_spec, &harness_parent, mode)?;
+                    crucible_gen::generate_with_account_overlay(
+                        &synthesised_spec,
+                        &harness,
+                        mode,
+                        prepared_domain_replay
+                            .as_ref()
+                            .map(|prepared| &prepared.overlay),
+                        Some(&deploy_so),
+                    )?;
                 }
                 // Brownfield ships its own IDL (no `anchor build` to feed
                 // `discover_idl`): write the synthesised JSON to
@@ -404,6 +612,23 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                     crucible_brownfield::write_synthesized_idl(&harness, &prog, idl_json)
                         .context("writing synthesised IDL")?;
                 }
+                let domain_seed_report = prepared_domain_replay
+                    .as_ref()
+                    .map(|prepared| {
+                        let report = probe::domain_sequence_seed::write_domain_seed_corpus(
+                            &synthesised_spec,
+                            &prepared.resolved,
+                            &harness,
+                            Some(&prepared.overlay),
+                        )?;
+                        eprintln!(
+                            "Crucible domain mode: prepared {} deterministic replay seed(s); resolved artifact: {}.",
+                            report.seeds.len(),
+                            prepared.resolved_path.display()
+                        );
+                        Ok::<_, anyhow::Error>(report)
+                    })
+                    .transpose()?;
                 // Budget 0 = emit the harness and exit (dry-run preview
                 // without the Crucible build cost).
                 if budget_secs == 0 {
@@ -441,6 +666,9 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 }
                 ctx.stateful = stateful;
                 ctx.invariant_mode = mode;
+                if let Some(report) = domain_seed_report {
+                    ctx.domain_seed_report = Some(report);
+                }
                 let findings = crucible_probe::run_fuzz_probe(&ctx)?;
                 let output = probe::ProbeOutput {
                     version: 1,
@@ -462,7 +690,13 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 return Ok(());
             }
 
-            let _ = (harness_dir, no_smoke, stateful);
+            let _ = (
+                harness_dir,
+                no_smoke,
+                stateful,
+                crucible_mode,
+                domain_dossier,
+            );
             let output = if bootstrap {
                 let root = root
                     .ok_or_else(|| anyhow::anyhow!("--bootstrap requires --root <project-path>"))?;
@@ -499,6 +733,12 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 report.deferred,
             );
             eprintln!("Wrote spec to {}", report.spec_path.display());
+            if let Some(path) = &report.spec_handoff_path {
+                eprintln!("Wrote specification handoff to {}", path.display());
+            }
+            if let Some(path) = &report.domain_sequences_path {
+                eprintln!("Wrote domain action plans to {}", path.display());
+            }
             if report.rejected > 0 {
                 eprintln!("Wrote scoping notes to {}", report.scoping_path.display());
             }

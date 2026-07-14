@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qedgen.dev/schemas/auditor/audit-run-manifest-v1.schema.json",
+  "title": "QEDGen Auditor Run Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "schema_uri", "audit_id", "status", "target", "lanes", "artifacts"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "schema_uri": { "const": "https://qedgen.dev/schemas/auditor/audit-run-manifest-v1.schema.json" },
+    "audit_id": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$" },
+    "status": { "enum": ["running", "completed", "build-blocked", "tooling-blocked", "policy-interfered"] },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["program_root", "runtime", "mode"],
+      "properties": {
+        "program_root": { "type": "string", "minLength": 1 },
+        "runtime": { "type": "string", "minLength": 1 },
+        "mode": { "enum": ["spec-aware", "spec-less"] },
+        "spec": { "type": ["string", "null"] },
+        "source_commit": { "type": ["string", "null"] }
+      }
+    },
+    "tool_versions": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "lanes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "status"],
+        "properties": {
+          "name": { "enum": ["source-review", "ordinary-probe", "compile", "mollusk", "miri", "crucible-protocol", "crucible-skeleton", "crucible-domain"] },
+          "status": { "enum": ["not-run", "queued", "running", "passed", "failed", "blocked", "not-applicable"] },
+          "reason": { "type": ["string", "null"] },
+          "resume_command": { "type": ["string", "null"] },
+          "started_at": { "type": ["string", "null"], "format": "date-time" },
+          "finished_at": { "type": ["string", "null"], "format": "date-time" },
+          "artifact_paths": { "type": "array", "items": { "type": "string" } }
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "status": { "const": "blocked" } }, "required": ["status"] },
+            "then": {
+              "required": ["reason", "resume_command"],
+              "properties": {
+                "reason": { "type": "string", "minLength": 1 },
+                "resume_command": { "type": "string", "minLength": 1 }
+              }
+            }
+          }
+        ]
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["domain_dossier_json", "domain_dossier_markdown", "report"],
+      "properties": {
+        "domain_dossier_json": { "type": "string", "minLength": 1 },
+        "domain_dossier_markdown": { "type": "string", "minLength": 1 },
+        "ratified_intent": { "type": ["string", "null"] },
+        "domain_interview": { "type": ["string", "null"] },
+        "domain_sequences": { "type": ["string", "null"] },
+        "spec_handoff": { "type": ["string", "null"] },
+        "report": { "type": ["string", "null"] },
+        "suppressions": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

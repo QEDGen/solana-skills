@@ -500,6 +500,15 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                 out.type_aliases
                     .push((ta.name.clone(), type_ref_to_string(&ta.target)));
             }
+            TopItem::Dimension(dimension) => {
+                let base = type_ref_to_string(&dimension.base);
+                out.type_aliases
+                    .push((dimension.name.clone(), base.clone()));
+                out.dimensions.push(crate::check::ParsedDimension {
+                    name: dimension.name.clone(),
+                    base,
+                });
+            }
             TopItem::ProgramId(pid) => {
                 out.program_id = Some(pid.clone());
             }
@@ -517,35 +526,47 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                 out.instructions.push(adapt_instruction(instr, consts));
             }
             TopItem::Environment(envd) => {
+                let environment_tcx = TreeCx::for_environment(envd, &env, consts, ghosts.clone());
                 let mut mutates: Vec<(String, String)> = Vec::new();
+                let mut external_fields: Vec<(String, String, String)> = Vec::new();
                 let mut constraints_lean: Vec<String> = Vec::new();
                 let mut constraints_rust: Vec<String> = Vec::new();
+                let mut typed_constraints: Vec<crate::check::ParsedEnvironmentConstraint> =
+                    Vec::new();
                 for Node { node: c, .. } in &envd.clauses {
                     match c {
                         a::EnvClause::Mutates { field, ty } => {
                             mutates.push((field.clone(), ty.clone()));
                         }
+                        a::EnvClause::External { object, field, ty } => {
+                            external_fields.push((
+                                object.clone(),
+                                field.clone(),
+                                type_ref_to_string(ty),
+                            ));
+                        }
                         a::EnvClause::Constraint(e) => {
-                            constraints_lean.push(expr_to_lean(
-                                &e.node,
-                                Ctx::Ensures,
-                                consts,
-                                &env,
-                            ));
-                            constraints_rust.push(expr_to_rust(
-                                &e.node,
-                                Ctx::Ensures,
-                                consts,
-                                opts_native(&env),
-                            ));
+                            let lean_expr = expr_to_lean(&e.node, Ctx::Ensures, consts, &env);
+                            let rust_expr =
+                                expr_to_rust(&e.node, Ctx::Ensures, consts, opts_native(&env));
+                            constraints_lean.push(lean_expr.clone());
+                            constraints_rust.push(rust_expr.clone());
+                            typed_constraints.push(crate::check::ParsedEnvironmentConstraint {
+                                lean_expr,
+                                rust_expr,
+                                tree: Some(build_expr_tree(e, &environment_tcx)),
+                                class: classify_property_body(e),
+                            });
                         }
                     }
                 }
                 out.environments.push(ParsedEnvironment {
                     name: envd.name.clone(),
                     mutates,
+                    external_fields,
                     constraints: constraints_lean,
                     constraints_rust,
+                    typed_constraints,
                 });
             }
             TopItem::Interface(iface) => {
@@ -1142,6 +1163,7 @@ fn expand_handler(
         state_fields: base_env.state_fields.clone(),
         records: base_env.records.clone(),
         params: h.params.iter().map(|f| (f.name.clone(), &f.ty)).collect(),
+        external_fields: base_env.external_fields.clone(),
         aliases: base_env.aliases.clone(),
         adts: base_env.adts.clone(),
     };

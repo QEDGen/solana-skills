@@ -166,6 +166,11 @@ fn walk_expr(e: &Expr, scope: &CanonScope, shadow: &mut Vec<String>) -> Expr {
             b: boxed(b, scope, shadow),
             d: boxed(d, scope, shadow),
         },
+        Expr::MulDivRoundHalfUp { a, b, d } => Expr::MulDivRoundHalfUp {
+            a: boxed(a, scope, shadow),
+            b: boxed(b, scope, shadow),
+            d: boxed(d, scope, shadow),
+        },
         Expr::Contains { coll, elem } => Expr::Contains {
             coll: boxed(coll, scope, shadow),
             elem: boxed(elem, scope, shadow),

@@ -168,8 +168,31 @@ pub struct ParsedInvariant {
 pub struct ParsedEnvironment {
     pub name: String,
     pub mutates: Vec<(String, String)>, // (field, type)
-    pub constraints: Vec<String>,       // lean form
-    pub constraints_rust: Vec<String>,  // rust form
+    /// Typed fields in distinct external namespaces: `(object, field, type)`.
+    pub external_fields: Vec<(String, String, String)>,
+    /// Legacy target-rendered forms, retained while environment codegen
+    /// migrates to [`ParsedEnvironmentConstraint`]. Indices correspond to
+    /// `typed_constraints`.
+    pub constraints: Vec<String>, // lean form
+    pub constraints_rust: Vec<String>, // rust form
+    /// Typed metadata for each constraint. Adapter-produced specs populate
+    /// this one-for-one with `constraints`; legacy ingest paths may leave it
+    /// empty and continue to use the rendered strings above.
+    pub typed_constraints: Vec<ParsedEnvironmentConstraint>,
+}
+
+/// Structural carrier for an environment constraint.
+///
+/// The rendered strings deliberately coexist with the tree during the
+/// migration: current generators still consume them, while new consumers can
+/// distinguish a unary post-state assumption from a binary pre/post relation
+/// without parsing target code.
+#[derive(Debug, Clone)]
+pub struct ParsedEnvironmentConstraint {
+    pub lean_expr: String,
+    pub rust_expr: String,
+    pub tree: Option<crate::mir::ExprTree>,
+    pub class: PropertyClass,
 }
 
 /// Temporal shape of a property body, computed at parse time: any
@@ -250,9 +273,28 @@ pub struct QuantifierLint {
 /// property body has no valid `fn p(&State) -> bool` lowering.
 pub const QEDGEN_UNSUPPORTED_MARKER: &str = "QEDGEN_UNSUPPORTED_QUANTIFIER";
 
+/// Sentinel embedded by the Rust sum lowerings when a `sum` binder has no
+/// finite `Fin[N]` domain. Unlike the quantifier marker (a comment plus a
+/// `true` stub), this renders as a bare comment in expression position, so
+/// every consumer MUST skip expressions carrying it.
+pub const QEDGEN_UNSUPPORTED_SUM_MARKER: &str = "QEDGEN_UNSUPPORTED_SUM";
+
 /// Does this Rust-rendered expression require harness-level scaffolding?
 pub fn rust_expr_is_unsupported(rust_expr: &str) -> bool {
     rust_expr.contains(QEDGEN_UNSUPPORTED_MARKER)
+        || rust_expr.contains(QEDGEN_UNSUPPORTED_SUM_MARKER)
+}
+
+/// Does this lifecycle state NAME denote account nonexistence (the account
+/// has not been created yet / was closed)? Shared by the Crucible PDA
+/// materialization gate and domain-sequence seeding so the two never drift.
+/// Deliberately excludes names like `Inactive`/`Paused`, which describe an
+/// EXISTING account in a logical state.
+pub fn state_name_is_nonexistent(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "uninitialized" | "uninitialised" | "not_initialized" | "not_initialised" | "empty"
+    )
 }
 
 /// PDA seed declaration from a qedspec block.
@@ -260,6 +302,12 @@ pub fn rust_expr_is_unsupported(rust_expr: &str) -> bool {
 pub struct ParsedPda {
     pub name: String,
     pub seeds: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedDimension {
+    pub name: String,
+    pub base: String,
 }
 
 /// Event declaration from a qedspec block.
@@ -699,6 +747,9 @@ pub struct ParsedSpec {
     /// Stored as (alias_name, rendered_target). Target is `Fin[N]`, `Nat`,
     /// a record name, etc. — whatever `TypeRef` the source points at.
     pub type_aliases: Vec<(String, String)>,
+    /// Nominal numeric declarations. Each also appears in `type_aliases` so
+    /// codegen erases it to the declared integer ABI type.
+    pub dimensions: Vec<ParsedDimension>,
     /// Cover blocks (reachability properties).
     pub covers: Vec<ParsedCover>,
     /// Liveness properties (leads-to).

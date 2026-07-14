@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "schema_uri": "https://qedgen.dev/schemas/auditor/domain-sequences-v1.schema.json",
+  "audit_id": "audit_vault",
+  "source_dossier_schema_version": 1,
+  "plans": [{
+    "id": "bad",
+    "kind": "paired_round_trip",
+    "title": "invented sequence",
+    "setup": [],
+    "forward": [],
+    "reverse": [],
+    "teardown": [],
+    "provenance_candidate_ids": [],
+    "unresolved_parameters": [{ "handler": null, "name": "amount", "kind": "invented", "declared_type": null, "reason": "bad" }]
+  }],
+  "exclusions": []
+}

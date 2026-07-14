@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "schema_uri": "https://qedgen.dev/schemas/auditor/domain-sequences-v1.schema.json",
+  "audit_id": "audit_vault",
+  "source_dossier_schema_version": 1,
+  "plans": [
+    {
+      "id": "sequence:pair_deposit_withdraw:deposit:withdraw:setup=none:teardown=none",
+      "kind": "paired_round_trip",
+      "title": "deposit then withdraw",
+      "setup": [],
+      "forward": [{
+        "handler": "deposit",
+        "role": "forward",
+        "from_state": null,
+        "to_state": null,
+        "guards": [],
+        "provenance_candidate_ids": ["pair_deposit_withdraw"],
+        "unresolved_parameters": [{
+          "handler": "deposit",
+          "name": "amount",
+          "kind": "handler_argument",
+          "declared_type": "U64",
+          "reason": "choose a value from ratified constraints; no value was inferred"
+        }]
+      }],
+      "reverse": [{
+        "handler": "withdraw",
+        "role": "reverse",
+        "from_state": null,
+        "to_state": null,
+        "guards": [],
+        "provenance_candidate_ids": ["pair_deposit_withdraw"],
+        "unresolved_parameters": []
+      }],
+      "teardown": [],
+      "provenance_candidate_ids": ["pair_deposit_withdraw"],
+      "unresolved_parameters": [{
+        "handler": "deposit",
+        "name": "amount",
+        "kind": "handler_argument",
+        "declared_type": "U64",
+        "reason": "choose a value from ratified constraints; no value was inferred"
+      }]
+    }
+  ],
+  "exclusions": []
+}

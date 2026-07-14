@@ -126,6 +126,7 @@ fn top_item<'a>() -> impl Parser<'a, &'a str, Node<TopItem>, Err<'a>> + Clone {
     // uses a different shape after the name and can be disambiguated.
     let group_a = choice((
         const_decl(),
+        dimension_decl(),
         record_decl(),
         type_alias_decl(),
         adt_decl(),

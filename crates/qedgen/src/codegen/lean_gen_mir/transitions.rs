@@ -1021,7 +1021,9 @@ fn collect_tree_bound_guards(
         // The u128-widened helpers narrow back to the declared width
         // fallibly (`try_into()?`) and divide checked — growth + divisor
         // guard, same divergence class as bare `*` / `/`.
-        ExprTree::MulDivFloor { a, b, d } | ExprTree::MulDivCeil { a, b, d } => {
+        ExprTree::MulDivFloor { a, b, d }
+        | ExprTree::MulDivCeil { a, b, d }
+        | ExprTree::MulDivRoundHalfUp { a, b, d } => {
             walk(a, conds);
             walk(b, conds);
             walk(d, conds);

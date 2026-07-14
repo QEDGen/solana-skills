@@ -141,7 +141,7 @@ pub(crate) fn emit_single_account_sections(
     if progress {
         eprintln!("Rendering Kani section: cover/liveness/environment proofs");
     }
-    emit_file_level_features(out, parsed)?;
+    emit_file_level_features(out, mir, parsed)?;
     Ok(())
 }
 

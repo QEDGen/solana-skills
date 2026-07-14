@@ -106,6 +106,7 @@ fn render(e: &ExprTree, cx: LeanCx, inside_old: bool) -> (String, Prec) {
         ExprTree::Sum {
             binder,
             binder_ty,
+            fin_bound: _,
             body,
         } => (
             format!(
@@ -239,6 +240,17 @@ fn render(e: &ExprTree, cx: LeanCx, inside_old: bool) -> (String, Prec) {
             (
                 format!(
                     "((({}) * ({}) + ({}) - 1) / ({}))",
+                    a_str, b_str, d_str, d_str
+                ),
+                Prec::Atom,
+            )
+        }
+        ExprTree::MulDivRoundHalfUp { a, b, d } => {
+            let (a_str, b_str) = coerced_pair_strings(a, b, cx, inside_old);
+            let d_str = render(d, cx, inside_old).0;
+            (
+                format!(
+                    "((({}) * ({}) + ({}) / 2) / ({}))",
                     a_str, b_str, d_str, d_str
                 ),
                 Prec::Atom,
@@ -416,6 +428,7 @@ fn render_old(inner: &ExprTree, cx: LeanCx) -> (String, Prec) {
         | ExprTree::Arith { .. }
         | ExprTree::MulDivFloor { .. }
         | ExprTree::MulDivCeil { .. }
+        | ExprTree::MulDivRoundHalfUp { .. }
         | ExprTree::Match { .. }
         | ExprTree::Ctor { .. }
         | ExprTree::RecordLit(_)
@@ -455,6 +468,33 @@ fn render_path(p: &TreePath, cx: LeanCx, inside_old: bool) -> String {
                 }
             };
             out.push_str(prefix);
+        }
+        BindingKind::External => {
+            out.push_str(if inside_old { "pre_" } else { "post_" });
+            out.push_str(&p.root);
+            if let Some(TreeSeg::Field(first)) = p.segments.first() {
+                out.push('_');
+                out.push_str(first);
+                for seg in &p.segments[1..] {
+                    match seg {
+                        TreeSeg::Field(field) => {
+                            out.push('.');
+                            out.push_str(field);
+                        }
+                        TreeSeg::Index(index) => match cx.subscript {
+                            LeanSubscript::Brackets => {
+                                out.push('[');
+                                out.push_str(index);
+                                out.push(']');
+                            }
+                            LeanSubscript::Application => {
+                                out = format!("({} {})", out, index);
+                            }
+                        },
+                    }
+                }
+                return out;
+            }
         }
         BindingKind::Param
         | BindingKind::Const(_)
@@ -578,7 +618,9 @@ pub fn tree_mentions_ident(e: &ExprTree, name: &str) -> bool {
         | ExprTree::Arith { lhs, rhs, .. } => {
             tree_mentions_ident(lhs, name) || tree_mentions_ident(rhs, name)
         }
-        ExprTree::MulDivFloor { a, b, d } | ExprTree::MulDivCeil { a, b, d } => {
+        ExprTree::MulDivFloor { a, b, d }
+        | ExprTree::MulDivCeil { a, b, d }
+        | ExprTree::MulDivRoundHalfUp { a, b, d } => {
             tree_mentions_ident(a, name)
                 || tree_mentions_ident(b, name)
                 || tree_mentions_ident(d, name)

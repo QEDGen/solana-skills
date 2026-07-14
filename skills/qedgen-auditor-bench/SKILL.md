@@ -26,6 +26,11 @@ Default to one corpus entry and two independent audit runs for a regression
 check. Use three only for a high-assurance benchmark. Never use an unbounded
 run-until-dry loop.
 
+For a local domain-regression baseline, use the seven labeled, schema-valid
+fixtures under `fixtures/domain-corpus/` and run `fixtures/domain-corpus/validate.sh`
+before scoring. These fixtures exercise candidate categories, units, paired
+operations, and intended language gaps without third-party ground truth.
+
 ## Model policy
 
 The auditor's `references/model-selection.md` is the single source for
@@ -182,6 +187,10 @@ Assign a run-level status before computing recall:
   interference.
 - `build-blocked`: source review completed, but executable evidence was blocked;
   score structural recall only and exclude reproducer metrics.
+- `tooling-blocked`: source review and dossier extraction completed, but QEDGen,
+  runtime metadata, or one or more verification lanes were unavailable. Score
+  source-derived candidate recall, require a valid run manifest with resume
+  commands, and exclude unavailable-lane metrics.
 - `policy-interfered`: a venue safety or cybersecurity policy refused,
   truncated, redirected, or suppressed the authorized analysis. Exclude the run
   from recall, precision, severity, and model comparisons.
@@ -216,6 +225,8 @@ Write under the explicit benchmark directory:
 <output>/<entry>/<run-id>/
   baseline.json
   sanitize.log
+  run-1/domain-dossier.json
+  run-1/run-manifest.json
   run-1/report.md
   run-1/repro.log
   run-N/...

@@ -1,0 +1,20 @@
+{
+  "address": "6bRRkRXokuEQs6sctPhSGjqEnEkPgbda16N1aajwH7bp",
+  "metadata": {
+    "name": "domain_boundary",
+    "version": "0.1.0",
+    "spec": "0.1.0"
+  },
+  "instructions": [
+    {
+      "name": "accept",
+      "discriminator": [65, 150, 70, 216, 133, 6, 107, 4],
+      "accounts": [
+        { "name": "authority", "writable": true, "signer": true }
+      ],
+      "args": [
+        { "name": "amount", "type": "u64" }
+      ]
+    }
+  ]
+}

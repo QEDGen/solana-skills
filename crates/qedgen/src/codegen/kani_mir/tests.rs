@@ -75,6 +75,180 @@ fn lower_fixture(rel_path: &str) -> (Mir, ParsedSpec) {
     (mir, parsed)
 }
 
+fn lower_inline(src: &str) -> (Mir, ParsedSpec) {
+    let parsed = crate::chumsky_adapter::parse_str(src).expect("inline fixture parses");
+    let mir = crate::mir::lower(&parsed);
+    (mir, parsed)
+}
+
+const ENVIRONMENT_SPEC_HEAD: &str = r#"spec EnvironmentHarness
+program_id "11111111111111111111111111111111"
+
+type State = { rate : U64, }
+type Error | Bad
+
+property rate_positive : state.rate > 0 preserved_by all
+"#;
+
+#[test]
+fn environment_binary_constraint_routes_pre_and_post_receivers() {
+    let src = format!(
+        "{}{}",
+        ENVIRONMENT_SPEC_HEAD,
+        r#"
+environment rate_change {
+  mutates rate : U64
+  constraint state.rate >= old(state.rate)
+}
+"#
+    );
+    let (mir, parsed) = lower_inline(&src);
+    let out = render(&mir, &parsed);
+    let harness = out
+        .split("fn verify_rate_positive_under_rate_change()")
+        .nth(1)
+        .expect("environment harness");
+
+    assert!(harness.contains("    let pre = s.clone();\n"), "{harness}");
+    assert!(harness.contains("    let post = &s;\n"), "{harness}");
+    assert!(
+        harness.contains("    kani::assume(post.rate >= pre.rate);\n"),
+        "binary constraint must keep old/new state distinct:\n{harness}"
+    );
+    let pre = harness.find("let pre = s.clone();").unwrap();
+    let mutation = harness.find("s.rate = kani::any();").unwrap();
+    let post = harness.find("let post = &s;").unwrap();
+    let assumption = harness
+        .find("kani::assume(post.rate >= pre.rate);")
+        .unwrap();
+    assert!(
+        pre < mutation && mutation < post && post < assumption,
+        "pre/post bindings must bracket the external mutation:\n{harness}"
+    );
+}
+
+#[test]
+fn environment_external_clock_uses_distinct_pre_post_values() {
+    let src = format!(
+        "{}{}",
+        ENVIRONMENT_SPEC_HEAD,
+        r#"
+environment clock_advance {
+  external clock.slot : U64
+  constraint clock.slot >= old(clock.slot)
+}
+"#
+    );
+    let (mir, parsed) = lower_inline(&src);
+    let out = render(&mir, &parsed);
+    let harness = out
+        .split("fn verify_rate_positive_under_clock_advance()")
+        .nth(1)
+        .expect("external environment harness");
+    assert!(
+        harness.contains("let pre_clock_slot: u64 = kani::any();"),
+        "{harness}"
+    );
+    assert!(
+        harness.contains("let post_clock_slot: u64 = kani::any();"),
+        "{harness}"
+    );
+    assert!(
+        harness.contains("kani::assume(post_clock_slot >= pre_clock_slot);"),
+        "{harness}"
+    );
+    assert!(!harness.contains("s.slot ="), "{harness}");
+}
+
+#[test]
+fn environment_unary_state_constraint_with_external_binds_post() {
+    // Regression: an external field forces the two-state (PrePost) binder, so
+    // a UNARY state constraint renders `post.rate` — the harness must bind
+    // `post` even though there is no `old(...)`/`pre`. Previously `post` was
+    // emitted only for binary constraints, leaving `post` unbound → the
+    // generated Kani harness failed to compile.
+    let src = format!(
+        "{}{}",
+        ENVIRONMENT_SPEC_HEAD,
+        r#"
+environment clock_check {
+  external clock.slot : U64
+  constraint state.rate > 0
+}
+"#
+    );
+    let (mir, parsed) = lower_inline(&src);
+    let out = render(&mir, &parsed);
+    let harness = out
+        .split("fn verify_rate_positive_under_clock_check()")
+        .nth(1)
+        .expect("external+unary environment harness");
+    assert!(
+        harness.contains("    kani::assume(post.rate > 0);\n"),
+        "unary state read renders through the post receiver:\n{harness}"
+    );
+    assert!(
+        harness.contains("    let post = &s;\n"),
+        "post must be bound for the unary state read:\n{harness}"
+    );
+    assert!(
+        !harness.contains("    let pre = s.clone();\n"),
+        "no old(...) read, so pre must not be emitted:\n{harness}"
+    );
+}
+
+#[test]
+fn environment_unary_constraint_keeps_legacy_rendering() {
+    let src = format!(
+        "{}{}",
+        ENVIRONMENT_SPEC_HEAD,
+        r#"
+environment rate_change {
+  mutates rate : U64
+  constraint state.rate > 0
+}
+"#
+    );
+    let (mut mir, parsed) = lower_inline(&src);
+    let typed_out = render(&mir, &parsed);
+
+    // Simulate a pre-seam / legacy MIR. Unary typed metadata must not change
+    // generated output compared with the existing string-only path.
+    mir.environments[0].typed_constraints.clear();
+    let legacy_out = render(&mir, &parsed);
+    assert_eq!(typed_out, legacy_out);
+    assert!(typed_out.contains("    kani::assume(s.rate > 0);\n"));
+    assert!(!typed_out.contains("    let pre = s.clone();\n"));
+    assert!(!typed_out.contains("    let post = &s;\n"));
+}
+
+#[test]
+fn environment_binary_constraint_without_tree_falls_back_wholesale() {
+    let src = format!(
+        "{}{}",
+        ENVIRONMENT_SPEC_HEAD,
+        r#"
+environment rate_change {
+  mutates rate : U64
+  constraint state.rate >= old(state.rate)
+  constraint state.rate > 0
+}
+"#
+    );
+    let (mut mir, parsed) = lower_inline(&src);
+    mir.environments[0].typed_constraints[0].predicate.0.tree = None;
+    let out = render(&mir, &parsed);
+
+    for constraint in &parsed.environments[0].constraints_rust {
+        assert!(
+            out.contains(&format!("    kani::assume({constraint});\n")),
+            "legacy constraint missing after fallback:\n{out}"
+        );
+    }
+    assert!(!out.contains("    let pre = s.clone();\n"));
+    assert!(!out.contains("    let post = &s;\n"));
+}
+
 #[test]
 fn render_emits_file_header_and_cfg_kani() {
     // The structural prefix is deterministic — every pilot
@@ -489,7 +663,7 @@ fn compound_effect_rhs_and_arith_predicates_render_soundly() {
     // #145 — helper referenced for a ref_impl-only use; #182 — imported from the
     // soundness-proven crate rather than inlined.
     assert!(
-        out.contains("use qedgen_kani_prelude::{mul_div_ceil_u128, mul_div_floor_u128};"),
+        out.contains("use qedgen_kani_prelude::{mul_div_ceil_u128, mul_div_floor_u128, mul_div_round_half_up_u128};"),
         "mul_div helpers must be imported from qedgen_kani_prelude:\n{out}"
     );
     assert!(

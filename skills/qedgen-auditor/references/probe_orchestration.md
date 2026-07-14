@@ -112,7 +112,8 @@ Crucible has three entry points:
 
 If ordinary probe failed because the QEDGen executable, build, runtime adapter,
 or instruction metadata is unavailable, mark Crucible blocked. Continue the
-read-driven dossier and preserve the intended command for resumption.
+read-driven dossier and preserve the intended command for resumption in
+`run-manifest.json`.
 
 ---
 
@@ -209,11 +210,44 @@ Bash: qedgen probe --program <root> \
         --audit-dir .qed/audit/<ts>/
 ```
 
-Writes three files to the audit dir:
+Writes eight files to the audit dir:
 - `interview.md` — markdown checkboxes, one section per cluster.
 - `clusters.json` — full schema-v3 envelope.
 - `skeleton.qedspec` — pre-interview structural skeleton (handler
   stubs, no `requires` / `effect` bodies yet).
+- `domain-dossier.json` — canonical schema-v1 dossier seeded with stable
+  structural candidates plus conservative source-derived asset-flow, quantity,
+  paired-operation, and source-span hints; all inferred semantics remain pending.
+- `domain-dossier.md` — human-readable rendering of the dossier.
+- `domain-interview.json` — deterministic stable-ID questions and the canonical
+  answer array consumed by `qedgen ratify`.
+- `domain-interview.md` — readable rendering for file-driven review.
+- `run-manifest.json` — initial lane status; ordinary probe is complete and
+later verification lanes are resumable.
+
+`qedgen ratify` additionally writes `spec-handoff.json`, separating emitted
+structural clauses, ratified domain facts that still need authoring, regression
+guards, and explicit language gaps. Every ratified domain clause carries
+construct names, a parser-shaped authoring template, and limitations; every
+language gap records what the current language can express so supported floor,
+ceiling, finite-sum, nominal-dimension, lifecycle, and authority patterns are not mislabeled as
+documentary-only.
+Typed external assumptions use `external object.field : Type` inside an
+`environment`; keep them distinct from legacy `mutates`, which intentionally
+perturbs a program-state field.
+It also writes `domain-sequences.json`: paired round trips and lifecycle
+setup/teardown coverage targets. Bind every unresolved account and argument
+before deterministic replay; until then, use the plans to guide stateful
+exploration without claiming exact sequence coverage.
+Once bindings are complete, run domain mode with both
+`--domain-sequences` and `--domain-sequence-bindings`. QEDGen rejects partial,
+unknown, duplicate, and cross-audit bindings, writes the resolved artifact,
+replays every plan exactly, then uses those seeds as the exploratory corpus.
+Structured seeds encode handler choice and arguments, not fixture account
+identity. QEDGen therefore compiles `fixture:<account>` bindings into the
+generated harness first and records the deterministic account overlay; only
+then may it omit those compiled bindings from the seed bytes. Conflicting or
+unknown fixture targets stop replay rather than being silently discarded.
 
 ### Step 2 — auto-ratify *high-confidence* clusters
 

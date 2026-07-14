@@ -1273,6 +1273,18 @@ pub fn mul_div_ceil_u128(a: u128, b: u128, d: u128) -> u128 {\n\
     }\n\
 }\n",
     );
+    out.push_str(
+        "/// Nearest `(a * b) / d`, with exact halves rounded upward.\n\
+#[inline]\n\
+pub fn mul_div_round_half_up_u128(a: u128, b: u128, d: u128) -> u128 {\n\
+    if d == 0 { return 0; }\n\
+    let prod = a.saturating_mul(b);\n\
+    let q = prod / d;\n\
+    let r = prod % d;\n\
+    let threshold = d / 2 + d % 2;\n\
+    if r >= threshold { q.saturating_add(1) } else { q }\n\
+}\n",
+    );
     out.push_str("// ---- END GENERATED ----\n");
     crate::codegen_shared::write_generated_file(&src_dir.join("math.rs"), &out)?;
     Ok(())

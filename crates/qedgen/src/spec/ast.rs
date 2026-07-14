@@ -73,6 +73,9 @@ pub enum TopItem {
     ProgramId(String),
     /// `type Name = <type_ref>` — type alias, expands to its target.
     TypeAlias(TypeAliasDecl),
+    /// `dimension Name = U64` — nominal numeric type. Runtime ABI erases to
+    /// the integer base while the checker preserves `Name` across arithmetic.
+    Dimension(DimensionDecl),
     /// `pubkey NAME [u64, u64, u64, u64]` — 4-chunk U64 pubkey literal (sBPF sugar).
     Pubkey(PubkeyDecl),
     /// `errors [Name = code "desc", ...]` — top-level error list (sBPF sugar,
@@ -263,6 +266,12 @@ pub enum SbpfFlowKind {
 pub struct TypeAliasDecl {
     pub name: String,
     pub target: TypeRef,
+}
+
+#[derive(Debug, Clone)]
+pub struct DimensionDecl {
+    pub name: String,
+    pub base: TypeRef,
 }
 
 // ============================================================================
@@ -854,6 +863,14 @@ pub enum Expr {
         b: Box<Node<Expr>>,
         d: Box<Node<Expr>>,
     },
+    /// `mul_div_round_half_up(a, b, d)` — nearest integer to `(a * b) / d`,
+    /// with exact half-way cases rounded upward. Intended for non-negative
+    /// quantities with `d > 0`.
+    MulDivRoundHalfUp {
+        a: Box<Node<Expr>>,
+        b: Box<Node<Expr>>,
+        d: Box<Node<Expr>>,
+    },
     /// `contains(coll, elem)` — collection membership. Rust `coll.contains(&elem)`,
     /// Lean `elem ∈ coll`. Produces a `Bool`. Built-in (not an `in` operator)
     /// because `in` is a reserved keyword. Used for `Vec` state fields
@@ -999,7 +1016,9 @@ pub fn for_each_child_with_binder<'a>(
             f(lhs, None);
             f(rhs, None);
         }
-        Expr::MulDivFloor { a, b, d } | Expr::MulDivCeil { a, b, d } => {
+        Expr::MulDivFloor { a, b, d }
+        | Expr::MulDivCeil { a, b, d }
+        | Expr::MulDivRoundHalfUp { a, b, d } => {
             f(a, None);
             f(b, None);
             f(d, None);
@@ -1166,6 +1185,13 @@ pub struct EnvironmentDecl {
 pub enum EnvClause {
     /// `mutates field : Type` — field that mutates externally.
     Mutates { field: String, ty: String },
+    /// `external clock.slot : U64` — a typed field in a namespace distinct
+    /// from program state. Constraints relate pre/post values with `old(...)`.
+    External {
+        object: String,
+        field: String,
+        ty: TypeRef,
+    },
     /// `constraint expr` — constraint relating pre/post values.
     Constraint(Node<Expr>),
 }

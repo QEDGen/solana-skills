@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "schema_uri": "https://qedgen.dev/schemas/auditor/domain-replay-report-v1.schema.json",
+  "resolved_document_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+  "account_binding_overlay_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+  "harness_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+  "records": [
+    {
+      "plan_id": "paired_deposit_withdraw",
+      "seed_path": ".qedgen/domain-sequence-corpus/example/000-paired_deposit_withdraw.seed",
+      "seed_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+      "action_count": 2,
+      "command": ["crucible", "run", "vault", "invariant_test", "-C", "fuzz/vault", "--replay", ".qedgen/domain-sequence-corpus/example/000-paired_deposit_withdraw.seed"],
+      "status": "completed_zero_exit",
+      "exit_code": 0,
+      "error": null
+    }
+  ]
+}

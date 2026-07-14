@@ -88,6 +88,67 @@ ratification immediately; preserve it for spec drafting and later executable
 verification when blocked lanes recover. Read [domain invariant extraction](references/domain-invariant-extraction.md)
 before interviewing the user or drafting domain properties.
 
+Write both `.qed/audit/<timestamp>/domain-dossier.json` and its human-readable
+`.md` rendering. Validate the JSON against
+`<skill-root>/schemas/domain-dossier.schema.json`; use its stable candidate IDs
+in interviews, specs, findings, and fuzz results. Also maintain
+`.qed/audit/<timestamp>/run-manifest.json` against
+`<skill-root>/schemas/audit-run-manifest.schema.json`. Update each lane as it
+starts or finishes; blocked lanes require a concrete reason and exact resume
+command. After ratification, require `spec-handoff.json` against
+`<skill-root>/schemas/spec-handoff.schema.json`. It separates structural,
+domain, and regression layers, links clauses to stable provenance IDs, and
+records language gaps instead of flattening unsupported domain semantics into
+comments. For each `needs_authoring` domain clause, follow its
+`authoring.constructs`, parser-shaped `authoring.template`, and
+`authoring.notes`; each language gap states `current_language_support` so
+finite sums, nominal dimensions, floor/ceiling/half-up rounding, typed external
+fields, lifecycle transitions, and authority guards are not mistaken for
+missing syntax. Also require `domain-sequences.json` against
+`<skill-root>/schemas/domain-sequences.schema.json`. Use its ratified
+setup/forward/reverse/teardown plans as stateful coverage targets, but do not
+claim exact-sequence coverage while any `unresolved_parameters` remain or the
+runner has not replayed that plan. Validate the artifacts with:
+
+For exact replay, author `domain-sequence-bindings.json` against
+`domain-sequence-bindings.schema.json`. Every plan/action/parameter key must be
+explicit; never infer accounts or argument values. Domain-mode Crucible writes
+`resolved-domain-sequences.json`, validates it against
+`resolved-domain-sequences.schema.json`, replays each byte-exact seed before
+exploratory fuzzing, and feeds the same corpus into the subsequent run. Each
+exact replay appends durable evidence at
+`<harness>/.qedgen/domain-replay-report.json`, validated against
+`domain-replay-report.schema.json`; the report pins the resolved document,
+account overlay, generated harness, seed content, native replay command, exit
+status, and plan ID. A seed merely present in the exploratory corpus is not
+exact-sequence coverage. Account
+targets use the explicit `fixture:<account>` namespace. QEDGen verifies them
+against non-PDA, non-default spec accounts, collapses them into
+`account-binding-overlay.json`, rejects conflicts across plans, and compiles
+that overlay into action account literals and signer selection before encoding
+handler arguments. The collapse step also rejects same-action fixture aliasing
+and fixture targets whose signer, writable, program, account-type,
+authority/owner, or imported namespace constraints cannot satisfy the source
+account. Default-address and PDA accounts remain generator-managed and must not
+appear in the overlay. For PDAs, QEDGen retains Anchor IDL seed tuples and
+derives each action's address from literal, account, numeric argument, and
+supported state-field seeds. Dependent PDAs are ordered before their consumers;
+unresolved or cyclic derivations stop codegen instead of falling back to an
+empty-seed address. Non-init PDAs are materialized on demand, while init targets
+remain absent for the instruction to create.
+
+```bash
+<skill-root>/scripts/check-domain-artifacts.sh \
+  --dossier .qed/audit/<timestamp>/domain-dossier.json \
+  --manifest .qed/audit/<timestamp>/run-manifest.json \
+  --handoff .qed/audit/<timestamp>/spec-handoff.json \
+  --sequences .qed/audit/<timestamp>/domain-sequences.json \
+  --bindings .qed/audit/<timestamp>/domain-sequence-bindings.json \
+  --resolved-sequences .qed/audit/<timestamp>/resolved-domain-sequences.json \
+  --account-overlay .qed/audit/<timestamp>/account-binding-overlay.json \
+  --replay-report fuzz/<program>/.qedgen/domain-replay-report.json
+```
+
 Read only the relevant detailed references:
 
 - [category catalog](references/category-catalog.md): per-category
@@ -193,8 +254,9 @@ Write the full report to `.qed/findings/audit-<timestamp>.md`. Reproducers stay
 ephemeral under `target/`. Write suppression rules only for stable,
 machine-detectable false positives.
 
-Give the report header a run status: `completed`, `build-blocked` (source
-review finished but executable evidence was unavailable), or
+Give the report header a run status: `completed`, `build-blocked` (the program
+did not compile), `tooling-blocked` (QEDGen, metadata, simulator, or another
+verification lane was unavailable while source review continued), or
 `policy-interfered` (a venue or provider policy stopped, truncated, or
 redirected the analysis). If an audit worker halts mid-run — refusal,
 truncation, or silent stop — the run is `policy-interfered`: report what was
@@ -209,6 +271,9 @@ Order the digest:
 3. Specification gaps.
 4. Open hypotheses, clearly excluded from vulnerability totals.
 5. Suppressed count and emitted artifacts.
+
+Include the dossier JSON/Markdown and run manifest in the artifact footer. A
+blocked run must point to the manifest's resume commands.
 
 Every surfaced finding must include:
 

@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "schema_uri": "https://qedgen.dev/schemas/auditor/domain-dossier-v1.schema.json",
+  "audit_id": "domain_boundary",
+  "target": {
+    "program_root": ".",
+    "runtime": "anchor",
+    "mode": "spec-aware",
+    "spec": "domain.qedspec",
+    "source_commit": null
+  },
+  "handlers": [
+    {
+      "name": "accept",
+      "source_path": "src/lib.rs",
+      "accounts_type": "Accept",
+      "args": [{ "name": "amount", "qedspec_type": "U64" }]
+    }
+  ],
+  "structural_candidates": [],
+  "asset_flows": [],
+  "quantities": [
+    {
+      "id": "qty_accepted_amount",
+      "symbol": "last_accepted",
+      "unit": "request units",
+      "scale": "1",
+      "rounding": "exact",
+      "valid_range": "0..=10",
+      "conversions": [],
+      "metadata": {
+        "confidence": "semantic",
+        "ratification": "user",
+        "rationale": "The product owner ratified 10 as the maximum accepted request.",
+        "source_anchors": [
+          {
+            "path": "src/lib.rs",
+            "line_start": 13,
+            "line_end": 14,
+            "symbol": "accept",
+            "excerpt": "BUG: the product contract requires amount <= 10."
+          }
+        ],
+        "verification_lanes": ["crucible"]
+      }
+    }
+  ],
+  "paired_operations": [],
+  "lifecycle_edges": [],
+  "authority_capabilities": [],
+  "economic_equations": [],
+  "external_assumptions": []
+}

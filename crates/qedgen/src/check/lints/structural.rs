@@ -215,6 +215,31 @@ pub(super) fn check_vacuous_property_lowering(spec: &ParsedSpec) -> Vec<Complete
             continue;
         }
 
+        // Rule 2b — unconditional: unbounded-sum marker present. The Rust
+        // lowering is a bare sentinel comment, so every backend skips the
+        // property entirely.
+        if rs.contains(crate::check::QEDGEN_UNSUPPORTED_SUM_MARKER) {
+            warnings.push(
+                warn(
+                    "vacuous_property_lowering",
+                    Severity::Warning,
+                    1,
+                    format!(
+                        "property '{}' contains a sum without a finite domain — \
+                     Kani/proptest/Crucible skip this property entirely",
+                        prop.name
+                    ),
+                )
+                .subject(prop.name.clone())
+                .fix(
+                    "Give the sum binder a finite domain: declare `type Idx = \
+                      Fin[N]` (or use Fin[N] directly) so the sum lowers to a \
+                      bounded fold.",
+                ),
+            );
+            continue;
+        }
+
         // Rule 3 — unconditional: bare `true` body.
         if trimmed == "true" {
             warnings.push(

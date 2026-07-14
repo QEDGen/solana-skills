@@ -183,6 +183,7 @@ pub(crate) fn tree_bare_rhs(tree: &crate::mir::ExprTree) -> Option<String> {
                 _ => None,
             },
             BindingKind::Const(value) => p.segments.is_empty().then(|| value.clone()),
+            BindingKind::External => None,
             BindingKind::Param
             | BindingKind::LetBound
             | BindingKind::Account
@@ -202,6 +203,7 @@ pub(crate) fn tree_bare_rhs(tree: &crate::mir::ExprTree) -> Option<String> {
         | ExprTree::Arith { .. }
         | ExprTree::MulDivFloor { .. }
         | ExprTree::MulDivCeil { .. }
+        | ExprTree::MulDivRoundHalfUp { .. }
         | ExprTree::Match { .. }
         | ExprTree::Ctor { .. }
         | ExprTree::RecordLit(_)

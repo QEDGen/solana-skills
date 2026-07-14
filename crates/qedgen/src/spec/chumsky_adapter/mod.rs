@@ -92,6 +92,8 @@ struct TypeEnv<'a> {
     state_fields: std::collections::BTreeMap<String, &'a a::TypeRef>,
     records: std::collections::BTreeMap<String, std::collections::BTreeMap<String, &'a a::TypeRef>>,
     params: Vec<(String, &'a a::TypeRef)>,
+    external_fields:
+        std::collections::BTreeMap<String, std::collections::BTreeMap<String, &'a a::TypeRef>>,
     aliases: std::collections::BTreeMap<String, String>,
     /// Sum-type registry: enum name → (variant name → its Rust
     /// [`VariantShape`]). `Struct` (`Approved of { … }` → `Enum::Approved { .. }`),
@@ -148,6 +150,10 @@ impl<'a> TypeEnv<'a> {
                     env.aliases
                         .insert(ta.name.clone(), type_ref_to_string(&ta.target));
                 }
+                TopItem::Dimension(dimension) => {
+                    env.aliases
+                        .insert(dimension.name.clone(), type_ref_to_string(&dimension.base));
+                }
                 // Ghosts render as state fields: `state.<ghost>` must resolve
                 // in properties / invariants / `requires` / `ensures` and in
                 // other ghosts' update RHS. They are rendering-only here — the
@@ -155,6 +161,16 @@ impl<'a> TypeEnv<'a> {
                 // includes ghosts.
                 TopItem::Ghost(g) => {
                     env.state_fields.entry(g.name.clone()).or_insert(&g.ty);
+                }
+                TopItem::Environment(environment) => {
+                    for clause in &environment.clauses {
+                        if let a::EnvClause::External { object, field, ty } = &clause.node {
+                            env.external_fields
+                                .entry(object.clone())
+                                .or_default()
+                                .insert(field.clone(), ty);
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -169,12 +185,7 @@ impl<'a> TypeEnv<'a> {
     /// by callers: a numeric literal renders as-is, a const name renders as
     /// the Rust `const` the codegen already emits.
     fn fin_bound(&self, binder_ty: &str) -> Option<String> {
-        let resolved = self
-            .aliases
-            .get(binder_ty.trim())
-            .map(String::as_str)
-            .unwrap_or(binder_ty)
-            .trim();
+        let resolved = self.resolve_alias_name(binder_ty);
         let inner = resolved.strip_prefix("Fin[")?.strip_suffix(']')?;
         Some(inner.trim().to_string())
     }
@@ -187,7 +198,7 @@ impl<'a> TypeEnv<'a> {
     /// Resolve a source-language TypeRef to its Lean `Kind`.
     fn type_ref_kind(&self, t: &a::TypeRef) -> Kind {
         match t {
-            a::TypeRef::Named(n) => match n.as_str() {
+            a::TypeRef::Named(n) => match self.resolve_alias_name(n).as_str() {
                 "U8" | "U16" | "U32" | "U64" | "U128" => Kind::Nat,
                 "I8" | "I16" | "I32" | "I64" | "I128" => Kind::Int,
                 "Bool" => Kind::Bool,
@@ -198,6 +209,18 @@ impl<'a> TypeEnv<'a> {
             a::TypeRef::Fin { .. } => Kind::Nat, // Fin n coerces to Nat for arithmetic.
             a::TypeRef::Param(_, _) => Kind::Other,
         }
+    }
+
+    fn resolve_alias_name(&self, name: &str) -> String {
+        let mut resolved = name.trim().to_string();
+        let mut seen = std::collections::BTreeSet::new();
+        while seen.insert(resolved.clone()) {
+            let Some(next) = self.aliases.get(&resolved) else {
+                break;
+            };
+            resolved = next.trim().to_string();
+        }
+        resolved
     }
 
     /// Shared walking core for [`Self::path_kind`] / [`Self::path_type_name`]
@@ -259,6 +282,28 @@ impl<'a> TypeEnv<'a> {
             }
             return current;
         }
+        if let Some(fields) = self.external_fields.get(&p.root) {
+            let mut current: Option<&a::TypeRef> = None;
+            for seg in &p.segments {
+                match seg {
+                    a::PathSeg::Field(field) => {
+                        current = match current {
+                            None => fields.get(field).copied(),
+                            Some(a::TypeRef::Named(record)) => {
+                                self.records.get(record).and_then(|m| m.get(field).copied())
+                            }
+                            _ => None,
+                        };
+                    }
+                    a::PathSeg::Index(_) => {
+                        if let Some(a::TypeRef::Map { inner, .. }) = current {
+                            current = Some(inner.as_ref());
+                        }
+                    }
+                }
+            }
+            return current;
+        }
         // Bare ident — try handler params.
         if p.segments.is_empty() {
             return self
@@ -268,6 +313,10 @@ impl<'a> TypeEnv<'a> {
                 .map(|(_, t)| *t);
         }
         None
+    }
+
+    fn is_external_root(&self, name: &str) -> bool {
+        self.external_fields.contains_key(name)
     }
 
     /// Resolve the kind of a Path. Handles subscripts into Map fields by
@@ -360,7 +409,9 @@ impl<'a> TypeEnv<'a> {
             Expr::Paren(inner) => self.infer(&inner.node),
             // mul_div_floor/ceil follow the operand types: Int if any of a or
             // b is Int, else Nat. Divisor kind doesn't promote — it's a scale.
-            Expr::MulDivFloor { a, b, .. } | Expr::MulDivCeil { a, b, .. } => {
+            Expr::MulDivFloor { a, b, .. }
+            | Expr::MulDivCeil { a, b, .. }
+            | Expr::MulDivRoundHalfUp { a, b, .. } => {
                 let ak = self.infer(&a.node);
                 let bk = self.infer(&b.node);
                 match (ak, bk) {
@@ -415,7 +466,7 @@ impl<'a> TypeEnv<'a> {
         };
         match t {
             a::TypeRef::Named(n) => matches!(
-                n.as_str(),
+                self.resolve_alias_name(n).as_str(),
                 "U16" | "U32" | "U64" | "U128" | "I16" | "I32" | "I64" | "I128" | "Bool"
             ),
             _ => false,

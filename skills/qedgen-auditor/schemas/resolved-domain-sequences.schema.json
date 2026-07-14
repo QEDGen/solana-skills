@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qedgen.dev/schemas/auditor/resolved-domain-sequences-v1.schema.json",
+  "title": "QEDGen Auditor Resolved Domain Sequences",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "schema_uri", "source_sequence_schema_uri", "source_bindings_schema_uri", "audit_id", "source_dossier_schema_version", "plans", "exclusions"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "schema_uri": { "const": "https://qedgen.dev/schemas/auditor/resolved-domain-sequences-v1.schema.json" },
+    "source_sequence_schema_uri": { "const": "https://qedgen.dev/schemas/auditor/domain-sequences-v1.schema.json" },
+    "source_bindings_schema_uri": { "const": "https://qedgen.dev/schemas/auditor/domain-sequence-bindings-v1.schema.json" },
+    "audit_id": { "type": ["string", "null"] },
+    "source_dossier_schema_version": { "type": ["integer", "null"] },
+    "plans": { "type": "array", "items": { "$ref": "#/$defs/plan" } },
+    "exclusions": { "type": "array" }
+  },
+  "$defs": {
+    "plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "title", "setup", "forward", "reverse", "teardown", "provenance_candidate_ids", "resolved_plan_bindings"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["paired_round_trip", "lifecycle_transition"] },
+        "title": { "type": "string", "minLength": 1 },
+        "setup": { "type": "array", "items": { "$ref": "#/$defs/action" } },
+        "forward": { "type": "array", "items": { "$ref": "#/$defs/action" } },
+        "reverse": { "type": "array", "items": { "$ref": "#/$defs/action" } },
+        "teardown": { "type": "array", "items": { "$ref": "#/$defs/action" } },
+        "provenance_candidate_ids": { "type": "array", "items": { "type": "string" } },
+        "resolved_plan_bindings": { "type": "array", "items": { "$ref": "#/$defs/binding" } }
+      }
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["handler", "role", "from_state", "to_state", "guards", "provenance_candidate_ids", "resolved_bindings"],
+      "properties": {
+        "handler": { "type": "string", "minLength": 1 },
+        "role": { "enum": ["setup", "forward", "reverse", "teardown", "lifecycle_transition"] },
+        "from_state": { "type": ["string", "null"] },
+        "to_state": { "type": ["string", "null"] },
+        "guards": { "type": "array", "items": { "type": "string" } },
+        "provenance_candidate_ids": { "type": "array", "items": { "type": "string" } },
+        "resolved_bindings": { "type": "array", "items": { "$ref": "#/$defs/binding" } }
+      }
+    },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["parameter", "value", "provenance"],
+      "properties": {
+        "parameter": { "type": "object" },
+        "value": {},
+        "provenance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["source", "plan_id", "action"],
+          "properties": {
+            "source": { "const": "user" },
+            "plan_id": { "type": "string", "minLength": 1 },
+            "action": { "type": ["object", "null"] }
+          }
+        }
+      }
+    }
+  }
+}

@@ -148,6 +148,17 @@ pub(super) fn type_alias_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>
         .map(|(name, target)| TopItem::TypeAlias(TypeAliasDecl { name, target }))
 }
 
+// Nominal numeric dimension: `dimension Lamports = U64`.
+pub(super) fn dimension_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
+    kw("dimension")
+        .ignore_then(non_keyword_ident())
+        .then_ignore(wsc())
+        .then_ignore(just('='))
+        .then_ignore(wsc())
+        .then(type_ref())
+        .map(|(name, base)| TopItem::Dimension(DimensionDecl { name, base }))
+}
+
 // ADT variant: `| Name [= code] ["desc"] [of { fields }]`
 pub(super) fn variant<'a>() -> impl Parser<'a, &'a str, Variant, Err<'a>> + Clone {
     let code = just('=')
@@ -566,7 +577,20 @@ pub(super) fn environment_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a
         .ignore_then(expr())
         .map(EnvClause::Constraint);
 
-    let clause = choice((mutates, constraint)).map_with(|c, e| Node::new(c, e.span().into_range()));
+    let external = kw("external")
+        .ignore_then(non_keyword_ident())
+        .then_ignore(wsc())
+        .then_ignore(just('.'))
+        .then_ignore(wsc())
+        .then(non_keyword_ident())
+        .then_ignore(wsc())
+        .then_ignore(just(':'))
+        .then_ignore(wsc())
+        .then(type_ref())
+        .map(|((object, field), ty)| EnvClause::External { object, field, ty });
+
+    let clause = choice((external, mutates, constraint))
+        .map_with(|c, e| Node::new(c, e.span().into_range()));
 
     kw("environment")
         .ignore_then(non_keyword_ident())

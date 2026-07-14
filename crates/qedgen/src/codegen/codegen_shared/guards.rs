@@ -7,7 +7,11 @@ use crate::mir::Mir;
 /// declare `pub mod math;` keep compiling.
 pub(crate) fn guards_use_math_helpers(spec: &ParsedSpec) -> bool {
     let mut any = false;
-    let probe = |s: &str| s.contains("mul_div_floor_u128") || s.contains("mul_div_ceil_u128");
+    let probe = |s: &str| {
+        s.contains("mul_div_floor_u128")
+            || s.contains("mul_div_ceil_u128")
+            || s.contains("mul_div_round_half_up_u128")
+    };
     for h in &spec.handlers {
         if h.requires.iter().any(|r| probe(&r.rust_expr)) {
             any = true;

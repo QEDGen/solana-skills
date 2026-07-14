@@ -490,6 +490,7 @@ fn parses_full_pool_spec() {
             TopItem::Environment(_) => "environment",
             TopItem::ProgramId(_) => "program_id",
             TopItem::TypeAlias(_) => "type_alias",
+            TopItem::Dimension(_) => "dimension",
             TopItem::Pubkey(_) => "pubkey",
             TopItem::Errors(_) => "errors",
             TopItem::Instruction(_) => "instruction",
@@ -822,6 +823,38 @@ type State | Active
         }
         o => panic!("expected Cmp, got {:?}", o),
     }
+}
+
+#[test]
+fn parses_mul_div_round_half_up() {
+    let src = r#"
+spec T
+handler noop (amount : U64) : State -> State {
+  requires mul_div_round_half_up(amount, 3, 2) >= 0
+}
+type State = { total : U64 }
+"#;
+    let s = parse_ok(src);
+    let handler = s
+        .items
+        .iter()
+        .find_map(|item| match &item.node {
+            TopItem::Handler(handler) => Some(handler),
+            _ => None,
+        })
+        .unwrap();
+    let guard = handler
+        .clauses
+        .iter()
+        .find_map(|clause| match &clause.node {
+            HandlerClause::Requires { guard, .. } => Some(guard),
+            _ => None,
+        })
+        .unwrap();
+    let Expr::Cmp { lhs, .. } = &guard.node else {
+        panic!("expected comparison");
+    };
+    assert!(matches!(&lhs.node, Expr::MulDivRoundHalfUp { .. }));
 }
 
 #[test]

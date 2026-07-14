@@ -175,6 +175,24 @@ pub fn mul_div_ceil_u128(a: u128, b: u128, d: u128) -> u128 {
     }
 }
 
+/// Nearest integer to `a*b/d`, with exact halves rounded upward; `0` when
+/// `d == 0`. Quotient/remainder decomposition avoids an overflowing bias add.
+#[inline]
+pub fn mul_div_round_half_up_u128(a: u128, b: u128, d: u128) -> u128 {
+    if d == 0 {
+        return 0;
+    }
+    let prod = a.saturating_mul(b);
+    let q = prod / d;
+    let r = prod % d;
+    let half_up_threshold = d / 2 + d % 2;
+    if r >= half_up_threshold {
+        q.saturating_add(1)
+    } else {
+        q
+    }
+}
+
 /// `floor(a * bps / 10000)` split into quotient/remainder to keep the product
 /// small; `u128::MAX` when `bps > 10000` (out of range).
 #[inline]
@@ -514,6 +532,29 @@ fn mul_div_ceil_u128_ceil_contract_bounded() {
     }
 }
 
+/// `mul_div_round_half_up_u128` chooses floor below the half-way threshold
+/// and ceiling at or above it, including odd denominators where no exact half
+/// exists. The concrete divisor panel keeps the duplicated reference divider
+/// tractable while covering even/odd and exact/non-exact cases.
+#[kani::proof]
+fn mul_div_round_half_up_contract_bounded() {
+    let a: u128 = kani::any();
+    let b: u128 = kani::any();
+    kani::assume(a <= u8::MAX as u128 && b <= u8::MAX as u128);
+    let prod = a * b;
+    for d in [1u128, 2, 3, 7, 10, 255, 70000] {
+        let floor = prod / d;
+        let remainder = prod % d;
+        let threshold = d / 2 + d % 2;
+        let expected = if remainder >= threshold {
+            floor + 1
+        } else {
+            floor
+        };
+        assert_eq!(mul_div_round_half_up_u128(a, b, d), expected);
+    }
+}
+
 /// #190: the `d == 0` guard of both `mul_div` helpers returns 0 at FULL
 /// operand width — the branch never reaches a divider.
 #[kani::proof]
@@ -522,6 +563,7 @@ fn mul_div_zero_divisor_full_width() {
     let b: u128 = kani::any();
     assert_eq!(mul_div_floor_u128(a, b, 0), 0);
     assert_eq!(mul_div_ceil_u128(a, b, 0), 0);
+    assert_eq!(mul_div_round_half_up_u128(a, b, 0), 0);
 }
 
 /// #190: the saturation branch — when `a·b` overflows u128, both helpers
@@ -550,7 +592,16 @@ fn mul_div_floor_u128_saturation_bounded_divisor() {
 fn mul_bps_floor_u128_floor_contract_bounded() {
     let bps: u128 = kani::any();
     if bps <= 10000 {
-        for a in [0u128, 1, 9999, 10000, 10001, 65535, 123_456_789, u64::MAX as u128] {
+        for a in [
+            0u128,
+            1,
+            9999,
+            10000,
+            10001,
+            65535,
+            123_456_789,
+            u64::MAX as u128,
+        ] {
             // a·bps ≤ (2^64-1)·10^4 < 2^128 — the bracket math cannot overflow.
             let q = mul_bps_floor_u128(a, bps);
             assert!(q * 10000 <= a * bps);

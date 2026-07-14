@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "schema_uri": "https://qedgen.dev/schemas/auditor/domain-sequences-v1.schema.json",
+  "audit_id": "domain_boundary",
+  "source_dossier_schema_version": 1,
+  "plans": [
+    {
+      "id": "domain-limit-accept",
+      "kind": "lifecycle_transition",
+      "title": "accept an amount above the ratified domain limit",
+      "setup": [],
+      "forward": [
+        {
+          "handler": "accept",
+          "role": "lifecycle_transition",
+          "from_state": "Active",
+          "to_state": "Active",
+          "guards": [],
+          "provenance_candidate_ids": ["qty_accepted_amount"],
+          "unresolved_parameters": [
+            {
+              "handler": "accept",
+              "name": "Accept",
+              "kind": "account_bindings",
+              "declared_type": null,
+              "reason": "bind the signer identity explicitly"
+            },
+            {
+              "handler": "accept",
+              "name": "amount",
+              "kind": "handler_argument",
+              "declared_type": "U64",
+              "reason": "choose the first value above the ratified maximum"
+            }
+          ]
+        }
+      ],
+      "reverse": [],
+      "teardown": [],
+      "provenance_candidate_ids": ["qty_accepted_amount"],
+      "unresolved_parameters": [
+        {
+          "handler": "accept",
+          "name": "Accept",
+          "kind": "account_bindings",
+          "declared_type": null,
+          "reason": "bind the signer identity explicitly"
+        },
+        {
+          "handler": "accept",
+          "name": "amount",
+          "kind": "handler_argument",
+          "declared_type": "U64",
+          "reason": "choose the first value above the ratified maximum"
+        }
+      ]
+    }
+  ],
+  "exclusions": []
+}

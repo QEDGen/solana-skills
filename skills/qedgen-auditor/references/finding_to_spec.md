@@ -55,6 +55,40 @@ domain checks define intended behavior; regression checks prove that known bug
 shapes fail. Run Crucible again after the domain layer is ratified, even if the
 structural skeleton already had a dry fuzz result.
 
+`qedgen ratify` writes `spec-handoff.json` beside the dossier. Treat
+`disposition: emitted` as executable only when the generated `.qedspec`
+contains the matching `// provenance: domain-candidate <id>` line.
+`needs_authoring` means intent is ratified but no executable clause exists.
+Use that clause's `authoring.constructs`, parser-shaped `authoring.template`,
+and limitations in `authoring.notes` as the starting point; replace every
+angle-bracket placeholder from ratified dossier facts and source evidence.
+Resolve every `language_gaps[]` entry by extending the language or retaining
+an explicit documentary property with a manual lane; never silently count it
+as covered. Each gap's `current_language_support` distinguishes missing intent
+from a backend limitation and names the nearest executable construct.
+
+Finite aggregate conservation is executable when the binder resolves to
+`Fin[N]` (directly or through an alias): use `sum i : Index, ...`, including
+inside `old(...)` for pre/post properties. Unbounded sums remain a visible
+language gap. `mul_div_floor` and `mul_div_ceil` are executable rounding
+constructs. `mul_div_round_half_up` executes nearest rounding with exact halves
+rounded upward for non-negative quantities and a positive denominator. Do not
+map a generic `nearest` answer to it until the user ratifies that tie policy;
+unsupported policies such as ties-to-even remain documentary.
+Nominal numeric units are executable with `dimension Lamports = U64` (or
+another integer base). Use the dimension name on state fields and handler
+parameters; literals adopt the surrounding unit, while incompatible unit
+arithmetic, comparisons, and assignments fail during spec checking. Dimensions
+erase to their declared integer base at generated-code ABI boundaries.
+
+External assumptions are executable without shadowing program state. Declare
+typed scalar fields inside an environment, for example `external clock.slot :
+U64`, then constrain post/pre values with `clock.slot >= old(clock.slot)`.
+Kani receives distinct nondeterministic `pre_clock_slot` / `post_clock_slot`
+values; Lean receives matching theorem parameters. Use the same shape for
+oracle values, CPI return data, owner keys, and executable flags. Composite
+imported contracts still require explicit scalar projections or a manual lane.
+
 ---
 
 ## How each entry reads

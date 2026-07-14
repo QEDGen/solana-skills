@@ -350,6 +350,18 @@ fn mul_div_ceil_u128(a: u128, b: u128, d: u128) -> u128 {\n\
     if prod % d == 0 { prod / d } else { (prod / d).saturating_add(1) }\n\
 }\n\n",
         );
+        out.push_str(
+            "#[allow(dead_code)]\n\
+#[inline]\n\
+fn mul_div_round_half_up_u128(a: u128, b: u128, d: u128) -> u128 {\n\
+    if d == 0 { return 0; }\n\
+    let prod = a.saturating_mul(b);\n\
+    let q = prod / d;\n\
+    let r = prod % d;\n\
+    let threshold = d / 2 + d % 2;\n\
+    if r >= threshold { q.saturating_add(1) } else { q }\n\
+}\n\n",
+        );
     }
 
     rust_codegen_util::emit_constants(&mut out, &spec.constants);

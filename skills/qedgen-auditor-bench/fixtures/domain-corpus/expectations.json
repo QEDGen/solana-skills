@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "description": "Labeled domain-semantic extraction corpus for the QEDGen auditor.",
+  "entries": [
+    {
+      "domain": "vault",
+      "dossier": "vault-dossier.json",
+      "expected_candidate_categories": ["asset_flows", "quantities", "paired_operations", "economic_equations"],
+      "expected_units": ["underlying atoms", "share atoms"],
+      "expected_paired_operations": ["deposit/withdraw"],
+      "intended_language_gaps": ["share-price rounding across a multi-step deposit/withdraw sequence"]
+    },
+    {
+      "domain": "amm",
+      "dossier": "amm-dossier.json",
+      "expected_candidate_categories": ["asset_flows", "quantities", "paired_operations", "economic_equations"],
+      "expected_units": ["token A atoms", "token B atoms"],
+      "expected_paired_operations": ["swap_a_for_b/swap_b_for_a"],
+      "intended_language_gaps": ["nonlinear constant-product relation with fee and integer rounding"]
+    },
+    {
+      "domain": "lending_liquidation",
+      "dossier": "lending-liquidation-dossier.json",
+      "expected_candidate_categories": ["asset_flows", "quantities", "paired_operations", "external_assumptions"],
+      "expected_units": ["debt atoms", "collateral atoms"],
+      "expected_paired_operations": ["borrow/repay"],
+      "intended_language_gaps": ["health-factor transition across oracle movement and partial liquidation"]
+    },
+    {
+      "domain": "oracle",
+      "dossier": "oracle-dossier.json",
+      "expected_candidate_categories": ["quantities", "paired_operations", "external_assumptions"],
+      "expected_units": ["quote atoms per base token"],
+      "expected_paired_operations": ["publish_price/consume_price"],
+      "intended_language_gaps": ["freshness relative to a modeled clock and confidence interval"]
+    },
+    {
+      "domain": "token_2022",
+      "dossier": "token-2022-dossier.json",
+      "expected_candidate_categories": ["asset_flows", "quantities", "paired_operations", "external_assumptions"],
+      "expected_units": ["mint atoms"],
+      "expected_paired_operations": ["transfer/settle_accounting"],
+      "intended_language_gaps": ["extension-dependent transfer fees and hook side effects"]
+    },
+    {
+      "domain": "rewards_vesting",
+      "dossier": "rewards-vesting-dossier.json",
+      "expected_candidate_categories": ["quantities", "paired_operations", "economic_equations", "external_assumptions"],
+      "expected_units": ["reward atoms"],
+      "expected_paired_operations": ["accrue/claim"],
+      "intended_language_gaps": ["time-integrated accrual with vesting cliffs and carry"]
+    },
+    {
+      "domain": "governance",
+      "dossier": "governance-dossier.json",
+      "expected_candidate_categories": ["quantities", "paired_operations", "lifecycle_edges", "authority_capabilities"],
+      "expected_units": ["vote-weight units"],
+      "expected_paired_operations": ["cast_vote/execute_proposal"],
+      "intended_language_gaps": ["snapshot-based quorum over a proposal lifecycle"]
+    }
+  ]
+}

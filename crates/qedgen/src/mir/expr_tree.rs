@@ -78,6 +78,9 @@ pub enum ExprTree {
         binder: Symbol,
         /// Binder type in source-DSL form (`AccountIdx`, `Fin[N]`, …).
         binder_ty: Symbol,
+        /// Resolved finite bound for Rust/Kani/proptest lowering. `None`
+        /// keeps non-finite sums explicit and unsupported.
+        fin_bound: Option<Symbol>,
         body: Box<ExprTree>,
     },
     /// `forall i : T, body` / `exists i : T, body`.
@@ -127,6 +130,12 @@ pub enum ExprTree {
     },
     /// `mul_div_ceil(a, b, d)`.
     MulDivCeil {
+        a: Box<ExprTree>,
+        b: Box<ExprTree>,
+        d: Box<ExprTree>,
+    },
+    /// `mul_div_round_half_up(a, b, d)` — nearest, ties upward.
+    MulDivRoundHalfUp {
         a: Box<ExprTree>,
         b: Box<ExprTree>,
         d: Box<ExprTree>,
@@ -248,6 +257,8 @@ pub enum BindingKind {
     /// Account binding from the handler's `accounts { … }` block (or the
     /// `auth` actor).
     Account,
+    /// Field in a declared external namespace (`clock.slot`, `oracle.price`).
+    External,
     /// `abstract <name> : <Type>` existential binder.
     AbstractBinder,
     /// Bound by an enclosing expression-level binder (quantifier, `sum`,
@@ -354,6 +365,7 @@ impl TreePath {
             | BindingKind::Param
             | BindingKind::LetBound
             | BindingKind::Account
+            | BindingKind::External
             | BindingKind::AbstractBinder
             | BindingKind::ExprBinder
             | BindingKind::Unresolved => NumKind::Nat,
@@ -387,7 +399,9 @@ impl ExprTree {
             ExprTree::Len(_) => NumKind::Nat,
             ExprTree::Arith { lhs, rhs, .. } => join(lhs, rhs),
             // Divisor kind doesn't promote — it's a scale.
-            ExprTree::MulDivFloor { a, b, .. } | ExprTree::MulDivCeil { a, b, .. } => join(a, b),
+            ExprTree::MulDivFloor { a, b, .. }
+            | ExprTree::MulDivCeil { a, b, .. }
+            | ExprTree::MulDivRoundHalfUp { a, b, .. } => join(a, b),
             // First arm's body decides; arms must agree (elaborator-checked).
             ExprTree::Match { arms, .. } => arms
                 .first()

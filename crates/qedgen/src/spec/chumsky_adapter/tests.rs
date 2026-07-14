@@ -1146,6 +1146,132 @@ fn classify_property_constant_body_is_unary() {
     );
 }
 
+#[test]
+fn environment_constraints_retain_typed_temporal_metadata() {
+    let src = format!(
+        "{}{}",
+        CLASSIFY_SPEC_HEAD,
+        r#"
+environment rate_change {
+  mutates balance : U64
+  constraint state.balance >= old(state.balance)
+  constraint state.balance > 0
+}
+"#
+    );
+    let spec = parse_str(&src).expect("parse environment constraints");
+    let environment = &spec.environments[0];
+
+    assert_eq!(environment.constraints.len(), 2);
+    assert_eq!(environment.constraints_rust.len(), 2);
+    assert_eq!(environment.typed_constraints.len(), 2);
+    for (index, typed) in environment.typed_constraints.iter().enumerate() {
+        assert_eq!(typed.lean_expr, environment.constraints[index]);
+        assert_eq!(typed.rust_expr, environment.constraints_rust[index]);
+        assert!(
+            typed.tree.is_some(),
+            "constraint {index} must retain its tree"
+        );
+    }
+    assert_eq!(
+        environment.typed_constraints[0].class,
+        crate::check::PropertyClass::Binary
+    );
+    assert_eq!(
+        environment.typed_constraints[1].class,
+        crate::check::PropertyClass::Unary
+    );
+}
+
+#[test]
+fn environment_external_fields_use_a_distinct_typed_namespace() {
+    let src = format!(
+        "{}{}",
+        CLASSIFY_SPEC_HEAD,
+        r#"
+environment clock_advance {
+  external clock.slot : U64
+  constraint clock.slot >= old(clock.slot)
+}
+"#
+    );
+    let spec = parse_str(&src).expect("parse external environment");
+    let environment = &spec.environments[0];
+    assert_eq!(
+        environment.external_fields,
+        vec![("clock".into(), "slot".into(), "U64".into())]
+    );
+    let tree = environment.typed_constraints[0]
+        .tree
+        .as_ref()
+        .expect("typed external constraint");
+    let crate::mir::ExprTree::Cmp { lhs, rhs, .. } = tree else {
+        panic!("expected external comparison, got {tree:?}");
+    };
+    let crate::mir::ExprTree::Path(lhs) = lhs.as_ref() else {
+        panic!("expected external path");
+    };
+    assert_eq!(lhs.binding, crate::mir::expr_tree::BindingKind::External);
+    assert_eq!(lhs.ty, Some(crate::mir::Ty::U64));
+    let crate::mir::ExprTree::Old(rhs) = rhs.as_ref() else {
+        panic!("expected old external path");
+    };
+    assert!(matches!(
+        rhs.as_ref(),
+        crate::mir::ExprTree::Path(path)
+            if path.binding == crate::mir::expr_tree::BindingKind::External
+    ));
+}
+
+#[test]
+fn cross_environment_external_reference_is_rejected() {
+    // `clock.slot` is declared external in `clock_env`; referencing it from
+    // `oracle_env` (which does not declare it) would lower to an unresolved
+    // identifier in Kani/Lean. The spec checker must reject it up front.
+    let src = format!(
+        "{}{}",
+        CLASSIFY_SPEC_HEAD,
+        r#"
+environment clock_env {
+  external clock.slot : U64
+  constraint clock.slot >= old(clock.slot)
+}
+
+environment oracle_env {
+  external oracle.price : U64
+  constraint oracle.price >= clock.slot
+}
+"#
+    );
+    let err = parse_str(&src).expect_err("cross-env external must be rejected");
+    let msg = format!("{err:#}");
+    assert!(msg.contains("oracle_env"), "{msg}");
+    assert!(msg.contains("clock"), "{msg}");
+    assert!(msg.contains("clock_env"), "{msg}");
+}
+
+#[test]
+fn external_shared_across_environments_is_allowed() {
+    // The same external declared in BOTH environments is fine — each
+    // environment redeclares it, so the reference resolves locally.
+    let src = format!(
+        "{}{}",
+        CLASSIFY_SPEC_HEAD,
+        r#"
+environment a {
+  external clock.slot : U64
+  constraint clock.slot >= 0
+}
+
+environment b {
+  external clock.slot : U64
+  constraint clock.slot >= 0
+}
+"#
+    );
+    parse_str(&src).expect("shared external redeclared in each env parses");
+}
+
 // ========================================================================
 // RustOpts.state_mode + inside_old round-trips
 // ========================================================================
@@ -1278,6 +1404,7 @@ ghost total : U64 {
   init { 0 }
   on mint { total := state.total + amount }
 }
+
 handler mint (amount : U64) {
   effect { balance := state.balance + amount }
 }
@@ -1310,6 +1437,93 @@ property p : state.total == state.balance preserved_by all
         .rust_expression
         .as_deref()
         .is_some_and(|r| r.contains("s.total")));
+}
+
+#[test]
+fn bounded_sum_alias_lowers_to_self_contained_binary_rust() {
+    let src = r#"
+spec SumVault
+const MAX = 8
+type Slot = Fin[MAX]
+state { balances : Map[MAX] U64 }
+type Error | E
+handler rebalance { }
+property conservation :
+  sum i : Slot, state.balances[i] >= sum i : Slot, old(state.balances[i])
+  preserved_by [rebalance]
+"#;
+    let typed = crate::chumsky_parser::parse(src).expect("parse bounded sum");
+    let spec = adapt(&typed);
+    let property = spec
+        .properties
+        .iter()
+        .find(|property| property.name == "conservation")
+        .expect("conservation property");
+    assert_eq!(property.class, crate::check::PropertyClass::Binary);
+    let rust = property
+        .rust_expression
+        .as_deref()
+        .expect("bounded sum must have Rust lowering");
+    assert!(rust.contains("0..(MAX as usize)"), "{rust}");
+    assert!(rust.contains("post.balances"), "{rust}");
+    assert!(rust.contains("pre.balances"), "{rust}");
+    assert!(!rust.contains("sum_over"), "{rust}");
+    assert!(
+        !rust.contains(crate::check::QEDGEN_UNSUPPORTED_MARKER),
+        "{rust}"
+    );
+}
+
+#[test]
+fn unbounded_sum_is_explicitly_unsupported_in_rust() {
+    let src = r#"
+spec UnboundedSum
+state { total : U64 }
+type Error | E
+handler tick { }
+property bad_sum : sum i : U64, state.total >= 0 preserved_by [tick]
+"#;
+    let typed = crate::chumsky_parser::parse(src).expect("parse unbounded sum");
+    let spec = adapt(&typed);
+    let rust = spec.properties[0]
+        .rust_expression
+        .as_deref()
+        .expect("unsupported sentinel retained for diagnostics");
+    assert!(rust.contains("QEDGEN_UNSUPPORTED_SUM"), "{rust}");
+    assert!(!rust.contains("sum_over"), "{rust}");
+    // The skip-guard layer must recognize the sum sentinel — otherwise the
+    // bare comment escapes into Kani/proptest/Crucible expression position
+    // as a syntax error and counts as an executable assertion.
+    assert!(crate::check::rust_expr_is_unsupported(rust), "{rust}");
+}
+
+#[test]
+fn sum_binder_resolves_fin_through_alias_chain() {
+    // `Idx -> AccountIdx -> Fin[4]`: fin_bound must resolve transitively,
+    // matching resolve_alias_name, not stop after one hop.
+    let src = r#"
+spec AliasChainSum
+const MAX = 4
+type AccountIdx = Fin[MAX]
+type Idx = AccountIdx
+state { balances : Map[MAX] U64 }
+type Error | E
+handler rebalance { }
+property conservation :
+  sum i : Idx, state.balances[i] >= 0
+  preserved_by [rebalance]
+"#;
+    let typed = crate::chumsky_parser::parse(src).expect("parse alias-chain sum");
+    let spec = adapt(&typed);
+    let rust = spec.properties[0]
+        .rust_expression
+        .as_deref()
+        .expect("alias-chain sum must have Rust lowering");
+    assert!(rust.contains("0..(MAX as usize)"), "{rust}");
+    assert!(
+        !rust.contains(crate::check::QEDGEN_UNSUPPORTED_SUM_MARKER),
+        "{rust}"
+    );
 }
 
 // ========================================================================
@@ -1612,6 +1826,34 @@ handler accept (total : U64) (fee_bps : U64) : State.Active -> State.Active {
     assert!(
         fee_rhs.contains("mul_div_ceil_u128") && fee_rhs.contains("as u64"),
         "ceil variant must narrow too; got: {fee_rhs}"
+    );
+}
+
+#[test]
+fn mul_div_round_half_up_narrows_to_u64_at_call_site() {
+    let src = r#"spec FeeMath
+program_id "11111111111111111111111111111111"
+type State = { total_collected : U64 }
+
+handler accept (total : U64) (rate : U64) : State -> State {
+  permissionless
+  let rounded = mul_div_round_half_up(total, rate, 10_000)
+  effect { total_collected += rounded }
+}
+"#;
+    let spec = parse_str(src).expect("parse");
+    let (_, lean_rhs, rust_rhs) = spec.handlers[0]
+        .let_bindings
+        .iter()
+        .find(|(name, _, _)| name == "rounded")
+        .expect("rounded binding");
+    assert!(
+        rust_rhs.contains("mul_div_round_half_up_u128") && rust_rhs.contains("as u64"),
+        "half-up variant must use the helper and narrow; got: {rust_rhs}"
+    );
+    assert!(
+        lean_rhs.contains("/ 2"),
+        "Lean rendering must encode the half-up bias: {lean_rhs}"
     );
 }
 

@@ -48,6 +48,19 @@ pub enum InvariantMode {
 /// invariant family asserted after each action; brownfield callers (no
 /// spec) pass `InvariantMode::Protocol`.
 pub fn generate(spec: &ParsedSpec, output_dir: &Path, mode: InvariantMode) -> Result<()> {
+    generate_with_account_overlay(spec, output_dir, mode, None, None)
+}
+
+pub(crate) fn generate_with_account_overlay(
+    spec: &ParsedSpec,
+    output_dir: &Path,
+    mode: InvariantMode,
+    account_overlay: Option<&crate::probe::domain_account_overlay::AccountBindingOverlay>,
+    // Absolute path to `<project>/target/deploy/<prog>.so`. When set, the
+    // harness loads the program from this exact path so it works from any
+    // location; when None it falls back to a layout-relative path.
+    deploy_so: Option<&Path>,
+) -> Result<()> {
     if spec.handlers.is_empty() {
         bail!("No handlers found in spec — nothing to fuzz");
     }
@@ -69,11 +82,11 @@ pub fn generate(spec: &ParsedSpec, output_dir: &Path, mode: InvariantMode) -> Re
     std::fs::write(dir.join("idls").join("README.md"), emit_idls_readme(spec))?;
     crate::codegen_shared::write_generated_file(
         &dir.join("src").join("main.rs"),
-        &emit_harness(spec, mode)?,
+        &emit_harness_with_deploy(spec, mode, account_overlay, deploy_so)?,
     )?;
 
     let assertion_count = match mode {
-        InvariantMode::Spec | InvariantMode::Both => linked_invariant_count(spec),
+        InvariantMode::Spec | InvariantMode::Both => executable_assertion_count(spec),
         InvariantMode::Protocol => 0,
     };
     let label = match mode {
@@ -95,7 +108,12 @@ pub fn generate(spec: &ParsedSpec, output_dir: &Path, mode: InvariantMode) -> Re
 /// Pick the harness leaf directory. If `output_dir` already ends with the
 /// spec's snake-case name, treat it as the leaf; otherwise append it. Lets
 /// callers pass either `./fuzz/` (parent) or `./fuzz/my_program/` (leaf).
-fn harness_dir_for(spec: &ParsedSpec, output_dir: &Path) -> std::path::PathBuf {
+///
+/// `pub(crate)`: the CLI must resolve the harness dir with THIS function
+/// before threading it to the build / seed-corpus / replay consumers —
+/// `generate` appends the leaf internally, so a caller that keeps the raw
+/// `--harness-dir` would look one level too shallow (see run.rs).
+pub(crate) fn harness_dir_for(spec: &ParsedSpec, output_dir: &Path) -> std::path::PathBuf {
     let leaf = spec_program_name(spec);
     if output_dir.file_name().and_then(|s| s.to_str()) == Some(leaf.as_str()) {
         output_dir.to_path_buf()
@@ -139,8 +157,12 @@ fn is_sbpf_target(spec: &ParsedSpec) -> bool {
     spec.is_assembly_target()
 }
 
-fn linked_invariant_count(spec: &ParsedSpec) -> usize {
-    spec.invariants
+/// Assertions that Crucible can actually execute after each action. Domain
+/// mode uses this as a coverage gate: a ratified dossier paired with a spec
+/// containing no renderable assertions must not be reported as domain fuzzing.
+pub(crate) fn executable_assertion_count(spec: &ParsedSpec) -> usize {
+    let invariants = spec
+        .invariants
         .iter()
         .filter(|i| {
             i.rust_expr
@@ -153,7 +175,19 @@ fn linked_invariant_count(spec: &ParsedSpec) -> usize {
                 .iter()
                 .any(|h| h.invariants.contains(&i.name) || h.establishes.contains(&i.name))
         })
-        .count()
+        .count();
+    let properties = spec
+        .properties
+        .iter()
+        .filter(|property| {
+            property
+                .rust_expression
+                .as_ref()
+                .map(|expression| !check::rust_expr_is_unsupported(expression))
+                .unwrap_or(false)
+        })
+        .count();
+    invariants + properties
 }
 
 // ============================================================================
@@ -256,7 +290,24 @@ invariant_test = []
 // Harness body
 // ============================================================================
 
-fn emit_harness(spec: &ParsedSpec, mode: InvariantMode) -> Result<String> {
+/// Test-only convenience: emit a harness with the layout-relative `.so`
+/// path. Production goes through `emit_harness_with_deploy` with an absolute
+/// path from the CLI.
+#[cfg(test)]
+fn emit_harness(
+    spec: &ParsedSpec,
+    mode: InvariantMode,
+    account_overlay: Option<&crate::probe::domain_account_overlay::AccountBindingOverlay>,
+) -> Result<String> {
+    emit_harness_with_deploy(spec, mode, account_overlay, None)
+}
+
+fn emit_harness_with_deploy(
+    spec: &ParsedSpec,
+    mode: InvariantMode,
+    account_overlay: Option<&crate::probe::domain_account_overlay::AccountBindingOverlay>,
+    deploy_so: Option<&Path>,
+) -> Result<String> {
     let prog = spec_program_name(spec);
     let fixture = fixture_name(spec);
 
@@ -289,9 +340,11 @@ use {prog}::accounts;
         emit_protocol_invariants_helpers(&mut out);
     }
 
-    emit_fixture_struct(&mut out, spec, &fixture, mode);
+    let force_fixture_accounts =
+        account_overlay.is_some_and(|overlay| !overlay.handlers.is_empty());
+    emit_fixture_struct(&mut out, spec, &fixture, mode, force_fixture_accounts);
     out.push('\n');
-    emit_fixture_impl(&mut out, spec, &fixture, mode)?;
+    emit_fixture_impl(&mut out, spec, &fixture, mode, account_overlay, deploy_so)?;
     out.push('\n');
     emit_invariant_fn(&mut out, spec, &fixture, mode);
 
@@ -629,8 +682,12 @@ fn assert_token_balance_conserved(ctx: &TestContext, before: &[AccountSnapshot],
 /// program-owned PDA vault is intentionally absent (it legitimately gains
 /// rent, and `account_tracked_pubkey_exprs` is where the PDA is tracked).
 /// Spec mode has no non-signer keypairs, so this collapses to the signer set.
-fn wallet_tracked_pubkey_exprs(spec: &ParsedSpec, mode: InvariantMode) -> Vec<String> {
-    if uses_brownfield_accounts(spec, mode) {
+fn wallet_tracked_pubkey_exprs(
+    spec: &ParsedSpec,
+    mode: InvariantMode,
+    force_fixture_accounts: bool,
+) -> Vec<String> {
+    if uses_brownfield_accounts(spec, mode, force_fixture_accounts) {
         collect_brownfield_keypair_names(spec)
             .iter()
             .map(|name| format!("self.{}.pubkey()", brownfield_keypair_ident(name)))
@@ -647,20 +704,21 @@ fn wallet_tracked_pubkey_exprs(spec: &ParsedSpec, mode: InvariantMode) -> Vec<St
 /// PDA vault (when setup created one). The `Account`-set guards' tracked set
 /// — broader than signers because owner flips, discriminator changes, and
 /// closures matter on non-signer writables too.
-fn account_tracked_pubkey_exprs(spec: &ParsedSpec, mode: InvariantMode) -> Vec<String> {
+fn account_tracked_pubkey_exprs(
+    spec: &ParsedSpec,
+    op: &ParsedHandler,
+    mode: InvariantMode,
+    force_fixture_accounts: bool,
+) -> Vec<String> {
     let mut exprs = Vec::new();
-    if uses_brownfield_accounts(spec, mode) {
+    if uses_brownfield_accounts(spec, mode, force_fixture_accounts) {
         for name in collect_brownfield_keypair_names(spec) {
             exprs.push(format!("self.{}.pubkey()", brownfield_keypair_ident(&name)));
         }
-        let has_pda = spec
-            .handlers
-            .iter()
-            .any(|h| h.accounts.iter().any(|a| a.pda_seeds.is_some()));
-        if has_pda {
-            // Re-derived the same way as the per-action accounts literal and
-            // the setup vault creation (empty-seed placeholder).
-            exprs.push("Pubkey::find_program_address(&[], &self.program_id).0".to_string());
+        for account in &op.accounts {
+            if account.pda_seeds.is_some() {
+                exprs.push(pda_local_ident(&account.name));
+            }
         }
     } else {
         for sig in collect_signer_idents(spec) {
@@ -668,6 +726,164 @@ fn account_tracked_pubkey_exprs(spec: &ParsedSpec, mode: InvariantMode) -> Vec<S
         }
     }
     exprs
+}
+
+fn pda_local_ident(account_name: &str) -> String {
+    format!("__pda_{}", brownfield_keypair_ident(account_name))
+}
+
+fn pda_seeds_for_account<'a>(
+    spec: &'a ParsedSpec,
+    account: &'a crate::check::ParsedHandlerAccount,
+) -> Option<&'a [String]> {
+    let inline = account.pda_seeds.as_deref()?;
+    spec.pdas
+        .iter()
+        .find(|pda| pda.name == account.name)
+        .or_else(|| {
+            (inline.len() == 1)
+                .then(|| spec.pdas.iter().find(|pda| pda.name == inline[0]))
+                .flatten()
+        })
+        .map(|pda| pda.seeds.as_slice())
+        .or(Some(inline))
+}
+
+fn is_integer_type(ty: &str) -> bool {
+    matches!(
+        ty,
+        "U8" | "U16" | "U32" | "U64" | "U128" | "I8" | "I16" | "I32" | "I64" | "I128"
+    )
+}
+
+fn render_pda_seed_expr(
+    spec: &ParsedSpec,
+    op: &ParsedHandler,
+    seed: &str,
+    account_overlay: Option<&crate::probe::domain_account_overlay::AccountBindingOverlay>,
+) -> Result<String> {
+    if let Some(hex) = seed.strip_prefix("bytes:") {
+        if hex.len() % 2 != 0 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            bail!(
+                "Crucible PDA seed `{seed}` in handler `{}` has an invalid encoded byte literal",
+                op.name
+            );
+        }
+        let bytes = hex
+            .as_bytes()
+            .chunks(2)
+            .map(|pair| format!("0x{}", std::str::from_utf8(pair).unwrap_or("00")))
+            .collect::<Vec<_>>();
+        return Ok(format!("&[{}]", bytes.join(", ")));
+    }
+    if (seed.starts_with('"') && seed.ends_with('"'))
+        || (seed.starts_with('\'') && seed.ends_with('\''))
+    {
+        return Ok(format!("b{}", seed));
+    }
+
+    if let Some(account) = op.accounts.iter().find(|account| account.name == seed) {
+        if account.pda_seeds.is_some() {
+            return Ok(format!("{}.as_ref()", pda_local_ident(&account.name)));
+        }
+        if let Some(pubkey) = &account.default_pubkey {
+            return Ok(format!("solana_pubkey::pubkey!(\"{pubkey}\").as_ref()"));
+        }
+        let target = account_overlay_target(account_overlay, &op.name, &account.name)?;
+        return Ok(format!(
+            "self.{}.pubkey().as_ref()",
+            brownfield_keypair_ident(target)
+        ));
+    }
+
+    if let Some((_, ty)) = op.takes_params.iter().find(|(name, _)| name == seed) {
+        return Ok(if is_integer_type(ty) {
+            format!("{seed}.to_le_bytes().as_ref()")
+        } else if ty == "Bool" {
+            format!("&[{seed} as u8]")
+        } else if ty == "Pubkey" {
+            // Pubkey action arguments are deliberately fixed because Crucible
+            // cannot derive Arbitrary for Solana's Address wrapper. Match the
+            // `instruction::X` literal emitted below.
+            "Pubkey::default().as_ref()".to_string()
+        } else {
+            bail!(
+                "Crucible PDA seed `{seed}` in handler `{}` has unsupported argument type `{ty}`",
+                op.name
+            )
+        });
+    }
+
+    let state_fields = rust_codegen_util::resolve_state_fields(spec);
+    if let Some((_, ty)) = state_fields.iter().find(|(name, _)| name == seed) {
+        return Ok(if is_integer_type(ty) {
+            format!("self.{seed}.to_le_bytes().as_ref()")
+        } else if ty == "Bool" {
+            format!("&[self.{seed} as u8]")
+        } else if ty == "Pubkey" {
+            format!("self.{seed}.as_ref()")
+        } else {
+            bail!(
+                "Crucible PDA seed `{seed}` in handler `{}` has unsupported state-field type `{ty}`",
+                op.name
+            )
+        });
+    }
+
+    bail!(
+        "Crucible cannot resolve PDA seed `{seed}` in handler `{}`; bind it as an account, instruction argument, state field, or literal",
+        op.name
+    )
+}
+
+fn ordered_pda_accounts<'a>(
+    spec: &ParsedSpec,
+    op: &'a ParsedHandler,
+) -> Result<Vec<&'a crate::check::ParsedHandlerAccount>> {
+    fn visit<'a>(
+        spec: &ParsedSpec,
+        op: &'a ParsedHandler,
+        account: &'a crate::check::ParsedHandlerAccount,
+        visiting: &mut std::collections::BTreeSet<String>,
+        emitted: &mut std::collections::BTreeSet<String>,
+        ordered: &mut Vec<&'a crate::check::ParsedHandlerAccount>,
+    ) -> Result<()> {
+        if emitted.contains(&account.name) {
+            return Ok(());
+        }
+        if !visiting.insert(account.name.clone()) {
+            bail!(
+                "Crucible PDA derivation cycle in handler `{}` at account `{}`",
+                op.name,
+                account.name
+            );
+        }
+        for seed in pda_seeds_for_account(spec, account).unwrap_or_default() {
+            if let Some(dependency) = op
+                .accounts
+                .iter()
+                .find(|candidate| candidate.name == *seed && candidate.pda_seeds.is_some())
+            {
+                visit(spec, op, dependency, visiting, emitted, ordered)?;
+            }
+        }
+        visiting.remove(&account.name);
+        emitted.insert(account.name.clone());
+        ordered.push(account);
+        Ok(())
+    }
+
+    let mut visiting = std::collections::BTreeSet::new();
+    let mut emitted = std::collections::BTreeSet::new();
+    let mut ordered = Vec::new();
+    for account in op
+        .accounts
+        .iter()
+        .filter(|account| account.pda_seeds.is_some())
+    {
+        visit(spec, op, account, &mut visiting, &mut emitted, &mut ordered)?;
+    }
+    Ok(ordered)
 }
 
 fn header(spec: &ParsedSpec, mode: InvariantMode) -> String {
@@ -722,7 +938,13 @@ fn fixture_name(spec: &ParsedSpec) -> String {
     format!("{head}Fixture")
 }
 
-fn emit_fixture_struct(out: &mut String, spec: &ParsedSpec, fixture: &str, mode: InvariantMode) {
+fn emit_fixture_struct(
+    out: &mut String,
+    spec: &ParsedSpec,
+    fixture: &str,
+    mode: InvariantMode,
+    force_fixture_accounts: bool,
+) {
     out.push_str("/// Fixture state. Includes Crucible test infrastructure plus shadow\n");
     out.push_str("/// fields mirroring spec state — invariants read from these instead of\n");
     out.push_str("/// from LiteSVM accounts directly so the body translation matches the\n");
@@ -732,7 +954,7 @@ fn emit_fixture_struct(out: &mut String, spec: &ParsedSpec, fixture: &str, mode:
     out.push_str("    ctx: TestContext,\n");
     out.push_str("    program_id: Pubkey,\n");
 
-    if uses_brownfield_accounts(spec, mode) {
+    if uses_brownfield_accounts(spec, mode, force_fixture_accounts) {
         // Brownfield: one Keypair per non-default, non-PDA account (signers
         // AND user-provided writables). Field idents are snake_cased; the
         // IDL's camelCase name stays on `ParsedHandlerAccount` to match the
@@ -787,8 +1009,13 @@ fn spec_is_brownfield_with_idl_accounts(spec: &ParsedSpec) -> bool {
 /// gets a keypair (the brownfield collector reads the account list, not
 /// `who`). `Both` keeps the proxy — it carries a real spec whose accounts
 /// block drives account handling.
-fn uses_brownfield_accounts(spec: &ParsedSpec, mode: InvariantMode) -> bool {
-    spec_is_brownfield_with_idl_accounts(spec)
+fn uses_brownfield_accounts(
+    spec: &ParsedSpec,
+    mode: InvariantMode,
+    force_fixture_accounts: bool,
+) -> bool {
+    force_fixture_accounts
+        || spec_is_brownfield_with_idl_accounts(spec)
         || (matches!(mode, InvariantMode::Protocol) && spec_has_account_entries(spec))
 }
 
@@ -867,14 +1094,25 @@ pub(crate) fn brownfield_keypair_ident(name: &str) -> String {
     out
 }
 
+/// Render `s` as a double-quoted Rust string literal, escaping backslashes
+/// and quotes (filesystem paths on Windows, or with spaces/quotes, would
+/// otherwise produce invalid source).
+fn rust_string_literal(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
 fn emit_fixture_impl(
     out: &mut String,
     spec: &ParsedSpec,
     fixture: &str,
     mode: InvariantMode,
+    account_overlay: Option<&crate::probe::domain_account_overlay::AccountBindingOverlay>,
+    deploy_so: Option<&Path>,
 ) -> Result<()> {
     let prog = spec_program_name(spec);
-    let is_brownfield = uses_brownfield_accounts(spec, mode);
+    let force_fixture_accounts =
+        account_overlay.is_some_and(|overlay| !overlay.handlers.is_empty());
+    let is_brownfield = uses_brownfield_accounts(spec, mode, force_fixture_accounts);
     let signers = collect_signer_idents(spec);
     let brownfield_names = if is_brownfield {
         collect_brownfield_keypair_names(spec)
@@ -889,15 +1127,25 @@ fn emit_fixture_impl(
     out.push_str("    pub fn setup() -> Self {\n");
     out.push_str("        let mut ctx = TestContext::new();\n");
     out.push_str(&format!("        let program_id = {prog}::ID;\n"));
-    // Spec-mode harness lives at <root>/fuzz/<prog>/; brownfield (protocol)
-    // at <root>/.qed/fuzz/<prog>/ — one extra level. Wrong depth panics at
-    // `ctx.add_program` on startup (No such file or directory).
-    let so_path_prefix = match mode {
-        InvariantMode::Protocol => "../../..",
-        InvariantMode::Spec | InvariantMode::Both => "../..",
+    // The `.so` path. When the CLI knows the project root it passes an
+    // ABSOLUTE path (`deploy_so`) so the harness resolves the program from
+    // any location — the fix for a `--harness-dir` outside the project.
+    // Otherwise (`qedgen codegen --crucible`, unit tests) fall back to a
+    // RELATIVE path from the standard harness depth: spec-mode harness lives
+    // at <root>/fuzz/<prog>/, brownfield (protocol) at <root>/.qed/fuzz/<prog>/
+    // — one extra level. Wrong depth panics at `ctx.add_program` on startup.
+    let so_literal = match deploy_so {
+        Some(path) => rust_string_literal(&path.display().to_string()),
+        None => {
+            let prefix = match mode {
+                InvariantMode::Protocol => "../../..",
+                InvariantMode::Spec | InvariantMode::Both => "../..",
+            };
+            rust_string_literal(&format!("{prefix}/target/deploy/{prog}.so"))
+        }
     };
     out.push_str(&format!(
-        "        ctx.add_program(&program_id, \"{so_path_prefix}/target/deploy/{prog}.so\")\n"
+        "        ctx.add_program(&program_id, {so_literal})\n"
     ));
     out.push_str("            .unwrap();\n");
     if is_brownfield {
@@ -916,23 +1164,6 @@ fn emit_fixture_impl(
             ));
         }
     }
-    // PDA-derived accounts (e.g. a program-owned vault) are created owned
-    // by *the program* + funded, so the program can debit them — the
-    // realistic drain shape. The brownfield placeholder derives every PDA
-    // from empty seeds (`find_program_address(&[], program_id)`), so they
-    // collapse to a single address; create it once. Matches the per-action
-    // `accounts(...)` literal, which derives the same address.
-    let has_pda_account = spec
-        .handlers
-        .iter()
-        .any(|h| h.accounts.iter().any(|a| a.pda_seeds.is_some()));
-    if is_brownfield && has_pda_account {
-        out.push_str("        let __pda = Pubkey::find_program_address(&[], &program_id).0;\n");
-        out.push_str(
-            "        ctx.create_account()\n            .pubkey(__pda)\n            .lamports(100_000_000_000)\n            .owner(program_id)\n            .create()\n            .unwrap();\n",
-        );
-    }
-
     let state_fields = rust_codegen_util::resolve_state_fields(spec);
     let mutable_fields = rust_codegen_util::field_refs(state_fields);
 
@@ -962,7 +1193,7 @@ fn emit_fixture_impl(
 
     // ── action_* per handler ─────────────────────────────────────────────
     for h in &spec.handlers {
-        emit_action_fn(out, spec, h, mode)?;
+        emit_action_fn(out, spec, h, mode, account_overlay)?;
         out.push('\n');
     }
 
@@ -975,6 +1206,7 @@ fn emit_action_fn(
     spec: &ParsedSpec,
     op: &ParsedHandler,
     mode: InvariantMode,
+    account_overlay: Option<&crate::probe::domain_account_overlay::AccountBindingOverlay>,
 ) -> Result<()> {
     out.push_str(&format!("    /// {} → action variant.\n", op.name));
     if op.accounts.is_empty() {
@@ -1008,6 +1240,61 @@ fn emit_action_fn(
         op.name, params
     ));
 
+    // Derive every PDA from its declared seed tuple. Dependencies between
+    // PDAs are topologically ordered, and non-init PDAs are materialized on
+    // demand so argument-dependent addresses can vary across fuzz actions.
+    // Init transitions must leave the target absent for the program/system
+    // instruction to create it.
+    let pda_accounts = ordered_pda_accounts(spec, op)?;
+    // A handler is an init transition — its PDAs must be left absent for the
+    // program/system instruction to create them — when its pre-state cannot
+    // belong to an existing account: the state name denotes nonexistence, or
+    // no handler in the spec produces it (unreachable except by creation).
+    // A name list alone is wrong in both directions: the minimal skeleton's
+    // `Init` is a creation state, while a produced `Inactive` is a paused
+    // EXISTING account that must be materialized on demand. Per-account init
+    // constraints (Anchor `init`) are not modeled, so this stays per-handler.
+    let produced_states: std::collections::BTreeSet<&str> = spec
+        .handlers
+        .iter()
+        .filter_map(|h| h.post_status.as_deref())
+        .collect();
+    let is_init = op
+        .pre_status
+        .as_deref()
+        .is_some_and(|pre| check::state_name_is_nonexistent(pre) || !produced_states.contains(pre));
+    for account in &pda_accounts {
+        let seeds = pda_seeds_for_account(spec, account).unwrap_or_default();
+        let local = pda_local_ident(&account.name);
+        let rendered = seeds
+            .iter()
+            .map(|seed| render_pda_seed_expr(spec, op, seed, account_overlay))
+            .collect::<Result<Vec<_>>>();
+        let seed_exprs = match rendered {
+            Ok(exprs) => exprs,
+            // Domain replay pins byte-exact addresses, so an overlay run must
+            // fail loudly rather than derive a placeholder the resolved plan
+            // never referenced.
+            Err(err) if account_overlay.is_some() => return Err(err),
+            Err(err) => {
+                out.push_str(&format!(
+                    "        // qedgen: {err}.\n        // Placeholder empty-seed derivation — fuzzing proceeds, but this\n        // PDA's real address is NOT exercised; agent-fill the seed tuple\n        // if `{}` matters to the properties under test.\n",
+                    account.name
+                ));
+                Vec::new()
+            }
+        };
+        out.push_str(&format!(
+            "        let {local} = Pubkey::find_program_address(&[{}], &self.program_id).0;\n",
+            seed_exprs.join(", ")
+        ));
+        if !is_init {
+            out.push_str(&format!(
+                "        if self.ctx.svm.get_account(&{local}).is_none() {{\n            self.ctx.create_account()\n                .pubkey({local})\n                .lamports(100_000_000_000)\n                .owner(self.program_id)\n                .create()\n                .unwrap();\n        }}\n"
+            ));
+        }
+    }
+
     // The Anchor `.call(...).accounts(...).send()` chain. `.send()` returns
     // `Result<TxOutcome, ...>`; both layers collapse into one bool —
     // transport errors count as failed actions, same as program errors.
@@ -1033,8 +1320,10 @@ fn emit_action_fn(
     // Protocol-invariant suite (Protocol / Both). Snapshot each used tracked
     // set once before .send(); the registry drives which guards assert after.
     let want_protocol = matches!(mode, InvariantMode::Protocol | InvariantMode::Both);
-    let wallet_exprs = wallet_tracked_pubkey_exprs(spec, mode);
-    let account_exprs = account_tracked_pubkey_exprs(spec, mode);
+    let force_fixture_accounts =
+        account_overlay.is_some_and(|overlay| !overlay.handlers.is_empty());
+    let wallet_exprs = wallet_tracked_pubkey_exprs(spec, mode, force_fixture_accounts);
+    let account_exprs = account_tracked_pubkey_exprs(spec, op, mode, force_fixture_accounts);
     let use_wallet = want_protocol && !wallet_exprs.is_empty();
     let use_account = want_protocol && !account_exprs.is_empty();
     if use_wallet {
@@ -1066,9 +1355,7 @@ fn emit_action_fn(
     // Crucible's generated struct OMITS fixed-pubkey accounts (auto-filled
     // by the macro) and snake-cases the remaining field names. So:
     //   - `default_pubkey` → SKIP (Crucible auto-fills).
-    //   - PDA (`pda_seeds`) → placeholder `find_program_address(&[], ..).0`;
-    //     it compiles and the program's PDA check rejects the call — fine
-    //     signal for a crash-first fuzzer.
+    //   - PDA (`pda_seeds`) → the seed-derived local emitted above.
     //   - Otherwise → `self.<keypair_ident>.pubkey()`.
     // Empty list (no IDL, no spec accounts block) → `todo!()` agent-fill.
     if op.accounts.is_empty() {
@@ -1083,9 +1370,10 @@ fn emit_action_fn(
                 continue;
             }
             let value = if acc.pda_seeds.is_some() {
-                "Pubkey::find_program_address(&[], &self.program_id).0".to_string()
+                pda_local_ident(&acc.name)
             } else {
-                format!("self.{}.pubkey()", brownfield_keypair_ident(&acc.name))
+                let target = account_overlay_target(account_overlay, &op.name, &acc.name)?;
+                format!("self.{}.pubkey()", brownfield_keypair_ident(target))
             };
             let field = brownfield_keypair_ident(&acc.name);
             out.push_str(&format!("                {field}: {value},\n"));
@@ -1095,12 +1383,12 @@ fn emit_action_fn(
 
     // Signers: prefer IDL per-account `isSigner` flags; fall back to the
     // spec's `auth X` lift.
-    let brownfield_signers: Vec<&str> = op
+    let brownfield_signers: Vec<String> = op
         .accounts
         .iter()
         .filter(|a| a.is_signer && a.default_pubkey.is_none() && a.pda_seeds.is_none())
-        .map(|a| a.name.as_str())
-        .collect();
+        .map(|a| account_overlay_target(account_overlay, &op.name, &a.name).map(str::to_string))
+        .collect::<Result<Vec<_>>>()?;
     if !brownfield_signers.is_empty() {
         let refs: Vec<String> = brownfield_signers
             .iter()
@@ -1133,10 +1421,20 @@ fn emit_action_fn(
         }
     }
 
-    // Shadow-state sync needs the on-chain account struct shape — emitted
-    // as a structured comment for agent fill.
+    // A direct scalar assignment from a same-typed handler argument can be
+    // mirrored without knowing the on-chain account layout. This records the
+    // domain-relevant value that the deployed program actually accepted; it
+    // does not pretend to deserialize arbitrary program state. Richer effects
+    // still need the account-specific sync below.
     if !op.effects.is_empty() {
         out.push_str("        if success {\n");
+        if !matches!(mode, InvariantMode::Protocol) {
+            for eff in &op.effects {
+                if let Some(rhs) = direct_scalar_shadow_assignment(spec, op, eff) {
+                    out.push_str(&format!("            self.{} = {rhs};\n", eff.field));
+                }
+            }
+        }
         out.push_str("            // TODO: sync shadow state from the on-chain account here.\n");
         out.push_str("            // For each effect declared in the spec, copy the post-state\n");
         out.push_str("            // field into the matching self.<field>. Example pattern:\n");
@@ -1153,6 +1451,67 @@ fn emit_action_fn(
     out.push_str("        success\n");
     out.push_str("    }\n");
     Ok(())
+}
+
+/// Return a safe shadow-state RHS for the one layout-independent effect shape:
+/// `field := argument`, where both sides have the same scalar type. The action
+/// has succeeded at this point, so the mirror lets domain invariants test the
+/// input envelope accepted by the deployed program. Arithmetic, field reads,
+/// nested paths, and type conversions remain account-specific agent work.
+fn direct_scalar_shadow_assignment(
+    spec: &ParsedSpec,
+    op: &ParsedHandler,
+    effect: &crate::check::ParsedEffect,
+) -> Option<String> {
+    if effect.op != "set"
+        || effect.field.is_empty()
+        || !effect
+            .field
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        || effect.field.as_bytes()[0].is_ascii_digit()
+    {
+        return None;
+    }
+    let rhs = if effect.value_rust.is_empty() {
+        effect.value.trim()
+    } else {
+        effect.value_rust.trim()
+    };
+    let (_, argument_type) = op.takes_params.iter().find(|(name, _)| name == rhs)?;
+    let (_, field_type) = spec
+        .state_fields
+        .iter()
+        .find(|(name, _)| name == &effect.field)?;
+    if argument_type != field_type || !is_crucible_scalar_type(field_type) {
+        return None;
+    }
+    Some(rhs.to_string())
+}
+
+fn is_crucible_scalar_type(qedspec_type: &str) -> bool {
+    matches!(
+        qedspec_type,
+        "U8" | "U16" | "U32" | "U64" | "U128" | "I8" | "I16" | "I32" | "I64" | "I128" | "Bool"
+    )
+}
+
+fn account_overlay_target<'a>(
+    overlay: Option<&'a crate::probe::domain_account_overlay::AccountBindingOverlay>,
+    handler: &str,
+    account: &'a str,
+) -> Result<&'a str> {
+    let Some(value) = overlay
+        .and_then(|overlay| overlay.handlers.get(handler))
+        .and_then(|handler| handler.accounts.get(account))
+    else {
+        return Ok(account);
+    };
+    value.strip_prefix("fixture:").ok_or_else(|| {
+        anyhow::anyhow!(
+            "account overlay target `{value}` for `{handler}.{account}` is not a fixture identifier"
+        )
+    })
 }
 
 /// `#[range(lo..hi)]` inference — currently none ("" → Crucible defaults
@@ -1350,6 +1709,34 @@ handler withdraw (amount : U64) : State.Active -> State.Active {
 }
 "#;
 
+    #[test]
+    fn deploy_so_emits_absolute_path_else_relative_fallback() {
+        let spec = parse_str(MINIMAL_SPEC).expect("parse spec");
+
+        // With an absolute deploy path the harness loads it verbatim, so a
+        // `--harness-dir` outside the project still resolves the program.
+        let abs = Path::new("/tmp/proj/target/deploy/counter.so");
+        let with_abs =
+            emit_harness_with_deploy(&spec, InvariantMode::Both, None, Some(abs)).unwrap();
+        assert!(
+            with_abs
+                .contains("ctx.add_program(&program_id, \"/tmp/proj/target/deploy/counter.so\")"),
+            "{with_abs}"
+        );
+        assert!(
+            !with_abs.contains("../.."),
+            "no relative prefix when absolute"
+        );
+        syn::parse_file(&with_abs).expect("absolute harness is valid Rust");
+
+        // Without one, fall back to the layout-relative path.
+        let with_rel = emit_harness_with_deploy(&spec, InvariantMode::Both, None, None).unwrap();
+        assert!(
+            with_rel.contains("../../target/deploy/counter.so"),
+            "{with_rel}"
+        );
+    }
+
     /// Compile/parse gate: the emitted harness must be syntactically valid
     /// Rust in every mode. `syn::parse_file` validates syntax without the
     /// crucible git deps or the Solana toolchain (a full `crucible run` build
@@ -1373,11 +1760,142 @@ handler withdraw (amount : U64) : State.Active -> State.Active {
         ];
         for (src, mode, label) in cases {
             let spec = parse_str(src).expect("parse spec");
-            let harness = emit_harness(&spec, mode).expect("emit harness");
+            let harness = emit_harness(&spec, mode, None).expect("emit harness");
             if let Err(e) = syn::parse_file(&harness) {
                 panic!("emitted harness ({label}) is not valid Rust: {e}\n---\n{harness}");
             }
         }
+    }
+
+    /// A `liquidate`-shaped handler whose PDA seed tuple references a name
+    /// (`borrower`) that is neither an account, an argument, nor a flat
+    /// state field — the shape that must degrade to the placeholder
+    /// derivation, never abort generation (regression: lending example).
+    const UNRESOLVED_SEED_SPEC: &str = r#"spec Lending
+program_id "11111111111111111111111111111111"
+
+type State
+  | Active of { total : U64 }
+
+type Error
+  | E
+
+handler liquidate (amount : U64) : State.Active -> State.Active {
+  accounts { liquidator : signer, writable
+             loan : writable, pda ["loan", borrower] }
+  requires state.total >= amount
+  effect { total := total - amount }
+}
+"#;
+
+    #[test]
+    fn unresolved_pda_seed_degrades_to_placeholder_without_overlay() {
+        let spec = parse_str(UNRESOLVED_SEED_SPEC).expect("parse spec");
+        let harness = emit_harness(&spec, InvariantMode::Spec, None)
+            .expect("unresolved seed must not abort generation");
+        assert!(
+            harness.contains("Pubkey::find_program_address(&[], &self.program_id)"),
+            "{harness}"
+        );
+        assert!(
+            harness.contains("Placeholder empty-seed derivation"),
+            "{harness}"
+        );
+        assert!(
+            harness.contains("cannot resolve PDA seed `borrower`"),
+            "{harness}"
+        );
+        syn::parse_file(&harness).expect("degraded harness must still be valid Rust");
+    }
+
+    #[test]
+    fn unresolved_pda_seed_stays_fatal_under_account_overlay() {
+        // Domain replay pins byte-exact addresses: with an overlay present a
+        // placeholder would silently diverge from the resolved plan.
+        let spec = parse_str(UNRESOLVED_SEED_SPEC).expect("parse spec");
+        let overlay = crate::probe::domain_account_overlay::AccountBindingOverlay {
+            schema_version: 1,
+            schema_uri: String::new(),
+            source_resolved_sequence_schema_uri: String::new(),
+            audit_id: None,
+            handlers: Default::default(),
+        };
+        let err = emit_harness(&spec, InvariantMode::Spec, Some(&overlay))
+            .expect_err("overlay generation must reject unresolved seeds");
+        assert!(err
+            .to_string()
+            .contains("cannot resolve PDA seed `borrower`"));
+    }
+
+    /// Lifecycle spec exercising both directions of the init gate: `Init` is
+    /// produced by no handler (creation state → PDA left absent), while
+    /// `Inactive` is produced by `pause` (existing paused account → PDA
+    /// materialized on demand).
+    const LIFECYCLE_PDA_SPEC: &str = r#"spec Lifecycle
+program_id "11111111111111111111111111111111"
+
+type State
+  | Init
+  | Active of { balance : U64 }
+  | Inactive
+
+type Error
+  | E
+
+handler initialize : State.Init -> State.Active {
+  accounts { payer : signer, writable
+             vault : writable, pda ["vault"] }
+  effect { balance := 0 }
+}
+
+handler pause : State.Active -> State.Inactive {
+  accounts { admin : signer, writable
+             vault : writable, pda ["vault"] }
+}
+
+handler resume : State.Inactive -> State.Active {
+  accounts { admin : signer, writable
+             vault : writable, pda ["vault"] }
+}
+"#;
+
+    #[test]
+    fn init_gate_follows_state_machine_structure_not_name_list() {
+        let spec = parse_str(LIFECYCLE_PDA_SPEC).expect("parse spec");
+        let mut out = String::new();
+        emit_fixture_impl(
+            &mut out,
+            &spec,
+            "LifecycleFixture",
+            InvariantMode::Spec,
+            None,
+            None,
+        )
+        .expect("emit");
+        let action_of = |name: &str| {
+            let start = out.find(&format!("pub fn action_{name}")).expect(name);
+            let end = out[start..]
+                .find("\n    /// ")
+                .map(|o| start + o)
+                .unwrap_or(out.len());
+            &out[start..end]
+        };
+        // `Init` is unproduced → initialize is a creation transition: the
+        // PDA must be left absent (no on-demand create_account block).
+        assert!(
+            !action_of("initialize").contains("create_account"),
+            "initialize must leave its PDA absent:\n{}",
+            action_of("initialize")
+        );
+        // `Inactive` is produced by `pause` → resume acts on an EXISTING
+        // paused account: the PDA must be materialized on demand.
+        assert!(
+            action_of("resume").contains("create_account"),
+            "resume must materialize its PDA on demand:\n{}",
+            action_of("resume")
+        );
+        // `Active` is produced by initialize/resume → pause also materializes.
+        assert!(action_of("pause").contains("create_account"));
     }
 
     #[test]
@@ -1397,7 +1915,13 @@ handler withdraw (amount : U64) : State.Active -> State.Active {
     fn emits_fixture_with_state_shadow_fields() {
         let spec = parse_str(MINIMAL_SPEC).expect("parse");
         let mut out = String::new();
-        emit_fixture_struct(&mut out, &spec, "CounterFixture", InvariantMode::Spec);
+        emit_fixture_struct(
+            &mut out,
+            &spec,
+            "CounterFixture",
+            InvariantMode::Spec,
+            false,
+        );
         assert!(out.contains("#[derive(Clone)]"));
         assert!(out.contains("struct CounterFixture {"));
         assert!(out.contains("ctx: TestContext,"));
@@ -1409,7 +1933,15 @@ handler withdraw (amount : U64) : State.Active -> State.Active {
     fn emits_action_fn_per_handler() {
         let spec = parse_str(MINIMAL_SPEC).expect("parse");
         let mut out = String::new();
-        emit_fixture_impl(&mut out, &spec, "CounterFixture", InvariantMode::Spec).expect("emit");
+        emit_fixture_impl(
+            &mut out,
+            &spec,
+            "CounterFixture",
+            InvariantMode::Spec,
+            None,
+            None,
+        )
+        .expect("emit");
         assert!(out.contains("#[fuzz_fixture]"));
         assert!(out.contains("impl CounterFixture {"));
         assert!(out.contains("pub fn setup() -> Self"));
@@ -1488,6 +2020,36 @@ handler withdraw (amount : U64) : State.Active -> State.Active {
         assert!(out.contains("fixture.count"));
     }
 
+    #[test]
+    fn domain_mode_mirrors_same_typed_accepted_scalar_arguments() {
+        let spec = parse_str(
+            r#"spec AcceptedLimit
+program_id "11111111111111111111111111111111"
+
+type State | Active of { last_accepted : U64 }
+type Error | E
+
+invariant accepted_limit : state.last_accepted <= 10
+
+handler accept (amount : U64) : State.Active -> State.Active {
+  permissionless
+  invariant accepted_limit
+  effect { last_accepted := amount }
+}
+"#,
+        )
+        .expect("parse");
+
+        let domain = emit_harness(&spec, InvariantMode::Both, None).expect("domain harness");
+        let protocol =
+            emit_harness(&spec, InvariantMode::Protocol, None).expect("protocol harness");
+
+        assert!(domain.contains("if success {\n            self.last_accepted = amount;"));
+        assert!(domain.contains("fixture.last_accepted <= 10"));
+        assert!(!protocol.contains("self.last_accepted = amount;"));
+        assert!(!protocol.contains("invariant accepted_limit violated"));
+    }
+
     // Protocol/Both wrap every `.send()` with a wallet-lamport snapshot +
     // inflation assertion; Spec mode must NOT emit the wrap.
     #[test]
@@ -1509,7 +2071,8 @@ handler bump (delta : U64) : State.Active -> State.Active {
 }
 "#;
         let spec = parse_str(src).expect("parse");
-        let harness = emit_harness(&spec, InvariantMode::Protocol).expect("emit protocol harness");
+        let harness =
+            emit_harness(&spec, InvariantMode::Protocol, None).expect("emit protocol harness");
         // Shared snapshot infra emitted once at top.
         assert!(
             harness.contains("fn snapshot_account_state")
@@ -1580,7 +2143,8 @@ handler bump (delta : U64) : State.Active -> State.Active {
             handlers: vec![handler],
             ..Default::default()
         };
-        let harness = emit_harness(&spec, InvariantMode::Protocol).expect("emit protocol harness");
+        let harness =
+            emit_harness(&spec, InvariantMode::Protocol, None).expect("emit protocol harness");
         // The non-signer writable still gets a fixture keypair …
         assert!(
             harness.contains("recipient: Rc<Keypair>,"),
@@ -1601,6 +2165,135 @@ handler bump (delta : U64) : State.Active -> State.Active {
     }
 
     #[test]
+    fn account_overlay_materializes_fixture_identities_in_action_and_signers() {
+        let authority = crate::check::ParsedHandlerAccount {
+            name: "authority".into(),
+            is_signer: true,
+            is_writable: true,
+            ..Default::default()
+        };
+        let recipient = crate::check::ParsedHandlerAccount {
+            name: "recipient".into(),
+            is_writable: true,
+            ..Default::default()
+        };
+        let mut handler = synthetic_handler();
+        handler.name = "drain".into();
+        handler.accounts = vec![authority, recipient];
+        let spec = ParsedSpec {
+            program_name: "vault".into(),
+            handlers: vec![handler],
+            ..Default::default()
+        };
+        let overlay = crate::probe::domain_account_overlay::AccountBindingOverlay {
+            schema_version: 1,
+            schema_uri: crate::probe::domain_account_overlay::ACCOUNT_BINDING_OVERLAY_SCHEMA_URI
+                .into(),
+            source_resolved_sequence_schema_uri: "resolved".into(),
+            audit_id: Some("audit".into()),
+            handlers: [(
+                "drain".to_string(),
+                crate::probe::domain_account_overlay::HandlerAccountOverlay {
+                    accounts: [
+                        ("authority".to_string(), "fixture:recipient".to_string()),
+                        ("recipient".to_string(), "fixture:authority".to_string()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    provenance: Default::default(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+
+        let harness = emit_harness(&spec, InvariantMode::Both, Some(&overlay)).unwrap();
+        assert!(harness.contains("recipient: Rc<Keypair>,"));
+        assert!(harness.contains("authority: self.recipient.pubkey(),"));
+        assert!(harness.contains("recipient: self.authority.pubkey(),"));
+        assert!(harness.contains(".signers(&[&*self.recipient])"));
+    }
+
+    #[test]
+    fn derives_nested_pdas_from_literal_account_and_numeric_argument_seeds() {
+        let src = r#"spec SeededVault
+program_id "11111111111111111111111111111111"
+
+pda pool ["pool", authority]
+pda ticket ["ticket", pool, lane]
+
+type State
+  | Active of { balance : U64 }
+
+type Error
+  | E
+
+handler withdraw (lane : U64) : State.Active -> State.Active {
+  accounts { ticket : writable, pda [ticket]
+             pool : writable, pda [pool]
+             authority : signer, writable }
+  effect { balance := balance }
+}
+"#;
+        let spec = parse_str(src).expect("parse");
+        let harness =
+            emit_harness(&spec, InvariantMode::Protocol, None).expect("emit protocol harness");
+        let pool = harness
+            .find("let __pda_pool = Pubkey::find_program_address")
+            .expect("pool derivation");
+        let ticket = harness
+            .find("let __pda_ticket = Pubkey::find_program_address")
+            .expect("ticket derivation");
+        assert!(
+            pool < ticket,
+            "dependency PDA must be derived first:\n{harness}"
+        );
+        assert!(harness.contains(
+            "let __pda_pool = Pubkey::find_program_address(&[b\"pool\", self.authority.pubkey().as_ref()], &self.program_id).0;"
+        ));
+        assert!(harness.contains(
+            "let __pda_ticket = Pubkey::find_program_address(&[b\"ticket\", __pda_pool.as_ref(), lane.to_le_bytes().as_ref()], &self.program_id).0;"
+        ));
+        assert!(harness.contains("ticket: __pda_ticket,"));
+        assert!(harness.contains("pool: __pda_pool,"));
+        assert!(harness.contains("__pda_ticket,") && harness.contains("__pda_pool,"));
+        assert!(!harness.contains("find_program_address(&[],"));
+    }
+
+    #[test]
+    fn init_handler_derives_pda_without_precreating_it() {
+        let src = r#"spec Initializer
+program_id "11111111111111111111111111111111"
+
+pda vault ["vault", payer]
+
+type State
+  | Uninitialized
+  | Active of { value : U64 }
+
+type Error
+  | E
+
+handler initialize : State.Uninitialized -> State.Active {
+  accounts { payer : signer, writable
+             vault : writable, pda [vault] }
+  effect { value := 0 }
+}
+"#;
+        let spec = parse_str(src).expect("parse");
+        let harness =
+            emit_harness(&spec, InvariantMode::Protocol, None).expect("emit protocol harness");
+        assert!(harness.contains(
+            "let __pda_vault = Pubkey::find_program_address(&[b\"vault\", self.payer.pubkey().as_ref()], &self.program_id).0;"
+        ));
+        assert!(harness.contains("vault: __pda_vault,"));
+        assert!(
+            !harness.contains("get_account(&__pda_vault).is_none()"),
+            "init target must remain absent before dispatch:\n{harness}"
+        );
+    }
+
+    #[test]
     fn spec_mode_does_not_emit_protocol_suite() {
         let src = r#"spec Counter
 program_id "11111111111111111111111111111111"
@@ -1617,7 +2310,7 @@ handler bump (delta : U64) : State.Active -> State.Active {
 }
 "#;
         let spec = parse_str(src).expect("parse");
-        let harness = emit_harness(&spec, InvariantMode::Spec).expect("emit spec harness");
+        let harness = emit_harness(&spec, InvariantMode::Spec, None).expect("emit spec harness");
         assert!(
             !harness.contains("snapshot_account_state")
                 && !harness.contains("assert_no_wallet_inflation")
@@ -1649,7 +2342,7 @@ handler bump (delta : U64) : State.Active -> State.Active {
 }
 "#;
         let spec = parse_str(src).expect("parse");
-        let harness = emit_harness(&spec, InvariantMode::Both).expect("emit both harness");
+        let harness = emit_harness(&spec, InvariantMode::Both, None).expect("emit both harness");
         // Spec invariant flows in.
         assert!(harness.contains("fuzz_assert!"));
         // Plus the protocol-invariant lamport check.

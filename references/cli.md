@@ -412,6 +412,16 @@ $QEDGEN probe --fuzz 0 --root programs/my_program
 # `program.instructions[]` are both recognised. Native + sBPF still
 # bail (deferred to v2.23+; native will gate on Shank).
 $QEDGEN probe --fuzz 300 --root programs/my_pinocchio_program
+
+# Domain mode — replay ratified domain sequences, then fuzz. Protocol
+# mode stays blind to domain-specific bugs; domain mode links a ratified
+# dossier fact to a spec invariant and deterministically replays the
+# bound witness before exploratory fuzzing.
+$QEDGEN probe --fuzz 300 --crucible-mode domain \
+  --spec my_program.qedspec \
+  --domain-dossier .qed/audit/latest/domain-dossier.json \
+  --domain-sequences .qed/audit/latest/domain-sequences.json \
+  --domain-sequence-bindings .qed/audit/latest/domain-sequence-bindings.json
 ```
 
 | Flag | Type | Default | Description |
@@ -424,9 +434,13 @@ $QEDGEN probe --fuzz 300 --root programs/my_pinocchio_program
 | `--emit-spec-candidates` | bool | false | v2.19 — lift findings into candidate spec clauses (clusters) the auditor subagent surfaces through the scaffold-to-spec interview. Schema bumps to v3 with a `clusters[]` field. v2-shape consumers see no change when the flag is off. |
 | `--audit-dir` | Path | optional | v2.19 — when paired with `--emit-spec-candidates`, write the full audit working set (`interview.md`, `clusters.json`, `skeleton.qedspec`) to this directory. Companion `qedgen ratify --audit-dir <path>` consumes the three files to produce the final spec. Conventionally `.qed/audit/<timestamp>/`. |
 | `--fuzz` | u64 | none | Wall-clock seconds. Runs the coverage-guided fuzz engine alongside (or instead of) the pattern-match predicates. v2.21+: requires `--spec <path>` (spec-driven invariants) OR `--root <project-path>` (brownfield protocol-mode); passing both layers spec invariants on top of protocol crash detection. Findings come back in the same `findings[]` with `category: crucible_fuzz_crash` and a `Reproducer::Crucible`. Budget `0` emits the harness scaffold (brownfield only) and exits without building / running the fuzzer — handy for previewing what the agent needs to fill before paying the Crucible build cost. |
-| `--harness-dir` | Path | `./fuzz/<prog>/` | Crucible harness directory. Matches `codegen --crucible` output. |
+| `--harness-dir` | Path | `./fuzz/<prog>/` | Crucible harness directory. Matches `codegen --crucible` output. An existing harness is reused, never regenerated (agent-filled `todo!()` account literals survive re-runs); delete it to pick up spec or binding changes. When the directory leaf differs from the program name it is treated as a parent and the `<prog>` leaf is appended. |
 | `--no-smoke` | bool | false | Skip the 30s smoke pre-flight that stops early on high-rate duplicate findings. |
 | `--stateful` | bool | false | Stateful action-chain mode. Higher throughput, longer crash chains. |
+| `--crucible-mode` | enum | inferred | Select the Crucible verification layer explicitly (all values require `--fuzz`): `protocol` (mechanical behavioral guards; requires `--root`), `skeleton` (structural `.qedspec` assertions; requires `--spec`), `domain` (ratified domain facts plus protocol guards; requires `--spec` and `--domain-dossier`). Omitted → legacy inference: root-only = protocol, spec-only = skeleton, spec + root = both. |
+| `--domain-dossier` | Path | - | Canonical `domain-dossier.json` for `--crucible-mode domain`. Every fact assigned to the Crucible lane must be ratified (`auto` or `user`) before fuzzing starts. Requires `--fuzz`. |
+| `--domain-sequences` | Path | - | Deterministic action targets emitted by `qedgen ratify`. Every target must resolve before domain-mode replay starts. Requires `--fuzz` and `--domain-sequence-bindings`. |
+| `--domain-sequence-bindings` | Path | - | Explicit user values for every unresolved account, argument, and lifecycle association in `--domain-sequences` — never inferred from names or nearby source. Requires `--fuzz` and `--domain-sequences`. Produces `resolved-domain-sequences.json`, `account-binding-overlay.json`, a byte-exact replay seed corpus, and a durable `domain-replay-report.json`. |
 
 ### `ratify`
 v2.19 — consume the working set emitted by `qedgen probe

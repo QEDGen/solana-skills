@@ -41,7 +41,7 @@ pub(crate) fn emit_math_helpers(out: &mut String, parsed: &ParsedSpec) {
     if crate::codegen_shared::guards_use_math_helpers(parsed) {
         out.push_str(
             "#[allow(unused_imports)]\n\
-use qedgen_kani_prelude::{mul_div_ceil_u128, mul_div_floor_u128};\n\n",
+use qedgen_kani_prelude::{mul_div_ceil_u128, mul_div_floor_u128, mul_div_round_half_up_u128};\n\n",
         );
     }
 

@@ -175,16 +175,21 @@ fn render(e: &ExprTree, cx: RustCx, inside_old: bool) -> (String, Prec) {
         ExprTree::Sum {
             binder,
             binder_ty,
+            fin_bound,
             body,
-        } => (
-            format!(
-                "sum_over::<{}>(|{}| {})",
-                binder_ty,
-                binder,
-                render(body, cx, inside_old).0
-            ),
-            Prec::Atom,
-        ),
+        } => {
+            let body = render(body, cx, inside_old).0;
+            let rendered = match fin_bound {
+                Some(bound) => format!(
+                    "(0..({bound} as usize)).map(|{binder}| {body}).fold(0, |__sum, __item| __sum + __item)"
+                ),
+                None => format!(
+                    "/* {}: {binder} : {binder_ty} requires a finite Fin[N] domain */",
+                    crate::check::QEDGEN_UNSUPPORTED_SUM_MARKER
+                ),
+            };
+            (rendered, Prec::Atom)
+        }
         ExprTree::Quant {
             kind,
             binder,
@@ -242,6 +247,10 @@ fn render(e: &ExprTree, cx: RustCx, inside_old: bool) -> (String, Prec) {
         ),
         ExprTree::MulDivCeil { a, b, d } => (
             render_mul_div("mul_div_ceil_u128", a, b, d, cx, inside_old),
+            Prec::Atom,
+        ),
+        ExprTree::MulDivRoundHalfUp { a, b, d } => (
+            render_mul_div("mul_div_round_half_up_u128", a, b, d, cx, inside_old),
             Prec::Atom,
         ),
         // `contains(coll, elem)` → `coll.contains(&elem)`.
@@ -482,6 +491,19 @@ fn render_path(p: &TreePath, cx: RustCx, inside_old: bool) -> String {
             }
             out.push_str(&p.root);
         }
+        BindingKind::External => {
+            if matches!(cx.binder, Binder::PrePost) {
+                out.push_str(if inside_old { "pre_" } else { "post_" });
+                out.push_str(&p.root);
+                if let Some(TreeSeg::Field(first)) = p.segments.first() {
+                    out.push('_');
+                    out.push_str(first);
+                    segs = &p.segments[1..];
+                }
+            } else {
+                out.push_str(&p.root);
+            }
+        }
         BindingKind::Param
         | BindingKind::Const(_)
         | BindingKind::LetBound
@@ -583,9 +605,10 @@ fn render_quant(
 /// `rust_infer_kind` override.
 fn rust_num_kind(e: &ExprTree) -> NumKind {
     match e {
-        ExprTree::MulDivFloor { .. } | ExprTree::MulDivCeil { .. } | ExprTree::Len(_) => {
-            NumKind::Nat
-        }
+        ExprTree::MulDivFloor { .. }
+        | ExprTree::MulDivCeil { .. }
+        | ExprTree::MulDivRoundHalfUp { .. }
+        | ExprTree::Len(_) => NumKind::Nat,
         ExprTree::Old(inner) => rust_num_kind(inner),
         ExprTree::Int(_)
         | ExprTree::Bool(_)
@@ -633,6 +656,7 @@ fn spine_has_arith(e: &ExprTree) -> bool {
         | ExprTree::Len(_)
         | ExprTree::MulDivFloor { .. }
         | ExprTree::MulDivCeil { .. }
+        | ExprTree::MulDivRoundHalfUp { .. }
         | ExprTree::Match { .. }
         | ExprTree::Ctor { .. }
         | ExprTree::RecordLit(_)
@@ -775,6 +799,7 @@ fn render_pred_wrapped_term(e: &ExprTree, cx: RustCx, inside_old: bool, wide: &s
         | ExprTree::Arith { .. }
         | ExprTree::MulDivFloor { .. }
         | ExprTree::MulDivCeil { .. }
+        | ExprTree::MulDivRoundHalfUp { .. }
         | ExprTree::Match { .. }
         | ExprTree::Ctor { .. }
         | ExprTree::RecordLit(_)
@@ -920,7 +945,9 @@ fn render_widened_term(e: &ExprTree, cx: RustCx, inside_old: bool, wide: &str) -
             }
         }
         // Already u128-typed helpers — cast only when the wide type differs.
-        ExprTree::MulDivFloor { .. } | ExprTree::MulDivCeil { .. } => {
+        ExprTree::MulDivFloor { .. }
+        | ExprTree::MulDivCeil { .. }
+        | ExprTree::MulDivRoundHalfUp { .. } => {
             let s = render(e, cx, inside_old).0;
             if wide == "u128" {
                 (s, Prec::Atom)
@@ -1016,7 +1043,9 @@ pub fn for_each_path(e: &ExprTree, f: &mut impl FnMut(&TreePath)) {
             for_each_path(lhs, f);
             for_each_path(rhs, f);
         }
-        ExprTree::MulDivFloor { a, b, d } | ExprTree::MulDivCeil { a, b, d } => {
+        ExprTree::MulDivFloor { a, b, d }
+        | ExprTree::MulDivCeil { a, b, d }
+        | ExprTree::MulDivRoundHalfUp { a, b, d } => {
             for_each_path(a, f);
             for_each_path(b, f);
             for_each_path(d, f);
@@ -1127,7 +1156,10 @@ pub fn top_conjuncts(e: &ExprTree) -> Vec<&ExprTree> {
 /// Structural replacement for the `rendered.contains('?')` heuristic.
 pub fn contains_fallible_arith(e: &ExprTree) -> bool {
     match e {
-        ExprTree::Arith { .. } | ExprTree::MulDivFloor { .. } | ExprTree::MulDivCeil { .. } => true,
+        ExprTree::Arith { .. }
+        | ExprTree::MulDivFloor { .. }
+        | ExprTree::MulDivCeil { .. }
+        | ExprTree::MulDivRoundHalfUp { .. } => true,
         ExprTree::Int(_) | ExprTree::Bool(_) | ExprTree::Path(_) => false,
         ExprTree::Old(inner) | ExprTree::Not(inner) => contains_fallible_arith(inner),
         ExprTree::Sum { body, .. } | ExprTree::Quant { body, .. } => contains_fallible_arith(body),

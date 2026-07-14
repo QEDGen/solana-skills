@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "schema_uri": "https://qedgen.dev/schemas/auditor/domain-sequence-bindings-v1.schema.json",
+  "source_sequence_schema_uri": "https://qedgen.dev/schemas/auditor/domain-sequences-v1.schema.json",
+  "source_audit_id": "audit_vault",
+  "bindings": [
+    {
+      "plan_id": "sequence:pair_deposit_withdraw:deposit:withdraw:setup=none:teardown=none",
+      "action": { "phase": "forward", "index": 0 },
+      "parameter": { "name": "amount", "kind": "handler_argument" },
+      "value": 42
+    }
+  ]
+}

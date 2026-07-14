@@ -7,12 +7,245 @@
 //! full run → per-crash tmin → categorize → dedupe by `(handler, dedupe_key)`.
 
 use anyhow::{bail, Context, Result};
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
 use crate::crucible_gen::InvariantMode;
 use crate::probe::{Category, CrucibleCrashMetadata, Finding, Reproducer, Severity};
+
+const DOMAIN_FACT_ARRAYS: &[&str] = &[
+    "asset_flows",
+    "quantities",
+    "paired_operations",
+    "lifecycle_edges",
+    "authority_capabilities",
+    "economic_equations",
+    "external_assumptions",
+];
+
+pub const DOMAIN_REPLAY_REPORT_SCHEMA_URI: &str =
+    "https://qedgen.dev/schemas/auditor/domain-replay-report-v1.schema.json";
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DomainReplayReport {
+    pub schema_version: u32,
+    pub schema_uri: String,
+    pub resolved_document_sha256: String,
+    pub account_binding_overlay_sha256: String,
+    pub harness_sha256: String,
+    pub records: Vec<DomainReplayRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DomainReplayRecord {
+    pub plan_id: String,
+    pub seed_path: String,
+    pub seed_sha256: String,
+    pub action_count: usize,
+    pub command: Vec<String>,
+    pub status: DomainReplayStatus,
+    pub exit_code: Option<i32>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DomainReplayStatus {
+    CompletedZeroExit,
+    CompletedNonzeroExit,
+    /// The replay child was killed by a signal (SIGSEGV/SIGABRT/OOM), so it
+    /// has no numeric exit code. This is a REPRODUCED crash — exactly what a
+    /// fuzzer cares about — not a spawn failure.
+    TerminatedBySignal,
+    SpawnFailed,
+}
+
+/// Validate the domain handoff before Crucible claims semantic coverage.
+/// Only facts explicitly assigned to the Crucible lane participate. Every
+/// participating fact must be ratified, and an empty domain lane is blocked.
+/// If an adjacent run manifest exists, failures are persisted there so an
+/// audit remains resumable even though the fuzz process never starts.
+pub fn require_ratified_domain_facts(dossier_path: &Path, spec_path: &Path) -> Result<usize> {
+    let result = inspect_ratified_domain_facts(dossier_path);
+    if let Err(error) = &result {
+        let _ = mark_domain_lane_blocked(dossier_path, spec_path, &error.to_string());
+    }
+    result
+}
+
+/// Refuse a domain run whose spec compiles to no executable Crucible
+/// assertions. Ratified prose is valuable audit evidence, but it is not fuzz
+/// coverage until represented by a Rust-renderable invariant or property.
+pub fn require_executable_domain_assertions(
+    dossier_path: &Path,
+    spec_path: &Path,
+    assertion_count: usize,
+) -> Result<()> {
+    if assertion_count > 0 {
+        return Ok(());
+    }
+    let reason = "domain spec has no Rust-renderable linked invariants or properties; author executable assertions before domain fuzzing";
+    let _ = mark_domain_lane_blocked(dossier_path, spec_path, reason);
+    bail!(reason)
+}
+
+/// Clear this lane's previous readiness block once both the dossier and spec
+/// gates pass. This records readiness, not a successful fuzz result.
+pub fn mark_domain_lane_ready(dossier_path: &Path) -> Result<()> {
+    let Some(parent) = dossier_path.parent() else {
+        return Ok(());
+    };
+    let manifest_path = parent.join("run-manifest.json");
+    if !manifest_path.exists() {
+        return Ok(());
+    }
+    let mut manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest_path)?)?;
+    let lanes = manifest
+        .get_mut("lanes")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or_else(|| anyhow::anyhow!("run manifest has no lanes array"))?;
+    if let Some(lane) = lanes.iter_mut().find(|lane| {
+        lane.get("name").and_then(serde_json::Value::as_str) == Some("crucible-domain")
+    }) {
+        lane["status"] = serde_json::Value::String("queued".to_string());
+        lane["reason"] = serde_json::Value::Null;
+        lane["resume_command"] = serde_json::Value::Null;
+    } else {
+        lanes.push(serde_json::json!({
+            "name": "crucible-domain",
+            "status": "queued",
+            "reason": null,
+            "resume_command": null,
+            "started_at": null,
+            "finished_at": null,
+            "artifact_paths": [dossier_path.display().to_string()]
+        }));
+    }
+    let any_blocked = lanes.iter().any(|lane| lane["status"] == "blocked");
+    if !any_blocked && manifest["status"] == "tooling-blocked" {
+        manifest["status"] = serde_json::Value::String("running".to_string());
+    }
+    std::fs::write(
+        &manifest_path,
+        format!("{}\n", serde_json::to_string_pretty(&manifest)?),
+    )?;
+    Ok(())
+}
+
+fn inspect_ratified_domain_facts(dossier_path: &Path) -> Result<usize> {
+    let raw = std::fs::read_to_string(dossier_path)
+        .with_context(|| format!("reading domain dossier {}", dossier_path.display()))?;
+    let dossier: serde_json::Value = serde_json::from_str(&raw)
+        .with_context(|| format!("parsing domain dossier {}", dossier_path.display()))?;
+    if dossier
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        != Some(1)
+        || dossier
+            .get("schema_uri")
+            .and_then(serde_json::Value::as_str)
+            != Some("https://qedgen.dev/schemas/auditor/domain-dossier-v1.schema.json")
+    {
+        bail!(
+            "domain mode requires a canonical schema-v1 domain dossier; validate it with `check-domain-artifacts.sh --dossier {}`",
+            dossier_path.display()
+        );
+    }
+
+    let mut eligible = 0usize;
+    let mut pending = Vec::new();
+    for array_name in DOMAIN_FACT_ARRAYS {
+        let facts = dossier
+            .get(array_name)
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| anyhow::anyhow!("domain dossier is missing `{array_name}` array"))?;
+        for fact in facts {
+            let metadata = fact.get("metadata").ok_or_else(|| {
+                anyhow::anyhow!("domain fact in `{array_name}` is missing metadata")
+            })?;
+            let targets_crucible = metadata
+                .get("verification_lanes")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|lanes| lanes.iter().any(|lane| lane.as_str() == Some("crucible")));
+            if !targets_crucible {
+                continue;
+            }
+            eligible += 1;
+            let ratification = metadata
+                .get("ratification")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("missing");
+            if !matches!(ratification, "auto" | "user") {
+                pending.push(
+                    fact.get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("<missing-id>")
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    if eligible == 0 {
+        bail!(
+            "domain dossier has no facts assigned to the Crucible verification lane; ratify domain intent and add `crucible` to the selected facts' verification_lanes"
+        );
+    }
+    if !pending.is_empty() {
+        bail!(
+            "domain dossier has unratified Crucible facts: {}; resolve each to `auto` or `user` before domain fuzzing",
+            pending.join(", ")
+        );
+    }
+    Ok(eligible)
+}
+
+fn mark_domain_lane_blocked(dossier_path: &Path, spec_path: &Path, reason: &str) -> Result<()> {
+    let Some(parent) = dossier_path.parent() else {
+        return Ok(());
+    };
+    let manifest_path = parent.join("run-manifest.json");
+    if !manifest_path.exists() {
+        return Ok(());
+    }
+    let mut manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest_path)?)?;
+    manifest["status"] = serde_json::Value::String("tooling-blocked".to_string());
+    let lanes = manifest
+        .get_mut("lanes")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or_else(|| anyhow::anyhow!("run manifest has no lanes array"))?;
+    let resume = format!(
+        "qedgen probe --fuzz 300 --crucible-mode domain --spec {} --domain-dossier {}",
+        spec_path.display(),
+        dossier_path.display()
+    );
+    let lane = lanes.iter_mut().find(|lane| {
+        lane.get("name").and_then(serde_json::Value::as_str) == Some("crucible-domain")
+    });
+    let blocked = serde_json::json!({
+        "name": "crucible-domain",
+        "status": "blocked",
+        "reason": reason,
+        "resume_command": resume,
+        "started_at": null,
+        "finished_at": null,
+        "artifact_paths": [dossier_path.display().to_string()]
+    });
+    if let Some(lane) = lane {
+        *lane = blocked;
+    } else {
+        lanes.push(blocked);
+    }
+    std::fs::write(
+        &manifest_path,
+        format!("{}\n", serde_json::to_string_pretty(&manifest)?),
+    )?;
+    Ok(())
+}
 
 /// Per-crash `crucible tmin` cap — keeps minimization from eating the
 /// user's budget after a productive fuzz run.
@@ -57,6 +290,10 @@ pub struct FuzzProbeContext<'a> {
     /// Invariant family the harness was built against — lets triage label
     /// protocol-only crashes distinctly from spec violations.
     pub invariant_mode: InvariantMode,
+    /// Optional byte-exact corpus synthesized from explicitly bound domain
+    /// sequences. Each seed is replayed once and written to a durable evidence
+    /// report before the same corpus is used for exploratory fuzzing.
+    pub domain_seed_report: Option<super::domain_sequence_seed::DomainSeedReport>,
 }
 
 impl<'a> FuzzProbeContext<'a> {
@@ -71,6 +308,7 @@ impl<'a> FuzzProbeContext<'a> {
             fuzz_budget: DEFAULT_FUZZ_BUDGET,
             stateful: false,
             invariant_mode: InvariantMode::Spec,
+            domain_seed_report: None,
         }
     }
 }
@@ -93,6 +331,11 @@ pub fn run_fuzz_probe(ctx: &FuzzProbeContext) -> Result<Vec<Finding>> {
     build_harness(&ctx.harness_dir).context("building Crucible harness")?;
 
     let mut findings = Vec::new();
+
+    if let Some(seed_report) = &ctx.domain_seed_report {
+        replay_domain_seed_report(&ctx.harness_dir, seed_report)?;
+        findings.extend(harvest_crucible_findings(ctx)?);
+    }
 
     if !ctx.smoke_budget.is_zero() {
         let smoke = run_crucible_round(ctx, ctx.smoke_budget, "smoke")
@@ -121,9 +364,30 @@ fn run_crucible_round(
     budget: Duration,
     label: &str,
 ) -> Result<Vec<Finding>> {
-    let crash_dir = run_crucible(&ctx.harness_dir, budget, ctx.stateful)
-        .with_context(|| format!("crucible run ({label}) failed"))?;
-    let crashes = collect_crash_files(&crash_dir).unwrap_or_default();
+    let crash_dir = run_crucible(
+        &ctx.harness_dir,
+        budget,
+        ctx.stateful,
+        ctx.domain_seed_report
+            .as_ref()
+            .map(|report| report.corpus_dir.as_path()),
+    )
+    .with_context(|| format!("crucible run ({label}) failed"))?;
+    harvest_crucible_findings_from(ctx, &crash_dir)
+}
+
+fn harvest_crucible_findings(ctx: &FuzzProbeContext) -> Result<Vec<Finding>> {
+    harvest_crucible_findings_from(
+        ctx,
+        &ctx.harness_dir.join("crashes").join(HARNESS_TEST_NAME),
+    )
+}
+
+fn harvest_crucible_findings_from(
+    ctx: &FuzzProbeContext,
+    crash_dir: &Path,
+) -> Result<Vec<Finding>> {
+    let crashes = collect_crash_files(crash_dir).unwrap_or_default();
     if !crashes.is_empty() {
         // tmin failure is non-fatal — raw crashes are still valid
         // reproducers, we just lose minimization.
@@ -401,7 +665,12 @@ fn build_harness(harness_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn run_crucible(harness_dir: &Path, budget: Duration, stateful: bool) -> Result<PathBuf> {
+fn run_crucible(
+    harness_dir: &Path,
+    budget: Duration,
+    stateful: bool,
+    corpus_in: Option<&Path>,
+) -> Result<PathBuf> {
     let prog = harness_dir
         .file_name()
         .and_then(|s| s.to_str())
@@ -417,11 +686,129 @@ fn run_crucible(harness_dir: &Path, budget: Duration, stateful: bool) -> Result<
     if stateful {
         cmd.arg("--stateful");
     }
+    if let Some(corpus_in) = corpus_in {
+        cmd.arg("--corpus-in").arg(corpus_in);
+    }
     let status = cmd.status().context("spawning `crucible run`")?;
     // Non-zero exit can mean "found crashes", not failure — harvest the
     // crashes dir regardless.
     let _ = status;
     Ok(harness_dir.join("crashes").join(HARNESS_TEST_NAME))
+}
+
+fn crucible_replay_command(harness_dir: &Path, seed: &Path) -> Result<Vec<String>> {
+    let prog = harness_dir
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| anyhow::anyhow!("harness_dir has no leaf name"))?;
+    Ok(vec![
+        "crucible".to_string(),
+        "run".to_string(),
+        prog.to_string(),
+        HARNESS_TEST_NAME.to_string(),
+        "-C".to_string(),
+        harness_dir.display().to_string(),
+        "--replay".to_string(),
+        seed.display().to_string(),
+    ])
+}
+
+fn run_crucible_replay(harness_dir: &Path, seed: &Path) -> Result<Option<i32>> {
+    let command = crucible_replay_command(harness_dir, seed)?;
+    let status = Command::new(&command[0])
+        .args(&command[1..])
+        .status()
+        .context("spawning `crucible run --replay`")?;
+    // As in fuzz mode, a non-zero status may mean that the replay reproduced
+    // a violation. Crash harvesting is the source of truth.
+    Ok(status.code())
+}
+
+fn replay_domain_seed_report(
+    harness_dir: &Path,
+    seeds: &super::domain_sequence_seed::DomainSeedReport,
+) -> Result<PathBuf> {
+    replay_domain_seed_report_with(harness_dir, seeds, run_crucible_replay)
+}
+
+fn replay_domain_seed_report_with<F>(
+    harness_dir: &Path,
+    seeds: &super::domain_sequence_seed::DomainSeedReport,
+    mut replay: F,
+) -> Result<PathBuf>
+where
+    F: FnMut(&Path, &Path) -> Result<Option<i32>>,
+{
+    let mut report = DomainReplayReport {
+        schema_version: 1,
+        schema_uri: DOMAIN_REPLAY_REPORT_SCHEMA_URI.to_string(),
+        resolved_document_sha256: seeds.resolved_document_sha256.clone(),
+        account_binding_overlay_sha256: seeds.account_binding_overlay_sha256.clone(),
+        harness_sha256: seeds.harness_sha256.clone(),
+        records: Vec::with_capacity(seeds.seeds.len()),
+    };
+    let report_path = harness_dir
+        .join(".qedgen")
+        .join("domain-replay-report.json");
+
+    for seed in &seeds.seeds {
+        let command = crucible_replay_command(harness_dir, &seed.path)?;
+        match replay(harness_dir, &seed.path) {
+            Ok(exit_code) => {
+                report.records.push(DomainReplayRecord {
+                    plan_id: seed.plan_id.clone(),
+                    seed_path: seed.path.display().to_string(),
+                    seed_sha256: seed.seed_sha256.clone(),
+                    action_count: seed.action_count,
+                    command,
+                    status: match exit_code {
+                        Some(0) => DomainReplayStatus::CompletedZeroExit,
+                        Some(_) => DomainReplayStatus::CompletedNonzeroExit,
+                        // No code → killed by a signal (a reproduced crash).
+                        None => DomainReplayStatus::TerminatedBySignal,
+                    },
+                    exit_code,
+                    error: None,
+                });
+                write_domain_replay_report(&report_path, &report)?;
+            }
+            Err(error) => {
+                report.records.push(DomainReplayRecord {
+                    plan_id: seed.plan_id.clone(),
+                    seed_path: seed.path.display().to_string(),
+                    seed_sha256: seed.seed_sha256.clone(),
+                    action_count: seed.action_count,
+                    command,
+                    status: DomainReplayStatus::SpawnFailed,
+                    exit_code: None,
+                    error: Some(format!("{error:#}")),
+                });
+                write_domain_replay_report(&report_path, &report)?;
+                return Err(error).with_context(|| {
+                    format!(
+                        "replaying domain plan `{}`; evidence written to {}",
+                        seed.plan_id,
+                        report_path.display()
+                    )
+                });
+            }
+        }
+    }
+    eprintln!(
+        "Crucible domain replay evidence written to {}.",
+        report_path.display()
+    );
+    Ok(report_path)
+}
+
+fn write_domain_replay_report(path: &Path, report: &DomainReplayReport) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, format!("{}\n", serde_json::to_string_pretty(report)?))?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
 }
 
 /// Minimize every crash in one shot via `crucible tmin --all`. Per-crash
@@ -476,6 +863,260 @@ fn crucible_version() -> Option<String> {
 mod tests {
     use super::*;
     use crate::probe::{CrucibleActionRecord, CrucibleCrashMetadata};
+
+    fn domain_dossier(ratification: &str, lanes: &[&str]) -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": 1,
+            "schema_uri": "https://qedgen.dev/schemas/auditor/domain-dossier-v1.schema.json",
+            "asset_flows": [{
+                "id": "flow_deposit",
+                "metadata": {
+                    "ratification": ratification,
+                    "verification_lanes": lanes
+                }
+            }],
+            "quantities": [],
+            "paired_operations": [],
+            "lifecycle_edges": [],
+            "authority_capabilities": [],
+            "economic_equations": [],
+            "external_assumptions": []
+        })
+    }
+
+    #[test]
+    fn domain_mode_accepts_only_ratified_crucible_facts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dossier = tmp.path().join("domain-dossier.json");
+        std::fs::write(
+            &dossier,
+            serde_json::to_string(&domain_dossier("user", &["manual", "crucible"])).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            require_ratified_domain_facts(&dossier, Path::new("vault.qedspec")).unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn domain_mode_rejects_empty_crucible_lane() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dossier = tmp.path().join("domain-dossier.json");
+        std::fs::write(
+            &dossier,
+            serde_json::to_string(&domain_dossier("user", &["manual"])).unwrap(),
+        )
+        .unwrap();
+
+        let error = require_ratified_domain_facts(&dossier, Path::new("vault.qedspec"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no facts assigned to the Crucible"));
+    }
+
+    #[test]
+    fn domain_mode_persists_blocked_lane_for_pending_facts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dossier = tmp.path().join("domain-dossier.json");
+        std::fs::write(
+            &dossier,
+            serde_json::to_string(&domain_dossier("pending", &["crucible"])).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("run-manifest.json"),
+            serde_json::to_string(&serde_json::json!({
+                "status": "running",
+                "lanes": [{"name": "source-review", "status": "passed"}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let error = require_ratified_domain_facts(&dossier, Path::new("vault.qedspec"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("flow_deposit"));
+        let manifest: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.path().join("run-manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest["status"], "tooling-blocked");
+        let lane = manifest["lanes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|lane| lane["name"] == "crucible-domain")
+            .unwrap();
+        assert_eq!(lane["status"], "blocked");
+        assert!(lane["resume_command"]
+            .as_str()
+            .unwrap()
+            .contains("--crucible-mode domain"));
+    }
+
+    #[test]
+    fn domain_mode_rejects_ratified_prose_without_executable_assertions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dossier = tmp.path().join("domain-dossier.json");
+        std::fs::write(&dossier, "{}").unwrap();
+        std::fs::write(
+            tmp.path().join("run-manifest.json"),
+            r#"{"status":"running","lanes":[]}"#,
+        )
+        .unwrap();
+
+        let error = require_executable_domain_assertions(&dossier, Path::new("vault.qedspec"), 0)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no Rust-renderable"));
+        let manifest: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.path().join("run-manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest["lanes"][0]["name"], "crucible-domain");
+    }
+
+    #[test]
+    fn domain_mode_clears_previous_readiness_block() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dossier = tmp.path().join("domain-dossier.json");
+        std::fs::write(&dossier, "{}").unwrap();
+        std::fs::write(
+            tmp.path().join("run-manifest.json"),
+            serde_json::to_string(&serde_json::json!({
+                "status": "tooling-blocked",
+                "lanes": [{
+                    "name": "crucible-domain",
+                    "status": "blocked",
+                    "reason": "pending facts",
+                    "resume_command": "retry"
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        mark_domain_lane_ready(&dossier).unwrap();
+        let manifest: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.path().join("run-manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest["status"], "running");
+        assert_eq!(manifest["lanes"][0]["status"], "queued");
+        assert!(manifest["lanes"][0]["reason"].is_null());
+    }
+
+    fn seed_report(harness: &Path) -> super::super::domain_sequence_seed::DomainSeedReport {
+        super::super::domain_sequence_seed::DomainSeedReport {
+            corpus_dir: harness.join("corpus"),
+            resolved_document_sha256: "11".repeat(32),
+            account_binding_overlay_sha256: "22".repeat(32),
+            harness_sha256: "33".repeat(32),
+            seeds: vec![
+                super::super::domain_sequence_seed::DomainSeed {
+                    plan_id: "plan-a".to_string(),
+                    path: harness.join("corpus/plan-a.seed"),
+                    action_count: 2,
+                    seed_sha256: "44".repeat(32),
+                },
+                super::super::domain_sequence_seed::DomainSeed {
+                    plan_id: "plan-b".to_string(),
+                    path: harness.join("corpus/plan-b.seed"),
+                    action_count: 1,
+                    seed_sha256: "55".repeat(32),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn replay_command_uses_native_crucible_replay_surface() {
+        let command = crucible_replay_command(
+            Path::new("/tmp/vault"),
+            Path::new("/tmp/vault/corpus/plan.seed"),
+        )
+        .unwrap();
+        assert_eq!(
+            command,
+            vec![
+                "crucible",
+                "run",
+                "vault",
+                "invariant_test",
+                "-C",
+                "/tmp/vault",
+                "--replay",
+                "/tmp/vault/corpus/plan.seed",
+            ]
+        );
+    }
+
+    #[test]
+    fn replay_ledger_records_each_plan_and_fingerprint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let harness = tmp.path().join("vault");
+        std::fs::create_dir_all(&harness).unwrap();
+        let seeds = seed_report(&harness);
+        let mut calls = 0;
+        let path = replay_domain_seed_report_with(&harness, &seeds, |_, _| {
+            calls += 1;
+            Ok(if calls == 1 { Some(0) } else { Some(1) })
+        })
+        .unwrap();
+        let report: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(report["schema_uri"], DOMAIN_REPLAY_REPORT_SCHEMA_URI);
+        assert_eq!(report["resolved_document_sha256"], "11".repeat(32));
+        assert_eq!(report["records"][0]["plan_id"], "plan-a");
+        assert_eq!(report["records"][0]["status"], "completed_zero_exit");
+        assert_eq!(report["records"][1]["status"], "completed_nonzero_exit");
+        assert_eq!(report["records"][1]["exit_code"], 1);
+        assert_eq!(report["records"][1]["seed_sha256"], "55".repeat(32));
+    }
+
+    #[test]
+    fn replay_ledger_records_signal_termination_as_reproduced_crash() {
+        // A replay killed by a signal (no exit code) is a reproduced crash,
+        // not a spawn failure. It must serialize as `terminated_by_signal`
+        // with a null exit_code and no error — the shape the shipped
+        // validator accepts.
+        let tmp = tempfile::tempdir().unwrap();
+        let harness = tmp.path().join("vault");
+        std::fs::create_dir_all(&harness).unwrap();
+        let mut seeds = seed_report(&harness);
+        seeds.seeds.truncate(1);
+        let path = replay_domain_seed_report_with(&harness, &seeds, |_, _| Ok(None)).unwrap();
+        let report: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(report["records"][0]["status"], "terminated_by_signal");
+        assert!(report["records"][0]["exit_code"].is_null());
+        assert!(report["records"][0]["error"].is_null());
+    }
+
+    #[test]
+    fn replay_ledger_persists_spawn_failure_before_returning_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let harness = tmp.path().join("vault");
+        std::fs::create_dir_all(&harness).unwrap();
+        let mut seeds = seed_report(&harness);
+        seeds.seeds.truncate(1);
+        let error = replay_domain_seed_report_with(&harness, &seeds, |_, _| {
+            Err(anyhow::anyhow!("fake crucible unavailable"))
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("plan-a"));
+        let path = harness.join(".qedgen/domain-replay-report.json");
+        let report: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(report["records"][0]["status"], "spawn_failed");
+        assert!(report["records"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("fake crucible unavailable"));
+    }
     use serde_json::json;
 
     /// Real `.meta.json` from `crucible run` on Crucible's bundled escrow

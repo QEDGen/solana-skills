@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "schema_uri": "https://qedgen.dev/schemas/auditor/domain-dossier-v1.schema.json",
+  "audit_id": "invalid_auto_ratification",
+  "target": {
+    "program_root": "programs/fee-vault",
+    "runtime": "anchor",
+    "mode": "spec-less"
+  },
+  "handlers": [],
+  "structural_candidates": [],
+  "asset_flows": [],
+  "quantities": [
+    {
+      "id": "qty_assets",
+      "symbol": "vault.total_assets",
+      "unit": "underlying atoms",
+      "scale": "unknown",
+      "rounding": "unknown",
+      "metadata": {
+        "confidence": "derived",
+        "ratification": "auto",
+        "rationale": "Derived candidates must not be auto-ratified.",
+        "source_anchors": [
+          {
+            "path": "src/state.rs",
+            "line_start": 1
+          }
+        ],
+        "verification_lanes": ["manual"]
+      }
+    }
+  ],
+  "paired_operations": [],
+  "lifecycle_edges": [],
+  "authority_capabilities": [],
+  "economic_equations": [],
+  "external_assumptions": []
+}

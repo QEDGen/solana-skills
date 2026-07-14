@@ -109,12 +109,16 @@ pub(super) fn expr_to_rust(
             binder,
             binder_ty,
             body,
-        } => format!(
-            "sum_over::<{}>(|{}| {})",
-            binder_ty,
-            binder,
-            expr_to_rust(&body.node, ctx, consts, opts)
-        ),
+        } => match opts.env.fin_bound(binder_ty) {
+            Some(bound) => format!(
+                "(0..({bound} as usize)).map(|{binder}| {}).fold(0, |__sum, __item| __sum + __item)",
+                expr_to_rust(&body.node, ctx, consts, opts)
+            ),
+            None => format!(
+                "/* {}: {binder} : {binder_ty} requires a finite Fin[N] domain */",
+                crate::check::QEDGEN_UNSUPPORTED_SUM_MARKER
+            ),
+        },
         Expr::Quant {
             kind,
             binder,
@@ -288,6 +292,19 @@ pub(super) fn expr_to_rust(
         Expr::MulDivCeil { a, b, d } => {
             let call = format!(
                 "mul_div_ceil_u128({}, {}, {})",
+                render_helper_arg(&a.node, ctx, consts, opts),
+                render_helper_arg(&b.node, ctx, consts, opts),
+                render_helper_arg(&d.node, ctx, consts, opts)
+            );
+            if opts.checked_arith {
+                format!("({}).try_into().ok()?", call)
+            } else {
+                call
+            }
+        }
+        Expr::MulDivRoundHalfUp { a, b, d } => {
+            let call = format!(
+                "mul_div_round_half_up_u128({}, {}, {})",
                 render_helper_arg(&a.node, ctx, consts, opts),
                 render_helper_arg(&b.node, ctx, consts, opts),
                 render_helper_arg(&d.node, ctx, consts, opts)
@@ -486,7 +503,9 @@ fn render_path_with_pod(
 /// comparisons against the helper's u128 result.
 pub(super) fn rust_infer_kind(env: &TypeEnv, e: &Expr) -> Kind {
     match e {
-        Expr::MulDivFloor { .. } | Expr::MulDivCeil { .. } => Kind::Nat,
+        Expr::MulDivFloor { .. } | Expr::MulDivCeil { .. } | Expr::MulDivRoundHalfUp { .. } => {
+            Kind::Nat
+        }
         Expr::Paren(inner) => rust_infer_kind(env, &inner.node),
         Expr::Old(inner) => rust_infer_kind(env, &inner.node),
         _ => env.infer(e),
@@ -501,7 +520,7 @@ pub(super) fn rust_infer_kind(env: &TypeEnv, e: &Expr) -> Kind {
 /// form.
 pub(super) fn is_mul_div_let_rhs(e: &Expr) -> bool {
     match e {
-        Expr::MulDivFloor { .. } | Expr::MulDivCeil { .. } => true,
+        Expr::MulDivFloor { .. } | Expr::MulDivCeil { .. } | Expr::MulDivRoundHalfUp { .. } => true,
         Expr::Paren(inner) => is_mul_div_let_rhs(&inner.node),
         Expr::Old(inner) => is_mul_div_let_rhs(&inner.node),
         _ => false,
@@ -591,7 +610,7 @@ fn render_widened_term(
             }
         }
         // Already u128-typed helpers — cast only when the wide type differs.
-        Expr::MulDivFloor { .. } | Expr::MulDivCeil { .. } => {
+        Expr::MulDivFloor { .. } | Expr::MulDivCeil { .. } | Expr::MulDivRoundHalfUp { .. } => {
             let s = expr_to_rust(e, ctx, consts, opts);
             if wide == "u128" {
                 s

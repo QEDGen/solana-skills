@@ -26,6 +26,7 @@ pub(super) struct TreeCx<'a, 'env> {
     pub params: std::collections::BTreeSet<String>,
     pub lets: std::collections::BTreeSet<String>,
     pub accounts: std::collections::BTreeSet<String>,
+    pub externals: std::collections::BTreeSet<String>,
     pub abstracts: std::collections::BTreeSet<String>,
 }
 
@@ -56,8 +57,24 @@ impl<'a, 'env> TreeCx<'a, 'env> {
             params: Default::default(),
             lets: Default::default(),
             accounts: Default::default(),
+            externals: Default::default(),
             abstracts: Default::default(),
         }
+    }
+
+    pub(super) fn for_environment(
+        environment: &a::EnvironmentDecl,
+        env: &'a TypeEnv<'env>,
+        consts: ConstTable<'a>,
+        ghosts: std::collections::BTreeSet<String>,
+    ) -> Self {
+        let mut cx = TreeCx::spec_level(env, consts, ghosts);
+        for clause in &environment.clauses {
+            if let a::EnvClause::External { object, .. } = &clause.node {
+                cx.externals.insert(object.clone());
+            }
+        }
+        cx
     }
 
     /// Handler-scoped context. Mirrors `canon_scope_for_handler`'s
@@ -151,6 +168,7 @@ fn build(e: &Expr, cx: &TreeCx, shadow: &mut Vec<String>) -> ExprTree {
         } => ExprTree::Sum {
             binder: binder.clone(),
             binder_ty: binder_ty.clone(),
+            fin_bound: cx.env.fin_bound(binder_ty),
             body: under(binder, body, cx, shadow),
         },
         Expr::Quant {
@@ -223,6 +241,11 @@ fn build(e: &Expr, cx: &TreeCx, shadow: &mut Vec<String>) -> ExprTree {
             d: boxed(d, cx, shadow),
         },
         Expr::MulDivCeil { a, b, d } => ExprTree::MulDivCeil {
+            a: boxed(a, cx, shadow),
+            b: boxed(b, cx, shadow),
+            d: boxed(d, cx, shadow),
+        },
+        Expr::MulDivRoundHalfUp { a, b, d } => ExprTree::MulDivRoundHalfUp {
             a: boxed(a, cx, shadow),
             b: boxed(b, cx, shadow),
             d: boxed(d, cx, shadow),
@@ -353,6 +376,8 @@ fn build_path(p: &a::Path, cx: &TreeCx, shadow: &[String]) -> TreePath {
         BindingKind::LetBound
     } else if cx.accounts.contains(&p.root) {
         BindingKind::Account
+    } else if cx.externals.contains(&p.root) && cx.env.is_external_root(&p.root) {
+        BindingKind::External
     } else if cx.abstracts.contains(&p.root) {
         BindingKind::AbstractBinder
     } else {
@@ -362,7 +387,7 @@ fn build_path(p: &a::Path, cx: &TreeCx, shadow: &[String]) -> TreePath {
     // Leaf type from the environment: state-rooted paths walk fields /
     // records / Map subscripts; bare params resolve through the handler
     // signature. Everything else stays untyped.
-    let ty = path_leaf_type(p, cx.env).map(ty_of_type_ref);
+    let ty = path_leaf_type(p, cx.env).map(|ty| ty_of_type_ref(ty, cx.env));
 
     TreePath {
         root: p.root.clone(),
@@ -387,13 +412,13 @@ fn path_leaf_type<'e>(p: &a::Path, env: &TypeEnv<'e>) -> Option<&'e a::TypeRef> 
 /// stay consistent; DSL-only forms `Ty` doesn't model natively (`Fin[N]`,
 /// parameterized types) land in `Custom` and are classified by
 /// `expr_tree::ty_num_kind`.
-fn ty_of_type_ref(t: &a::TypeRef) -> crate::mir::Ty {
+fn ty_of_type_ref(t: &a::TypeRef, env: &TypeEnv<'_>) -> crate::mir::Ty {
     match t {
-        a::TypeRef::Named(n) => crate::mir::parse_ty(n),
+        a::TypeRef::Named(n) => crate::mir::parse_ty(&env.resolve_alias_name(n)),
         a::TypeRef::Param(head, tail) => crate::mir::Ty::Custom(format!("{} {}", head, tail)),
         a::TypeRef::Map { bound, inner } => crate::mir::Ty::Map {
             capacity: bound.clone(),
-            value: Box::new(ty_of_type_ref(inner)),
+            value: Box::new(ty_of_type_ref(inner, env)),
         },
         a::TypeRef::Fin { bound } => crate::mir::Ty::Custom(format!("Fin[{}]", bound)),
     }

@@ -466,7 +466,11 @@ pub(crate) fn emit_overflow_detection_harnesses(
 ///   3. Environment — per `(env, property)` cross: assume the property pre,
 ///      mutate `env.mutates` fields to `kani::any()`, assume the
 ///      constraints, then `assert!(<prop>(&s))`.
-pub(crate) fn emit_file_level_features(out: &mut String, parsed: &ParsedSpec) -> Result<()> {
+pub(crate) fn emit_file_level_features(
+    out: &mut String,
+    mir: &Mir,
+    parsed: &ParsedSpec,
+) -> Result<()> {
     use crate::codegen_shared::map_type;
     use crate::rust_codegen_util as util;
 
@@ -656,11 +660,19 @@ pub(crate) fn emit_file_level_features(out: &mut String, parsed: &ParsedSpec) ->
         );
 
         for env in &parsed.environments {
+            let mir_env = mir
+                .environments
+                .iter()
+                .find(|candidate| candidate.name == env.name);
             for prop in &parsed.properties {
                 if prop.expression.is_none() {
                     continue;
                 }
-                let rust_constraints: &[String] = &env.constraints_rust;
+                let (rust_constraints, needs_pre, needs_post) = render_environment_constraints(
+                    mir_env,
+                    &env.constraints_rust,
+                    !env.external_fields.is_empty(),
+                );
 
                 emit_proof_preamble(
                     out,
@@ -678,11 +690,35 @@ pub(crate) fn emit_file_level_features(out: &mut String, parsed: &ParsedSpec) ->
                 );
                 out.push_str(&format!("    kani::assume({}(&s));\n", prop.name));
 
+                // `pre` snapshots the pre-mutation state for `old(state.x)`
+                // reads; it must be taken BEFORE the `s.<field> = kani::any()`
+                // mutations below. `post` (emitted after) aliases the mutated
+                // state for `state.x` reads. Emit each only when a rendered
+                // constraint actually references it.
+                if needs_pre {
+                    out.push_str("    let pre = s.clone();\n");
+                }
+
+                for (object, field, field_type) in &env.external_fields {
+                    let rust_type = crate::codegen_shared::map_type(field_type, parsed)?;
+                    out.push_str(&format!(
+                        "    let pre_{}_{}: {} = kani::any();\n",
+                        object, field, rust_type
+                    ));
+                    out.push_str(&format!(
+                        "    let post_{}_{}: {} = kani::any();\n",
+                        object, field, rust_type
+                    ));
+                }
+
                 for (field, ftype) in &env.mutates {
                     out.push_str(&format!("    s.{} = kani::any();\n", field));
                     let _ = ftype;
                 }
-                for constraint in rust_constraints {
+                if needs_post {
+                    out.push_str("    let post = &s;\n");
+                }
+                for constraint in &rust_constraints {
                     out.push_str(&format!("    kani::assume({});\n", constraint));
                 }
 
@@ -697,4 +733,57 @@ pub(crate) fn emit_file_level_features(out: &mut String, parsed: &ParsedSpec) ->
     }
 
     Ok(())
+}
+
+/// Render environment constraints from typed MIR when it is complete, and
+/// report which snapshot bindings the rendered constraints require.
+///
+/// Unary constraints intentionally keep their legacy Rust strings for byte
+/// stability. Binary constraints need the structural tree so `old(state.x)`
+/// and `state.x` route to distinct `pre` / `post` receivers. An incomplete or
+/// legacy MIR carrier falls back wholesale to the parsed string list.
+///
+/// Returns `(constraints, needs_pre, needs_post)`. A state-field read renders
+/// as a `pre.` / `post.` receiver (external fields render as `pre_` / `post_`,
+/// so the trailing dot cleanly selects state receivers). `pre` appears only
+/// for `old(state.x)`; `post` for any two-state state read — including a Unary
+/// constraint over `state.x` once the environment has external fields, which
+/// forces the two-state (`PrePost`) binder. The caller must emit exactly the
+/// bindings the constraints reference, or the harness fails to compile.
+fn render_environment_constraints(
+    mir_env: Option<&crate::mir::EnvironmentMir>,
+    legacy: &[String],
+    has_external_fields: bool,
+) -> (Vec<String>, bool, bool) {
+    use crate::rust_codegen_util::tree_render::{render_rust, Binder, RustCx};
+
+    let usable = mir_env.filter(|mir_env| {
+        !mir_env.typed_constraints.is_empty()
+            && mir_env.typed_constraints.len() == legacy.len()
+            && !mir_env.typed_constraints.iter().any(|constraint| {
+                constraint.class == crate::check::PropertyClass::Binary
+                    && constraint.predicate.0.tree.is_none()
+            })
+    });
+
+    let constraints: Vec<String> = match usable {
+        Some(mir_env) => mir_env
+            .typed_constraints
+            .iter()
+            .enumerate()
+            .map(|(index, constraint)| {
+                if constraint.class == crate::check::PropertyClass::Binary || has_external_fields {
+                    if let Some(tree) = &constraint.predicate.0.tree {
+                        return render_rust(tree, RustCx::native().with_binder(Binder::PrePost));
+                    }
+                }
+                legacy[index].clone()
+            })
+            .collect(),
+        None => legacy.to_vec(),
+    };
+
+    let needs_pre = constraints.iter().any(|c| c.contains("pre."));
+    let needs_post = constraints.iter().any(|c| c.contains("post."));
+    (constraints, needs_pre, needs_post)
 }
