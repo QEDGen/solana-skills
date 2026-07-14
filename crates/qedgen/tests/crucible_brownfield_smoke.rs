@@ -361,6 +361,216 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
     }
 }
 
+fn domain_boundary_fixture() -> std::path::PathBuf {
+    repo_root()
+        .join("crates/qedgen/tests/fixtures/regressions/domain-mode-boundary/domain_boundary")
+}
+
+fn only_domain_seed(harness: &Path) -> std::path::PathBuf {
+    let corpus_root = harness.join(".qedgen/domain-sequence-corpus");
+    let corpus = std::fs::read_dir(&corpus_root)
+        .expect("read domain corpus root")
+        .next()
+        .expect("domain corpus hash directory")
+        .expect("read domain corpus entry")
+        .path();
+    let mut seeds: Vec<_> = std::fs::read_dir(corpus)
+        .expect("read domain corpus")
+        .map(|entry| entry.expect("read seed entry").path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("seed"))
+        .collect();
+    seeds.sort();
+    assert_eq!(seeds.len(), 1, "fixture must have one replay seed");
+    seeds.pop().unwrap()
+}
+
+/// End-to-end, toolchain-independent half of the protocol/domain boundary
+/// regression. Both modes go through the real CLI. The domain run must carry
+/// a byte-exact replay that accepts 11 and checks the ratified maximum of 10;
+/// protocol mode must have real protocol guards but no domain assertion.
+#[test]
+fn domain_boundary_fixture_is_replayable_and_protocol_blind() {
+    ensure_qedgen_built();
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let program = tmp.path().join("domain_boundary");
+    copy_dir_recursive(&domain_boundary_fixture(), &program);
+
+    let protocol_harness = tmp.path().join("protocol/domain_boundary");
+    let protocol = Command::new(qedgen_bin())
+        .args([
+            "probe",
+            "--fuzz",
+            "0",
+            "--crucible-mode",
+            "protocol",
+            "--root",
+        ])
+        .arg(&program)
+        .arg("--harness-dir")
+        .arg(&protocol_harness)
+        .output()
+        .expect("emit protocol harness");
+    assert!(
+        protocol.status.success(),
+        "protocol emit failed: {}",
+        String::from_utf8_lossy(&protocol.stderr)
+    );
+
+    let domain_harness = tmp.path().join("domain/domain_boundary");
+    let domain = Command::new(qedgen_bin())
+        .args([
+            "probe",
+            "--fuzz",
+            "0",
+            "--crucible-mode",
+            "domain",
+            "--spec",
+        ])
+        .arg(program.join("domain.qedspec"))
+        .arg("--domain-dossier")
+        .arg(program.join("domain-dossier.json"))
+        .arg("--domain-sequences")
+        .arg(program.join("domain-sequences.json"))
+        .arg("--domain-sequence-bindings")
+        .arg(program.join("domain-sequence-bindings.json"))
+        .arg("--harness-dir")
+        .arg(&domain_harness)
+        .output()
+        .expect("emit domain harness");
+    assert!(
+        domain.status.success(),
+        "domain emit failed: {}",
+        String::from_utf8_lossy(&domain.stderr)
+    );
+
+    let protocol_body =
+        std::fs::read_to_string(protocol_harness.join("src/main.rs")).expect("protocol main");
+    assert!(protocol_body.contains("assert_no_wallet_inflation"));
+    assert!(protocol_body.contains("__wallet_snap"));
+    assert!(!protocol_body.contains("accepted_amount_within_domain"));
+    assert!(!protocol_body.contains("self.last_accepted = amount;"));
+
+    let domain_body =
+        std::fs::read_to_string(domain_harness.join("src/main.rs")).expect("domain main");
+    assert!(domain_body.contains("self.last_accepted = amount;"));
+    assert!(domain_body.contains("fixture.last_accepted <= 10"));
+    assert!(domain_body.contains("invariant accepted_amount_within_domain violated"));
+
+    let seed = std::fs::read(only_domain_seed(&domain_harness)).expect("read replay seed");
+    assert_eq!(
+        seed,
+        [1, 0, 0, 0, 0, 0, 11, 0, 0, 0, 0, 0, 0, 0],
+        "one action plus the little-endian u64 boundary witness"
+    );
+    let resolved = std::fs::read_to_string(program.join("resolved-domain-sequences.json")).unwrap();
+    assert!(resolved.contains("domain-limit-accept"));
+    assert!(resolved.contains("\"value\": 11"));
+    let overlay = std::fs::read_to_string(program.join("account-binding-overlay.json")).unwrap();
+    assert!(overlay.contains("\"authority\": \"fixture:authority\""));
+}
+
+/// Opt-in live proof of the fixture's headline claim. This is skipped in the
+/// ordinary suite because it requires the Solana SBF and Crucible toolchains.
+#[test]
+fn live_domain_boundary_protocol_misses_and_domain_finds() {
+    if std::env::var_os("QEDGEN_RUN_LIVE_CRUCIBLE_DOMAIN_BOUNDARY").is_none() {
+        return;
+    }
+    ensure_qedgen_built();
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let program = tmp.path().join("domain_boundary");
+    copy_dir_recursive(&domain_boundary_fixture(), &program);
+
+    let build = Command::new("cargo")
+        .arg("build-sbf")
+        .current_dir(&program)
+        .output()
+        .expect("spawn cargo build-sbf");
+    assert!(
+        build.status.success(),
+        "SBF build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let protocol_harness = tmp.path().join("protocol/domain_boundary");
+    let protocol = Command::new(qedgen_bin())
+        .args([
+            "probe",
+            "--fuzz",
+            "1",
+            "--no-smoke",
+            "--crucible-mode",
+            "protocol",
+            "--root",
+        ])
+        .arg(&program)
+        .arg("--harness-dir")
+        .arg(&protocol_harness)
+        .output()
+        .expect("run protocol mode");
+    assert!(
+        protocol.status.success(),
+        "protocol run failed:\n{}",
+        String::from_utf8_lossy(&protocol.stderr)
+    );
+    let protocol_json: serde_json::Value =
+        serde_json::from_slice(&protocol.stdout).expect("protocol JSON");
+    assert_eq!(protocol_json["findings"], serde_json::json!([]));
+
+    let domain_harness = tmp.path().join("domain/domain_boundary");
+    let domain = Command::new(qedgen_bin())
+        .args([
+            "probe",
+            "--fuzz",
+            "1",
+            "--no-smoke",
+            "--crucible-mode",
+            "domain",
+            "--spec",
+        ])
+        .arg(program.join("domain.qedspec"))
+        .arg("--domain-dossier")
+        .arg(program.join("domain-dossier.json"))
+        .arg("--domain-sequences")
+        .arg(program.join("domain-sequences.json"))
+        .arg("--domain-sequence-bindings")
+        .arg(program.join("domain-sequence-bindings.json"))
+        .arg("--harness-dir")
+        .arg(&domain_harness)
+        .output()
+        .expect("run domain mode");
+    assert!(
+        domain.status.success(),
+        "domain run failed:\n{}",
+        String::from_utf8_lossy(&domain.stderr)
+    );
+    let domain_json: serde_json::Value =
+        serde_json::from_slice(&domain.stdout).expect("domain JSON");
+    let findings = domain_json["findings"].as_array().expect("findings array");
+    assert!(findings.iter().any(|finding| {
+        finding["handler"] == "accept" && finding["category_tag"] == "invariant_violation"
+    }));
+
+    let report: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(domain_harness.join(".qedgen/domain-replay-report.json"))
+            .expect("domain replay report"),
+    )
+    .expect("parse domain replay report");
+    assert_eq!(report["records"][0]["plan_id"], "domain-limit-accept");
+    assert_eq!(report["records"][0]["action_count"], 1);
+    for hash in [
+        "resolved_document_sha256",
+        "account_binding_overlay_sha256",
+        "harness_sha256",
+    ] {
+        assert_eq!(report[hash].as_str().map(str::len), Some(64));
+    }
+    assert_eq!(
+        report["records"][0]["seed_sha256"].as_str().map(str::len),
+        Some(64)
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // v2.22 Slice 3 — Pinocchio brownfield Crucible fuzz
 // ─────────────────────────────────────────────────────────────────────

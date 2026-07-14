@@ -1354,10 +1354,20 @@ fn emit_action_fn(
         }
     }
 
-    // Shadow-state sync needs the on-chain account struct shape — emitted
-    // as a structured comment for agent fill.
+    // A direct scalar assignment from a same-typed handler argument can be
+    // mirrored without knowing the on-chain account layout. This records the
+    // domain-relevant value that the deployed program actually accepted; it
+    // does not pretend to deserialize arbitrary program state. Richer effects
+    // still need the account-specific sync below.
     if !op.effects.is_empty() {
         out.push_str("        if success {\n");
+        if !matches!(mode, InvariantMode::Protocol) {
+            for eff in &op.effects {
+                if let Some(rhs) = direct_scalar_shadow_assignment(spec, op, eff) {
+                    out.push_str(&format!("            self.{} = {rhs};\n", eff.field));
+                }
+            }
+        }
         out.push_str("            // TODO: sync shadow state from the on-chain account here.\n");
         out.push_str("            // For each effect declared in the spec, copy the post-state\n");
         out.push_str("            // field into the matching self.<field>. Example pattern:\n");
@@ -1374,6 +1384,49 @@ fn emit_action_fn(
     out.push_str("        success\n");
     out.push_str("    }\n");
     Ok(())
+}
+
+/// Return a safe shadow-state RHS for the one layout-independent effect shape:
+/// `field := argument`, where both sides have the same scalar type. The action
+/// has succeeded at this point, so the mirror lets domain invariants test the
+/// input envelope accepted by the deployed program. Arithmetic, field reads,
+/// nested paths, and type conversions remain account-specific agent work.
+fn direct_scalar_shadow_assignment(
+    spec: &ParsedSpec,
+    op: &ParsedHandler,
+    effect: &crate::check::ParsedEffect,
+) -> Option<String> {
+    if effect.op != "set"
+        || effect.field.is_empty()
+        || !effect
+            .field
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        || effect.field.as_bytes()[0].is_ascii_digit()
+    {
+        return None;
+    }
+    let rhs = if effect.value_rust.is_empty() {
+        effect.value.trim()
+    } else {
+        effect.value_rust.trim()
+    };
+    let (_, argument_type) = op.takes_params.iter().find(|(name, _)| name == rhs)?;
+    let (_, field_type) = spec
+        .state_fields
+        .iter()
+        .find(|(name, _)| name == &effect.field)?;
+    if argument_type != field_type || !is_crucible_scalar_type(field_type) {
+        return None;
+    }
+    Some(rhs.to_string())
+}
+
+fn is_crucible_scalar_type(qedspec_type: &str) -> bool {
+    matches!(
+        qedspec_type,
+        "U8" | "U16" | "U32" | "U64" | "U128" | "I8" | "I16" | "I32" | "I64" | "I128" | "Bool"
+    )
 }
 
 fn account_overlay_target<'a>(
@@ -1732,6 +1785,36 @@ handler withdraw (amount : U64) : State.Active -> State.Active {
         emit_invariant_fn(&mut out, &spec, "CounterFixture", InvariantMode::Both);
         assert!(out.contains("fuzz_assert!"));
         assert!(out.contains("fixture.count"));
+    }
+
+    #[test]
+    fn domain_mode_mirrors_same_typed_accepted_scalar_arguments() {
+        let spec = parse_str(
+            r#"spec AcceptedLimit
+program_id "11111111111111111111111111111111"
+
+type State | Active of { last_accepted : U64 }
+type Error | E
+
+invariant accepted_limit : state.last_accepted <= 10
+
+handler accept (amount : U64) : State.Active -> State.Active {
+  permissionless
+  invariant accepted_limit
+  effect { last_accepted := amount }
+}
+"#,
+        )
+        .expect("parse");
+
+        let domain = emit_harness(&spec, InvariantMode::Both, None).expect("domain harness");
+        let protocol =
+            emit_harness(&spec, InvariantMode::Protocol, None).expect("protocol harness");
+
+        assert!(domain.contains("if success {\n            self.last_accepted = amount;"));
+        assert!(domain.contains("fixture.last_accepted <= 10"));
+        assert!(!protocol.contains("self.last_accepted = amount;"));
+        assert!(!protocol.contains("invariant accepted_limit violated"));
     }
 
     // Protocol/Both wrap every `.send()` with a wallet-lamport snapshot +

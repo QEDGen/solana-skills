@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "schema_uri": "https://qedgen.dev/schemas/auditor/domain-sequence-bindings-v1.schema.json",
+  "source_sequence_schema_uri": "https://qedgen.dev/schemas/auditor/domain-sequences-v1.schema.json",
+  "source_audit_id": "domain_boundary",
+  "bindings": [
+    {
+      "plan_id": "domain-limit-accept",
+      "action": { "phase": "forward", "index": 0 },
+      "parameter": { "name": "Accept", "kind": "account_bindings" },
+      "value": { "authority": "fixture:authority" }
+    },
+    {
+      "plan_id": "domain-limit-accept",
+      "action": { "phase": "forward", "index": 0 },
+      "parameter": { "name": "amount", "kind": "handler_argument" },
+      "value": 11
+    }
+  ]
+}
