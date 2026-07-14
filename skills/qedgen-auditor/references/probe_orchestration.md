@@ -83,6 +83,20 @@ Budget tuning: 300s first pass; 1800s (30 min) if depth is wanted;
 Fired output: `findings[]` in JSON. Each has `Reproducer::Crucible`
 with input bytes + reproducing call sequence.
 
+**Scope the lane honestly.** In spec-less brownfield mode Crucible runs a
+per-action protocol-invariant suite that fires only on failure modes
+observable as a mechanical state diff: wallet-lamport inflation (any
+fuzzer-controlled account, signer or not, gaining lamports), total-lamport
+conservation, ownership takeover, discriminator/type change, close-scrub
+integrity, rent-exemption loss, realloc data leak, and SPL token-balance
+conservation. In-program faults (overflow, `checked_*` DoS, div-by-zero,
+`unwrap`, `require!`) surface as tx-errors it cannot see, and semantic/DeFi
+bugs need spec context — those always need agent-authored Mollusk
+reproducers regardless of Crucible. A dry Crucible run therefore says
+nothing about the classes it cannot observe; treat it as a fast win for the
+state-diff-observable shapes, not a general crash lane, and never let an
+empty fuzz pass downgrade or reject findings in the unobservable classes.
+
 **Default tier — gated on the auto-chain (brownfield needs a skeleton
 spec first).**
 
