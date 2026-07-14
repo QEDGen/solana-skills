@@ -59,9 +59,13 @@ structural skeleton already had a dry fuzz result.
 `disposition: emitted` as executable only when the generated `.qedspec`
 contains the matching `// provenance: domain-candidate <id>` line.
 `needs_authoring` means intent is ratified but no executable clause exists.
+Use that clause's `authoring.constructs`, parser-shaped `authoring.template`,
+and limitations in `authoring.notes` as the starting point; replace every
+angle-bracket placeholder from ratified dossier facts and source evidence.
 Resolve every `language_gaps[]` entry by extending the language or retaining
 an explicit documentary property with a manual lane; never silently count it
-as covered.
+as covered. Each gap's `current_language_support` distinguishes missing intent
+from a backend limitation and names the nearest executable construct.
 
 Finite aggregate conservation is executable when the binder resolves to
 `Fin[N]` (directly or through an alias): use `sum i : Index, ...`, including

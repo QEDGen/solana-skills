@@ -16,7 +16,12 @@
         "candidate_id": "qty_fee_amount",
         "kind": "quantity",
         "disposition": "needs_authoring",
-        "verification_lanes": ["manual", "crucible"]
+        "verification_lanes": ["manual", "crucible"],
+        "authoring": {
+          "constructs": ["const", "mul_div_floor"],
+          "template": "const SCALE = 10000\nlet fee = mul_div_floor(amount, bps, SCALE)",
+          "notes": ["Nominal unit checking is not yet enforced by the type system."]
+        }
       }
     ],
     "regression": []
@@ -24,8 +29,9 @@
   "language_gaps": [
     {
       "candidate_id": "qty_fee_amount",
-      "reason": "unit_or_rounding_semantics",
-      "disposition": "document_or_extend_language"
+      "reason": "dimensional_unit_types",
+      "disposition": "document_or_extend_language",
+      "current_language_support": "Numeric scales can be constants, but nominal units are not type checked."
     }
   ]
 }

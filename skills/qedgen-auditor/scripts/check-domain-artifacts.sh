@@ -155,6 +155,12 @@ validate_handoff() {
       type == "object" and
       (.candidate_id | type == "string" and length > 0) and
       (.disposition | enum(["emitted", "needs_authoring", "language_gap", "excluded"])) and
+      (if .disposition == "needs_authoring" then
+        (.authoring | type == "object") and
+        (.authoring.constructs | type == "array" and length > 0) and
+        (.authoring.template | type == "string" and length > 0) and
+        (.authoring.notes | type == "array")
+       else true end) and
       (.verification_lanes | type == "array" and all(.[];
         enum(["check", "manual", "mollusk", "miri", "crucible", "kani", "lean"])));
     .schema_version == 1 and
@@ -167,6 +173,7 @@ validate_handoff() {
     (.language_gaps | type == "array" and all(.[];
       (.candidate_id | type == "string" and length > 0) and
       (.reason | type == "string" and length > 0) and
+      (.current_language_support | type == "string" and length > 0) and
       .disposition == "document_or_extend_language"))
   ' "$1" >/dev/null
 }

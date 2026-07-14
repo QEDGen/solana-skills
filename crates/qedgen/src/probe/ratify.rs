@@ -331,31 +331,16 @@ fn write_spec_handoff(audit_dir: &Path, spec_path: &Path) -> Result<Option<PathB
                 "candidate_id": id,
                 "kind": kind,
                 "disposition": "needs_authoring",
-                "verification_lanes": item.pointer("/metadata/verification_lanes").cloned().unwrap_or_else(|| serde_json::json!([]))
+                "verification_lanes": item.pointer("/metadata/verification_lanes").cloned().unwrap_or_else(|| serde_json::json!([])),
+                "authoring": domain_authoring_guidance(kind, item)
             }));
 
-            let gap = match kind {
-                "quantity"
-                    if item.get("unit").and_then(serde_json::Value::as_str) == Some("unknown")
-                        || item.get("rounding").and_then(serde_json::Value::as_str)
-                            == Some("unknown") =>
-                {
-                    Some("unit_or_rounding_semantics")
-                }
-                "economic_equation"
-                    if item.get("unit_check").and_then(serde_json::Value::as_str)
-                        != Some("compatible") =>
-                {
-                    Some("dimensional_consistency")
-                }
-                "external_assumption" => Some("external_environment_model"),
-                _ => None,
-            };
-            if let Some(reason) = gap {
+            for reason in domain_language_gaps(kind, item) {
                 language_gaps.push(serde_json::json!({
                     "candidate_id": item.get("id").cloned().unwrap_or(serde_json::Value::Null),
                     "reason": reason,
-                    "disposition": "document_or_extend_language"
+                    "disposition": "document_or_extend_language",
+                    "current_language_support": current_language_support(reason)
                 }));
             }
         }
@@ -390,6 +375,111 @@ fn write_spec_handoff(audit_dir: &Path, spec_path: &Path) -> Result<Option<PathB
         )?;
     }
     Ok(Some(path))
+}
+
+fn domain_authoring_guidance(kind: &str, item: &serde_json::Value) -> serde_json::Value {
+    let rounding = item
+        .get("rounding")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let (constructs, template, notes): (Vec<&str>, String, Vec<&str>) = match kind {
+        "asset_flow" => (
+            vec!["call", "transfers", "property"],
+            "handler <name> { call Token.transfer(<source>, <destination>, <amount>) }\nproperty <asset>_conserved : <post_total> == old(<pre_total>) preserved_by [<handlers>]".to_string(),
+            vec!["Bind the dossier source, destination, asset, and nominal amount; do not infer token authority."],
+        ),
+        "quantity" => {
+            let expression = match rounding {
+                "floor" => "mul_div_floor(<amount>, <rate>, <denominator>)",
+                "ceil" => "mul_div_ceil(<amount>, <rate>, <denominator>)",
+                "exact" => "<checked arithmetic expression>",
+                "nearest" => "<unsupported nearest-rounding expression>",
+                _ => "<rounding policy must be ratified>",
+            };
+            (
+                vec!["const", "requires", "mul_div_floor", "mul_div_ceil"],
+                format!("const <SCALE> = <ratified scale>\nlet <quantity> = {expression}"),
+                vec!["Floor and ceiling are executable today; nominal unit checking is not yet enforced by the type system."],
+            )
+        }
+        "paired_operation" => (
+            vec!["property", "old", "sum", "preserved_by"],
+            "property <round_trip_claim> : <post relation> == old(<pre relation>) preserved_by [<forward>, <reverse>]".to_string(),
+            vec!["Use `sum i : Fin[N], ...` for finite aggregates; keep the generated domain sequence as the replay target."],
+        ),
+        "lifecycle_edge" => (
+            vec!["handler transition", "invariant", "establishes"],
+            "handler <name> : State.<from> -> State.<to> {\n  establishes <postcondition>\n}".to_string(),
+            vec!["Use `invariant` for preservation and `establishes` when the transition creates the truth of the predicate."],
+        ),
+        "authority_capability" => (
+            vec!["auth", "requires", "accounts"],
+            "handler <name> {\n  auth <signer_or_account.field>\n  requires <stored_authority> == <signer>.pubkey else Unauthorized\n}".to_string(),
+            vec!["Choose dotted `auth` only when one signer is unambiguous; otherwise write the explicit key equality."],
+        ),
+        "economic_equation" => (
+            vec!["property", "invariant", "sum", "mul_div_floor", "mul_div_ceil"],
+            "property <equation_name> : <ratified equation> preserved_by [<handlers>]".to_string(),
+            vec!["Finite sums and floor/ceiling arithmetic are executable; dimensional compatibility still requires review."],
+        ),
+        "external_assumption" => (
+            vec!["environment", "constraint", "old"],
+            "environment <scenario> {\n  mutates <local_shadow> : <Type>\n  constraint <post relation to old(...)>\n}".to_string(),
+            vec!["This models perturbation of program state; distinct oracle, clock, CPI-return, owner, and executable namespaces remain unsupported."],
+        ),
+        _ => (vec!["manual"], "<author executable clause>".to_string(), vec![]),
+    };
+    serde_json::json!({
+        "constructs": constructs,
+        "template": template,
+        "notes": notes
+    })
+}
+
+fn domain_language_gaps(kind: &str, item: &serde_json::Value) -> Vec<&'static str> {
+    let mut gaps = Vec::new();
+    match kind {
+        "quantity" => {
+            let unit = item
+                .get("unit")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+            if !matches!(unit, "dimensionless" | "count" | "boolean") {
+                gaps.push("dimensional_unit_types");
+            }
+            match item
+                .get("rounding")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown")
+            {
+                "exact" | "floor" | "ceil" => {}
+                "nearest" => gaps.push("rounding_mode_nearest"),
+                _ => gaps.push("rounding_policy_unresolved"),
+            }
+        }
+        "economic_equation" => gaps.push("dimensional_unit_types"),
+        "external_assumption" => gaps.push("external_environment_model"),
+        _ => {}
+    }
+    gaps
+}
+
+fn current_language_support(reason: &str) -> &'static str {
+    match reason {
+        "dimensional_unit_types" => {
+            "Numeric scales can be constants, but the type checker does not enforce nominal units or dimensional compatibility."
+        }
+        "rounding_mode_nearest" => {
+            "`mul_div_floor` and `mul_div_ceil` are executable; nearest and tie-breaking modes have no builtin."
+        }
+        "rounding_policy_unresolved" => {
+            "The language supports exact, floor, and ceiling arithmetic after the intended policy is ratified."
+        }
+        "external_environment_model" => {
+            "`environment` supports typed pre/post constraints over mutated program-state fields, not distinct external objects."
+        }
+        _ => "No executable lowering is currently available.",
+    }
 }
 
 /// Keep the schema-v1 dossier as the canonical ratification record. Older
@@ -913,8 +1003,16 @@ mod tests {
         );
         assert_eq!(
             handoff["language_gaps"][0]["reason"],
-            "unit_or_rounding_semantics"
+            "dimensional_unit_types"
         );
+        assert_eq!(
+            handoff["language_gaps"][1]["reason"],
+            "rounding_policy_unresolved"
+        );
+        assert!(handoff["layers"]["domain"][0]["authoring"]["template"]
+            .as_str()
+            .unwrap()
+            .contains("rounding policy must be ratified"));
         let spec = std::fs::read_to_string(&report.spec_path)?;
         assert!(spec.contains(&format!("provenance: domain-candidate {}", cid)));
         let sequences_path = report.domain_sequences_path.expect("domain sequences");
@@ -938,6 +1036,27 @@ mod tests {
             first_handoff
         );
         Ok(())
+    }
+
+    #[test]
+    fn quantity_handoff_distinguishes_supported_rounding_from_true_gaps() {
+        let floor = serde_json::json!({ "unit": "lamports", "rounding": "floor" });
+        assert_eq!(
+            domain_language_gaps("quantity", &floor),
+            vec!["dimensional_unit_types"]
+        );
+        let dimensionless = serde_json::json!({ "unit": "dimensionless", "rounding": "ceil" });
+        assert!(domain_language_gaps("quantity", &dimensionless).is_empty());
+        let nearest = serde_json::json!({ "unit": "count", "rounding": "nearest" });
+        assert_eq!(
+            domain_language_gaps("quantity", &nearest),
+            vec!["rounding_mode_nearest"]
+        );
+        let guidance = domain_authoring_guidance("quantity", &floor);
+        assert!(guidance["template"]
+            .as_str()
+            .unwrap()
+            .contains("mul_div_floor"));
     }
 
     #[test]
