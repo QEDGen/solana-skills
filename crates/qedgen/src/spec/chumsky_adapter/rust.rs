@@ -109,12 +109,15 @@ pub(super) fn expr_to_rust(
             binder,
             binder_ty,
             body,
-        } => format!(
-            "sum_over::<{}>(|{}| {})",
-            binder_ty,
-            binder,
-            expr_to_rust(&body.node, ctx, consts, opts)
-        ),
+        } => match opts.env.fin_bound(binder_ty) {
+            Some(bound) => format!(
+                "(0..({bound} as usize)).map(|{binder}| {}).fold(0, |__sum, __item| __sum + __item)",
+                expr_to_rust(&body.node, ctx, consts, opts)
+            ),
+            None => format!(
+                "/* QEDGEN_UNSUPPORTED_SUM: {binder} : {binder_ty} requires a finite Fin[N] domain */"
+            ),
+        },
         Expr::Quant {
             kind,
             binder,

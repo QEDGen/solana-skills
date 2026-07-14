@@ -13,6 +13,7 @@ fi
 for schema in \
   "$schemas/domain-dossier.schema.json" \
   "$schemas/audit-run-manifest.schema.json" \
+  "$schemas/domain-sequences.schema.json" \
   "$schemas/spec-handoff.schema.json"; do
   jq -e '
     .["$schema"] == "https://json-schema.org/draft/2020-12/schema" and
@@ -166,6 +167,40 @@ validate_handoff() {
   ' "$1" >/dev/null
 }
 
+validate_sequences() {
+  jq -e '
+    def enum($values): . as $value | ($values | index($value)) != null;
+    def unresolved:
+      type == "object" and
+      (.name | type == "string" and length > 0) and
+      (.kind | enum(["handler_argument", "account_bindings", "lifecycle_association"])) and
+      (.reason | type == "string" and length > 0);
+    def action:
+      type == "object" and
+      (.handler | type == "string" and length > 0) and
+      (.role | enum(["setup", "forward", "reverse", "teardown", "lifecycle_transition"])) and
+      (.provenance_candidate_ids | type == "array" and length > 0) and
+      (.unresolved_parameters | type == "array" and all(.[]; unresolved));
+    .schema_version == 1 and
+    .schema_uri == "https://qedgen.dev/schemas/auditor/domain-sequences-v1.schema.json" and
+    (.plans | type == "array" and all(.[];
+      (.id | type == "string" and length > 0) and
+      (.kind | enum(["paired_round_trip", "lifecycle_transition"])) and
+      (.title | type == "string" and length > 0) and
+      (.setup | type == "array" and all(.[]; action)) and
+      (.forward | type == "array" and all(.[]; action)) and
+      (.reverse | type == "array" and all(.[]; action)) and
+      (.teardown | type == "array" and all(.[]; action)) and
+      (.provenance_candidate_ids | type == "array" and length > 0) and
+      (.unresolved_parameters | type == "array" and all(.[]; unresolved)))) and
+    (.exclusions | type == "array" and all(.[];
+      (.candidate_id | type == "string" and length > 0) and
+      (.collection | enum(["paired_operations", "lifecycle_edges"])) and
+      (.ratification | enum(["auto", "user", "pending", "rejected", "bug"])) and
+      (.reason | type == "string" and length > 0)))
+  ' "$1" >/dev/null
+}
+
 if [[ $# -gt 0 ]]; then
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -184,8 +219,13 @@ if [[ $# -gt 0 ]]; then
         validate_handoff "$2"
         shift 2
         ;;
+      --sequences)
+        [[ $# -ge 2 ]] || { echo "--sequences requires a path" >&2; exit 2; }
+        validate_sequences "$2"
+        shift 2
+        ;;
       *)
-        echo "usage: check-auditor-domain-artifacts.sh [--dossier <json>] [--manifest <json>] [--handoff <json>]" >&2
+        echo "usage: check-auditor-domain-artifacts.sh [--dossier <json>] [--manifest <json>] [--handoff <json>] [--sequences <json>]" >&2
         exit 2
         ;;
     esac
@@ -210,6 +250,12 @@ fi
 validate_handoff "$fixtures/valid-spec-handoff.json"
 if validate_handoff "$fixtures/invalid-spec-handoff.json"; then
   echo "invalid specification handoff fixture unexpectedly passed" >&2
+  exit 1
+fi
+
+validate_sequences "$fixtures/valid-domain-sequences.json"
+if validate_sequences "$fixtures/invalid-domain-sequences.json"; then
+  echo "invalid domain sequences fixture unexpectedly passed" >&2
   exit 1
 fi
 

@@ -25,8 +25,9 @@
     "check:versions": "bash scripts/check-version-consistency.sh",
     "check:auditor-skill": "bash scripts/check-auditor-skill.sh",
     "check:auditor-domain-artifacts": "bash scripts/check-auditor-domain-artifacts.sh",
+    "check:auditor-domain-corpus": "bash skills/qedgen-auditor-bench/fixtures/domain-corpus/validate.sh",
     "test:auditor-preflight": "bash scripts/test-auditor-preflight.sh",
-    "test": "bash scripts/check-version-consistency.sh && bash scripts/check-auditor-skill.sh && bash scripts/check-auditor-domain-artifacts.sh && bash scripts/test-auditor-preflight.sh && ./bin/qedgen --help"
+    "test": "bash scripts/check-version-consistency.sh && bash scripts/check-auditor-skill.sh && bash scripts/check-auditor-domain-artifacts.sh && bash skills/qedgen-auditor-bench/fixtures/domain-corpus/validate.sh && bash scripts/test-auditor-preflight.sh && ./bin/qedgen --help"
   },
   "repository": {
     "type": "git",

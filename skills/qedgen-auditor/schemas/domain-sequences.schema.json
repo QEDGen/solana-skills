@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qedgen.dev/schemas/auditor/domain-sequences-v1.schema.json",
+  "title": "QEDGen Auditor Domain Action Plans",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "schema_uri", "audit_id", "source_dossier_schema_version", "plans", "exclusions"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "schema_uri": { "const": "https://qedgen.dev/schemas/auditor/domain-sequences-v1.schema.json" },
+    "audit_id": { "type": ["string", "null"] },
+    "source_dossier_schema_version": { "type": ["integer", "null"] },
+    "plans": { "type": "array", "items": { "$ref": "#/$defs/plan" } },
+    "exclusions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["candidate_id", "collection", "ratification", "reason"],
+        "properties": {
+          "candidate_id": { "type": "string", "minLength": 1 },
+          "collection": { "enum": ["paired_operations", "lifecycle_edges"] },
+          "ratification": { "enum": ["auto", "user", "pending", "rejected", "bug"] },
+          "reason": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "title", "setup", "forward", "reverse", "teardown", "provenance_candidate_ids", "unresolved_parameters"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["paired_round_trip", "lifecycle_transition"] },
+        "title": { "type": "string", "minLength": 1 },
+        "setup": { "type": "array", "items": { "$ref": "#/$defs/action" } },
+        "forward": { "type": "array", "items": { "$ref": "#/$defs/action" } },
+        "reverse": { "type": "array", "items": { "$ref": "#/$defs/action" } },
+        "teardown": { "type": "array", "items": { "$ref": "#/$defs/action" } },
+        "provenance_candidate_ids": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "unresolved_parameters": { "type": "array", "items": { "$ref": "#/$defs/unresolved" } }
+      }
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["handler", "role", "from_state", "to_state", "guards", "provenance_candidate_ids", "unresolved_parameters"],
+      "properties": {
+        "handler": { "type": "string", "minLength": 1 },
+        "role": { "enum": ["setup", "forward", "reverse", "teardown", "lifecycle_transition"] },
+        "from_state": { "type": ["string", "null"] },
+        "to_state": { "type": ["string", "null"] },
+        "guards": { "type": "array", "items": { "type": "string" } },
+        "provenance_candidate_ids": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "unresolved_parameters": { "type": "array", "items": { "$ref": "#/$defs/unresolved" } }
+      }
+    },
+    "unresolved": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["handler", "name", "kind", "declared_type", "reason"],
+      "properties": {
+        "handler": { "type": ["string", "null"] },
+        "name": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["handler_argument", "account_bindings", "lifecycle_association"] },
+        "declared_type": { "type": ["string", "null"] },
+        "reason": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

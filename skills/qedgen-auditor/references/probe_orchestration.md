@@ -228,6 +228,10 @@ later verification lanes are resumable.
 `qedgen ratify` additionally writes `spec-handoff.json`, separating emitted
 structural clauses, ratified domain facts that still need authoring, regression
 guards, and explicit language gaps.
+It also writes `domain-sequences.json`: paired round trips and lifecycle
+setup/teardown coverage targets. Bind every unresolved account and argument
+before deterministic replay; until then, use the plans to guide stateful
+exploration without claiming exact sequence coverage.
 
 ### Step 2 — auto-ratify *high-confidence* clusters
 

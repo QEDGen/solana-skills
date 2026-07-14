@@ -175,16 +175,20 @@ fn render(e: &ExprTree, cx: RustCx, inside_old: bool) -> (String, Prec) {
         ExprTree::Sum {
             binder,
             binder_ty,
+            fin_bound,
             body,
-        } => (
-            format!(
-                "sum_over::<{}>(|{}| {})",
-                binder_ty,
-                binder,
-                render(body, cx, inside_old).0
-            ),
-            Prec::Atom,
-        ),
+        } => {
+            let body = render(body, cx, inside_old).0;
+            let rendered = match fin_bound {
+                Some(bound) => format!(
+                    "(0..({bound} as usize)).map(|{binder}| {body}).fold(0, |__sum, __item| __sum + __item)"
+                ),
+                None => format!(
+                    "/* QEDGEN_UNSUPPORTED_SUM: {binder} : {binder_ty} requires a finite Fin[N] domain */"
+                ),
+            };
+            (rendered, Prec::Atom)
+        }
         ExprTree::Quant {
             kind,
             binder,

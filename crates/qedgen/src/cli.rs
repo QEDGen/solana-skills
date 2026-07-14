@@ -346,6 +346,8 @@ pub(crate) enum Commands {
     ///   when the audit working set carries schema-v1 domain artifacts.
     /// - `spec-handoff.json` — structural/domain/regression layer status,
     ///   provenance IDs, and explicit language gaps.
+    /// - `domain-sequences.json` — stateful setup/forward/reverse/teardown
+    ///   coverage targets with unresolved accounts and arguments made explicit.
     Ratify {
         /// Audit working-set directory (the one passed to `probe
         /// --audit-dir`). Must contain `interview.md`, `clusters.json`,

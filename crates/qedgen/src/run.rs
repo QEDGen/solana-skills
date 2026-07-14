@@ -599,6 +599,9 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             if let Some(path) = &report.spec_handoff_path {
                 eprintln!("Wrote specification handoff to {}", path.display());
             }
+            if let Some(path) = &report.domain_sequences_path {
+                eprintln!("Wrote domain action plans to {}", path.display());
+            }
             if report.rejected > 0 {
                 eprintln!("Wrote scoping notes to {}", report.scoping_path.display());
             }

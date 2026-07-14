@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "schema_uri": "https://qedgen.dev/schemas/auditor/domain-dossier-v1.schema.json",
+  "audit_id": "corpus_vault",
+  "target": { "program_root": "fixtures/vault", "runtime": "anchor", "mode": "spec-less", "spec": null, "source_commit": null },
+  "handlers": [],
+  "structural_candidates": [],
+  "asset_flows": [{
+    "id": "flow_vault_deposit", "handler": "deposit", "asset": "underlying", "source": "depositor", "destination": "vault", "nominal_amount": "assets", "delivered_amount": "vault_post - vault_pre", "fee_expression": null, "authority": "depositor", "state_mutations": ["mint shares"],
+    "metadata": { "confidence": "derived", "ratification": "pending", "rationale": "Transfer and share mint appear in one handler.", "source_anchors": [{ "path": "src/lib.rs", "line_start": 10, "symbol": "deposit", "excerpt": "transfer assets; mint shares" }], "verification_lanes": ["manual", "crucible"] }
+  }],
+  "quantities": [
+    { "id": "qty_vault_assets", "symbol": "assets", "unit": "underlying atoms", "scale": "underlying_mint.decimals", "rounding": "exact", "valid_range": null, "conversions": ["assets_to_shares"], "metadata": { "confidence": "semantic", "ratification": "pending", "rationale": "The mint defines the asset unit.", "source_anchors": [{ "path": "src/lib.rs", "line_start": 10, "symbol": "deposit", "excerpt": "assets" }], "verification_lanes": ["manual"] } },
+    { "id": "qty_vault_shares", "symbol": "shares", "unit": "share atoms", "scale": "share_mint.decimals", "rounding": "floor", "valid_range": null, "conversions": ["shares_to_assets"], "metadata": { "confidence": "semantic", "ratification": "pending", "rationale": "Share conversion rounds to integer atoms.", "source_anchors": [{ "path": "src/lib.rs", "line_start": 12, "symbol": "deposit", "excerpt": "let shares = assets_to_shares(assets)" }], "verification_lanes": ["manual", "crucible"] } }
+  ],
+  "paired_operations": [{ "id": "pair_vault_roundtrip", "left_operation": "deposit", "right_operation": "withdraw", "relationship": "withdraw reverses deposited shares subject to share-price rounding", "left_handlers": ["deposit"], "right_handlers": ["withdraw"], "metadata": { "confidence": "semantic", "ratification": "pending", "rationale": "Cross-handler inverse intent is domain-specific.", "source_anchors": [{ "path": "src/lib.rs", "line_start": 10, "line_end": 30, "symbol": "deposit/withdraw", "excerpt": "deposit; withdraw" }], "verification_lanes": ["manual", "crucible"] } }],
+  "lifecycle_edges": [],
+  "authority_capabilities": [],
+  "economic_equations": [{ "id": "eq_vault_conservation", "name": "vault conservation", "expression": "assets_after == assets_before + delivered - withdrawn", "scope": ["deposit", "withdraw"], "tolerance": "one share-conversion rounding unit", "unit_check": "compatible", "metadata": { "confidence": "semantic", "ratification": "pending", "rationale": "Conservation spans paired handlers.", "source_anchors": [{ "path": "src/lib.rs", "line_start": 10, "line_end": 30, "symbol": "deposit/withdraw", "excerpt": "total_assets" }], "verification_lanes": ["manual", "crucible"] } }],
+  "external_assumptions": []
+}

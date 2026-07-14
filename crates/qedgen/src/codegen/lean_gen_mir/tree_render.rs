@@ -106,6 +106,7 @@ fn render(e: &ExprTree, cx: LeanCx, inside_old: bool) -> (String, Prec) {
         ExprTree::Sum {
             binder,
             binder_ty,
+            fin_bound: _,
             body,
         } => (
             format!(

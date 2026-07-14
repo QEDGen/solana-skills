@@ -26,6 +26,11 @@ Default to one corpus entry and two independent audit runs for a regression
 check. Use three only for a high-assurance benchmark. Never use an unbounded
 run-until-dry loop.
 
+For a local domain-regression baseline, use the seven labeled, schema-valid
+fixtures under `fixtures/domain-corpus/` and run `fixtures/domain-corpus/validate.sh`
+before scoring. These fixtures exercise candidate categories, units, paired
+operations, and intended language gaps without third-party ground truth.
+
 ## Model policy
 
 The auditor's `references/model-selection.md` is the single source for

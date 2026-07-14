@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "schema_uri": "https://qedgen.dev/schemas/auditor/domain-dossier-v1.schema.json",
+  "audit_id": "corpus_amm",
+  "target": { "program_root": "fixtures/amm", "runtime": "anchor", "mode": "spec-less", "spec": null, "source_commit": null },
+  "handlers": [], "structural_candidates": [],
+  "asset_flows": [{ "id": "flow_amm_swap", "handler": "swap_a_for_b", "asset": "token_a", "source": "trader_a", "destination": "reserve_a", "nominal_amount": "amount_in", "delivered_amount": "reserve_a_post - reserve_a_pre", "fee_expression": "amount_in * fee_bps / 10000", "authority": "trader", "state_mutations": ["reserve_a", "reserve_b"], "metadata": { "confidence": "derived", "ratification": "pending", "rationale": "The handler transfers input and output assets.", "source_anchors": [{ "path": "src/lib.rs", "line_start": 20, "symbol": "swap_a_for_b", "excerpt": "transfer input; transfer output" }], "verification_lanes": ["manual", "crucible"] } }],
+  "quantities": [
+    { "id": "qty_amm_a", "symbol": "reserve_a", "unit": "token A atoms", "scale": "mint_a.decimals", "rounding": "exact", "valid_range": null, "conversions": [], "metadata": { "confidence": "derived", "ratification": "pending", "rationale": "Reserve A uses mint A atoms.", "source_anchors": [{ "path": "src/state.rs", "line_start": 5, "symbol": "reserve_a", "excerpt": "reserve_a: u64" }], "verification_lanes": ["manual"] } },
+    { "id": "qty_amm_b", "symbol": "reserve_b", "unit": "token B atoms", "scale": "mint_b.decimals", "rounding": "floor", "valid_range": null, "conversions": [], "metadata": { "confidence": "derived", "ratification": "pending", "rationale": "Swap output is floored to mint B atoms.", "source_anchors": [{ "path": "src/state.rs", "line_start": 6, "symbol": "reserve_b", "excerpt": "reserve_b: u64" }], "verification_lanes": ["manual", "crucible"] } }
+  ],
+  "paired_operations": [{ "id": "pair_amm_direction", "left_operation": "swap_a_for_b", "right_operation": "swap_b_for_a", "relationship": "opposite swap directions share reserves and fee policy", "left_handlers": ["swap_a_for_b"], "right_handlers": ["swap_b_for_a"], "metadata": { "confidence": "semantic", "ratification": "pending", "rationale": "Directional handlers form one market.", "source_anchors": [{ "path": "src/lib.rs", "line_start": 20, "line_end": 50, "symbol": "swap", "excerpt": "swap_a_for_b; swap_b_for_a" }], "verification_lanes": ["manual", "crucible"] } }],
+  "lifecycle_edges": [], "authority_capabilities": [],
+  "economic_equations": [{ "id": "eq_amm_product", "name": "constant product", "expression": "reserve_a_after * reserve_b_after >= reserve_a_before * reserve_b_before", "scope": ["swap_a_for_b", "swap_b_for_a"], "tolerance": "integer rounding and configured fee", "unit_check": "compatible", "metadata": { "confidence": "semantic", "ratification": "pending", "rationale": "AMM curve intent is not established by transfer syntax alone.", "source_anchors": [{ "path": "src/math.rs", "line_start": 8, "symbol": "quote", "excerpt": "k = reserve_a * reserve_b" }], "verification_lanes": ["manual", "crucible"] } }],
+  "external_assumptions": []
+}

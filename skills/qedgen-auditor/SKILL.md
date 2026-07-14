@@ -99,13 +99,18 @@ command. After ratification, require `spec-handoff.json` against
 `<skill-root>/schemas/spec-handoff.schema.json`. It separates structural,
 domain, and regression layers, links clauses to stable provenance IDs, and
 records language gaps instead of flattening unsupported domain semantics into
-comments. Validate the artifacts with:
+comments. Also require `domain-sequences.json` against
+`<skill-root>/schemas/domain-sequences.schema.json`. Use its ratified
+setup/forward/reverse/teardown plans as stateful coverage targets, but do not
+claim exact-sequence coverage while any `unresolved_parameters` remain or the
+runner has not replayed that plan. Validate the artifacts with:
 
 ```bash
 <skill-root>/scripts/check-domain-artifacts.sh \
   --dossier .qed/audit/<timestamp>/domain-dossier.json \
   --manifest .qed/audit/<timestamp>/run-manifest.json \
-  --handoff .qed/audit/<timestamp>/spec-handoff.json
+  --handoff .qed/audit/<timestamp>/spec-handoff.json \
+  --sequences .qed/audit/<timestamp>/domain-sequences.json
 ```
 
 Read only the relevant detailed references:

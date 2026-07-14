@@ -65,6 +65,7 @@
         "domain_dossier_markdown": { "type": "string", "minLength": 1 },
         "ratified_intent": { "type": ["string", "null"] },
         "domain_interview": { "type": ["string", "null"] },
+        "domain_sequences": { "type": ["string", "null"] },
         "spec_handoff": { "type": ["string", "null"] },
         "report": { "type": ["string", "null"] },
         "suppressions": { "type": ["string", "null"] }

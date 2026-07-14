@@ -63,6 +63,12 @@ Resolve every `language_gaps[]` entry by extending the language or retaining
 an explicit documentary property with a manual lane; never silently count it
 as covered.
 
+Finite aggregate conservation is executable when the binder resolves to
+`Fin[N]` (directly or through an alias): use `sum i : Index, ...`, including
+inside `old(...)` for pre/post properties. Unbounded sums remain a visible
+language gap. `mul_div_floor` and `mul_div_ceil` are executable rounding
+constructs; only unsupported policies such as ties-to-even remain documentary.
+
 ---
 
 ## How each entry reads

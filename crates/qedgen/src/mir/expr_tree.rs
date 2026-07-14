@@ -78,6 +78,9 @@ pub enum ExprTree {
         binder: Symbol,
         /// Binder type in source-DSL form (`AccountIdx`, `Fin[N]`, …).
         binder_ty: Symbol,
+        /// Resolved finite bound for Rust/Kani/proptest lowering. `None`
+        /// keeps non-finite sums explicit and unsupported.
+        fin_bound: Option<Symbol>,
         body: Box<ExprTree>,
     },
     /// `forall i : T, body` / `exists i : T, body`.

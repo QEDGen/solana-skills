@@ -82,6 +82,7 @@ for required in \
   "$skill_root/schemas/domain-dossier.schema.json" \
   "$skill_root/schemas/audit-run-manifest.schema.json" \
   "$skill_root/schemas/spec-handoff.schema.json" \
+  "$skill_root/schemas/domain-sequences.schema.json" \
   "$skill_root/scripts/check-domain-artifacts.sh"; do
   if [[ ! -f "$required" ]]; then
     echo "auditor domain artifact schema is missing: $required" >&2

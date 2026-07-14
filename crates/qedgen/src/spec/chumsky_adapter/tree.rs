@@ -151,6 +151,7 @@ fn build(e: &Expr, cx: &TreeCx, shadow: &mut Vec<String>) -> ExprTree {
         } => ExprTree::Sum {
             binder: binder.clone(),
             binder_ty: binder_ty.clone(),
+            fin_bound: cx.env.fin_bound(binder_ty),
             body: under(binder, body, cx, shadow),
         },
         Expr::Quant {

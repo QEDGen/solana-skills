@@ -23,6 +23,7 @@ pub(crate) mod crucible_brownfield;
 pub(crate) mod crucible_probe;
 pub(crate) mod domain_extract;
 pub(crate) mod domain_interview;
+pub(crate) mod domain_sequence;
 pub(crate) mod handler_intent;
 pub(crate) mod lifecycle_probe;
 pub(crate) mod paired_validator_probe;

@@ -45,6 +45,9 @@ pub struct RatifyReport {
     /// Machine-readable three-layer handoff. Present when the audit working
     /// set contains a domain dossier.
     pub spec_handoff_path: Option<PathBuf>,
+    /// Stateful coverage targets synthesized from ratified paired operations
+    /// and lifecycle edges.
+    pub domain_sequences_path: Option<PathBuf>,
 }
 
 pub fn run(opts: &RatifyOpts) -> Result<RatifyReport> {
@@ -168,6 +171,7 @@ pub fn run(opts: &RatifyOpts) -> Result<RatifyReport> {
     persist_domain_ratifications(&opts.audit_dir, &ratifications)?;
     persist_domain_interview_answers(&opts.audit_dir)?;
     let spec_handoff_path = write_spec_handoff(&opts.audit_dir, &spec_path)?;
+    let domain_sequences_path = write_domain_sequences(&opts.audit_dir)?;
 
     Ok(RatifyReport {
         accepted: accepted_program.len()
@@ -180,7 +184,37 @@ pub fn run(opts: &RatifyOpts) -> Result<RatifyReport> {
         scoping_path,
         findings_paths,
         spec_handoff_path,
+        domain_sequences_path,
     })
+}
+
+fn write_domain_sequences(audit_dir: &Path) -> Result<Option<PathBuf>> {
+    let dossier_path = audit_dir.join("domain-dossier.json");
+    if !dossier_path.exists() {
+        return Ok(None);
+    }
+    let dossier: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&dossier_path)
+            .with_context(|| format!("reading {}", dossier_path.display()))?,
+    )?;
+    let sequences = super::domain_sequence::synthesize_domain_sequences(&dossier)?;
+    let path = audit_dir.join("domain-sequences.json");
+    std::fs::write(
+        &path,
+        format!("{}\n", serde_json::to_string_pretty(&sequences)?),
+    )?;
+    let manifest_path = audit_dir.join("run-manifest.json");
+    if manifest_path.exists() {
+        let mut manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_path)?)?;
+        manifest["artifacts"]["domain_sequences"] =
+            serde_json::Value::String("domain-sequences.json".to_string());
+        std::fs::write(
+            &manifest_path,
+            format!("{}\n", serde_json::to_string_pretty(&manifest)?),
+        )?;
+    }
+    Ok(Some(path))
 }
 
 fn persist_domain_interview_answers(audit_dir: &Path) -> Result<()> {
@@ -827,6 +861,10 @@ mod tests {
             audit.join("domain-dossier.json"),
             serde_json::to_string_pretty(&serde_json::json!({
                 "structural_candidates": [{ "id": cid, "ratification": "pending", "rationale": null }],
+                "handlers": [
+                    { "name": "deposit", "accounts_type": "Deposit", "args": [{ "name": "amount", "qedspec_type": "U64" }] },
+                    { "name": "withdraw", "accounts_type": "Withdraw", "args": [{ "name": "shares", "qedspec_type": "U64" }] }
+                ],
                 "asset_flows": [],
                 "quantities": [{
                     "id": "qty_fee",
@@ -834,7 +872,12 @@ mod tests {
                     "rounding": "unknown",
                     "metadata": { "ratification": "pending", "verification_lanes": ["manual", "crucible"] }
                 }],
-                "paired_operations": [],
+                "paired_operations": [{
+                    "id": "pair_deposit_withdraw",
+                    "left_handlers": ["deposit"],
+                    "right_handlers": ["withdraw"],
+                    "metadata": { "ratification": "user" }
+                }],
                 "lifecycle_edges": [],
                 "authority_capabilities": [],
                 "economic_equations": [],
@@ -874,6 +917,16 @@ mod tests {
         );
         let spec = std::fs::read_to_string(&report.spec_path)?;
         assert!(spec.contains(&format!("provenance: domain-candidate {}", cid)));
+        let sequences_path = report.domain_sequences_path.expect("domain sequences");
+        let sequences: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(sequences_path)?)?;
+        assert_eq!(sequences["plans"][0]["kind"], "paired_round_trip");
+        assert_eq!(sequences["plans"][0]["forward"][0]["handler"], "deposit");
+        assert_eq!(sequences["plans"][0]["reverse"][0]["handler"], "withdraw");
+        assert!(!sequences["plans"][0]["unresolved_parameters"]
+            .as_array()
+            .unwrap()
+            .is_empty());
         let rerun = run(&RatifyOpts {
             audit_dir: audit.clone(),
             spec_out: Some(dir.path().join("vault.qedspec")),

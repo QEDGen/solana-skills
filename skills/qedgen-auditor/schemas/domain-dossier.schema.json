@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://qedgen.dev/schemas/auditor/domain-dossier-v1.schema.json",
   "title": "QEDGen Auditor Domain Dossier",
-  "$comment": "Stable candidate IDs must be unique across all six candidate arrays; scripts/check-auditor-domain-artifacts.sh enforces this cross-array constraint.",
+  "$comment": "Stable candidate IDs must be unique across all seven domain candidate arrays plus structural candidates; scripts/check-auditor-domain-artifacts.sh enforces this cross-array constraint.",
   "type": "object",
   "additionalProperties": false,
   "required": [

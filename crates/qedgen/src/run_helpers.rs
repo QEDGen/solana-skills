@@ -364,6 +364,7 @@ fn write_domain_artifact_seeds(
             "domain_dossier_markdown": "domain-dossier.md",
             "ratified_intent": null,
             "domain_interview": "domain-interview.json",
+            "domain_sequences": null,
             "spec_handoff": null,
             "report": null,
             "suppressions": null,

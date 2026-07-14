@@ -1278,6 +1278,7 @@ ghost total : U64 {
   init { 0 }
   on mint { total := state.total + amount }
 }
+
 handler mint (amount : U64) {
   effect { balance := state.balance + amount }
 }
@@ -1310,6 +1311,60 @@ property p : state.total == state.balance preserved_by all
         .rust_expression
         .as_deref()
         .is_some_and(|r| r.contains("s.total")));
+}
+
+#[test]
+fn bounded_sum_alias_lowers_to_self_contained_binary_rust() {
+    let src = r#"
+spec SumVault
+const MAX = 8
+type Slot = Fin[MAX]
+state { balances : Map[MAX] U64 }
+type Error | E
+handler rebalance { }
+property conservation :
+  sum i : Slot, state.balances[i] >= sum i : Slot, old(state.balances[i])
+  preserved_by [rebalance]
+"#;
+    let typed = crate::chumsky_parser::parse(src).expect("parse bounded sum");
+    let spec = adapt(&typed);
+    let property = spec
+        .properties
+        .iter()
+        .find(|property| property.name == "conservation")
+        .expect("conservation property");
+    assert_eq!(property.class, crate::check::PropertyClass::Binary);
+    let rust = property
+        .rust_expression
+        .as_deref()
+        .expect("bounded sum must have Rust lowering");
+    assert!(rust.contains("0..(MAX as usize)"), "{rust}");
+    assert!(rust.contains("post.balances"), "{rust}");
+    assert!(rust.contains("pre.balances"), "{rust}");
+    assert!(!rust.contains("sum_over"), "{rust}");
+    assert!(
+        !rust.contains(crate::check::QEDGEN_UNSUPPORTED_MARKER),
+        "{rust}"
+    );
+}
+
+#[test]
+fn unbounded_sum_is_explicitly_unsupported_in_rust() {
+    let src = r#"
+spec UnboundedSum
+state { total : U64 }
+type Error | E
+handler tick { }
+property bad_sum : sum i : U64, state.total >= 0 preserved_by [tick]
+"#;
+    let typed = crate::chumsky_parser::parse(src).expect("parse unbounded sum");
+    let spec = adapt(&typed);
+    let rust = spec.properties[0]
+        .rust_expression
+        .as_deref()
+        .expect("unsupported sentinel retained for diagnostics");
+    assert!(rust.contains("QEDGEN_UNSUPPORTED_SUM"), "{rust}");
+    assert!(!rust.contains("sum_over"), "{rust}");
 }
 
 // ========================================================================
