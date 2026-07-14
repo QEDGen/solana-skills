@@ -4,11 +4,10 @@
 > pre-implementation plan, kept for rationale. As shipped: the category and
 > manual-pass material landed as a single `references/audit-handbook.md`
 > (not the `category-catalog.md` / `manual-review-passes.md` named in §11),
-> and `references/model-selection.md` was added; preflight discovers
-> `*.qedspec` and Cargo manifests but not `qed.toml`, and rejects multi-spec
-> (not yet multi-program) ambiguity; the compile gate is a synchronous
-> `--compile` flag rather than an async handle; the CLI-contract check is a
-> token-level grep, not schema or snippet validation.
+> and `references/model-selection.md` was added; the compile gate is a
+> synchronous `--compile` flag rather than an async handle; the CLI-contract
+> check asserts clap field definitions in `cli.rs`, not full schema or
+> snippet validation.
 
 ## Goal
 

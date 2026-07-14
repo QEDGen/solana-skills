@@ -64,28 +64,61 @@ else
   fi
 fi
 
-manifest="$root/Cargo.toml"
+runtime_dep_regex='(^|[^[:alnum:]_-])(anchor-lang|pinocchio|quasar-lang|solana-program)([^[:alnum:]_-]|$)'
+
+program_root="$root"
+manifest=""
+is_program_manifest() {
+  grep -q '^\[package\]' "$1" && grep -Eq "$runtime_dep_regex" "$1"
+}
+
+if [[ -f "$root/Cargo.toml" ]] && is_program_manifest "$root/Cargo.toml"; then
+  manifest="$root/Cargo.toml"
+else
+  candidates=()
+  while IFS= read -r m; do
+    is_program_manifest "$m" && candidates+=("$m")
+  done < <(find "$root" -type f -name Cargo.toml -not -path '*/target/*' -not -path '*/.git/*' | sort)
+  if [[ ${#candidates[@]} -eq 1 ]]; then
+    manifest="${candidates[0]}"
+    program_root="$(cd "$(dirname "$manifest")" && pwd -P)"
+  elif [[ ${#candidates[@]} -gt 1 ]]; then
+    echo "error: multiple program crates found; pass --root pointing at one" >&2
+    printf 'candidate_program=%s\n' "${candidates[@]}" >&2
+    exit 2
+  elif [[ -f "$root/Cargo.toml" ]]; then
+    manifest="$root/Cargo.toml"
+  fi
+fi
+
 runtime="unknown"
-if [[ -f "$manifest" ]]; then
+if [[ -n "$manifest" ]]; then
   if grep -Eq '(^|[^[:alnum:]_-])anchor-lang([^[:alnum:]_-]|$)' "$manifest"; then
     runtime="anchor"
   elif grep -Eq '(^|[^[:alnum:]_-])pinocchio([^[:alnum:]_-]|$)' "$manifest"; then
     runtime="pinocchio"
-  elif grep -Eq 'quasar-lang' "$manifest" || grep -R -q --include='*.rs' --exclude-dir=target --exclude-dir=.git '#\[qed(verified' "$root" 2>/dev/null; then
+  elif grep -Eq 'quasar-lang' "$manifest" || grep -R -q --include='*.rs' --exclude-dir=target --exclude-dir=.git '#\[qed(verified' "$program_root" 2>/dev/null; then
     runtime="qedgen-codegen"
   elif grep -Eq '(^|[^[:alnum:]_-])solana-program([^[:alnum:]_-]|$)' "$manifest"; then
     runtime="native-rust"
   fi
 fi
 
-rust_source="$(find "$root" -type f -name '*.rs' -not -path '*/target/*' -print -quit)"
-asm_source="$(find "$root" -type f -name '*.s' -not -path '*/target/*' -print -quit)"
+rust_source="$(find "$program_root" -type f -name '*.rs' -not -path '*/target/*' -print -quit)"
+asm_source="$(find "$program_root" -type f -name '*.s' -not -path '*/target/*' -print -quit)"
 if [[ -n "$asm_source" && -z "$rust_source" ]]; then
   runtime="sbpf-assembly"
 fi
 
 mode="spec-less"
 [[ -n "$spec" ]] && mode="spec-aware"
+
+qed_manifest=""
+if [[ -n "$spec" && -f "$(dirname "$spec")/qed.toml" ]]; then
+  qed_manifest="$(dirname "$spec")/qed.toml"
+elif [[ -f "$root/qed.toml" ]]; then
+  qed_manifest="$root/qed.toml"
+fi
 
 qedgen_status="missing"
 qedgen_version=""
@@ -99,10 +132,12 @@ if command -v "$qedgen_bin" >/dev/null 2>&1 || [[ -x "$qedgen_bin" ]]; then
 fi
 
 echo "target_root=$root"
+echo "program_root=$program_root"
 echo "skill_version=$skill_version"
 echo "runtime=$runtime"
 echo "mode=$mode"
 echo "spec=${spec:-none}"
+echo "qed_manifest=${qed_manifest:-none}"
 echo "qedgen_status=$qedgen_status"
 echo "qedgen_version=${qedgen_version:-unknown}"
 echo "minimum_qedgen_version=$MIN_QEDGEN_VERSION"
@@ -111,14 +146,14 @@ cargo +nightly miri --version >/dev/null 2>&1 && echo "miri=ready" || echo "miri
 
 if [[ "$runtime" == "sbpf-assembly" && "$mode" == "spec-less" ]]; then
   echo "audit_capability=unsupported-source-audit"
-elif [[ "$qedgen_status" == "ready" ]]; then
+elif [[ "$qedgen_status" == "ready" && ( "$runtime" != "unknown" || "$mode" == "spec-aware" ) ]]; then
   echo "audit_capability=full"
 else
   echo "audit_capability=read-only"
 fi
 
 if [[ $run_compile -eq 1 ]]; then
-  if [[ ! -f "$manifest" ]]; then
+  if [[ -z "$manifest" || ! -f "$manifest" ]]; then
     echo "compile_status=not-applicable"
   elif cargo check --quiet --manifest-path "$manifest"; then
     echo "compile_status=clean"

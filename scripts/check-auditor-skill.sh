@@ -73,9 +73,9 @@ while IFS=: read -r source _ token; do
 done < <(find "$skill_root" -type f -name '*.md' -print0 | \
   xargs -0 grep -HnEo '\]\([^):#]+\.md\)' || true)
 
-for command in 'probe-repros' 'emit-spec-candidates' 'bootstrap' 'fuzz' 'frozen'; do
-  if ! grep -R -q -- "$command" "$repo_root/crates/qedgen/src/cli.rs" "$repo_root/crates/qedgen/src"; then
-    echo "documented CLI surface is missing from implementation: $command" >&2
+for field in 'probe_repros' 'emit_spec_candidates' 'bootstrap' 'fuzz' 'frozen'; do
+  if ! grep -Eq "^[[:space:]]*${field}:" "$repo_root/crates/qedgen/src/cli.rs"; then
+    echo "documented CLI flag is not a clap field in cli.rs: --${field//_/-}" >&2
     fail=1
   fi
 done
