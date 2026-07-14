@@ -8,7 +8,7 @@ use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::check::ParsedSpec;
+use crate::check::{ParsedHandlerAccount, ParsedSpec};
 
 use super::domain_sequence::UnresolvedParameterKind;
 use super::domain_sequence_binding::{
@@ -52,10 +52,7 @@ pub fn collapse_account_binding_overlay(
     sequences: &ResolvedDomainSequenceDocument,
 ) -> Result<AccountBindingOverlay> {
     let inventory = handler_account_inventory(spec)?;
-    let fixture_inventory: BTreeSet<_> = inventory
-        .values()
-        .flat_map(|handler| handler.bindable.iter().cloned())
-        .collect();
+    let fixture_inventory = fixture_account_inventory(&inventory);
     let mut collapsed: BTreeMap<String, HandlerAccountOverlay> = BTreeMap::new();
 
     for plan in &sequences.plans {
@@ -97,8 +94,17 @@ pub fn collapse_account_binding_overlay(
 
 #[derive(Debug)]
 struct HandlerAccountInventory {
-    bindable: BTreeSet<String>,
+    bindable: BTreeMap<String, AccountSemanticShape>,
     generator_managed: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AccountSemanticShape {
+    is_signer: bool,
+    is_writable: bool,
+    is_program: bool,
+    account_type: Option<String>,
+    imported_namespace: Option<String>,
 }
 
 fn handler_account_inventory(
@@ -110,7 +116,7 @@ fn handler_account_inventory(
             bail!("parsed spec contains a handler with an empty name");
         }
         let mut accounts = BTreeSet::new();
-        let mut bindable = BTreeSet::new();
+        let mut bindable = BTreeMap::new();
         let mut generator_managed = BTreeSet::new();
         for account in &handler.accounts {
             if account.name.trim().is_empty() {
@@ -129,7 +135,7 @@ fn handler_account_inventory(
             if account.default_pubkey.is_some() || account.pda_seeds.is_some() {
                 generator_managed.insert(account.name.clone());
             } else {
-                bindable.insert(account.name.clone());
+                bindable.insert(account.name.clone(), AccountSemanticShape::from(account));
             }
         }
         if handlers
@@ -148,9 +154,48 @@ fn handler_account_inventory(
     Ok(handlers)
 }
 
+impl From<&ParsedHandlerAccount> for AccountSemanticShape {
+    fn from(account: &ParsedHandlerAccount) -> Self {
+        Self {
+            is_signer: account.is_signer,
+            is_writable: account.is_writable,
+            is_program: account.is_program,
+            account_type: account.account_type.clone(),
+            imported_namespace: account.imported_namespace.clone(),
+        }
+    }
+}
+
+fn fixture_account_inventory(
+    inventory: &BTreeMap<String, HandlerAccountInventory>,
+) -> BTreeMap<String, Vec<AccountSemanticShape>> {
+    let mut fixtures: BTreeMap<String, Vec<AccountSemanticShape>> = BTreeMap::new();
+    for handler in inventory.values() {
+        for (name, shape) in &handler.bindable {
+            fixtures
+                .entry(name.clone())
+                .or_default()
+                .push(shape.clone());
+        }
+    }
+    for shapes in fixtures.values_mut() {
+        shapes.sort_by_key(|shape| {
+            (
+                shape.is_signer,
+                shape.is_writable,
+                shape.is_program,
+                shape.account_type.clone(),
+                shape.imported_namespace.clone(),
+            )
+        });
+        shapes.dedup();
+    }
+    fixtures
+}
+
 fn collapse_action(
     inventory: &BTreeMap<String, HandlerAccountInventory>,
-    fixture_inventory: &BTreeSet<String>,
+    fixture_inventory: &BTreeMap<String, Vec<AccountSemanticShape>>,
     collapsed: &mut BTreeMap<String, HandlerAccountOverlay>,
     plan_id: &str,
     locator: &ActionLocator,
@@ -177,6 +222,7 @@ fn collapse_action(
     }
 
     let mut action_mapping = BTreeMap::new();
+    let mut reverse_mapping = BTreeMap::new();
     for binding in account_bindings {
         validate_binding_provenance(plan_id, locator, action, binding)?;
         let object = binding.value.as_object().ok_or_else(|| {
@@ -193,12 +239,12 @@ fn collapse_action(
                     action.handler
                 );
             }
-            if !declared.bindable.contains(account) {
+            let Some(source_shape) = declared.bindable.get(account) else {
                 bail!(
                     "account binding key `{account}` is not declared by handler `{}`",
                     action.handler
                 );
-            }
+            };
             let fixture = target.as_str().ok_or_else(|| {
                 anyhow::anyhow!(
                     "account binding target for `{}.{account}` must be a fixture identifier string",
@@ -206,10 +252,28 @@ fn collapse_action(
                 )
             })?;
             let fixture_name = validate_fixture_identifier(fixture)?;
-            if !fixture_inventory.contains(fixture_name) {
+            let Some(target_shapes) = fixture_inventory.get(fixture_name) else {
                 bail!(
                     "fixture target `{fixture}` is absent from the parsed spec fixture inventory"
                 );
+            };
+            validate_fixture_compatibility(
+                &action.handler,
+                account,
+                source_shape,
+                fixture,
+                target_shapes,
+            )?;
+            if let Some(previous_account) =
+                reverse_mapping.insert(fixture.to_string(), account.clone())
+            {
+                if previous_account != *account {
+                    bail!(
+                        "account binding target `{fixture}` is aliased by both `{}.{previous_account}` and `{}.{account}` in one action",
+                        action.handler,
+                        action.handler
+                    );
+                }
             }
             if let Some(previous) = action_mapping.insert(account.clone(), fixture.to_string()) {
                 if previous != fixture {
@@ -223,8 +287,9 @@ fn collapse_action(
     }
 
     let supplied: BTreeSet<_> = action_mapping.keys().cloned().collect();
-    if supplied != declared.bindable {
-        let missing: Vec<_> = declared.bindable.difference(&supplied).cloned().collect();
+    let required: BTreeSet<_> = declared.bindable.keys().cloned().collect();
+    if supplied != required {
+        let missing: Vec<_> = required.difference(&supplied).cloned().collect();
         bail!(
             "handler `{}` action {plan_id}/{:?}[{}] is missing declared account bindings: {}",
             action.handler,
@@ -268,6 +333,48 @@ fn collapse_action(
             });
     }
     Ok(())
+}
+
+fn validate_fixture_compatibility(
+    handler: &str,
+    account: &str,
+    source: &AccountSemanticShape,
+    fixture: &str,
+    candidates: &[AccountSemanticShape],
+) -> Result<()> {
+    if candidates
+        .iter()
+        .any(|candidate| candidate_compatible(source, candidate))
+    {
+        return Ok(());
+    }
+
+    bail!(
+        "fixture target `{fixture}` is not semantically compatible with `{handler}.{account}`; signer/writable/program/type constraints do not match"
+    );
+}
+
+fn candidate_compatible(source: &AccountSemanticShape, candidate: &AccountSemanticShape) -> bool {
+    if source.is_signer && !candidate.is_signer {
+        return false;
+    }
+    if source.is_writable && !candidate.is_writable {
+        return false;
+    }
+    if source.is_program != candidate.is_program {
+        return false;
+    }
+    if let Some(source_type) = &source.account_type {
+        if candidate.account_type.as_ref() != Some(source_type) {
+            return false;
+        }
+    }
+    if let Some(source_namespace) = &source.imported_namespace {
+        if candidate.imported_namespace.as_ref() != Some(source_namespace) {
+            return false;
+        }
+    }
+    true
 }
 
 fn validate_binding_provenance(
@@ -425,14 +532,45 @@ mod tests {
 
     #[test]
     fn rejects_conflicts_across_plans() {
+        let mut spec = spec();
+        spec.handlers.push(ParsedHandler {
+            name: "fixture_inventory".to_string(),
+            accounts: vec![ParsedHandlerAccount {
+                name: "vault_b".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
         let input = resolved(vec![
             plan("plan-a", "fixture:vault"),
-            plan("plan-b", "fixture:authority"),
+            plan("plan-b", "fixture:vault_b"),
         ]);
-        assert!(collapse_account_binding_overlay(&spec(), &input)
+        assert!(collapse_account_binding_overlay(&spec, &input)
             .unwrap_err()
             .to_string()
             .contains("across sequence actions"));
+    }
+
+    #[test]
+    fn rejects_aliasing_one_fixture_into_multiple_action_accounts() {
+        let input = resolved(vec![plan("plan-a", "fixture:authority")]);
+        assert!(collapse_account_binding_overlay(&spec(), &input)
+            .unwrap_err()
+            .to_string()
+            .contains("aliased by both"));
+    }
+
+    #[test]
+    fn rejects_semantically_incompatible_fixture_targets() {
+        let mut spec = spec();
+        spec.handlers[0].accounts[0].is_writable = true;
+        spec.handlers[0].accounts[0].account_type = Some("token".to_string());
+
+        let input = resolved(vec![plan("plan-a", "fixture:authority")]);
+        assert!(collapse_account_binding_overlay(&spec, &input)
+            .unwrap_err()
+            .to_string()
+            .contains("not semantically compatible"));
     }
 
     #[test]
