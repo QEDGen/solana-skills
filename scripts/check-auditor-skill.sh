@@ -81,6 +81,7 @@ done
 for required in \
   'Asset-flow graph' \
   'Quantity and unit table' \
+  'Lifecycle graph' \
   'Authority-capability matrix' \
   'Economic equations' \
   'Probe-failure behavior'; do

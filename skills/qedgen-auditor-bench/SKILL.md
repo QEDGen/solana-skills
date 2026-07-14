@@ -165,7 +165,8 @@ When the corpus entry includes domain expectations, also emit:
   lane's observable coverage).
 
 Run a probe-failure variant for local or sanitized fixtures by disabling the
-ordinary probe while leaving source readable. Require a completed domain
+ordinary probe while leaving source readable — set `QEDGEN_BIN` to a stub
+executable that exits nonzero so preflight reports QEDGen as missing. Require a completed domain
 dossier, explicit blocked-lane status, no clean-audit claim, and resumable
 verification commands. Score this separately from vulnerability recall so an
 intentional tooling fault is not counted as a missed finding.

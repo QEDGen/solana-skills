@@ -121,6 +121,10 @@ threats, and intentional exceptions after the first MED+ finding, or after the
 autonomous pass finishes dry or probe-blocked. Keep unratified semantic claims
 as hypotheses.
 
+Phase numbers refer to the orchestration in
+[manual review passes](references/manual-review-passes.md): Phase 1 autonomous
+discovery, Phase 2 intent interview, Phase 3 refined second wave.
+
 Crucible has three bounded entry points:
 
 1. Start spec-less protocol mode during Phase 1 as soon as supported runtime
