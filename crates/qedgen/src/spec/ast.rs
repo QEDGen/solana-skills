@@ -863,6 +863,14 @@ pub enum Expr {
         b: Box<Node<Expr>>,
         d: Box<Node<Expr>>,
     },
+    /// `mul_div_round_half_up(a, b, d)` — nearest integer to `(a * b) / d`,
+    /// with exact half-way cases rounded upward. Intended for non-negative
+    /// quantities with `d > 0`.
+    MulDivRoundHalfUp {
+        a: Box<Node<Expr>>,
+        b: Box<Node<Expr>>,
+        d: Box<Node<Expr>>,
+    },
     /// `contains(coll, elem)` — collection membership. Rust `coll.contains(&elem)`,
     /// Lean `elem ∈ coll`. Produces a `Bool`. Built-in (not an `in` operator)
     /// because `in` is a reserved keyword. Used for `Vec` state fields
@@ -1008,7 +1016,9 @@ pub fn for_each_child_with_binder<'a>(
             f(lhs, None);
             f(rhs, None);
         }
-        Expr::MulDivFloor { a, b, d } | Expr::MulDivCeil { a, b, d } => {
+        Expr::MulDivFloor { a, b, d }
+        | Expr::MulDivCeil { a, b, d }
+        | Expr::MulDivRoundHalfUp { a, b, d } => {
             f(a, None);
             f(b, None);
             f(d, None);

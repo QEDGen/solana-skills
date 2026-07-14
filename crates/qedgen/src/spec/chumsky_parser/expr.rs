@@ -166,10 +166,16 @@ pub(super) fn expr<'a>() -> impl Parser<'a, &'a str, Node<Expr>, Err<'a>> + Clon
             .then_ignore(just(')'))
             .map_with(|inner, e| Node::new(Expr::Paren(Box::new(inner)), e.span().into_range()));
 
-        // mul_div_floor(a, b, d) / mul_div_ceil(a, b, d) — built-in triads
+        // Scaled-integer built-in triads.
         // for scaled integer math. The VM has no native fixed-point; this is
         // the canonical `widen → multiply → floor-divide by scale` pattern.
-        let mdf_args = |kw_name: &'static str, is_ceil: bool| {
+        #[derive(Clone, Copy)]
+        enum MulDivMode {
+            Floor,
+            Ceil,
+            RoundHalfUp,
+        }
+        let mdf_args = |kw_name: &'static str, mode: MulDivMode| {
             let e1 = expr.clone();
             let e2 = expr.clone();
             let e3 = expr.clone();
@@ -189,24 +195,29 @@ pub(super) fn expr<'a>() -> impl Parser<'a, &'a str, Node<Expr>, Err<'a>> + Clon
                 .then_ignore(wsc())
                 .then_ignore(just(')'))
                 .map_with(move |((a, b), d), e| {
-                    let node = if is_ceil {
-                        Expr::MulDivCeil {
+                    let node = match mode {
+                        MulDivMode::Ceil => Expr::MulDivCeil {
                             a: Box::new(a),
                             b: Box::new(b),
                             d: Box::new(d),
-                        }
-                    } else {
-                        Expr::MulDivFloor {
+                        },
+                        MulDivMode::Floor => Expr::MulDivFloor {
                             a: Box::new(a),
                             b: Box::new(b),
                             d: Box::new(d),
-                        }
+                        },
+                        MulDivMode::RoundHalfUp => Expr::MulDivRoundHalfUp {
+                            a: Box::new(a),
+                            b: Box::new(b),
+                            d: Box::new(d),
+                        },
                     };
                     Node::new(node, e.span().into_range())
                 })
         };
-        let mul_div_floor_atom = mdf_args("mul_div_floor", false);
-        let mul_div_ceil_atom = mdf_args("mul_div_ceil", true);
+        let mul_div_floor_atom = mdf_args("mul_div_floor", MulDivMode::Floor);
+        let mul_div_ceil_atom = mdf_args("mul_div_ceil", MulDivMode::Ceil);
+        let mul_div_round_half_up_atom = mdf_args("mul_div_round_half_up", MulDivMode::RoundHalfUp);
 
         // len(coll) — collection length → `Expr::Len`.
         let len_atom = {
@@ -476,6 +487,7 @@ pub(super) fn expr<'a>() -> impl Parser<'a, &'a str, Node<Expr>, Err<'a>> + Clon
             current_epoch_atom,
             mul_div_floor_atom,
             mul_div_ceil_atom,
+            mul_div_round_half_up_atom,
             contains_atom,
             len_atom,
             match_expr,

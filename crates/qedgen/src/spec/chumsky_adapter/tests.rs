@@ -1707,6 +1707,34 @@ handler accept (total : U64) (fee_bps : U64) : State.Active -> State.Active {
     );
 }
 
+#[test]
+fn mul_div_round_half_up_narrows_to_u64_at_call_site() {
+    let src = r#"spec FeeMath
+program_id "11111111111111111111111111111111"
+type State = { total_collected : U64 }
+
+handler accept (total : U64) (rate : U64) : State -> State {
+  permissionless
+  let rounded = mul_div_round_half_up(total, rate, 10_000)
+  effect { total_collected += rounded }
+}
+"#;
+    let spec = parse_str(src).expect("parse");
+    let (_, lean_rhs, rust_rhs) = spec.handlers[0]
+        .let_bindings
+        .iter()
+        .find(|(name, _, _)| name == "rounded")
+        .expect("rounded binding");
+    assert!(
+        rust_rhs.contains("mul_div_round_half_up_u128") && rust_rhs.contains("as u64"),
+        "half-up variant must use the helper and narrow; got: {rust_rhs}"
+    );
+    assert!(
+        lean_rhs.contains("/ 2"),
+        "Lean rendering must encode the half-up bias: {lean_rhs}"
+    );
+}
+
 /// The let-binding narrow gate peels through `Paren` wrappers so the
 /// author-written `let X = (mul_div_floor(...))` shape gets the same
 /// narrowing as the bare form. Mirrors the `rust_infer_kind` peel

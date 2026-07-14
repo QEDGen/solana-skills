@@ -393,13 +393,13 @@ fn domain_authoring_guidance(kind: &str, item: &serde_json::Value) -> serde_json
                 "floor" => "mul_div_floor(<amount>, <rate>, <denominator>)",
                 "ceil" => "mul_div_ceil(<amount>, <rate>, <denominator>)",
                 "exact" => "<checked arithmetic expression>",
-                "nearest" => "<unsupported nearest-rounding expression>",
+                "nearest" => "<ratify tie policy: mul_div_round_half_up(<amount>, <rate>, <denominator>) or documentary alternative>",
                 _ => "<rounding policy must be ratified>",
             };
             (
-                vec!["dimension", "const", "requires", "mul_div_floor", "mul_div_ceil"],
+                vec!["dimension", "const", "requires", "mul_div_floor", "mul_div_ceil", "mul_div_round_half_up"],
                 format!("dimension <Unit> = U64\nconst <SCALE> = <ratified scale>\nlet <quantity> = {expression}"),
-                vec!["Declare each ratified nominal unit with `dimension`; literals remain polymorphic, while cross-unit arithmetic and comparisons fail typechecking."],
+                vec!["Declare each ratified nominal unit with `dimension`; literals remain polymorphic, while cross-unit arithmetic and comparisons fail typechecking.", "Floor, ceiling, and nearest-with-ties-up are executable; explicitly ratify the tie policy before using a nearest mode."],
             )
         }
         "paired_operation" => (
@@ -418,7 +418,7 @@ fn domain_authoring_guidance(kind: &str, item: &serde_json::Value) -> serde_json
             vec!["Choose dotted `auth` only when one signer is unambiguous; otherwise write the explicit key equality."],
         ),
         "economic_equation" => (
-            vec!["dimension", "property", "invariant", "sum", "mul_div_floor", "mul_div_ceil"],
+            vec!["dimension", "property", "invariant", "sum", "mul_div_floor", "mul_div_ceil", "mul_div_round_half_up"],
             "dimension <Unit> = U64\nproperty <equation_name> : <ratified equation> preserved_by [<handlers>]".to_string(),
             vec!["Declare nominal units before authoring the equation; finite sums, floor/ceiling arithmetic, and dimensional compatibility are executable."],
         ),
@@ -463,7 +463,7 @@ fn current_language_support(reason: &str) -> &'static str {
             "Declare `dimension Name = U64` (or another integer base); the checker enforces nominal compatibility and codegen erases the name to its integer ABI."
         }
         "rounding_mode_nearest" => {
-            "`mul_div_floor` and `mul_div_ceil` are executable; nearest and tie-breaking modes have no builtin."
+            "`mul_div_round_half_up` is executable for nearest-with-ties-up; a generic `nearest` dossier value still requires explicit tie-policy ratification, and ties-to-even has no builtin."
         }
         "rounding_policy_unresolved" => {
             "The language supports exact, floor, and ceiling arithmetic after the intended policy is ratified."

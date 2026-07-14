@@ -228,6 +228,11 @@ fn build(e: &Expr, cx: &TreeCx, shadow: &mut Vec<String>) -> ExprTree {
             b: boxed(b, cx, shadow),
             d: boxed(d, cx, shadow),
         },
+        Expr::MulDivRoundHalfUp { a, b, d } => ExprTree::MulDivRoundHalfUp {
+            a: boxed(a, cx, shadow),
+            b: boxed(b, cx, shadow),
+            d: boxed(d, cx, shadow),
+        },
         Expr::Match { scrutinee, arms } => {
             // Resolve the scrutinee's enum (a Path scrutinee resolves via the
             // type env) so the arm patterns are shape-correct; each named arm's

@@ -391,7 +391,10 @@ fn check_expr_dimensions(
     }
     if matches!(
         expr,
-        Expr::Arith { .. } | Expr::MulDivFloor { .. } | Expr::MulDivCeil { .. }
+        Expr::Arith { .. }
+            | Expr::MulDivFloor { .. }
+            | Expr::MulDivCeil { .. }
+            | Expr::MulDivRoundHalfUp { .. }
     ) {
         let _ = infer_dimension(expr, field_types, param_types, dimensions, const_literals)?;
     }
@@ -470,7 +473,9 @@ fn infer_dimension(
                 a::ArithOp::Div => combine_divide(left, right)?,
             }
         }
-        Expr::MulDivFloor { a, b, d } | Expr::MulDivCeil { a, b, d } => {
+        Expr::MulDivFloor { a, b, d }
+        | Expr::MulDivCeil { a, b, d }
+        | Expr::MulDivRoundHalfUp { a, b, d } => {
             let av = infer_dimension(
                 &a.node,
                 field_types,

@@ -376,7 +376,9 @@ impl<'a> TypeEnv<'a> {
             Expr::Paren(inner) => self.infer(&inner.node),
             // mul_div_floor/ceil follow the operand types: Int if any of a or
             // b is Int, else Nat. Divisor kind doesn't promote — it's a scale.
-            Expr::MulDivFloor { a, b, .. } | Expr::MulDivCeil { a, b, .. } => {
+            Expr::MulDivFloor { a, b, .. }
+            | Expr::MulDivCeil { a, b, .. }
+            | Expr::MulDivRoundHalfUp { a, b, .. } => {
                 let ak = self.infer(&a.node);
                 let bk = self.infer(&b.node);
                 match (ak, bk) {

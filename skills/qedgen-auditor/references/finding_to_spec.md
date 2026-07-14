@@ -71,7 +71,10 @@ Finite aggregate conservation is executable when the binder resolves to
 `Fin[N]` (directly or through an alias): use `sum i : Index, ...`, including
 inside `old(...)` for pre/post properties. Unbounded sums remain a visible
 language gap. `mul_div_floor` and `mul_div_ceil` are executable rounding
-constructs; only unsupported policies such as ties-to-even remain documentary.
+constructs. `mul_div_round_half_up` executes nearest rounding with exact halves
+rounded upward for non-negative quantities and a positive denominator. Do not
+map a generic `nearest` answer to it until the user ratifies that tie policy;
+unsupported policies such as ties-to-even remain documentary.
 Nominal numeric units are executable with `dimension Lamports = U64` (or
 another integer base). Use the dimension name on state fields and handler
 parameters; literals adopt the surrounding unit, while incompatible unit

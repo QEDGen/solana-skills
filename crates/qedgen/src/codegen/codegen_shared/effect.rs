@@ -202,6 +202,7 @@ pub(crate) fn tree_bare_rhs(tree: &crate::mir::ExprTree) -> Option<String> {
         | ExprTree::Arith { .. }
         | ExprTree::MulDivFloor { .. }
         | ExprTree::MulDivCeil { .. }
+        | ExprTree::MulDivRoundHalfUp { .. }
         | ExprTree::Match { .. }
         | ExprTree::Ctor { .. }
         | ExprTree::RecordLit(_)

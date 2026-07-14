@@ -593,7 +593,7 @@ fn compound_effect_rhs_and_arith_predicates_render_soundly() {
     // #145 — helper referenced for a ref_impl-only use; #182 — imported from the
     // soundness-proven crate rather than inlined.
     assert!(
-        out.contains("use qedgen_kani_prelude::{mul_div_ceil_u128, mul_div_floor_u128};"),
+        out.contains("use qedgen_kani_prelude::{mul_div_ceil_u128, mul_div_floor_u128, mul_div_round_half_up_u128};"),
         "mul_div helpers must be imported from qedgen_kani_prelude:\n{out}"
     );
     assert!(

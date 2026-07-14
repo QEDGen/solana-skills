@@ -91,6 +91,7 @@ pub(super) const KEYWORDS: &[&str] = &[
     "is",
     "mul_div_floor",
     "mul_div_ceil",
+    "mul_div_round_half_up",
     "interface",
     "pragma",
     "let",

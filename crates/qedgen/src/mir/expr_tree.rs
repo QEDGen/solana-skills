@@ -134,6 +134,12 @@ pub enum ExprTree {
         b: Box<ExprTree>,
         d: Box<ExprTree>,
     },
+    /// `mul_div_round_half_up(a, b, d)` — nearest, ties upward.
+    MulDivRoundHalfUp {
+        a: Box<ExprTree>,
+        b: Box<ExprTree>,
+        d: Box<ExprTree>,
+    },
     /// `contains(coll, elem)` — collection membership. Rust `coll.contains(&elem)`,
     /// Lean `elem ∈ coll`. Produces a `Bool`.
     Contains {
@@ -390,7 +396,9 @@ impl ExprTree {
             ExprTree::Len(_) => NumKind::Nat,
             ExprTree::Arith { lhs, rhs, .. } => join(lhs, rhs),
             // Divisor kind doesn't promote — it's a scale.
-            ExprTree::MulDivFloor { a, b, .. } | ExprTree::MulDivCeil { a, b, .. } => join(a, b),
+            ExprTree::MulDivFloor { a, b, .. }
+            | ExprTree::MulDivCeil { a, b, .. }
+            | ExprTree::MulDivRoundHalfUp { a, b, .. } => join(a, b),
             // First arm's body decides; arms must agree (elaborator-checked).
             ExprTree::Match { arms, .. } => arms
                 .first()
