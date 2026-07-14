@@ -23,7 +23,9 @@
   "main": "SKILL.md",
   "scripts": {
     "check:versions": "bash scripts/check-version-consistency.sh",
-    "test": "bash scripts/check-version-consistency.sh && ./bin/qedgen --help"
+    "check:auditor-skill": "bash scripts/check-auditor-skill.sh",
+    "test:auditor-preflight": "bash scripts/test-auditor-preflight.sh",
+    "test": "bash scripts/check-version-consistency.sh && bash scripts/check-auditor-skill.sh && bash scripts/test-auditor-preflight.sh && ./bin/qedgen --help"
   },
   "repository": {
     "type": "git",
@@ -35,7 +37,8 @@
   "agentSkills": {
     "skills": [
       "SKILL.md",
-      "skills/qedgen-auditor/SKILL.md"
+      "skills/qedgen-auditor/SKILL.md",
+      "skills/qedgen-auditor-bench/SKILL.md"
     ]
   }
 }

@@ -1,4 +1,8 @@
-# qedgen-auditor — thinking-budget hook
+# qedgen-auditor — optional Claude Code thinking-budget adapter
+
+This is a venue-specific optional adapter, not part of the portable audit
+workflow. Other skill.sh-compatible venues should ignore `hooks/` and use
+their own reasoning-budget controls when available.
 
 A Claude Code `UserPromptSubmit` hook that detects audit-trigger phrases and
 appends `ultrathink` to the prompt so Fable 5 / Opus 4.8 sessions allocate

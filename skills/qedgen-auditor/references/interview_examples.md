@@ -363,10 +363,10 @@ suppresses the intent gap, not the implementation gap.
 
 ---
 
-## Fallback for harnesses without `AskUserQuestion`-equivalent
+## Portable file-driven interview
 
-Harnesses without a native structured-question primitive (Codex /
-Cursor / etc.) fall back to the v2.19 file-driven path:
+Venues without a native structured-question primitive use the v2.19
+file-driven path:
 
 1. Agent runs the producer that emits cluster cards (the existing
    `qedgen probe --emit-spec-candidates` flow).
@@ -377,7 +377,6 @@ Cursor / etc.) fall back to the v2.19 file-driven path:
 4. Agent re-reads on completion (chat signal) and proceeds to Phase 3
    with the parsed ratifications.
 
-The file path produces strictly less interview signal than the TUI
-path (free-form invariants, no per-option `preview`, no enriched
-state-machine options). It's the **graceful degrade**, not the target
-UX — ship Claude-Code TUI primary, file fallback secondary.
+The file and structured-question paths must ask for the same decisions and
+produce the same ratified data. Presentation differences must not alter audit
+coverage, evidence, or severity.

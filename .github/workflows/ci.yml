@@ -58,6 +58,11 @@ jobs:
       - name: Check version metadata
         run: bash scripts/check-version-consistency.sh
 
+      - name: Check auditor skill contract
+        run: |
+          bash scripts/check-auditor-skill.sh
+          bash scripts/test-auditor-preflight.sh
+
       - name: Check README drift
         run: bash scripts/check-readme-drift.sh
 
