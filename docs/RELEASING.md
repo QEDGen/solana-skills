@@ -2,7 +2,7 @@
 
 Pre-release checklist. Run before cutting a new release or tag. (Moved out of `CLAUDE.md` so it isn't loaded into every session — it only matters at release time.)
 
-1. **Bump version** in BOTH `crates/qedgen/Cargo.toml` AND `package.json` — `install.sh` derives its version from Cargo.toml; the `check-version-consistency.sh` CI gate fails the build if the two drift (v2.28.0 shipped with this exact mismatch; v2.28.1 hotfixed it). Run `bash scripts/check-version-consistency.sh` after bumping to confirm.
+1. **Bump version** in `crates/qedgen/Cargo.toml`, `package.json`, AND `skills/qedgen-auditor/VERSION` — `install.sh` derives its version from Cargo.toml; the `check-version-consistency.sh` CI gate fails the build if the first two drift (v2.28.0 shipped with this exact mismatch; v2.28.1 hotfixed it), and `check-auditor-skill.sh` fails it if the skill VERSION drifts from package.json. Run `bash scripts/check-version-consistency.sh && bash scripts/check-auditor-skill.sh` after bumping to confirm.
 
 1a. **Re-stamp the version-pinned generated artifacts** — codegen stamps `qedgen-macros = { …, tag = "v<version>" }` into every generated `Cargo.toml`, so a version bump drifts BOTH the codegen snapshots AND the committed bundled examples. After bumping, run (rebuild `bin/qedgen` first): `UPDATE_SNAPSHOTS=1 cargo test --test codegen_snapshot` (refresh the 6 codegen fixtures) AND `qedgen check --regen-drift --write` (re-stamp the 8 `examples/rust/*/**/Cargo.toml` pins). Skipping this fails the `Run tests` (codegen_snapshot) + `Check example codegen drift` CI steps — v2.31 hit both in sequence. Verify each diff is *only* the tag line, then `cargo test` / `qedgen check --regen-drift` should be clean.
 

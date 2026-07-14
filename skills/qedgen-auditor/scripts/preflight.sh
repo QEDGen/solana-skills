@@ -131,9 +131,17 @@ if command -v "$qedgen_bin" >/dev/null 2>&1 || [[ -x "$qedgen_bin" ]]; then
   fi
 fi
 
+skill_commit="unknown"
+if [[ -f "$skill_root/SOURCE_COMMIT" ]]; then
+  skill_commit="$(tr -d '[:space:]' < "$skill_root/SOURCE_COMMIT")"
+elif command -v git >/dev/null 2>&1; then
+  skill_commit="$(git -C "$skill_root" rev-parse HEAD 2>/dev/null || echo unknown)"
+fi
+
 echo "target_root=$root"
 echo "program_root=$program_root"
 echo "skill_version=$skill_version"
+echo "skill_commit=$skill_commit"
 echo "runtime=$runtime"
 echo "mode=$mode"
 echo "spec=${spec:-none}"

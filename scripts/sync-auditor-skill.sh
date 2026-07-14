@@ -13,4 +13,7 @@ fi
 
 mkdir -p "$destination"
 rsync -a --delete "$source_root/" "$destination/"
+if commit="$(git -C "$repo_root" rev-parse HEAD 2>/dev/null)"; then
+  printf '%s\n' "$commit" > "$destination/SOURCE_COMMIT"
+fi
 echo "synced qedgen-auditor to $destination"

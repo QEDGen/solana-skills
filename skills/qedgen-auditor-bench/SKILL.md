@@ -26,31 +26,29 @@ run-until-dry loop.
 
 ## Model policy
 
-Read the auditor's `references/model-selection.md` before dispatch.
+The auditor's `references/model-selection.md` is the single source for
+concrete model identifiers; read it before dispatch and take the current
+per-provider mapping from there. Do not restate identifiers here — a model
+bump must be a one-file change.
 
-For Anthropic-backed venues:
+Per capability tier:
 
-- discovery worker: `claude-fable-5`, extended thinking at the highest
-  available budget (fallback: `claude-opus-4-8`, extended thinking);
-- reconciliation judge: `claude-sonnet-5`, structured JSON output;
-- deterministic extraction/normalization: `claude-haiku-4-5`.
+- discovery worker: the mapping's default audit worker at high reasoning;
+  high-assurance runs use its highest practical reasoning setting;
+- reconciliation judge: the mapping's balanced judge tier with structured
+  JSON output;
+- deterministic extraction/normalization: the mapping's low-cost structured
+  tier.
 
-For OpenAI-backed venues:
+Pin the exact identifiers taken from the mapping in scored runs. Do not use
+aliases. Preserve older models only in an intentionally labeled
+model-regression comparison. OpenAI workers can stop mid-run when audit
+content triggers the provider's cybersecurity policy; classify such runs
+`policy-interfered`, never as a clean pass.
 
-- discovery worker: `gpt-5.6-sol`, `high` reasoning;
-- high-assurance discovery: `gpt-5.6-sol`, `xhigh` reasoning when available;
-- reconciliation judge: `gpt-5.6-terra`, `high` reasoning;
-- deterministic extraction/normalization: `gpt-5.6-terra`, medium or high
-  reasoning according to complexity.
-
-Pin explicit identifiers in scored runs. Do not use aliases. Preserve older
-models only in an intentionally labeled model-regression comparison. OpenAI
-workers can stop mid-run when audit content triggers the provider's
-cybersecurity policy; classify such runs `policy-interfered`, never as a clean
-pass.
-
-For other providers, select the current frontier reasoning/coding tier for
-discovery and the balanced frontier tier for judging. Record the mapping.
+For providers the mapping does not cover, select the current frontier
+reasoning/coding tier for discovery and the balanced frontier tier for
+judging. Record the mapping used.
 
 ## Per-entry pipeline
 

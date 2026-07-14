@@ -5,6 +5,9 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 skill_root="$repo_root/skills/qedgen-auditor"
 bench_skill="$repo_root/skills/qedgen-auditor-bench/SKILL.md"
 installed_root="${QEDGEN_AUDITOR_INSTALLED_ROOT:-}"
+if [[ -z "$installed_root" && -d "$repo_root/.claude/skills/qedgen-auditor" ]]; then
+  installed_root="$repo_root/.claude/skills/qedgen-auditor"
+fi
 
 fail=0
 
@@ -84,9 +87,10 @@ if [[ -n "$installed_root" ]]; then
   if [[ ! -d "$installed_root" ]]; then
     echo "installed skill directory does not exist: $installed_root" >&2
     fail=1
-  elif ! diff -qr "$skill_root" "$installed_root" >/dev/null; then
+  elif ! diff -qr --exclude=SOURCE_COMMIT "$skill_root" "$installed_root" >/dev/null; then
     echo "installed qedgen-auditor skill differs from repository canonical copy" >&2
-    diff -qr "$skill_root" "$installed_root" >&2 || true
+    diff -qr --exclude=SOURCE_COMMIT "$skill_root" "$installed_root" >&2 || true
+    echo "re-sync with: bash scripts/sync-auditor-skill.sh $installed_root" >&2
     fail=1
   fi
 fi

@@ -145,6 +145,15 @@ Write the full report to `.qed/findings/audit-<timestamp>.md`. Reproducers stay
 ephemeral under `target/`. Write suppression rules only for stable,
 machine-detectable false positives.
 
+Give the report header a run status: `completed`, `build-blocked` (source
+review finished but executable evidence was unavailable), or
+`policy-interfered` (a venue or provider policy stopped, truncated, or
+redirected the analysis). If an audit worker halts mid-run — refusal,
+truncation, or silent stop — the run is `policy-interfered`: report what was
+covered before the stop, switch to a worker that completes audit workloads
+(see [model selection](references/model-selection.md)), and never present a
+partial pass as complete coverage.
+
 Order the digest:
 
 1. Confirmed CRITICAL/HIGH/MEDIUM findings.

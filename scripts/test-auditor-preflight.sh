@@ -28,6 +28,7 @@ printf '%s\n' '[dependencies]' > "$tmp/native/qed.toml"
 output="$("$preflight" --root "$tmp/native" --qedgen "$tmp/qedgen-stub")"
 grep -q '^runtime=native-rust$' <<<"$output"
 grep -q "^skill_version=$expected_version\$" <<<"$output"
+grep -Eq '^skill_commit=[0-9a-f]{40}$|^skill_commit=unknown$' <<<"$output"
 grep -q '^mode=spec-aware$' <<<"$output"
 grep -q "^program_root=$tmp/native\$" <<<"$output"
 grep -q "^spec=$tmp/native/fixture.qedspec\$" <<<"$output"
@@ -125,7 +126,16 @@ if "$repo_root/scripts/sync-auditor-skill.sh" >/dev/null 2>&1; then
   exit 1
 fi
 "$repo_root/scripts/sync-auditor-skill.sh" "$tmp/installed-skill" >/dev/null
+grep -Eq '^[0-9a-f]{40}$' "$tmp/installed-skill/SOURCE_COMMIT"
 QEDGEN_AUDITOR_INSTALLED_ROOT="$tmp/installed-skill" \
   "$repo_root/scripts/check-auditor-skill.sh" >/dev/null
+
+# --- a drifted installed copy is caught ---
+printf '%s\n' 'drift' >> "$tmp/installed-skill/SKILL.md"
+if QEDGEN_AUDITOR_INSTALLED_ROOT="$tmp/installed-skill" \
+  "$repo_root/scripts/check-auditor-skill.sh" >/dev/null 2>&1; then
+  echo "expected drifted installed skill to fail the check" >&2
+  exit 1
+fi
 
 echo "auditor preflight tests passed"
