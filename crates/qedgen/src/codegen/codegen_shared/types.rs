@@ -485,8 +485,62 @@ pub(crate) fn ensure_parent_dir(output_path: &Path) -> Result<()> {
 
 pub(crate) fn write_generated_file(output_path: &Path, content: &str) -> Result<()> {
     ensure_parent_dir(output_path)?;
-    std::fs::write(output_path, content)?;
+    if output_path.extension().is_some_and(|ext| ext == "rs") {
+        std::fs::write(output_path, format_rust_source(content))?;
+    } else {
+        std::fs::write(output_path, content)?;
+    }
     Ok(())
+}
+
+/// Best-effort `rustfmt` pass over generated Rust source. Returns the input
+/// unchanged when rustfmt is unavailable or rejects the source, warning once
+/// per process — formatting is presentation; the snapshot/smoke suites own
+/// correctness. Runs at every `.rs` write AND before body-hash stamping
+/// ([`crate::codegen_shared::precompute_body_hash`] callers): the
+/// `#[qed(verified, hash = …)]` leg hashes the canonical token stream, and
+/// rustfmt is not token-neutral (trailing commas), so the stamp must be
+/// computed over the formatted text. rustfmt is idempotent, so the double
+/// pass is safe.
+pub(crate) fn format_rust_source(source: &str) -> String {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    fn warn_once(msg: &str) {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| eprintln!("warning: {msg}"));
+    }
+
+    let child = Command::new("rustfmt")
+        .args(["--edition", "2021", "--emit", "stdout"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn();
+    let Ok(mut child) = child else {
+        warn_once("rustfmt not found on PATH; generated Rust left unformatted");
+        return source.to_string();
+    };
+    // rustfmt consumes all of stdin before emitting, so a straight
+    // write-then-wait cannot deadlock.
+    if let Some(mut stdin) = child.stdin.take() {
+        if stdin.write_all(source.as_bytes()).is_err() {
+            let _ = child.wait();
+            return source.to_string();
+        }
+    }
+    match child.wait_with_output() {
+        Ok(output) if output.status.success() => match String::from_utf8(output.stdout) {
+            Ok(formatted) if !formatted.is_empty() => formatted,
+            _ => source.to_string(),
+        },
+        _ => {
+            // Parse-rejected source is a codegen bug the compile gates will
+            // surface; keep the bytes so the user sees what was generated.
+            warn_once("rustfmt rejected generated source; leaving it unformatted");
+            source.to_string()
+        }
+    }
 }
 
 pub fn map_type_standalone(dsl_type: &str, spec: &ParsedSpec) -> Result<String> {

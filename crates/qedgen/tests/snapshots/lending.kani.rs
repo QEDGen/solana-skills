@@ -16,7 +16,38 @@
 
 #[allow(dead_code)]
 fn pubkey_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
-    a[0] == b[0] && a[1] == b[1] && a[2] == b[2] && a[3] == b[3] && a[4] == b[4] && a[5] == b[5] && a[6] == b[6] && a[7] == b[7] && a[8] == b[8] && a[9] == b[9] && a[10] == b[10] && a[11] == b[11] && a[12] == b[12] && a[13] == b[13] && a[14] == b[14] && a[15] == b[15] && a[16] == b[16] && a[17] == b[17] && a[18] == b[18] && a[19] == b[19] && a[20] == b[20] && a[21] == b[21] && a[22] == b[22] && a[23] == b[23] && a[24] == b[24] && a[25] == b[25] && a[26] == b[26] && a[27] == b[27] && a[28] == b[28] && a[29] == b[29] && a[30] == b[30] && a[31] == b[31]
+    a[0] == b[0]
+        && a[1] == b[1]
+        && a[2] == b[2]
+        && a[3] == b[3]
+        && a[4] == b[4]
+        && a[5] == b[5]
+        && a[6] == b[6]
+        && a[7] == b[7]
+        && a[8] == b[8]
+        && a[9] == b[9]
+        && a[10] == b[10]
+        && a[11] == b[11]
+        && a[12] == b[12]
+        && a[13] == b[13]
+        && a[14] == b[14]
+        && a[15] == b[15]
+        && a[16] == b[16]
+        && a[17] == b[17]
+        && a[18] == b[18]
+        && a[19] == b[19]
+        && a[20] == b[20]
+        && a[21] == b[21]
+        && a[22] == b[22]
+        && a[23] == b[23]
+        && a[24] == b[24]
+        && a[25] == b[25]
+        && a[26] == b[26]
+        && a[27] == b[27]
+        && a[28] == b[28]
+        && a[29] == b[29]
+        && a[30] == b[30]
+        && a[31] == b[31]
 }
 
 #[allow(dead_code)]
@@ -31,495 +62,544 @@ fn pubkey_ne(a: &[u8; 32], b: &[u8; 32]) -> bool {
 mod pool {
     use super::*;
 
-#[derive(Clone, Copy, PartialEq, Eq, kani::Arbitrary)]
-enum Status {
-    Uninitialized,
-    Active,
-    Paused,
-}
-
-#[derive(Clone, Copy)]
-struct State {
-    authority: [u8; 32],
-    total_deposits: u64,
-    total_borrows: u64,
-    interest_rate: u64,
-    status: Status,
-}
-
-// ============================================================================
-// Property predicates (from qedspec `property` declarations)
-// ============================================================================
-
-/// pool_solvency: s.total_deposits ≥ s.total_borrows
-fn pool_solvency(s: &State) -> bool {
-    s.total_deposits >= s.total_borrows
-}
-
-// ============================================================================
-// Transition functions (from qedspec operations — effects + guards)
-//
-// Each returns true if the guard passes and the transition fires,
-// false if the guard rejects the operation.
-// ============================================================================
-
-fn init_pool(s: &mut State, rate: u64) -> bool {
-    if !((rate > 0)) {
-        return false;
+    #[derive(Clone, Copy, PartialEq, Eq, kani::Arbitrary)]
+    enum Status {
+        Uninitialized,
+        Active,
+        Paused,
     }
-    if s.status != Status::Uninitialized {
-        return false;
+
+    #[derive(Clone, Copy)]
+    struct State {
+        authority: [u8; 32],
+        total_deposits: u64,
+        total_borrows: u64,
+        interest_rate: u64,
+        status: Status,
     }
-    s.interest_rate = rate;
-    s.total_deposits = 0;
-    s.total_borrows = 0;
-    s.status = Status::Active;
-    true
-}
 
-fn deposit(s: &mut State, amount: u64) -> bool {
-    if !((amount > 0)) {
-        return false;
+    // ============================================================================
+    // Property predicates (from qedspec `property` declarations)
+    // ============================================================================
+
+    /// pool_solvency: s.total_deposits ≥ s.total_borrows
+    fn pool_solvency(s: &State) -> bool {
+        s.total_deposits >= s.total_borrows
     }
-    if s.status != Status::Active {
-        return false;
+
+    // ============================================================================
+    // Transition functions (from qedspec operations — effects + guards)
+    //
+    // Each returns true if the guard passes and the transition fires,
+    // false if the guard rejects the operation.
+    // ============================================================================
+
+    fn init_pool(s: &mut State, rate: u64) -> bool {
+        if !(rate > 0) {
+            return false;
+        }
+        if s.status != Status::Uninitialized {
+            return false;
+        }
+        s.interest_rate = rate;
+        s.total_deposits = 0;
+        s.total_borrows = 0;
+        s.status = Status::Active;
+        true
     }
-    match s.total_deposits.checked_add(amount) {
-        Some(__v) => s.total_deposits = __v,
-        None => return false,
+
+    fn deposit(s: &mut State, amount: u64) -> bool {
+        if !(amount > 0) {
+            return false;
+        }
+        if s.status != Status::Active {
+            return false;
+        }
+        match s.total_deposits.checked_add(amount) {
+            Some(__v) => s.total_deposits = __v,
+            None => return false,
+        }
+        s.status = Status::Active;
+        true
     }
-    s.status = Status::Active;
-    true
-}
 
-// ============================================================================
-// Guard enforcement — transitions reject invalid inputs
-// ============================================================================
+    // ============================================================================
+    // Guard enforcement — transitions reject invalid inputs
+    // ============================================================================
 
-#[kani::proof]
-#[kani::unwind(2)]
-#[kani::solver(cadical)]
-fn verify_init_pool_rejects_invalid() {
-    let mut s = State {
-        authority: kani::any(),
-        total_deposits: kani::any(),
-        total_borrows: kani::any(),
-        interest_rate: kani::any(),
-        status: kani::any(),
-    };
-    kani::assume(s.status == Status::Uninitialized);
-    let rate: u64 = kani::any();
-    kani::assume(!((rate > 0)));
-    kani::cover!(true, "guard-violation domain is satisfiable");
-    assert!(!init_pool(&mut s, rate),
-        "init_pool must reject when guard is violated");
-}
-
-#[kani::proof]
-#[kani::unwind(2)]
-#[kani::solver(cadical)]
-fn verify_deposit_rejects_invalid() {
-    let mut s = State {
-        authority: kani::any(),
-        total_deposits: kani::any(),
-        total_borrows: kani::any(),
-        interest_rate: kani::any(),
-        status: kani::any(),
-    };
-    kani::assume(s.status == Status::Active);
-    let amount: u64 = kani::any();
-    kani::assume(!((amount > 0)));
-    kani::cover!(true, "guard-violation domain is satisfiable");
-    assert!(!deposit(&mut s, amount),
-        "deposit must reject when guard is violated");
-}
-
-// ============================================================================
-// Property preservation — invariants hold through all transitions
-// ============================================================================
-
-#[kani::proof]
-#[kani::unwind(2)]
-#[kani::solver(cadical)]
-fn verify_init_pool_preserves_pool_solvency() {
-    let pre = State {
-        authority: [0u8; 32],
-        total_deposits: 0,
-        total_borrows: 0,
-        interest_rate: 0,
-        status: Status::Uninitialized,
-    };
-    let mut post = pre;
-    let rate: u64 = kani::any();
-    if init_pool(&mut post, rate) {
-        assert!(pool_solvency(&post),
-            "pool_solvency must hold after init_pool");
+    #[kani::proof]
+    #[kani::unwind(2)]
+    #[kani::solver(cadical)]
+    fn verify_init_pool_rejects_invalid() {
+        let mut s = State {
+            authority: kani::any(),
+            total_deposits: kani::any(),
+            total_borrows: kani::any(),
+            interest_rate: kani::any(),
+            status: kani::any(),
+        };
+        kani::assume(s.status == Status::Uninitialized);
+        let rate: u64 = kani::any();
+        kani::assume(!(rate > 0));
+        kani::cover!(true, "guard-violation domain is satisfiable");
+        assert!(
+            !init_pool(&mut s, rate),
+            "init_pool must reject when guard is violated"
+        );
     }
-}
 
-#[kani::proof]
-#[kani::unwind(2)]
-#[kani::solver(cadical)]
-fn verify_deposit_preserves_pool_solvency() {
-    let pre = State {
-        authority: kani::any(),
-        total_deposits: kani::any(),
-        total_borrows: kani::any(),
-        interest_rate: kani::any(),
-        status: kani::any(),
-    };
-    kani::assume(pre.status == Status::Active);
-    kani::assume(pool_solvency(&pre));
-    let mut post = pre;
-    let amount: u64 = kani::any();
-    if deposit(&mut post, amount) {
-        assert!(pool_solvency(&post),
-            "pool_solvency must hold after deposit");
+    #[kani::proof]
+    #[kani::unwind(2)]
+    #[kani::solver(cadical)]
+    fn verify_deposit_rejects_invalid() {
+        let mut s = State {
+            authority: kani::any(),
+            total_deposits: kani::any(),
+            total_borrows: kani::any(),
+            interest_rate: kani::any(),
+            status: kani::any(),
+        };
+        kani::assume(s.status == Status::Active);
+        let amount: u64 = kani::any();
+        kani::assume(!(amount > 0));
+        kani::cover!(true, "guard-violation domain is satisfiable");
+        assert!(
+            !deposit(&mut s, amount),
+            "deposit must reject when guard is violated"
+        );
     }
-}
 
-// ============================================================================
-// Effect conformance — verify transition effects match spec
-//
-// Each proof applies a transition to symbolic state and checks that every
-// field changed/unchanged matches the spec's effect: declarations.
-// ============================================================================
+    // ============================================================================
+    // Property preservation — invariants hold through all transitions
+    // ============================================================================
 
-#[kani::proof]
-#[kani::unwind(2)]
-#[kani::solver(cadical)]
-fn verify_init_pool_effect_interest_rate() {
-    let mut s = State {
-        authority: [0u8; 32],
-        total_deposits: 0,
-        total_borrows: 0,
-        interest_rate: 0,
-        status: Status::Uninitialized,
-    };
-    let rate: u64 = kani::any();
-    let pre_authority = s.authority;
-    let pre_total_deposits = s.total_deposits;
-    let pre_total_borrows = s.total_borrows;
-    if init_pool(&mut s, rate) {
-        assert!(s.interest_rate == rate, "interest_rate must equal rate");
-        assert!(pubkey_eq(&s.authority, &pre_authority), "authority must not change");
+    #[kani::proof]
+    #[kani::unwind(2)]
+    #[kani::solver(cadical)]
+    fn verify_init_pool_preserves_pool_solvency() {
+        let pre = State {
+            authority: [0u8; 32],
+            total_deposits: 0,
+            total_borrows: 0,
+            interest_rate: 0,
+            status: Status::Uninitialized,
+        };
+        let mut post = pre;
+        let rate: u64 = kani::any();
+        if init_pool(&mut post, rate) {
+            assert!(
+                pool_solvency(&post),
+                "pool_solvency must hold after init_pool"
+            );
+        }
     }
-}
 
-#[kani::proof]
-#[kani::unwind(2)]
-#[kani::solver(cadical)]
-fn verify_init_pool_effect_total_deposits() {
-    let mut s = State {
-        authority: [0u8; 32],
-        total_deposits: 0,
-        total_borrows: 0,
-        interest_rate: 0,
-        status: Status::Uninitialized,
-    };
-    let rate: u64 = kani::any();
-    let pre_authority = s.authority;
-    let pre_total_borrows = s.total_borrows;
-    let pre_interest_rate = s.interest_rate;
-    if init_pool(&mut s, rate) {
-        assert!(s.total_deposits == 0, "total_deposits must equal 0");
-        assert!(pubkey_eq(&s.authority, &pre_authority), "authority must not change");
+    #[kani::proof]
+    #[kani::unwind(2)]
+    #[kani::solver(cadical)]
+    fn verify_deposit_preserves_pool_solvency() {
+        let pre = State {
+            authority: kani::any(),
+            total_deposits: kani::any(),
+            total_borrows: kani::any(),
+            interest_rate: kani::any(),
+            status: kani::any(),
+        };
+        kani::assume(pre.status == Status::Active);
+        kani::assume(pool_solvency(&pre));
+        let mut post = pre;
+        let amount: u64 = kani::any();
+        if deposit(&mut post, amount) {
+            assert!(
+                pool_solvency(&post),
+                "pool_solvency must hold after deposit"
+            );
+        }
     }
-}
 
-#[kani::proof]
-#[kani::unwind(2)]
-#[kani::solver(cadical)]
-fn verify_init_pool_effect_total_borrows() {
-    let mut s = State {
-        authority: [0u8; 32],
-        total_deposits: 0,
-        total_borrows: 0,
-        interest_rate: 0,
-        status: Status::Uninitialized,
-    };
-    let rate: u64 = kani::any();
-    let pre_authority = s.authority;
-    let pre_total_deposits = s.total_deposits;
-    let pre_interest_rate = s.interest_rate;
-    if init_pool(&mut s, rate) {
-        assert!(s.total_borrows == 0, "total_borrows must equal 0");
-        assert!(pubkey_eq(&s.authority, &pre_authority), "authority must not change");
+    // ============================================================================
+    // Effect conformance — verify transition effects match spec
+    //
+    // Each proof applies a transition to symbolic state and checks that every
+    // field changed/unchanged matches the spec's effect: declarations.
+    // ============================================================================
+
+    #[kani::proof]
+    #[kani::unwind(2)]
+    #[kani::solver(cadical)]
+    fn verify_init_pool_effect_interest_rate() {
+        let mut s = State {
+            authority: [0u8; 32],
+            total_deposits: 0,
+            total_borrows: 0,
+            interest_rate: 0,
+            status: Status::Uninitialized,
+        };
+        let rate: u64 = kani::any();
+        let pre_authority = s.authority;
+        let pre_total_deposits = s.total_deposits;
+        let pre_total_borrows = s.total_borrows;
+        if init_pool(&mut s, rate) {
+            assert!(s.interest_rate == rate, "interest_rate must equal rate");
+            assert!(
+                pubkey_eq(&s.authority, &pre_authority),
+                "authority must not change"
+            );
+        }
     }
-}
 
-#[kani::proof]
-#[kani::unwind(2)]
-#[kani::solver(cadical)]
-fn verify_deposit_effect_total_deposits() {
-    let mut s = State {
-        authority: kani::any(),
-        total_deposits: kani::any(),
-        total_borrows: kani::any(),
-        interest_rate: kani::any(),
-        status: kani::any(),
-    };
-    kani::assume(s.status == Status::Active);
-    let amount: u64 = kani::any();
-    let pre_authority = s.authority;
-    let pre_total_deposits = s.total_deposits;
-    let pre_total_borrows = s.total_borrows;
-    let pre_interest_rate = s.interest_rate;
-    if deposit(&mut s, amount) {
-        assert!(s.total_deposits == pre_total_deposits.wrapping_add(amount), "total_deposits must increment by amount");
-        assert!(pubkey_eq(&s.authority, &pre_authority), "authority must not change");
-        assert!(s.total_borrows == pre_total_borrows, "total_borrows must not change");
-        assert!(s.interest_rate == pre_interest_rate, "interest_rate must not change");
+    #[kani::proof]
+    #[kani::unwind(2)]
+    #[kani::solver(cadical)]
+    fn verify_init_pool_effect_total_deposits() {
+        let mut s = State {
+            authority: [0u8; 32],
+            total_deposits: 0,
+            total_borrows: 0,
+            interest_rate: 0,
+            status: Status::Uninitialized,
+        };
+        let rate: u64 = kani::any();
+        let pre_authority = s.authority;
+        let pre_total_borrows = s.total_borrows;
+        let pre_interest_rate = s.interest_rate;
+        if init_pool(&mut s, rate) {
+            assert!(s.total_deposits == 0, "total_deposits must equal 0");
+            assert!(
+                pubkey_eq(&s.authority, &pre_authority),
+                "authority must not change"
+            );
+        }
     }
-}
 
-// ============================================================================
-// Overflow detection — Kani catches arithmetic overflow on add effects
-// ============================================================================
+    #[kani::proof]
+    #[kani::unwind(2)]
+    #[kani::solver(cadical)]
+    fn verify_init_pool_effect_total_borrows() {
+        let mut s = State {
+            authority: [0u8; 32],
+            total_deposits: 0,
+            total_borrows: 0,
+            interest_rate: 0,
+            status: Status::Uninitialized,
+        };
+        let rate: u64 = kani::any();
+        let pre_authority = s.authority;
+        let pre_total_deposits = s.total_deposits;
+        let pre_interest_rate = s.interest_rate;
+        if init_pool(&mut s, rate) {
+            assert!(s.total_borrows == 0, "total_borrows must equal 0");
+            assert!(
+                pubkey_eq(&s.authority, &pre_authority),
+                "authority must not change"
+            );
+        }
+    }
 
-#[kani::proof]
-#[kani::unwind(2)]
-#[kani::solver(cadical)]
-fn verify_deposit_no_overflow() {
-    let mut s = State {
-        authority: kani::any(),
-        total_deposits: kani::any(),
-        total_borrows: kani::any(),
-        interest_rate: kani::any(),
-        status: kani::any(),
-    };
-    kani::assume(s.status == Status::Active);
-    let amount: u64 = kani::any();
-    deposit(&mut s, amount);  // Kani detects overflow on += internally
-}
+    #[kani::proof]
+    #[kani::unwind(2)]
+    #[kani::solver(cadical)]
+    fn verify_deposit_effect_total_deposits() {
+        let mut s = State {
+            authority: kani::any(),
+            total_deposits: kani::any(),
+            total_borrows: kani::any(),
+            interest_rate: kani::any(),
+            status: kani::any(),
+        };
+        kani::assume(s.status == Status::Active);
+        let amount: u64 = kani::any();
+        let pre_authority = s.authority;
+        let pre_total_deposits = s.total_deposits;
+        let pre_total_borrows = s.total_borrows;
+        let pre_interest_rate = s.interest_rate;
+        if deposit(&mut s, amount) {
+            assert!(
+                s.total_deposits == pre_total_deposits.wrapping_add(amount),
+                "total_deposits must increment by amount"
+            );
+            assert!(
+                pubkey_eq(&s.authority, &pre_authority),
+                "authority must not change"
+            );
+            assert!(
+                s.total_borrows == pre_total_borrows,
+                "total_borrows must not change"
+            );
+            assert!(
+                s.interest_rate == pre_interest_rate,
+                "interest_rate must not change"
+            );
+        }
+    }
 
+    // ============================================================================
+    // Overflow detection — Kani catches arithmetic overflow on add effects
+    // ============================================================================
+
+    #[kani::proof]
+    #[kani::unwind(2)]
+    #[kani::solver(cadical)]
+    fn verify_deposit_no_overflow() {
+        let mut s = State {
+            authority: kani::any(),
+            total_deposits: kani::any(),
+            total_borrows: kani::any(),
+            interest_rate: kani::any(),
+            status: kani::any(),
+        };
+        kani::assume(s.status == Status::Active);
+        let amount: u64 = kani::any();
+        deposit(&mut s, amount); // Kani detects overflow on += internally
+    }
 } // mod pool
 
 mod loan {
     use super::*;
 
-#[derive(Clone, Copy, PartialEq, Eq, kani::Arbitrary)]
-enum Status {
-    Empty,
-    Active,
-    Liquidated,
-}
-
-#[derive(Clone, Copy)]
-struct State {
-    borrower: [u8; 32],
-    pool: [u8; 32],
-    amount: u64,
-    collateral: u64,
-    status: Status,
-}
-
-// ============================================================================
-// Transition functions (from qedspec operations — effects + guards)
-//
-// Each returns true if the guard passes and the transition fires,
-// false if the guard rejects the operation.
-// ============================================================================
-
-fn borrow(s: &mut State, amount: u64, collateral: u64) -> bool {
-    if !(((amount > 0) && (collateral > 0))) {
-        return false;
+    #[derive(Clone, Copy, PartialEq, Eq, kani::Arbitrary)]
+    enum Status {
+        Empty,
+        Active,
+        Liquidated,
     }
-    if s.status != Status::Empty {
-        return false;
+
+    #[derive(Clone, Copy)]
+    struct State {
+        borrower: [u8; 32],
+        pool: [u8; 32],
+        amount: u64,
+        collateral: u64,
+        status: Status,
     }
-    s.amount = amount;
-    s.collateral = collateral;
-    s.status = Status::Active;
-    true
-}
 
-fn repay(s: &mut State) -> bool {
-    if s.status != Status::Active {
-        return false;
+    // ============================================================================
+    // Transition functions (from qedspec operations — effects + guards)
+    //
+    // Each returns true if the guard passes and the transition fires,
+    // false if the guard rejects the operation.
+    // ============================================================================
+
+    fn borrow(s: &mut State, amount: u64, collateral: u64) -> bool {
+        if !((amount > 0) && (collateral > 0)) {
+            return false;
+        }
+        if s.status != Status::Empty {
+            return false;
+        }
+        s.amount = amount;
+        s.collateral = collateral;
+        s.status = Status::Active;
+        true
     }
-    s.amount = 0;
-    s.collateral = 0;
-    s.status = Status::Empty;
-    true
-}
 
-fn liquidate(s: &mut State) -> bool {
-    if !((s.amount > s.collateral)) {
-        return false;
+    fn repay(s: &mut State) -> bool {
+        if s.status != Status::Active {
+            return false;
+        }
+        s.amount = 0;
+        s.collateral = 0;
+        s.status = Status::Empty;
+        true
     }
-    if s.status != Status::Active {
-        return false;
+
+    fn liquidate(s: &mut State) -> bool {
+        if !(s.amount > s.collateral) {
+            return false;
+        }
+        if s.status != Status::Active {
+            return false;
+        }
+        s.amount = 0;
+        s.status = Status::Liquidated;
+        true
     }
-    s.amount = 0;
-    s.status = Status::Liquidated;
-    true
-}
 
-// ============================================================================
-// Guard enforcement — transitions reject invalid inputs
-// ============================================================================
+    // ============================================================================
+    // Guard enforcement — transitions reject invalid inputs
+    // ============================================================================
 
-#[kani::proof]
-#[kani::unwind(2)]
-#[kani::solver(cadical)]
-fn verify_borrow_rejects_invalid() {
-    let mut s = State {
-        borrower: kani::any(),
-        pool: kani::any(),
-        amount: kani::any(),
-        collateral: kani::any(),
-        status: kani::any(),
-    };
-    kani::assume(s.status == Status::Empty);
-    let amount: u64 = kani::any();
-    let collateral: u64 = kani::any();
-    kani::assume(!(((amount > 0) && (collateral > 0))));
-    kani::cover!(true, "guard-violation domain is satisfiable");
-    assert!(!borrow(&mut s, amount, collateral),
-        "borrow must reject when guard is violated");
-}
-
-#[kani::proof]
-#[kani::unwind(2)]
-#[kani::solver(cadical)]
-fn verify_liquidate_rejects_invalid() {
-    let mut s = State {
-        borrower: kani::any(),
-        pool: kani::any(),
-        amount: kani::any(),
-        collateral: kani::any(),
-        status: kani::any(),
-    };
-    kani::assume(s.status == Status::Active);
-    kani::assume(!((s.amount > s.collateral)));
-    kani::cover!(true, "guard-violation domain is satisfiable");
-    assert!(!liquidate(&mut s),
-        "liquidate must reject when guard is violated");
-}
-
-// ============================================================================
-// Effect conformance — verify transition effects match spec
-//
-// Each proof applies a transition to symbolic state and checks that every
-// field changed/unchanged matches the spec's effect: declarations.
-// ============================================================================
-
-#[kani::proof]
-#[kani::unwind(2)]
-#[kani::solver(cadical)]
-fn verify_borrow_effect_amount() {
-    let mut s = State {
-        borrower: kani::any(),
-        pool: kani::any(),
-        amount: kani::any(),
-        collateral: kani::any(),
-        status: kani::any(),
-    };
-    kani::assume(s.status == Status::Empty);
-    let amount: u64 = kani::any();
-    let collateral: u64 = kani::any();
-    let pre_borrower = s.borrower;
-    let pre_pool = s.pool;
-    let pre_collateral = s.collateral;
-    if borrow(&mut s, amount, collateral) {
-        assert!(s.amount == amount, "amount must equal amount");
-        assert!(pubkey_eq(&s.borrower, &pre_borrower), "borrower must not change");
-        assert!(pubkey_eq(&s.pool, &pre_pool), "pool must not change");
+    #[kani::proof]
+    #[kani::unwind(2)]
+    #[kani::solver(cadical)]
+    fn verify_borrow_rejects_invalid() {
+        let mut s = State {
+            borrower: kani::any(),
+            pool: kani::any(),
+            amount: kani::any(),
+            collateral: kani::any(),
+            status: kani::any(),
+        };
+        kani::assume(s.status == Status::Empty);
+        let amount: u64 = kani::any();
+        let collateral: u64 = kani::any();
+        kani::assume(!((amount > 0) && (collateral > 0)));
+        kani::cover!(true, "guard-violation domain is satisfiable");
+        assert!(
+            !borrow(&mut s, amount, collateral),
+            "borrow must reject when guard is violated"
+        );
     }
-}
 
-#[kani::proof]
-#[kani::unwind(2)]
-#[kani::solver(cadical)]
-fn verify_borrow_effect_collateral() {
-    let mut s = State {
-        borrower: kani::any(),
-        pool: kani::any(),
-        amount: kani::any(),
-        collateral: kani::any(),
-        status: kani::any(),
-    };
-    kani::assume(s.status == Status::Empty);
-    let amount: u64 = kani::any();
-    let collateral: u64 = kani::any();
-    let pre_borrower = s.borrower;
-    let pre_pool = s.pool;
-    let pre_amount = s.amount;
-    if borrow(&mut s, amount, collateral) {
-        assert!(s.collateral == collateral, "collateral must equal collateral");
-        assert!(pubkey_eq(&s.borrower, &pre_borrower), "borrower must not change");
-        assert!(pubkey_eq(&s.pool, &pre_pool), "pool must not change");
+    #[kani::proof]
+    #[kani::unwind(2)]
+    #[kani::solver(cadical)]
+    fn verify_liquidate_rejects_invalid() {
+        let mut s = State {
+            borrower: kani::any(),
+            pool: kani::any(),
+            amount: kani::any(),
+            collateral: kani::any(),
+            status: kani::any(),
+        };
+        kani::assume(s.status == Status::Active);
+        kani::assume(!(s.amount > s.collateral));
+        kani::cover!(true, "guard-violation domain is satisfiable");
+        assert!(
+            !liquidate(&mut s),
+            "liquidate must reject when guard is violated"
+        );
     }
-}
 
-#[kani::proof]
-#[kani::unwind(2)]
-#[kani::solver(cadical)]
-fn verify_repay_effect_amount() {
-    let mut s = State {
-        borrower: kani::any(),
-        pool: kani::any(),
-        amount: kani::any(),
-        collateral: kani::any(),
-        status: kani::any(),
-    };
-    kani::assume(s.status == Status::Active);
-    let pre_borrower = s.borrower;
-    let pre_pool = s.pool;
-    let pre_collateral = s.collateral;
-    if repay(&mut s) {
-        assert!(s.amount == 0, "amount must equal 0");
-        assert!(pubkey_eq(&s.borrower, &pre_borrower), "borrower must not change");
-        assert!(pubkey_eq(&s.pool, &pre_pool), "pool must not change");
+    // ============================================================================
+    // Effect conformance — verify transition effects match spec
+    //
+    // Each proof applies a transition to symbolic state and checks that every
+    // field changed/unchanged matches the spec's effect: declarations.
+    // ============================================================================
+
+    #[kani::proof]
+    #[kani::unwind(2)]
+    #[kani::solver(cadical)]
+    fn verify_borrow_effect_amount() {
+        let mut s = State {
+            borrower: kani::any(),
+            pool: kani::any(),
+            amount: kani::any(),
+            collateral: kani::any(),
+            status: kani::any(),
+        };
+        kani::assume(s.status == Status::Empty);
+        let amount: u64 = kani::any();
+        let collateral: u64 = kani::any();
+        let pre_borrower = s.borrower;
+        let pre_pool = s.pool;
+        let pre_collateral = s.collateral;
+        if borrow(&mut s, amount, collateral) {
+            assert!(s.amount == amount, "amount must equal amount");
+            assert!(
+                pubkey_eq(&s.borrower, &pre_borrower),
+                "borrower must not change"
+            );
+            assert!(pubkey_eq(&s.pool, &pre_pool), "pool must not change");
+        }
     }
-}
 
-#[kani::proof]
-#[kani::unwind(2)]
-#[kani::solver(cadical)]
-fn verify_repay_effect_collateral() {
-    let mut s = State {
-        borrower: kani::any(),
-        pool: kani::any(),
-        amount: kani::any(),
-        collateral: kani::any(),
-        status: kani::any(),
-    };
-    kani::assume(s.status == Status::Active);
-    let pre_borrower = s.borrower;
-    let pre_pool = s.pool;
-    let pre_amount = s.amount;
-    if repay(&mut s) {
-        assert!(s.collateral == 0, "collateral must equal 0");
-        assert!(pubkey_eq(&s.borrower, &pre_borrower), "borrower must not change");
-        assert!(pubkey_eq(&s.pool, &pre_pool), "pool must not change");
+    #[kani::proof]
+    #[kani::unwind(2)]
+    #[kani::solver(cadical)]
+    fn verify_borrow_effect_collateral() {
+        let mut s = State {
+            borrower: kani::any(),
+            pool: kani::any(),
+            amount: kani::any(),
+            collateral: kani::any(),
+            status: kani::any(),
+        };
+        kani::assume(s.status == Status::Empty);
+        let amount: u64 = kani::any();
+        let collateral: u64 = kani::any();
+        let pre_borrower = s.borrower;
+        let pre_pool = s.pool;
+        let pre_amount = s.amount;
+        if borrow(&mut s, amount, collateral) {
+            assert!(
+                s.collateral == collateral,
+                "collateral must equal collateral"
+            );
+            assert!(
+                pubkey_eq(&s.borrower, &pre_borrower),
+                "borrower must not change"
+            );
+            assert!(pubkey_eq(&s.pool, &pre_pool), "pool must not change");
+        }
     }
-}
 
-#[kani::proof]
-#[kani::unwind(2)]
-#[kani::solver(cadical)]
-fn verify_liquidate_effect_amount() {
-    let mut s = State {
-        borrower: kani::any(),
-        pool: kani::any(),
-        amount: kani::any(),
-        collateral: kani::any(),
-        status: kani::any(),
-    };
-    kani::assume(s.status == Status::Active);
-    let pre_borrower = s.borrower;
-    let pre_pool = s.pool;
-    let pre_collateral = s.collateral;
-    if liquidate(&mut s) {
-        assert!(s.amount == 0, "amount must equal 0");
-        assert!(pubkey_eq(&s.borrower, &pre_borrower), "borrower must not change");
-        assert!(pubkey_eq(&s.pool, &pre_pool), "pool must not change");
-        assert!(s.collateral == pre_collateral, "collateral must not change");
+    #[kani::proof]
+    #[kani::unwind(2)]
+    #[kani::solver(cadical)]
+    fn verify_repay_effect_amount() {
+        let mut s = State {
+            borrower: kani::any(),
+            pool: kani::any(),
+            amount: kani::any(),
+            collateral: kani::any(),
+            status: kani::any(),
+        };
+        kani::assume(s.status == Status::Active);
+        let pre_borrower = s.borrower;
+        let pre_pool = s.pool;
+        let pre_collateral = s.collateral;
+        if repay(&mut s) {
+            assert!(s.amount == 0, "amount must equal 0");
+            assert!(
+                pubkey_eq(&s.borrower, &pre_borrower),
+                "borrower must not change"
+            );
+            assert!(pubkey_eq(&s.pool, &pre_pool), "pool must not change");
+        }
     }
-}
 
+    #[kani::proof]
+    #[kani::unwind(2)]
+    #[kani::solver(cadical)]
+    fn verify_repay_effect_collateral() {
+        let mut s = State {
+            borrower: kani::any(),
+            pool: kani::any(),
+            amount: kani::any(),
+            collateral: kani::any(),
+            status: kani::any(),
+        };
+        kani::assume(s.status == Status::Active);
+        let pre_borrower = s.borrower;
+        let pre_pool = s.pool;
+        let pre_amount = s.amount;
+        if repay(&mut s) {
+            assert!(s.collateral == 0, "collateral must equal 0");
+            assert!(
+                pubkey_eq(&s.borrower, &pre_borrower),
+                "borrower must not change"
+            );
+            assert!(pubkey_eq(&s.pool, &pre_pool), "pool must not change");
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(2)]
+    #[kani::solver(cadical)]
+    fn verify_liquidate_effect_amount() {
+        let mut s = State {
+            borrower: kani::any(),
+            pool: kani::any(),
+            amount: kani::any(),
+            collateral: kani::any(),
+            status: kani::any(),
+        };
+        kani::assume(s.status == Status::Active);
+        let pre_borrower = s.borrower;
+        let pre_pool = s.pool;
+        let pre_collateral = s.collateral;
+        if liquidate(&mut s) {
+            assert!(s.amount == 0, "amount must equal 0");
+            assert!(
+                pubkey_eq(&s.borrower, &pre_borrower),
+                "borrower must not change"
+            );
+            assert!(pubkey_eq(&s.pool, &pre_pool), "pool must not change");
+            assert!(s.collateral == pre_collateral, "collateral must not change");
+        }
+    }
 } // mod loan
 
 // ---- GENERATED BY QEDGEN — DO NOT EDIT BELOW THIS LINE ----

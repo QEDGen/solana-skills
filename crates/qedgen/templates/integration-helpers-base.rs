@@ -11,4 +11,3 @@ fn empty(address: Pubkey) -> Account {
         executable: false,
     }
 }
-

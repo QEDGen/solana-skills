@@ -390,31 +390,37 @@ handler withdraw (amount : U64) {
 
     // Guard fn signature + pinocchio/zeropod imports.
     assert!(
-        guards.contains("use zeropod::ZeroPodFixed;")
-            && guards.contains("pub fn withdraw(ctx: &Withdraw, amount: u64) -> ProgramResult {"),
+        compact(&guards).contains(&compact("use zeropod::ZeroPodFixed;"))
+            && compact(&guards).contains(&compact(
+                "pub fn withdraw(ctx: &Withdraw, amount: u64) -> ProgramResult {"
+            )),
         "guard fn signature + imports; got:\n{guards}"
     );
     // Signer-auth.
     assert!(
-        guards.contains("if !ctx.owner.is_signer() {")
-            && guards.contains("return Err(ProgramError::MissingRequiredSignature);"),
+        compact(&guards).contains(&compact("if !ctx.owner.is_signer() {"))
+            && compact(&guards).contains(&compact(
+                "return Err(ProgramError::MissingRequiredSignature);"
+            )),
         "must emit the signer-auth check; got:\n{guards}"
     );
     // Param requires — direct.
     assert!(
-        guards.contains(
+        compact(&guards).contains(&compact(
             "if !(amount > 0) { return Err(ProgramError::from(VaultError::InvalidAmount)); }"
-        ),
+        )),
         "param requires must emit a direct if-check; got:\n{guards}"
     );
     // State requires — decode + .get() on the decoded view.
     assert!(
-        guards.contains("VaultAccount::from_bytes(unsafe { ctx.vault.borrow_data_unchecked() })"),
+        compact(&guards).contains(&compact(
+            "VaultAccount::from_bytes(unsafe { ctx.vault.borrow_data_unchecked() })"
+        )),
         "state-referencing requires must decode the state account; got:\n{guards}"
     );
     assert!(
-        guards.contains("__state.balance.get() >= amount")
-            && guards.contains("VaultError::Insufficient"),
+        compact(&guards).contains(&compact("__state.balance.get() >= amount"))
+            && compact(&guards).contains(&compact("VaultError::Insufficient")),
         "state requires must read via the decoded __state view; got:\n{guards}"
     );
 }
@@ -2289,4 +2295,16 @@ handler set_bid : State.Active -> State.Active {
         rendered,
         "        self.state.bid_buyer = self.state.rfp_buyer;\n"
     );
+}
+
+/// Whitespace-insensitive needle match: generated Rust is rustfmt-formatted
+/// at the write seam, so tests must not depend on line wrapping.
+fn compact(s: &str) -> String {
+    let squeezed: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    // rustfmt adds trailing commas when it wraps a call/struct/array across
+    // lines; normalize them away so needles match either rendering.
+    squeezed
+        .replace(",)", ")")
+        .replace(",]", "]")
+        .replace(",}", "}")
 }

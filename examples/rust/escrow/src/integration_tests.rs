@@ -46,7 +46,6 @@ fn empty(address: Pubkey) -> Account {
         executable: false,
     }
 }
-
 /// Create a pre-populated EscrowAccount account (program-owned).
 fn state_account(
     address: Pubkey,
@@ -101,7 +100,6 @@ fn token_account(address: Pubkey, mint: Pubkey, owner: Pubkey, amount: u64) -> A
         },
     )
 }
-
 // ── initialize ──
 
 #[test]
@@ -112,10 +110,8 @@ fn test_initialize() {
     let system_program = quasar_svm::system_program::ID;
     let rent = quasar_svm::solana_sdk_ids::sysvar::rent::ID;
     let initializer = Pubkey::new_unique();
-    let (escrow, _escrow_bump) = Pubkey::find_program_address(
-        &[b"escrow", initializer.as_ref()],
-        &crate::ID,
-    );
+    let (escrow, _escrow_bump) =
+        Pubkey::find_program_address(&[b"escrow", initializer.as_ref()], &crate::ID);
     let mint = Pubkey::new_unique();
     let initializer_ta = Pubkey::new_unique();
     let escrow_ta = Pubkey::new_unique();
@@ -143,8 +139,18 @@ fn test_initialize() {
             signer(initializer),
             empty(escrow),
             empty(mint),
-            token_account(initializer_ta, Pubkey::new_unique(), Pubkey::new_unique(), 1_000_000) /* AGENT: set mint, owner, amount */,
-            token_account(escrow_ta, Pubkey::new_unique(), Pubkey::new_unique(), 1_000_000) /* AGENT: set mint, owner, amount */,
+            token_account(
+                initializer_ta,
+                Pubkey::new_unique(),
+                Pubkey::new_unique(),
+                1_000_000,
+            ), /* AGENT: set mint, owner, amount */
+            token_account(
+                escrow_ta,
+                Pubkey::new_unique(),
+                Pubkey::new_unique(),
+                1_000_000,
+            ), /* AGENT: set mint, owner, amount */
         ],
     );
 
@@ -169,10 +175,8 @@ fn test_exchange() {
 
     // Account addresses
     let taker = Pubkey::new_unique();
-    let (escrow, _escrow_bump) = Pubkey::find_program_address(
-        &[b"escrow", initializer.as_ref()],
-        &crate::ID,
-    );
+    let (escrow, _escrow_bump) =
+        Pubkey::find_program_address(&[b"escrow", initializer.as_ref()], &crate::ID);
     let initializer_ta = Pubkey::new_unique();
     let taker_ta = Pubkey::new_unique();
     let escrow_ta = Pubkey::new_unique();
@@ -191,10 +195,25 @@ fn test_exchange() {
         &instruction,
         &[
             signer(taker),
-            empty(escrow) /* AGENT: use state_account() with appropriate fields */,
-            token_account(initializer_ta, Pubkey::new_unique(), Pubkey::new_unique(), 1_000_000) /* AGENT: set mint, owner, amount */,
-            token_account(taker_ta, Pubkey::new_unique(), Pubkey::new_unique(), 1_000_000) /* AGENT: set mint, owner, amount */,
-            token_account(escrow_ta, Pubkey::new_unique(), Pubkey::new_unique(), 1_000_000) /* AGENT: set mint, owner, amount */,
+            empty(escrow), /* AGENT: use state_account() with appropriate fields */
+            token_account(
+                initializer_ta,
+                Pubkey::new_unique(),
+                Pubkey::new_unique(),
+                1_000_000,
+            ), /* AGENT: set mint, owner, amount */
+            token_account(
+                taker_ta,
+                Pubkey::new_unique(),
+                Pubkey::new_unique(),
+                1_000_000,
+            ), /* AGENT: set mint, owner, amount */
+            token_account(
+                escrow_ta,
+                Pubkey::new_unique(),
+                Pubkey::new_unique(),
+                1_000_000,
+            ), /* AGENT: set mint, owner, amount */
         ],
     );
 
@@ -211,10 +230,8 @@ fn test_cancel() {
 
     // Account addresses
     let initializer = Pubkey::new_unique();
-    let (escrow, _escrow_bump) = Pubkey::find_program_address(
-        &[b"escrow", initializer.as_ref()],
-        &crate::ID,
-    );
+    let (escrow, _escrow_bump) =
+        Pubkey::find_program_address(&[b"escrow", initializer.as_ref()], &crate::ID);
     let escrow_ta = Pubkey::new_unique();
     let initializer_ta = Pubkey::new_unique();
 
@@ -231,9 +248,19 @@ fn test_cancel() {
         &instruction,
         &[
             signer(initializer),
-            empty(escrow) /* AGENT: use state_account() with appropriate fields */,
-            token_account(escrow_ta, Pubkey::new_unique(), Pubkey::new_unique(), 1_000_000) /* AGENT: set mint, owner, amount */,
-            token_account(initializer_ta, Pubkey::new_unique(), Pubkey::new_unique(), 1_000_000) /* AGENT: set mint, owner, amount */,
+            empty(escrow), /* AGENT: use state_account() with appropriate fields */
+            token_account(
+                escrow_ta,
+                Pubkey::new_unique(),
+                Pubkey::new_unique(),
+                1_000_000,
+            ), /* AGENT: set mint, owner, amount */
+            token_account(
+                initializer_ta,
+                Pubkey::new_unique(),
+                Pubkey::new_unique(),
+                1_000_000,
+            ), /* AGENT: set mint, owner, amount */
         ],
     );
 
@@ -274,12 +301,25 @@ fn test_initialize_unauthorized() {
             signer(wrong_initializer),
             empty(escrow),
             empty(mint),
-            token_account(initializer_ta, Pubkey::new_unique(), Pubkey::new_unique(), 1_000_000) /* AGENT: set mint, owner, amount */,
-            token_account(escrow_ta, Pubkey::new_unique(), Pubkey::new_unique(), 1_000_000) /* AGENT: set mint, owner, amount */,
+            token_account(
+                initializer_ta,
+                Pubkey::new_unique(),
+                Pubkey::new_unique(),
+                1_000_000,
+            ), /* AGENT: set mint, owner, amount */
+            token_account(
+                escrow_ta,
+                Pubkey::new_unique(),
+                Pubkey::new_unique(),
+                1_000_000,
+            ), /* AGENT: set mint, owner, amount */
         ],
     );
 
-    assert!(result.is_err(), "initialize should reject wrong initializer");
+    assert!(
+        result.is_err(),
+        "initialize should reject wrong initializer"
+    );
 }
 
 /// exchange must reject unauthorized callers (wrong taker).
@@ -307,10 +347,25 @@ fn test_exchange_unauthorized() {
         &instruction,
         &[
             signer(wrong_taker),
-            empty(escrow) /* AGENT: use state_account() with appropriate fields */,
-            token_account(initializer_ta, Pubkey::new_unique(), Pubkey::new_unique(), 1_000_000) /* AGENT: set mint, owner, amount */,
-            token_account(taker_ta, Pubkey::new_unique(), Pubkey::new_unique(), 1_000_000) /* AGENT: set mint, owner, amount */,
-            token_account(escrow_ta, Pubkey::new_unique(), Pubkey::new_unique(), 1_000_000) /* AGENT: set mint, owner, amount */,
+            empty(escrow), /* AGENT: use state_account() with appropriate fields */
+            token_account(
+                initializer_ta,
+                Pubkey::new_unique(),
+                Pubkey::new_unique(),
+                1_000_000,
+            ), /* AGENT: set mint, owner, amount */
+            token_account(
+                taker_ta,
+                Pubkey::new_unique(),
+                Pubkey::new_unique(),
+                1_000_000,
+            ), /* AGENT: set mint, owner, amount */
+            token_account(
+                escrow_ta,
+                Pubkey::new_unique(),
+                Pubkey::new_unique(),
+                1_000_000,
+            ), /* AGENT: set mint, owner, amount */
         ],
     );
 
@@ -340,9 +395,19 @@ fn test_cancel_unauthorized() {
         &instruction,
         &[
             signer(wrong_initializer),
-            empty(escrow) /* AGENT: use state_account() with appropriate fields */,
-            token_account(escrow_ta, Pubkey::new_unique(), Pubkey::new_unique(), 1_000_000) /* AGENT: set mint, owner, amount */,
-            token_account(initializer_ta, Pubkey::new_unique(), Pubkey::new_unique(), 1_000_000) /* AGENT: set mint, owner, amount */,
+            empty(escrow), /* AGENT: use state_account() with appropriate fields */
+            token_account(
+                escrow_ta,
+                Pubkey::new_unique(),
+                Pubkey::new_unique(),
+                1_000_000,
+            ), /* AGENT: set mint, owner, amount */
+            token_account(
+                initializer_ta,
+                Pubkey::new_unique(),
+                Pubkey::new_unique(),
+                1_000_000,
+            ), /* AGENT: set mint, owner, amount */
         ],
     );
 
@@ -366,4 +431,3 @@ fn test_lifecycle_sequence() {
     // AGENT: build and execute initialize instruction
     todo!("build instruction sequence");
 }
-

@@ -23,4 +23,3 @@ fn token_account(address: Pubkey, mint: Pubkey, owner: Pubkey, amount: u64) -> A
         },
     )
 }
-

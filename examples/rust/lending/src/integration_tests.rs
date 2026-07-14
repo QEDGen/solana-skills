@@ -46,7 +46,6 @@ fn empty(address: Pubkey) -> Account {
         executable: false,
     }
 }
-
 /// Create a pre-populated LendingAccount account (program-owned).
 fn state_account(
     address: Pubkey,
@@ -97,7 +96,6 @@ fn token_account(address: Pubkey, mint: Pubkey, owner: Pubkey, amount: u64) -> A
         },
     )
 }
-
 // ── init_pool ──
 
 #[test]
@@ -108,10 +106,8 @@ fn test_init_pool() {
     let system_program = quasar_svm::system_program::ID;
     let rent = quasar_svm::solana_sdk_ids::sysvar::rent::ID;
     let authority = Pubkey::new_unique();
-    let (pool, _pool_bump) = Pubkey::find_program_address(
-        &[b"pool", authority.as_ref()],
-        &crate::ID,
-    );
+    let (pool, _pool_bump) =
+        Pubkey::find_program_address(&[b"pool", authority.as_ref()], &crate::ID);
 
     // Instruction parameters
     let rate: u64 = 1_000_000; // AGENT: set appropriate value
@@ -124,13 +120,7 @@ fn test_init_pool() {
     }
     .into();
 
-    let result = svm.process_instruction(
-        &instruction,
-        &[
-            signer(authority),
-            empty(pool),
-        ],
-    );
+    let result = svm.process_instruction(&instruction, &[signer(authority), empty(pool)]);
 
     assert!(result.is_ok(), "init_pool failed: {:?}", result.raw_result);
 
@@ -151,10 +141,8 @@ fn test_deposit() {
 
     // Account addresses
     let depositor = Pubkey::new_unique();
-    let (pool, _pool_bump) = Pubkey::find_program_address(
-        &[b"pool", authority.as_ref()],
-        &crate::ID,
-    );
+    let (pool, _pool_bump) =
+        Pubkey::find_program_address(&[b"pool", authority.as_ref()], &crate::ID);
     let pool_vault = Pubkey::new_unique();
     let depositor_ta = Pubkey::new_unique();
 
@@ -175,9 +163,19 @@ fn test_deposit() {
         &instruction,
         &[
             signer(depositor),
-            empty(pool) /* AGENT: use state_account() with appropriate fields */,
-            token_account(pool_vault, Pubkey::new_unique(), Pubkey::new_unique(), 1_000_000) /* AGENT: set mint, owner, amount */,
-            token_account(depositor_ta, Pubkey::new_unique(), Pubkey::new_unique(), 1_000_000) /* AGENT: set mint, owner, amount */,
+            empty(pool), /* AGENT: use state_account() with appropriate fields */
+            token_account(
+                pool_vault,
+                Pubkey::new_unique(),
+                Pubkey::new_unique(),
+                1_000_000,
+            ), /* AGENT: set mint, owner, amount */
+            token_account(
+                depositor_ta,
+                Pubkey::new_unique(),
+                Pubkey::new_unique(),
+                1_000_000,
+            ), /* AGENT: set mint, owner, amount */
         ],
     );
 
@@ -202,14 +200,10 @@ fn test_borrow() {
     let system_program = quasar_svm::system_program::ID;
     let rent = quasar_svm::solana_sdk_ids::sysvar::rent::ID;
     let borrower = Pubkey::new_unique();
-    let (loan, _loan_bump) = Pubkey::find_program_address(
-        &[b"loan", pool.as_ref(), borrower.as_ref()],
-        &crate::ID,
-    );
-    let (pool, _pool_bump) = Pubkey::find_program_address(
-        &[b"pool", authority.as_ref()],
-        &crate::ID,
-    );
+    let (loan, _loan_bump) =
+        Pubkey::find_program_address(&[b"loan", pool.as_ref(), borrower.as_ref()], &crate::ID);
+    let (pool, _pool_bump) =
+        Pubkey::find_program_address(&[b"pool", authority.as_ref()], &crate::ID);
     let pool_vault = Pubkey::new_unique();
     let borrower_ta = Pubkey::new_unique();
 
@@ -236,8 +230,18 @@ fn test_borrow() {
             signer(borrower),
             empty(loan),
             empty(pool),
-            token_account(pool_vault, Pubkey::new_unique(), Pubkey::new_unique(), 1_000_000) /* AGENT: set mint, owner, amount */,
-            token_account(borrower_ta, Pubkey::new_unique(), Pubkey::new_unique(), 1_000_000) /* AGENT: set mint, owner, amount */,
+            token_account(
+                pool_vault,
+                Pubkey::new_unique(),
+                Pubkey::new_unique(),
+                1_000_000,
+            ), /* AGENT: set mint, owner, amount */
+            token_account(
+                borrower_ta,
+                Pubkey::new_unique(),
+                Pubkey::new_unique(),
+                1_000_000,
+            ), /* AGENT: set mint, owner, amount */
         ],
     );
 
@@ -262,14 +266,10 @@ fn test_repay() {
 
     // Account addresses
     let borrower = Pubkey::new_unique();
-    let (loan, _loan_bump) = Pubkey::find_program_address(
-        &[b"loan", pool.as_ref(), borrower.as_ref()],
-        &crate::ID,
-    );
-    let (pool, _pool_bump) = Pubkey::find_program_address(
-        &[b"pool", authority.as_ref()],
-        &crate::ID,
-    );
+    let (loan, _loan_bump) =
+        Pubkey::find_program_address(&[b"loan", pool.as_ref(), borrower.as_ref()], &crate::ID);
+    let (pool, _pool_bump) =
+        Pubkey::find_program_address(&[b"pool", authority.as_ref()], &crate::ID);
     let pool_vault = Pubkey::new_unique();
     let borrower_ta = Pubkey::new_unique();
 
@@ -287,10 +287,20 @@ fn test_repay() {
         &instruction,
         &[
             signer(borrower),
-            empty(loan) /* AGENT: use state_account() with appropriate fields */,
-            empty(pool) /* AGENT: use state_account() with appropriate fields */,
-            token_account(pool_vault, Pubkey::new_unique(), Pubkey::new_unique(), 1_000_000) /* AGENT: set mint, owner, amount */,
-            token_account(borrower_ta, Pubkey::new_unique(), Pubkey::new_unique(), 1_000_000) /* AGENT: set mint, owner, amount */,
+            empty(loan), /* AGENT: use state_account() with appropriate fields */
+            empty(pool), /* AGENT: use state_account() with appropriate fields */
+            token_account(
+                pool_vault,
+                Pubkey::new_unique(),
+                Pubkey::new_unique(),
+                1_000_000,
+            ), /* AGENT: set mint, owner, amount */
+            token_account(
+                borrower_ta,
+                Pubkey::new_unique(),
+                Pubkey::new_unique(),
+                1_000_000,
+            ), /* AGENT: set mint, owner, amount */
         ],
     );
 
@@ -315,14 +325,10 @@ fn test_liquidate() {
 
     // Account addresses
     let liquidator = Pubkey::new_unique();
-    let (loan, _loan_bump) = Pubkey::find_program_address(
-        &[b"loan", pool.as_ref(), borrower.as_ref()],
-        &crate::ID,
-    );
-    let (pool, _pool_bump) = Pubkey::find_program_address(
-        &[b"pool", authority.as_ref()],
-        &crate::ID,
-    );
+    let (loan, _loan_bump) =
+        Pubkey::find_program_address(&[b"loan", pool.as_ref(), borrower.as_ref()], &crate::ID);
+    let (pool, _pool_bump) =
+        Pubkey::find_program_address(&[b"pool", authority.as_ref()], &crate::ID);
     let pool_vault = Pubkey::new_unique();
     let liquidator_ta = Pubkey::new_unique();
 
@@ -340,10 +346,20 @@ fn test_liquidate() {
         &instruction,
         &[
             signer(liquidator),
-            empty(loan) /* AGENT: use state_account() with appropriate fields */,
-            empty(pool) /* AGENT: use state_account() with appropriate fields */,
-            token_account(pool_vault, Pubkey::new_unique(), Pubkey::new_unique(), 1_000_000) /* AGENT: set mint, owner, amount */,
-            token_account(liquidator_ta, Pubkey::new_unique(), Pubkey::new_unique(), 1_000_000) /* AGENT: set mint, owner, amount */,
+            empty(loan), /* AGENT: use state_account() with appropriate fields */
+            empty(pool), /* AGENT: use state_account() with appropriate fields */
+            token_account(
+                pool_vault,
+                Pubkey::new_unique(),
+                Pubkey::new_unique(),
+                1_000_000,
+            ), /* AGENT: set mint, owner, amount */
+            token_account(
+                liquidator_ta,
+                Pubkey::new_unique(),
+                Pubkey::new_unique(),
+                1_000_000,
+            ), /* AGENT: set mint, owner, amount */
         ],
     );
 
@@ -377,13 +393,7 @@ fn test_init_pool_unauthorized() {
     }
     .into();
 
-    let result = svm.process_instruction(
-        &instruction,
-        &[
-            signer(wrong_authority),
-            empty(pool),
-        ],
-    );
+    let result = svm.process_instruction(&instruction, &[signer(wrong_authority), empty(pool)]);
 
     assert!(result.is_err(), "init_pool should reject wrong authority");
 }
@@ -420,8 +430,18 @@ fn test_borrow_unauthorized() {
             signer(wrong_borrower),
             empty(loan),
             empty(pool),
-            token_account(pool_vault, Pubkey::new_unique(), Pubkey::new_unique(), 1_000_000) /* AGENT: set mint, owner, amount */,
-            token_account(borrower_ta, Pubkey::new_unique(), Pubkey::new_unique(), 1_000_000) /* AGENT: set mint, owner, amount */,
+            token_account(
+                pool_vault,
+                Pubkey::new_unique(),
+                Pubkey::new_unique(),
+                1_000_000,
+            ), /* AGENT: set mint, owner, amount */
+            token_account(
+                borrower_ta,
+                Pubkey::new_unique(),
+                Pubkey::new_unique(),
+                1_000_000,
+            ), /* AGENT: set mint, owner, amount */
         ],
     );
 
@@ -453,10 +473,20 @@ fn test_repay_unauthorized() {
         &instruction,
         &[
             signer(wrong_borrower),
-            empty(loan) /* AGENT: use state_account() with appropriate fields */,
-            empty(pool) /* AGENT: use state_account() with appropriate fields */,
-            token_account(pool_vault, Pubkey::new_unique(), Pubkey::new_unique(), 1_000_000) /* AGENT: set mint, owner, amount */,
-            token_account(borrower_ta, Pubkey::new_unique(), Pubkey::new_unique(), 1_000_000) /* AGENT: set mint, owner, amount */,
+            empty(loan), /* AGENT: use state_account() with appropriate fields */
+            empty(pool), /* AGENT: use state_account() with appropriate fields */
+            token_account(
+                pool_vault,
+                Pubkey::new_unique(),
+                Pubkey::new_unique(),
+                1_000_000,
+            ), /* AGENT: set mint, owner, amount */
+            token_account(
+                borrower_ta,
+                Pubkey::new_unique(),
+                Pubkey::new_unique(),
+                1_000_000,
+            ), /* AGENT: set mint, owner, amount */
         ],
     );
 
@@ -482,4 +512,3 @@ fn test_lifecycle_sequence() {
     // AGENT: build and execute init_pool instruction
     todo!("build instruction sequence");
 }
-

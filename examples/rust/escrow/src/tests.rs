@@ -180,7 +180,11 @@ mod tests {
     #[test]
     fn test_initialize_transition_uninitialized_to_open() {
         // initialize requires status == Uninitialized and moves to Open
-        assert_ne!(Status::Uninitialized, Status::Open, "initialize changes status");
+        assert_ne!(
+            Status::Uninitialized,
+            Status::Open,
+            "initialize changes status"
+        );
         let _pre = Status::Uninitialized;
         let _post = Status::Open;
         // AGENT: verify handler transitions status from _pre to _post
@@ -203,5 +207,4 @@ mod tests {
         let _post = Status::Closed;
         // AGENT: verify handler transitions status from _pre to _post
     }
-
 }

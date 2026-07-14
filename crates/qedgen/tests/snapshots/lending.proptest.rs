@@ -16,348 +16,346 @@ use proptest::prelude::*;
 mod pool {
     use super::*;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Status {
-    Uninitialized,
-    Active,
-    Paused,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct State {
-    authority: [u8; 32],
-    total_deposits: u64,
-    total_borrows: u64,
-    interest_rate: u64,
-    status: Status,
-}
-
-/// Proptest strategy for generating arbitrary State values.
-prop_compose! {
-    fn arb_state()(
-        authority in prop::array::uniform32(0u8..),
-        total_deposits in 0u64..=u64::MAX,
-        total_borrows in 0u64..=u64::MAX,
-        interest_rate in 0u64..=u64::MAX,
-        status in prop_oneof![Just(Status::Uninitialized), Just(Status::Active), Just(Status::Paused)],
-    ) -> State {
-        State {
-            authority,
-            total_deposits,
-            total_borrows,
-            interest_rate,
-            status,
-        }
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Status {
+        Uninitialized,
+        Active,
+        Paused,
     }
-}
 
-/// Boundary-biased strategy for guard rejection tests.
-prop_compose! {
-    fn arb_boundary_state()(
-        authority in prop::array::uniform32(0u8..1u8),
-        total_deposits in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX],
-        total_borrows in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX],
-        interest_rate in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX],
-        status in prop_oneof![Just(Status::Uninitialized), Just(Status::Active), Just(Status::Paused)],
-    ) -> State {
-        State {
-            authority,
-            total_deposits,
-            total_borrows,
-            interest_rate,
-            status,
-        }
+    #[derive(Debug, Clone, Copy)]
+    struct State {
+        authority: [u8; 32],
+        total_deposits: u64,
+        total_borrows: u64,
+        interest_rate: u64,
+        status: Status,
     }
-}
 
-/// pool_solvency: s.total_deposits ≥ s.total_borrows
-fn pool_solvency(s: &State) -> bool {
-    s.total_deposits >= s.total_borrows
-}
-
-fn init_pool(s: &mut State, rate: u64) -> bool {
-    if !((rate > 0)) {
-        return false;
-    }
-    if s.status != Status::Uninitialized {
-        return false;
-    }
-    s.interest_rate = rate;
-    s.total_deposits = 0;
-    s.total_borrows = 0;
-    s.status = Status::Active;
-    true
-}
-
-fn deposit(s: &mut State, amount: u64) -> bool {
-    if !((amount > 0)) {
-        return false;
-    }
-    if s.status != Status::Active {
-        return false;
-    }
-    s.total_deposits = s.total_deposits.wrapping_add(amount);
-    s.status = Status::Active;
-    true
-}
-
-proptest! {
-    #![proptest_config(ProptestConfig { max_global_rejects: 65536, ..ProptestConfig::with_cases(256) })]
-    #[test]
-    fn init_pool_preserves_pool_solvency(rate in 0u64..=u64::MAX) {
-        let mut post = State {
-            authority: [0u8; 32],
-            total_deposits: 0,
-            total_borrows: 0,
-            interest_rate: 0,
-            status: Status::Uninitialized,
-        };
-        let pre = post;
-        if init_pool(&mut post, rate) {
-            prop_assert!(pool_solvency(&post),
-                "pool_solvency must hold after init_pool");
-        }
-    }
-}
-
-proptest! {
-    #![proptest_config(ProptestConfig { max_global_rejects: 65536, ..ProptestConfig::with_cases(256) })]
-    #[test]
-    fn deposit_preserves_pool_solvency(s in arb_state(), amount in 0u64..=u64::MAX) {
-        let pre = s.clone();
-        let mut post = s;
-        prop_assume!(pool_solvency(&pre));
-        if deposit(&mut post, amount) {
-            prop_assert!(pool_solvency(&post),
-                "pool_solvency must hold after deposit");
-        }
-    }
-}
-
-proptest! {
-    #![proptest_config(ProptestConfig { max_global_rejects: 65536, ..ProptestConfig::with_cases(256) })]
-    #[test]
-    fn init_pool_rejects_invalid(s in arb_boundary_state(), rate in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX]) {
-        let mut s = s;
-        prop_assume!(!((rate > 0)));
-        prop_assert!(!init_pool(&mut s, rate),
-            "init_pool must reject when guard is violated");
-    }
-}
-
-proptest! {
-    #![proptest_config(ProptestConfig { max_global_rejects: 65536, ..ProptestConfig::with_cases(256) })]
-    #[test]
-    fn deposit_rejects_invalid(s in arb_boundary_state(), amount in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX]) {
-        let mut s = s;
-        prop_assume!(!((amount > 0)));
-        prop_assert!(!deposit(&mut s, amount),
-            "deposit must reject when guard is violated");
-    }
-}
-
-proptest! {
-    #![proptest_config(ProptestConfig { max_global_rejects: 65536, ..ProptestConfig::with_cases(256) })]
-    #[test]
-    fn deposit_no_overflow_on_total_deposits(s in arb_state(), amount in 0u64..=u64::MAX) {
-        let mut s = s;
-        prop_assume!(pool_solvency(&s));
-        let pre = s.total_deposits;
-        if deposit(&mut s, amount) {
-            // If transition succeeded, the add must not have wrapped
-            prop_assert!(s.total_deposits >= pre,
-                "overflow: deposit.total_deposits wrapped around after add");
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-enum Op {
-    InitPool(u64),
-    Deposit(u64),
-}
-
-fn arb_op() -> impl Strategy<Value = Op> {
-    prop_oneof![
-        (0u64..=u64::MAX).prop_map(|v| Op::InitPool(v)),
-        (0u64..=u64::MAX).prop_map(|v| Op::Deposit(v)),
-    ]
-}
-
-fn apply_op(s: &mut State, op: &Op) -> bool {
-    match op {
-        Op::InitPool(rate) => init_pool(s, *rate),
-        Op::Deposit(amount) => deposit(s, *amount),
-    }
-}
-
-fn assert_all_properties(s: &State, context: &str) {
-    assert!(pool_solvency(s), "{} violated: pool_solvency", context);
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum Lifecycle {
-    Uninitialized,
-    Active,
-    Paused,
-}
-
-fn lifecycle_transition(current: Lifecycle, op: &Op) -> Option<Lifecycle> {
-    match (current, op) {
-        (Lifecycle::Uninitialized, Op::InitPool(..)) => Some(Lifecycle::Active),
-        (Lifecycle::Active, Op::Deposit(..)) => Some(Lifecycle::Active),
-        _ => None, // transition not allowed in this state
-    }
-}
-
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(256))]
-    #[test]
-    fn state_machine_sequence(ops in proptest::collection::vec(arb_op(), 1..20)) {
-        let mut s = State {
-            authority: [0u8; 32],
-            total_deposits: 0,
-            total_borrows: 0,
-            interest_rate: 0,
-            status: Status::Uninitialized,
-        };
-        let mut lifecycle = Lifecycle::Uninitialized;
-        let mut initialized = false;
-        for (i, op) in ops.iter().enumerate() {
-            let next_lifecycle = lifecycle_transition(lifecycle, op);
-            if next_lifecycle.is_none() {
-                continue; // skip ops not valid in current lifecycle state
-            }
-            if apply_op(&mut s, op) {
-                if let Some(next) = next_lifecycle {
-                    lifecycle = next;
-                }
-                if !initialized {
-                    initialized = true;
-                    continue; // skip property checks on init transition
-                }
-                // Check all properties after each successful transition
-                prop_assert!(pool_solvency(&s),
-                    "pool_solvency violated after op {:?} (step {})", op, i);
+    /// Proptest strategy for generating arbitrary State values.
+    prop_compose! {
+        fn arb_state()(
+            authority in prop::array::uniform32(0u8..),
+            total_deposits in 0u64..=u64::MAX,
+            total_borrows in 0u64..=u64::MAX,
+            interest_rate in 0u64..=u64::MAX,
+            status in prop_oneof![Just(Status::Uninitialized), Just(Status::Active), Just(Status::Paused)],
+        ) -> State {
+            State {
+                authority,
+                total_deposits,
+                total_borrows,
+                interest_rate,
+                status,
             }
         }
     }
-}
+
+    /// Boundary-biased strategy for guard rejection tests.
+    prop_compose! {
+        fn arb_boundary_state()(
+            authority in prop::array::uniform32(0u8..1u8),
+            total_deposits in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX],
+            total_borrows in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX],
+            interest_rate in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX],
+            status in prop_oneof![Just(Status::Uninitialized), Just(Status::Active), Just(Status::Paused)],
+        ) -> State {
+            State {
+                authority,
+                total_deposits,
+                total_borrows,
+                interest_rate,
+                status,
+            }
+        }
+    }
+
+    /// pool_solvency: s.total_deposits ≥ s.total_borrows
+    fn pool_solvency(s: &State) -> bool {
+        s.total_deposits >= s.total_borrows
+    }
+
+    fn init_pool(s: &mut State, rate: u64) -> bool {
+        if !(rate > 0) {
+            return false;
+        }
+        if s.status != Status::Uninitialized {
+            return false;
+        }
+        s.interest_rate = rate;
+        s.total_deposits = 0;
+        s.total_borrows = 0;
+        s.status = Status::Active;
+        true
+    }
+
+    fn deposit(s: &mut State, amount: u64) -> bool {
+        if !(amount > 0) {
+            return false;
+        }
+        if s.status != Status::Active {
+            return false;
+        }
+        s.total_deposits = s.total_deposits.wrapping_add(amount);
+        s.status = Status::Active;
+        true
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { max_global_rejects: 65536, ..ProptestConfig::with_cases(256) })]
+        #[test]
+        fn init_pool_preserves_pool_solvency(rate in 0u64..=u64::MAX) {
+            let mut post = State {
+                authority: [0u8; 32],
+                total_deposits: 0,
+                total_borrows: 0,
+                interest_rate: 0,
+                status: Status::Uninitialized,
+            };
+            let pre = post;
+            if init_pool(&mut post, rate) {
+                prop_assert!(pool_solvency(&post),
+                    "pool_solvency must hold after init_pool");
+            }
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { max_global_rejects: 65536, ..ProptestConfig::with_cases(256) })]
+        #[test]
+        fn deposit_preserves_pool_solvency(s in arb_state(), amount in 0u64..=u64::MAX) {
+            let pre = s.clone();
+            let mut post = s;
+            prop_assume!(pool_solvency(&pre));
+            if deposit(&mut post, amount) {
+                prop_assert!(pool_solvency(&post),
+                    "pool_solvency must hold after deposit");
+            }
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { max_global_rejects: 65536, ..ProptestConfig::with_cases(256) })]
+        #[test]
+        fn init_pool_rejects_invalid(s in arb_boundary_state(), rate in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX]) {
+            let mut s = s;
+            prop_assume!(!((rate > 0)));
+            prop_assert!(!init_pool(&mut s, rate),
+                "init_pool must reject when guard is violated");
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { max_global_rejects: 65536, ..ProptestConfig::with_cases(256) })]
+        #[test]
+        fn deposit_rejects_invalid(s in arb_boundary_state(), amount in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX]) {
+            let mut s = s;
+            prop_assume!(!((amount > 0)));
+            prop_assert!(!deposit(&mut s, amount),
+                "deposit must reject when guard is violated");
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { max_global_rejects: 65536, ..ProptestConfig::with_cases(256) })]
+        #[test]
+        fn deposit_no_overflow_on_total_deposits(s in arb_state(), amount in 0u64..=u64::MAX) {
+            let mut s = s;
+            prop_assume!(pool_solvency(&s));
+            let pre = s.total_deposits;
+            if deposit(&mut s, amount) {
+                // If transition succeeded, the add must not have wrapped
+                prop_assert!(s.total_deposits >= pre,
+                    "overflow: deposit.total_deposits wrapped around after add");
+            }
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    enum Op {
+        InitPool(u64),
+        Deposit(u64),
+    }
+
+    fn arb_op() -> impl Strategy<Value = Op> {
+        prop_oneof![
+            (0u64..=u64::MAX).prop_map(|v| Op::InitPool(v)),
+            (0u64..=u64::MAX).prop_map(|v| Op::Deposit(v)),
+        ]
+    }
+
+    fn apply_op(s: &mut State, op: &Op) -> bool {
+        match op {
+            Op::InitPool(rate) => init_pool(s, *rate),
+            Op::Deposit(amount) => deposit(s, *amount),
+        }
+    }
+
+    fn assert_all_properties(s: &State, context: &str) {
+        assert!(pool_solvency(s), "{} violated: pool_solvency", context);
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum Lifecycle {
+        Uninitialized,
+        Active,
+        Paused,
+    }
+
+    fn lifecycle_transition(current: Lifecycle, op: &Op) -> Option<Lifecycle> {
+        match (current, op) {
+            (Lifecycle::Uninitialized, Op::InitPool(..)) => Some(Lifecycle::Active),
+            (Lifecycle::Active, Op::Deposit(..)) => Some(Lifecycle::Active),
+            _ => None, // transition not allowed in this state
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+        #[test]
+        fn state_machine_sequence(ops in proptest::collection::vec(arb_op(), 1..20)) {
+            let mut s = State {
+                authority: [0u8; 32],
+                total_deposits: 0,
+                total_borrows: 0,
+                interest_rate: 0,
+                status: Status::Uninitialized,
+            };
+            let mut lifecycle = Lifecycle::Uninitialized;
+            let mut initialized = false;
+            for (i, op) in ops.iter().enumerate() {
+                let next_lifecycle = lifecycle_transition(lifecycle, op);
+                if next_lifecycle.is_none() {
+                    continue; // skip ops not valid in current lifecycle state
+                }
+                if apply_op(&mut s, op) {
+                    if let Some(next) = next_lifecycle {
+                        lifecycle = next;
+                    }
+                    if !initialized {
+                        initialized = true;
+                        continue; // skip property checks on init transition
+                    }
+                    // Check all properties after each successful transition
+                    prop_assert!(pool_solvency(&s),
+                        "pool_solvency violated after op {:?} (step {})", op, i);
+                }
+            }
+        }
+    }
 } // mod pool
 
 mod loan {
     use super::*;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Status {
-    Empty,
-    Active,
-    Liquidated,
-}
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Status {
+        Empty,
+        Active,
+        Liquidated,
+    }
 
-#[derive(Debug, Clone, Copy)]
-struct State {
-    borrower: [u8; 32],
-    pool: [u8; 32],
-    amount: u64,
-    collateral: u64,
-    status: Status,
-}
+    #[derive(Debug, Clone, Copy)]
+    struct State {
+        borrower: [u8; 32],
+        pool: [u8; 32],
+        amount: u64,
+        collateral: u64,
+        status: Status,
+    }
 
-/// Proptest strategy for generating arbitrary State values.
-prop_compose! {
-    fn arb_state()(
-        borrower in prop::array::uniform32(0u8..),
-        pool in prop::array::uniform32(0u8..),
-        amount in 0u64..=u64::MAX,
-        collateral in 0u64..=u64::MAX,
-        status in prop_oneof![Just(Status::Empty), Just(Status::Active), Just(Status::Liquidated)],
-    ) -> State {
-        State {
-            borrower,
-            pool,
-            amount,
-            collateral,
-            status,
+    /// Proptest strategy for generating arbitrary State values.
+    prop_compose! {
+        fn arb_state()(
+            borrower in prop::array::uniform32(0u8..),
+            pool in prop::array::uniform32(0u8..),
+            amount in 0u64..=u64::MAX,
+            collateral in 0u64..=u64::MAX,
+            status in prop_oneof![Just(Status::Empty), Just(Status::Active), Just(Status::Liquidated)],
+        ) -> State {
+            State {
+                borrower,
+                pool,
+                amount,
+                collateral,
+                status,
+            }
         }
     }
-}
 
-/// Boundary-biased strategy for guard rejection tests.
-prop_compose! {
-    fn arb_boundary_state()(
-        borrower in prop::array::uniform32(0u8..1u8),
-        pool in prop::array::uniform32(0u8..1u8),
-        amount in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX],
-        collateral in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX],
-        status in prop_oneof![Just(Status::Empty), Just(Status::Active), Just(Status::Liquidated)],
-    ) -> State {
-        State {
-            borrower,
-            pool,
-            amount,
-            collateral,
-            status,
+    /// Boundary-biased strategy for guard rejection tests.
+    prop_compose! {
+        fn arb_boundary_state()(
+            borrower in prop::array::uniform32(0u8..1u8),
+            pool in prop::array::uniform32(0u8..1u8),
+            amount in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX],
+            collateral in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX],
+            status in prop_oneof![Just(Status::Empty), Just(Status::Active), Just(Status::Liquidated)],
+        ) -> State {
+            State {
+                borrower,
+                pool,
+                amount,
+                collateral,
+                status,
+            }
         }
     }
-}
 
-fn borrow(s: &mut State, amount: u64, collateral: u64) -> bool {
-    if !(((amount > 0) && (collateral > 0))) {
-        return false;
+    fn borrow(s: &mut State, amount: u64, collateral: u64) -> bool {
+        if !((amount > 0) && (collateral > 0)) {
+            return false;
+        }
+        if s.status != Status::Empty {
+            return false;
+        }
+        s.amount = amount;
+        s.collateral = collateral;
+        s.status = Status::Active;
+        true
     }
-    if s.status != Status::Empty {
-        return false;
-    }
-    s.amount = amount;
-    s.collateral = collateral;
-    s.status = Status::Active;
-    true
-}
 
-fn repay(s: &mut State) -> bool {
-    if s.status != Status::Active {
-        return false;
+    fn repay(s: &mut State) -> bool {
+        if s.status != Status::Active {
+            return false;
+        }
+        s.amount = 0;
+        s.collateral = 0;
+        s.status = Status::Empty;
+        true
     }
-    s.amount = 0;
-    s.collateral = 0;
-    s.status = Status::Empty;
-    true
-}
 
-fn liquidate(s: &mut State) -> bool {
-    if !((s.amount > s.collateral)) {
-        return false;
+    fn liquidate(s: &mut State) -> bool {
+        if !(s.amount > s.collateral) {
+            return false;
+        }
+        if s.status != Status::Active {
+            return false;
+        }
+        s.amount = 0;
+        s.status = Status::Liquidated;
+        true
     }
-    if s.status != Status::Active {
-        return false;
-    }
-    s.amount = 0;
-    s.status = Status::Liquidated;
-    true
-}
 
-proptest! {
-    #![proptest_config(ProptestConfig { max_global_rejects: 65536, ..ProptestConfig::with_cases(256) })]
-    #[test]
-    fn borrow_rejects_invalid(s in arb_boundary_state(), amount in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX], collateral in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX]) {
-        let mut s = s;
-        prop_assume!(!(((amount > 0) && (collateral > 0))));
-        prop_assert!(!borrow(&mut s, amount, collateral),
-            "borrow must reject when guard is violated");
+    proptest! {
+        #![proptest_config(ProptestConfig { max_global_rejects: 65536, ..ProptestConfig::with_cases(256) })]
+        #[test]
+        fn borrow_rejects_invalid(s in arb_boundary_state(), amount in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX], collateral in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX]) {
+            let mut s = s;
+            prop_assume!(!(((amount > 0) && (collateral > 0))));
+            prop_assert!(!borrow(&mut s, amount, collateral),
+                "borrow must reject when guard is violated");
+        }
     }
-}
 
-proptest! {
-    #![proptest_config(ProptestConfig { max_global_rejects: 65536, ..ProptestConfig::with_cases(256) })]
-    #[test]
-    fn liquidate_rejects_invalid(s in arb_boundary_state()) {
-        let mut s = s;
-        prop_assume!(!((s.amount > s.collateral)));
-        prop_assert!(!liquidate(&mut s),
-            "liquidate must reject when guard is violated");
+    proptest! {
+        #![proptest_config(ProptestConfig { max_global_rejects: 65536, ..ProptestConfig::with_cases(256) })]
+        #[test]
+        fn liquidate_rejects_invalid(s in arb_boundary_state()) {
+            let mut s = s;
+            prop_assume!(!((s.amount > s.collateral)));
+            prop_assert!(!liquidate(&mut s),
+                "liquidate must reject when guard is violated");
+        }
     }
-}
-
 } // mod loan
-

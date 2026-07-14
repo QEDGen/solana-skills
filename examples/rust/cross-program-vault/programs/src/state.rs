@@ -13,20 +13,20 @@ pub struct VaultAccount {
 #[derive(AnchorSerialize, AnchorDeserialize, InitSpace, Clone, Debug, PartialEq)]
 pub enum VaultAccountInner {
     Uninitialized,
-    Active {
-        total_deposits: u64,
-    },
+    Active { total_deposits: u64 },
 }
 
 impl VaultAccountInner {
     /// v2.29 Slice B accessor for `total_deposits`. Panics on variants
-/// that don't carry the field — guarded against by the
-/// per-handler lifecycle check that fires before any
-/// `requires` emission in `crate::guards`.
+    /// that don't carry the field — guarded against by the
+    /// per-handler lifecycle check that fires before any
+    /// `requires` emission in `crate::guards`.
     pub fn total_deposits(&self) -> &u64 {
         match self {
             Self::Active { total_deposits, .. } => total_deposits,
-            _ => panic!("VaultAccountInner::total_deposits() called on a variant without `total_deposits`"),
+            _ => panic!(
+                "VaultAccountInner::total_deposits() called on a variant without `total_deposits`"
+            ),
         }
     }
 }

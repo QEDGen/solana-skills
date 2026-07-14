@@ -494,6 +494,12 @@ pub(crate) fn render_handler_scaffold(
     out.push_str("    }\n");
     out.push_str("}\n");
 
+    // Format BEFORE the hash fixup: rustfmt is not token-neutral (it adds
+    // trailing commas), and the body hash is over the canonical token
+    // stream — hashing unformatted text would leave a stamp that the
+    // proc macro (reading the formatted file) can never match.
+    out = format_rust_source(&out);
+
     // Fixup: compute the impl method's body hash and splice it into the
     // placeholder. Both sides normalize via
     // `proc_macro2::TokenStream::from_str`, so codegen-time and

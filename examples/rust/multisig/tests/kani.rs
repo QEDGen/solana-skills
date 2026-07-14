@@ -16,7 +16,38 @@
 
 #[allow(dead_code)]
 fn pubkey_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
-    a[0] == b[0] && a[1] == b[1] && a[2] == b[2] && a[3] == b[3] && a[4] == b[4] && a[5] == b[5] && a[6] == b[6] && a[7] == b[7] && a[8] == b[8] && a[9] == b[9] && a[10] == b[10] && a[11] == b[11] && a[12] == b[12] && a[13] == b[13] && a[14] == b[14] && a[15] == b[15] && a[16] == b[16] && a[17] == b[17] && a[18] == b[18] && a[19] == b[19] && a[20] == b[20] && a[21] == b[21] && a[22] == b[22] && a[23] == b[23] && a[24] == b[24] && a[25] == b[25] && a[26] == b[26] && a[27] == b[27] && a[28] == b[28] && a[29] == b[29] && a[30] == b[30] && a[31] == b[31]
+    a[0] == b[0]
+        && a[1] == b[1]
+        && a[2] == b[2]
+        && a[3] == b[3]
+        && a[4] == b[4]
+        && a[5] == b[5]
+        && a[6] == b[6]
+        && a[7] == b[7]
+        && a[8] == b[8]
+        && a[9] == b[9]
+        && a[10] == b[10]
+        && a[11] == b[11]
+        && a[12] == b[12]
+        && a[13] == b[13]
+        && a[14] == b[14]
+        && a[15] == b[15]
+        && a[16] == b[16]
+        && a[17] == b[17]
+        && a[18] == b[18]
+        && a[19] == b[19]
+        && a[20] == b[20]
+        && a[21] == b[21]
+        && a[22] == b[22]
+        && a[23] == b[23]
+        && a[24] == b[24]
+        && a[25] == b[25]
+        && a[26] == b[26]
+        && a[27] == b[27]
+        && a[28] == b[28]
+        && a[29] == b[29]
+        && a[30] == b[30]
+        && a[31] == b[31]
 }
 
 #[allow(dead_code)]
@@ -96,7 +127,10 @@ fn propose(s: &mut State) -> bool {
 }
 
 fn approve(s: &mut State, member_index: u8) -> bool {
-    if !((member_index < s.member_count) && (s.members[(member_index) as usize] == approver) && (s.voted[(member_index) as usize] == 0)) {
+    if !((member_index < s.member_count)
+        && (s.members[(member_index) as usize] == approver)
+        && (s.voted[(member_index) as usize] == 0))
+    {
         return false;
     }
     if s.status != Status::HasProposal {
@@ -112,7 +146,10 @@ fn approve(s: &mut State, member_index: u8) -> bool {
 }
 
 fn reject(s: &mut State, member_index: u8) -> bool {
-    if !((member_index < s.member_count) && (s.members[(member_index) as usize] == rejecter) && (s.voted[(member_index) as usize] == 0)) {
+    if !((member_index < s.member_count)
+        && (s.members[(member_index) as usize] == rejecter)
+        && (s.voted[(member_index) as usize] == 0))
+    {
         return false;
     }
     if s.status != Status::HasProposal {
@@ -128,7 +165,10 @@ fn reject(s: &mut State, member_index: u8) -> bool {
 }
 
 fn execute(s: &mut State, member_index: u8) -> bool {
-    if !((member_index < s.member_count) && (s.members[(member_index) as usize] == executor) && (s.approval_count >= s.threshold)) {
+    if !((member_index < s.member_count)
+        && (s.members[(member_index) as usize] == executor)
+        && (s.approval_count >= s.threshold))
+    {
         return false;
     }
     if s.status != Status::HasProposal {
@@ -141,7 +181,9 @@ fn execute(s: &mut State, member_index: u8) -> bool {
 }
 
 fn cancel_proposal(s: &mut State) -> bool {
-    if !(((((s.member_count) as u128)).saturating_sub(((s.rejection_count) as u128)) < ((s.threshold) as u128))) {
+    if !(((s.member_count) as u128).saturating_sub(((s.rejection_count) as u128))
+        < ((s.threshold) as u128))
+    {
         return false;
     }
     if s.status != Status::HasProposal {
@@ -154,7 +196,7 @@ fn cancel_proposal(s: &mut State) -> bool {
 }
 
 fn add_member(s: &mut State, member_index: u8, member_pubkey: [u8; 32]) -> bool {
-    if !((member_index < s.member_count)) {
+    if !(member_index < s.member_count) {
         return false;
     }
     if s.status != Status::Active {
@@ -203,8 +245,10 @@ fn verify_create_vault_rejects_invalid() {
     let member_count: u8 = kani::any();
     kani::assume(!(((threshold > 0) && (threshold <= member_count)) && (member_count <= 32)));
     kani::cover!(true, "guard-violation domain is satisfiable");
-    assert!(!create_vault(&mut s, threshold, member_count),
-        "create_vault must reject when guard is violated");
+    assert!(
+        !create_vault(&mut s, threshold, member_count),
+        "create_vault must reject when guard is violated"
+    );
 }
 
 #[kani::proof]
@@ -223,10 +267,16 @@ fn verify_approve_rejects_invalid() {
     };
     kani::assume(s.status == Status::HasProposal);
     let member_index: u8 = kani::any();
-    kani::assume(!((member_index < s.member_count) && (s.members[(member_index) as usize] == approver) && (s.voted[(member_index) as usize] == 0)));
+    kani::assume(
+        !((member_index < s.member_count)
+            && (s.members[(member_index) as usize] == approver)
+            && (s.voted[(member_index) as usize] == 0)),
+    );
     kani::cover!(true, "guard-violation domain is satisfiable");
-    assert!(!approve(&mut s, member_index),
-        "approve must reject when guard is violated");
+    assert!(
+        !approve(&mut s, member_index),
+        "approve must reject when guard is violated"
+    );
 }
 
 #[kani::proof]
@@ -245,10 +295,16 @@ fn verify_reject_rejects_invalid() {
     };
     kani::assume(s.status == Status::HasProposal);
     let member_index: u8 = kani::any();
-    kani::assume(!((member_index < s.member_count) && (s.members[(member_index) as usize] == rejecter) && (s.voted[(member_index) as usize] == 0)));
+    kani::assume(
+        !((member_index < s.member_count)
+            && (s.members[(member_index) as usize] == rejecter)
+            && (s.voted[(member_index) as usize] == 0)),
+    );
     kani::cover!(true, "guard-violation domain is satisfiable");
-    assert!(!reject(&mut s, member_index),
-        "reject must reject when guard is violated");
+    assert!(
+        !reject(&mut s, member_index),
+        "reject must reject when guard is violated"
+    );
 }
 
 #[kani::proof]
@@ -267,10 +323,16 @@ fn verify_execute_rejects_invalid() {
     };
     kani::assume(s.status == Status::HasProposal);
     let member_index: u8 = kani::any();
-    kani::assume(!((member_index < s.member_count) && (s.members[(member_index) as usize] == executor) && (s.approval_count >= s.threshold)));
+    kani::assume(
+        !((member_index < s.member_count)
+            && (s.members[(member_index) as usize] == executor)
+            && (s.approval_count >= s.threshold)),
+    );
     kani::cover!(true, "guard-violation domain is satisfiable");
-    assert!(!execute(&mut s, member_index),
-        "execute must reject when guard is violated");
+    assert!(
+        !execute(&mut s, member_index),
+        "execute must reject when guard is violated"
+    );
 }
 
 #[kani::proof]
@@ -288,10 +350,15 @@ fn verify_cancel_proposal_rejects_invalid() {
         status: kani::any(),
     };
     kani::assume(s.status == Status::HasProposal);
-    kani::assume(!(((((s.member_count) as u128)).saturating_sub(((s.rejection_count) as u128)) < ((s.threshold) as u128))));
+    kani::assume(
+        !(((s.member_count) as u128).saturating_sub(((s.rejection_count) as u128))
+            < ((s.threshold) as u128)),
+    );
     kani::cover!(true, "guard-violation domain is satisfiable");
-    assert!(!cancel_proposal(&mut s),
-        "cancel_proposal must reject when guard is violated");
+    assert!(
+        !cancel_proposal(&mut s),
+        "cancel_proposal must reject when guard is violated"
+    );
 }
 
 #[kani::proof]
@@ -311,10 +378,12 @@ fn verify_add_member_rejects_invalid() {
     kani::assume(s.status == Status::Active);
     let member_index: u8 = kani::any();
     let member_pubkey: [u8; 32] = kani::any();
-    kani::assume(!((member_index < s.member_count)));
+    kani::assume(!(member_index < s.member_count));
     kani::cover!(true, "guard-violation domain is satisfiable");
-    assert!(!add_member(&mut s, member_index, member_pubkey),
-        "add_member must reject when guard is violated");
+    assert!(
+        !add_member(&mut s, member_index, member_pubkey),
+        "add_member must reject when guard is violated"
+    );
 }
 
 #[kani::proof]
@@ -332,10 +401,14 @@ fn verify_remove_member_rejects_invalid() {
         status: kani::any(),
     };
     kani::assume(s.status == Status::Active);
-    kani::assume(!((s.member_count > s.threshold) && ((s.approval_count == 0) && (s.rejection_count == 0))));
+    kani::assume(
+        !((s.member_count > s.threshold) && ((s.approval_count == 0) && (s.rejection_count == 0))),
+    );
     kani::cover!(true, "guard-violation domain is satisfiable");
-    assert!(!remove_member(&mut s),
-        "remove_member must reject when guard is violated");
+    assert!(
+        !remove_member(&mut s),
+        "remove_member must reject when guard is violated"
+    );
 }
 
 // ============================================================================
@@ -360,8 +433,10 @@ fn verify_create_vault_preserves_threshold_bounded() {
     let threshold: u8 = kani::any();
     let member_count: u8 = kani::any();
     if create_vault(&mut post, threshold, member_count) {
-        assert!(threshold_bounded(&post),
-            "threshold_bounded must hold after create_vault");
+        assert!(
+            threshold_bounded(&post),
+            "threshold_bounded must hold after create_vault"
+        );
     }
 }
 
@@ -385,8 +460,10 @@ fn verify_propose_preserves_threshold_bounded() {
     kani::assume(pre.member_count <= MAX_MEMBERS);
     let mut post = pre;
     if propose(&mut post) {
-        assert!(threshold_bounded(&post),
-            "threshold_bounded must hold after propose");
+        assert!(
+            threshold_bounded(&post),
+            "threshold_bounded must hold after propose"
+        );
     }
 }
 
@@ -411,8 +488,10 @@ fn verify_approve_preserves_threshold_bounded() {
     let mut post = pre;
     let member_index: u8 = kani::any();
     if approve(&mut post, member_index) {
-        assert!(threshold_bounded(&post),
-            "threshold_bounded must hold after approve");
+        assert!(
+            threshold_bounded(&post),
+            "threshold_bounded must hold after approve"
+        );
     }
 }
 
@@ -438,8 +517,10 @@ fn verify_reject_preserves_threshold_bounded() {
     let member_index: u8 = kani::any();
     kani::assume(pre.rejection_count < pre.member_count); // strict bound: rejection_count increments
     if reject(&mut post, member_index) {
-        assert!(threshold_bounded(&post),
-            "threshold_bounded must hold after reject");
+        assert!(
+            threshold_bounded(&post),
+            "threshold_bounded must hold after reject"
+        );
     }
 }
 
@@ -464,8 +545,10 @@ fn verify_execute_preserves_threshold_bounded() {
     let mut post = pre;
     let member_index: u8 = kani::any();
     if execute(&mut post, member_index) {
-        assert!(threshold_bounded(&post),
-            "threshold_bounded must hold after execute");
+        assert!(
+            threshold_bounded(&post),
+            "threshold_bounded must hold after execute"
+        );
     }
 }
 
@@ -489,8 +572,10 @@ fn verify_cancel_proposal_preserves_threshold_bounded() {
     kani::assume(pre.member_count <= MAX_MEMBERS);
     let mut post = pre;
     if cancel_proposal(&mut post) {
-        assert!(threshold_bounded(&post),
-            "threshold_bounded must hold after cancel_proposal");
+        assert!(
+            threshold_bounded(&post),
+            "threshold_bounded must hold after cancel_proposal"
+        );
     }
 }
 
@@ -516,8 +601,10 @@ fn verify_add_member_preserves_threshold_bounded() {
     let member_index: u8 = kani::any();
     let member_pubkey: [u8; 32] = kani::any();
     if add_member(&mut post, member_index, member_pubkey) {
-        assert!(threshold_bounded(&post),
-            "threshold_bounded must hold after add_member");
+        assert!(
+            threshold_bounded(&post),
+            "threshold_bounded must hold after add_member"
+        );
     }
 }
 
@@ -541,8 +628,10 @@ fn verify_remove_member_preserves_threshold_bounded() {
     kani::assume(pre.member_count <= MAX_MEMBERS);
     let mut post = pre;
     if remove_member(&mut post) {
-        assert!(threshold_bounded(&post),
-            "threshold_bounded must hold after remove_member");
+        assert!(
+            threshold_bounded(&post),
+            "threshold_bounded must hold after remove_member"
+        );
     }
 }
 
@@ -564,8 +653,10 @@ fn verify_create_vault_preserves_votes_bounded() {
     let threshold: u8 = kani::any();
     let member_count: u8 = kani::any();
     if create_vault(&mut post, threshold, member_count) {
-        assert!(votes_bounded(&post),
-            "votes_bounded must hold after create_vault");
+        assert!(
+            votes_bounded(&post),
+            "votes_bounded must hold after create_vault"
+        );
     }
 }
 
@@ -589,8 +680,10 @@ fn verify_propose_preserves_votes_bounded() {
     kani::assume(pre.member_count <= MAX_MEMBERS);
     let mut post = pre;
     if propose(&mut post) {
-        assert!(votes_bounded(&post),
-            "votes_bounded must hold after propose");
+        assert!(
+            votes_bounded(&post),
+            "votes_bounded must hold after propose"
+        );
     }
 }
 
@@ -615,8 +708,10 @@ fn verify_execute_preserves_votes_bounded() {
     let mut post = pre;
     let member_index: u8 = kani::any();
     if execute(&mut post, member_index) {
-        assert!(votes_bounded(&post),
-            "votes_bounded must hold after execute");
+        assert!(
+            votes_bounded(&post),
+            "votes_bounded must hold after execute"
+        );
     }
 }
 
@@ -640,8 +735,10 @@ fn verify_cancel_proposal_preserves_votes_bounded() {
     kani::assume(pre.member_count <= MAX_MEMBERS);
     let mut post = pre;
     if cancel_proposal(&mut post) {
-        assert!(votes_bounded(&post),
-            "votes_bounded must hold after cancel_proposal");
+        assert!(
+            votes_bounded(&post),
+            "votes_bounded must hold after cancel_proposal"
+        );
     }
 }
 
@@ -665,8 +762,10 @@ fn verify_remove_member_preserves_votes_bounded() {
     kani::assume(pre.member_count <= MAX_MEMBERS);
     let mut post = pre;
     if remove_member(&mut post) {
-        assert!(votes_bounded(&post),
-            "votes_bounded must hold after remove_member");
+        assert!(
+            votes_bounded(&post),
+            "votes_bounded must hold after remove_member"
+        );
     }
 }
 
@@ -701,7 +800,10 @@ fn verify_create_vault_effect_threshold() {
     let pre_rejection_count = s.rejection_count;
     if create_vault(&mut s, threshold, member_count) {
         assert!(s.threshold == threshold, "threshold must equal threshold");
-        assert!(pubkey_eq(&s.creator, &pre_creator), "creator must not change");
+        assert!(
+            pubkey_eq(&s.creator, &pre_creator),
+            "creator must not change"
+        );
         assert!(s.members == pre_members, "members must not change");
         assert!(s.voted == pre_voted, "voted must not change");
     }
@@ -730,8 +832,14 @@ fn verify_create_vault_effect_member_count() {
     let pre_approval_count = s.approval_count;
     let pre_rejection_count = s.rejection_count;
     if create_vault(&mut s, threshold, member_count) {
-        assert!(s.member_count == member_count, "member_count must equal member_count");
-        assert!(pubkey_eq(&s.creator, &pre_creator), "creator must not change");
+        assert!(
+            s.member_count == member_count,
+            "member_count must equal member_count"
+        );
+        assert!(
+            pubkey_eq(&s.creator, &pre_creator),
+            "creator must not change"
+        );
         assert!(s.members == pre_members, "members must not change");
         assert!(s.voted == pre_voted, "voted must not change");
     }
@@ -761,7 +869,10 @@ fn verify_create_vault_effect_approval_count() {
     let pre_rejection_count = s.rejection_count;
     if create_vault(&mut s, threshold, member_count) {
         assert!(s.approval_count == 0, "approval_count must equal 0");
-        assert!(pubkey_eq(&s.creator, &pre_creator), "creator must not change");
+        assert!(
+            pubkey_eq(&s.creator, &pre_creator),
+            "creator must not change"
+        );
         assert!(s.members == pre_members, "members must not change");
         assert!(s.voted == pre_voted, "voted must not change");
     }
@@ -791,7 +902,10 @@ fn verify_create_vault_effect_rejection_count() {
     let pre_approval_count = s.approval_count;
     if create_vault(&mut s, threshold, member_count) {
         assert!(s.rejection_count == 0, "rejection_count must equal 0");
-        assert!(pubkey_eq(&s.creator, &pre_creator), "creator must not change");
+        assert!(
+            pubkey_eq(&s.creator, &pre_creator),
+            "creator must not change"
+        );
         assert!(s.members == pre_members, "members must not change");
         assert!(s.voted == pre_voted, "voted must not change");
     }
@@ -821,9 +935,15 @@ fn verify_propose_effect_approval_count() {
     let pre_rejection_count = s.rejection_count;
     if propose(&mut s) {
         assert!(s.approval_count == 0, "approval_count must equal 0");
-        assert!(pubkey_eq(&s.creator, &pre_creator), "creator must not change");
+        assert!(
+            pubkey_eq(&s.creator, &pre_creator),
+            "creator must not change"
+        );
         assert!(s.threshold == pre_threshold, "threshold must not change");
-        assert!(s.member_count == pre_member_count, "member_count must not change");
+        assert!(
+            s.member_count == pre_member_count,
+            "member_count must not change"
+        );
         assert!(s.members == pre_members, "members must not change");
         assert!(s.voted == pre_voted, "voted must not change");
     }
@@ -853,9 +973,15 @@ fn verify_propose_effect_rejection_count() {
     let pre_approval_count = s.approval_count;
     if propose(&mut s) {
         assert!(s.rejection_count == 0, "rejection_count must equal 0");
-        assert!(pubkey_eq(&s.creator, &pre_creator), "creator must not change");
+        assert!(
+            pubkey_eq(&s.creator, &pre_creator),
+            "creator must not change"
+        );
         assert!(s.threshold == pre_threshold, "threshold must not change");
-        assert!(s.member_count == pre_member_count, "member_count must not change");
+        assert!(
+            s.member_count == pre_member_count,
+            "member_count must not change"
+        );
         assert!(s.members == pre_members, "members must not change");
         assert!(s.voted == pre_voted, "voted must not change");
     }
@@ -886,13 +1012,25 @@ fn verify_approve_effect_approval_count() {
     let pre_approval_count = s.approval_count;
     let pre_rejection_count = s.rejection_count;
     if approve(&mut s, member_index) {
-        assert!(s.approval_count == pre_approval_count.wrapping_add(1), "approval_count must increment by 1");
-        assert!(pubkey_eq(&s.creator, &pre_creator), "creator must not change");
+        assert!(
+            s.approval_count == pre_approval_count.wrapping_add(1),
+            "approval_count must increment by 1"
+        );
+        assert!(
+            pubkey_eq(&s.creator, &pre_creator),
+            "creator must not change"
+        );
         assert!(s.threshold == pre_threshold, "threshold must not change");
-        assert!(s.member_count == pre_member_count, "member_count must not change");
+        assert!(
+            s.member_count == pre_member_count,
+            "member_count must not change"
+        );
         assert!(s.members == pre_members, "members must not change");
         assert!(s.voted == pre_voted, "voted must not change");
-        assert!(s.rejection_count == pre_rejection_count, "rejection_count must not change");
+        assert!(
+            s.rejection_count == pre_rejection_count,
+            "rejection_count must not change"
+        );
     }
 }
 
@@ -921,13 +1059,25 @@ fn verify_approve_effect_voted_member_index() {
     let pre_approval_count = s.approval_count;
     let pre_rejection_count = s.rejection_count;
     if approve(&mut s, member_index) {
-        assert!(s.voted[member_index] == 1, "voted[member_index] must equal 1");
-        assert!(pubkey_eq(&s.creator, &pre_creator), "creator must not change");
+        assert!(
+            s.voted[member_index] == 1,
+            "voted[member_index] must equal 1"
+        );
+        assert!(
+            pubkey_eq(&s.creator, &pre_creator),
+            "creator must not change"
+        );
         assert!(s.threshold == pre_threshold, "threshold must not change");
-        assert!(s.member_count == pre_member_count, "member_count must not change");
+        assert!(
+            s.member_count == pre_member_count,
+            "member_count must not change"
+        );
         assert!(s.members == pre_members, "members must not change");
         assert!(s.voted == pre_voted, "voted must not change");
-        assert!(s.rejection_count == pre_rejection_count, "rejection_count must not change");
+        assert!(
+            s.rejection_count == pre_rejection_count,
+            "rejection_count must not change"
+        );
     }
 }
 
@@ -957,13 +1107,25 @@ fn verify_reject_effect_rejection_count() {
     let pre_approval_count = s.approval_count;
     let pre_rejection_count = s.rejection_count;
     if reject(&mut s, member_index) {
-        assert!(s.rejection_count == pre_rejection_count.wrapping_add(1), "rejection_count must increment by 1");
-        assert!(pubkey_eq(&s.creator, &pre_creator), "creator must not change");
+        assert!(
+            s.rejection_count == pre_rejection_count.wrapping_add(1),
+            "rejection_count must increment by 1"
+        );
+        assert!(
+            pubkey_eq(&s.creator, &pre_creator),
+            "creator must not change"
+        );
         assert!(s.threshold == pre_threshold, "threshold must not change");
-        assert!(s.member_count == pre_member_count, "member_count must not change");
+        assert!(
+            s.member_count == pre_member_count,
+            "member_count must not change"
+        );
         assert!(s.members == pre_members, "members must not change");
         assert!(s.voted == pre_voted, "voted must not change");
-        assert!(s.approval_count == pre_approval_count, "approval_count must not change");
+        assert!(
+            s.approval_count == pre_approval_count,
+            "approval_count must not change"
+        );
     }
 }
 
@@ -993,13 +1155,25 @@ fn verify_reject_effect_voted_member_index() {
     let pre_approval_count = s.approval_count;
     let pre_rejection_count = s.rejection_count;
     if reject(&mut s, member_index) {
-        assert!(s.voted[member_index] == 1, "voted[member_index] must equal 1");
-        assert!(pubkey_eq(&s.creator, &pre_creator), "creator must not change");
+        assert!(
+            s.voted[member_index] == 1,
+            "voted[member_index] must equal 1"
+        );
+        assert!(
+            pubkey_eq(&s.creator, &pre_creator),
+            "creator must not change"
+        );
         assert!(s.threshold == pre_threshold, "threshold must not change");
-        assert!(s.member_count == pre_member_count, "member_count must not change");
+        assert!(
+            s.member_count == pre_member_count,
+            "member_count must not change"
+        );
         assert!(s.members == pre_members, "members must not change");
         assert!(s.voted == pre_voted, "voted must not change");
-        assert!(s.approval_count == pre_approval_count, "approval_count must not change");
+        assert!(
+            s.approval_count == pre_approval_count,
+            "approval_count must not change"
+        );
     }
 }
 
@@ -1028,9 +1202,15 @@ fn verify_execute_effect_approval_count() {
     let pre_rejection_count = s.rejection_count;
     if execute(&mut s, member_index) {
         assert!(s.approval_count == 0, "approval_count must equal 0");
-        assert!(pubkey_eq(&s.creator, &pre_creator), "creator must not change");
+        assert!(
+            pubkey_eq(&s.creator, &pre_creator),
+            "creator must not change"
+        );
         assert!(s.threshold == pre_threshold, "threshold must not change");
-        assert!(s.member_count == pre_member_count, "member_count must not change");
+        assert!(
+            s.member_count == pre_member_count,
+            "member_count must not change"
+        );
         assert!(s.members == pre_members, "members must not change");
         assert!(s.voted == pre_voted, "voted must not change");
     }
@@ -1061,9 +1241,15 @@ fn verify_execute_effect_rejection_count() {
     let pre_approval_count = s.approval_count;
     if execute(&mut s, member_index) {
         assert!(s.rejection_count == 0, "rejection_count must equal 0");
-        assert!(pubkey_eq(&s.creator, &pre_creator), "creator must not change");
+        assert!(
+            pubkey_eq(&s.creator, &pre_creator),
+            "creator must not change"
+        );
         assert!(s.threshold == pre_threshold, "threshold must not change");
-        assert!(s.member_count == pre_member_count, "member_count must not change");
+        assert!(
+            s.member_count == pre_member_count,
+            "member_count must not change"
+        );
         assert!(s.members == pre_members, "members must not change");
         assert!(s.voted == pre_voted, "voted must not change");
     }
@@ -1093,9 +1279,15 @@ fn verify_cancel_proposal_effect_approval_count() {
     let pre_rejection_count = s.rejection_count;
     if cancel_proposal(&mut s) {
         assert!(s.approval_count == 0, "approval_count must equal 0");
-        assert!(pubkey_eq(&s.creator, &pre_creator), "creator must not change");
+        assert!(
+            pubkey_eq(&s.creator, &pre_creator),
+            "creator must not change"
+        );
         assert!(s.threshold == pre_threshold, "threshold must not change");
-        assert!(s.member_count == pre_member_count, "member_count must not change");
+        assert!(
+            s.member_count == pre_member_count,
+            "member_count must not change"
+        );
         assert!(s.members == pre_members, "members must not change");
         assert!(s.voted == pre_voted, "voted must not change");
     }
@@ -1125,9 +1317,15 @@ fn verify_cancel_proposal_effect_rejection_count() {
     let pre_approval_count = s.approval_count;
     if cancel_proposal(&mut s) {
         assert!(s.rejection_count == 0, "rejection_count must equal 0");
-        assert!(pubkey_eq(&s.creator, &pre_creator), "creator must not change");
+        assert!(
+            pubkey_eq(&s.creator, &pre_creator),
+            "creator must not change"
+        );
         assert!(s.threshold == pre_threshold, "threshold must not change");
-        assert!(s.member_count == pre_member_count, "member_count must not change");
+        assert!(
+            s.member_count == pre_member_count,
+            "member_count must not change"
+        );
         assert!(s.members == pre_members, "members must not change");
         assert!(s.voted == pre_voted, "voted must not change");
     }
@@ -1159,14 +1357,29 @@ fn verify_add_member_effect_members_member_index() {
     let pre_approval_count = s.approval_count;
     let pre_rejection_count = s.rejection_count;
     if add_member(&mut s, member_index, member_pubkey) {
-        assert!(pubkey_eq(&s.members[member_index], &member_pubkey), "members[member_index] must equal member_pubkey");
-        assert!(pubkey_eq(&s.creator, &pre_creator), "creator must not change");
+        assert!(
+            pubkey_eq(&s.members[member_index], &member_pubkey),
+            "members[member_index] must equal member_pubkey"
+        );
+        assert!(
+            pubkey_eq(&s.creator, &pre_creator),
+            "creator must not change"
+        );
         assert!(s.threshold == pre_threshold, "threshold must not change");
-        assert!(s.member_count == pre_member_count, "member_count must not change");
+        assert!(
+            s.member_count == pre_member_count,
+            "member_count must not change"
+        );
         assert!(s.members == pre_members, "members must not change");
         assert!(s.voted == pre_voted, "voted must not change");
-        assert!(s.approval_count == pre_approval_count, "approval_count must not change");
-        assert!(s.rejection_count == pre_rejection_count, "rejection_count must not change");
+        assert!(
+            s.approval_count == pre_approval_count,
+            "approval_count must not change"
+        );
+        assert!(
+            s.rejection_count == pre_rejection_count,
+            "rejection_count must not change"
+        );
     }
 }
 
@@ -1194,13 +1407,25 @@ fn verify_remove_member_effect_member_count() {
     let pre_approval_count = s.approval_count;
     let pre_rejection_count = s.rejection_count;
     if remove_member(&mut s) {
-        assert!(s.member_count == pre_member_count.wrapping_sub(1), "member_count must decrement by 1");
-        assert!(pubkey_eq(&s.creator, &pre_creator), "creator must not change");
+        assert!(
+            s.member_count == pre_member_count.wrapping_sub(1),
+            "member_count must decrement by 1"
+        );
+        assert!(
+            pubkey_eq(&s.creator, &pre_creator),
+            "creator must not change"
+        );
         assert!(s.threshold == pre_threshold, "threshold must not change");
         assert!(s.members == pre_members, "members must not change");
         assert!(s.voted == pre_voted, "voted must not change");
-        assert!(s.approval_count == pre_approval_count, "approval_count must not change");
-        assert!(s.rejection_count == pre_rejection_count, "rejection_count must not change");
+        assert!(
+            s.approval_count == pre_approval_count,
+            "approval_count must not change"
+        );
+        assert!(
+            s.rejection_count == pre_rejection_count,
+            "rejection_count must not change"
+        );
     }
 }
 
@@ -1224,7 +1449,7 @@ fn verify_approve_no_overflow() {
     };
     kani::assume(s.status == Status::HasProposal);
     let member_index: u8 = kani::any();
-    approve(&mut s, member_index);  // Kani detects overflow on += internally
+    approve(&mut s, member_index); // Kani detects overflow on += internally
 }
 
 #[kani::proof]
@@ -1243,7 +1468,7 @@ fn verify_reject_no_overflow() {
     };
     kani::assume(s.status == Status::HasProposal);
     let member_index: u8 = kani::any();
-    reject(&mut s, member_index);  // Kani detects overflow on += internally
+    reject(&mut s, member_index); // Kani detects overflow on += internally
 }
 
 // ============================================================================
@@ -1271,7 +1496,10 @@ fn cover_proposal_lifecycle() {
             let member_index_2: u8 = kani::any();
             if approve(&mut s, member_index_2) {
                 let member_index_3: u8 = kani::any();
-                kani::cover!(execute(&mut s, member_index_3), "proposal_lifecycle trace is reachable");
+                kani::cover!(
+                    execute(&mut s, member_index_3),
+                    "proposal_lifecycle trace is reachable"
+                );
             }
         }
     }
@@ -1326,7 +1554,7 @@ fn verify_liveness_proposal_resolves() {
         let op: u8 = kani::any();
         match op {
             0 => {
-            let member_index: u8 = kani::any();
+                let member_index: u8 = kani::any();
                 execute(&mut s, member_index);
             }
             1 => {
@@ -1335,7 +1563,10 @@ fn verify_liveness_proposal_resolves() {
             _ => {}
         }
     }
-    kani::cover!(s.status == Status::Active, "proposal_resolves reaches Active within 1 steps");
+    kani::cover!(
+        s.status == Status::Active,
+        "proposal_resolves reaches Active within 1 steps"
+    );
 }
 
 // ---- GENERATED BY QEDGEN — DO NOT EDIT BELOW THIS LINE ----

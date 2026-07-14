@@ -120,7 +120,10 @@ fn propose(s: &mut State) -> bool {
 }
 
 fn approve(s: &mut State, member_index: u8) -> bool {
-    if !((member_index < s.member_count) && (s.members[(member_index) as usize] == approver) && (s.voted[(member_index) as usize] == 0)) {
+    if !((member_index < s.member_count)
+        && (s.members[(member_index) as usize] == approver)
+        && (s.voted[(member_index) as usize] == 0))
+    {
         return false;
     }
     if s.status != Status::HasProposal {
@@ -133,7 +136,10 @@ fn approve(s: &mut State, member_index: u8) -> bool {
 }
 
 fn reject(s: &mut State, member_index: u8) -> bool {
-    if !((member_index < s.member_count) && (s.members[(member_index) as usize] == rejecter) && (s.voted[(member_index) as usize] == 0)) {
+    if !((member_index < s.member_count)
+        && (s.members[(member_index) as usize] == rejecter)
+        && (s.voted[(member_index) as usize] == 0))
+    {
         return false;
     }
     if s.status != Status::HasProposal {
@@ -146,7 +152,10 @@ fn reject(s: &mut State, member_index: u8) -> bool {
 }
 
 fn execute(s: &mut State, member_index: u8) -> bool {
-    if !((member_index < s.member_count) && (s.members[(member_index) as usize] == executor) && (s.approval_count >= s.threshold)) {
+    if !((member_index < s.member_count)
+        && (s.members[(member_index) as usize] == executor)
+        && (s.approval_count >= s.threshold))
+    {
         return false;
     }
     if s.status != Status::HasProposal {
@@ -159,7 +168,9 @@ fn execute(s: &mut State, member_index: u8) -> bool {
 }
 
 fn cancel_proposal(s: &mut State) -> bool {
-    if !(((((s.member_count) as u128)).saturating_sub(((s.rejection_count) as u128)) < ((s.threshold) as u128))) {
+    if !(((s.member_count) as u128).saturating_sub(((s.rejection_count) as u128))
+        < ((s.threshold) as u128))
+    {
         return false;
     }
     if s.status != Status::HasProposal {
@@ -172,7 +183,7 @@ fn cancel_proposal(s: &mut State) -> bool {
 }
 
 fn add_member(s: &mut State, member_index: u8, member_pubkey: [u8; 32]) -> bool {
-    if !((member_index < s.member_count)) {
+    if !(member_index < s.member_count) {
         return false;
     }
     if s.status != Status::Active {
@@ -553,7 +564,11 @@ fn apply_op(s: &mut State, op: &Op) -> bool {
 }
 
 fn assert_all_properties(s: &State, context: &str) {
-    assert!(threshold_bounded(s), "{} violated: threshold_bounded", context);
+    assert!(
+        threshold_bounded(s),
+        "{} violated: threshold_bounded",
+        context
+    );
     assert!(votes_bounded(s), "{} violated: votes_bounded", context);
 }
 
