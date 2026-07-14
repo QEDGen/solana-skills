@@ -26,7 +26,7 @@ if [[ ! -f "$bench_skill" ]] || ! grep -q '^name: qedgen-auditor-bench$' "$bench
   fail=1
 fi
 
-if rg -n 'model:[[:space:]]*(opus|gpt-5\.5)|Default audit worker:[^\n]*GPT-5\.5' \
+if grep -En 'model:[[:space:]]*(opus|gpt-5\.5)|Default audit worker:.*GPT-5\.5' \
   "$bench_skill" >/dev/null; then
   echo "benchmark dispatcher uses a stale model default" >&2
   fail=1
@@ -39,16 +39,18 @@ if [[ "$(sed -n '1p' "$skill_root/SKILL.md")" != "---" ]] ||
   fail=1
 fi
 
-if rg -n '\$HOME/\.(codex|claude)|CODEX_HOME|CLAUDE_HOME' "$skill_root" \
-  -g '*.md' -g '*.sh' -g '!**/hooks/**' >/dev/null; then
+if find "$skill_root" -type f \( -name '*.md' -o -name '*.sh' \) \
+  ! -path '*/hooks/*' -print0 | \
+  xargs -0 grep -En '\$HOME/\.(codex|claude)|CODEX_HOME|CLAUDE_HOME' >/dev/null; then
   echo "auditor skill contains a harness-specific home-directory assumption" >&2
-  rg -n '\$HOME/\.(codex|claude)|CODEX_HOME|CLAUDE_HOME' "$skill_root" \
-    -g '*.md' -g '*.sh' -g '!**/hooks/**' >&2
+  find "$skill_root" -type f \( -name '*.md' -o -name '*.sh' \) \
+    ! -path '*/hooks/*' -print0 | \
+    xargs -0 grep -En '\$HOME/\.(codex|claude)|CODEX_HOME|CLAUDE_HOME' >&2
   fail=1
 fi
 
-if rg -n 'Default audit worker:[^\n]*GPT-5\.5|Use GPT-5\.5 as (the )?default|recommended default[^\n]*GPT-5\.5' "$skill_root" \
-  -g '*.md' -g '!**/hooks/**' >/dev/null; then
+if find "$skill_root" -type f -name '*.md' ! -path '*/hooks/*' -print0 | \
+  xargs -0 grep -En 'Default audit worker:.*GPT-5\.5|Use GPT-5\.5 as (the )?default|recommended default.*GPT-5\.5' >/dev/null; then
   echo "auditor skill still recommends GPT-5.5 as a default" >&2
   fail=1
 fi
@@ -68,10 +70,11 @@ while IFS=: read -r source _ token; do
     echo "broken local markdown reference: $source -> $ref" >&2
     fail=1
   fi
-done < <(rg -n -o '\]\([^):#]+\.md\)' "$skill_root" -g '*.md' || true)
+done < <(find "$skill_root" -type f -name '*.md' -print0 | \
+  xargs -0 grep -HnEo '\]\([^):#]+\.md\)' || true)
 
 for command in 'probe-repros' 'emit-spec-candidates' 'bootstrap' 'fuzz' 'frozen'; do
-  if ! rg -q -- "$command" "$repo_root/crates/qedgen/src/cli.rs" "$repo_root/crates/qedgen/src"; then
+  if ! grep -R -q -- "$command" "$repo_root/crates/qedgen/src/cli.rs" "$repo_root/crates/qedgen/src"; then
     echo "documented CLI surface is missing from implementation: $command" >&2
     fail=1
   fi
