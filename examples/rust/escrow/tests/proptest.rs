@@ -78,7 +78,7 @@ prop_compose! {
 }
 
 fn initialize(s: &mut State, deposit_amount: u64, receive_amount: u64) -> bool {
-    if !(((deposit_amount > 0) && (receive_amount > 0))) {
+    if !((deposit_amount > 0) && (receive_amount > 0)) {
         return false;
     }
     if s.status != Status::Uninitialized {
@@ -116,4 +116,3 @@ proptest! {
             "initialize must reject when guard is violated");
     }
 }
-

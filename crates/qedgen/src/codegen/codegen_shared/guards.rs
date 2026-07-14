@@ -271,7 +271,7 @@ pub(crate) fn generate_guards(
     }
 
     out.push_str("// ---- END GENERATED ----\n");
-    std::fs::write(src_dir.join("guards.rs"), &out)?;
+    write_generated_file(&src_dir.join("guards.rs"), &out)?;
     Ok(())
 }
 
@@ -998,7 +998,7 @@ pub(crate) fn emit_pinocchio_guards(
     }
 
     out.push_str("// ---- END GENERATED ----\n");
-    std::fs::write(src_dir.join("guards.rs"), &out)?;
+    write_generated_file(&src_dir.join("guards.rs"), &out)?;
     Ok(())
 }
 

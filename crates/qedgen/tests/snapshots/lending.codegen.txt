@@ -650,18 +650,25 @@ pub struct LoanLiquidated {
 //! Called from user-owned `instructions/<name>::handler` before
 //! business logic; keep guard logic here, policy-free logic there.
 
-#![allow(unused_variables, unused_imports, dead_code, clippy::too_many_arguments)]
+#![allow(
+    unused_variables,
+    unused_imports,
+    dead_code,
+    clippy::too_many_arguments
+)]
 
-use anchor_lang::prelude::*;
 use crate::errors::*;
 use crate::state::*;
 use crate::*;
+use anchor_lang::prelude::*;
 
 /// Guards for `init_pool`.  
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn init_pool<'info>(ctx: &mut InitPool<'info>, rate: u64) -> Result<()> {
     // requires: rate > 0
-    if !(rate > 0) { return Err(LendingError::InvalidAmount.into()); }
+    if !(rate > 0) {
+        return Err(LendingError::InvalidAmount.into());
+    }
     // lifecycle: status := Active
     ctx.pool.status = PoolStatus::Active as u8;
     Ok(())
@@ -671,11 +678,17 @@ pub fn init_pool<'info>(ctx: &mut InitPool<'info>, rate: u64) -> Result<()> {
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn deposit<'info>(ctx: &mut Deposit<'info>, amount: u64) -> Result<()> {
     // lifecycle: require status == Active
-    if ctx.pool.status != PoolStatus::Active as u8 { return Err(crate::errors::LendingError::InvalidLifecycle.into()); }
+    if ctx.pool.status != PoolStatus::Active as u8 {
+        return Err(crate::errors::LendingError::InvalidLifecycle.into());
+    }
     // authority: ctx.pool_vault.owner != ctx.pool.key()
-    if ctx.pool_vault.owner != ctx.pool.key() { return Err(LendingError::Unauthorized.into()); }
+    if ctx.pool_vault.owner != ctx.pool.key() {
+        return Err(LendingError::Unauthorized.into());
+    }
     // requires: amount > 0
-    if !(amount > 0) { return Err(LendingError::InvalidAmount.into()); }
+    if !(amount > 0) {
+        return Err(LendingError::InvalidAmount.into());
+    }
     Ok(())
 }
 
@@ -683,9 +696,13 @@ pub fn deposit<'info>(ctx: &mut Deposit<'info>, amount: u64) -> Result<()> {
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn borrow<'info>(ctx: &mut Borrow<'info>, amount: u64, collateral: u64) -> Result<()> {
     // authority: ctx.pool_vault.owner != ctx.pool.key()
-    if ctx.pool_vault.owner != ctx.pool.key() { return Err(LendingError::Unauthorized.into()); }
+    if ctx.pool_vault.owner != ctx.pool.key() {
+        return Err(LendingError::Unauthorized.into());
+    }
     // requires: amount > 0 ∧ collateral > 0
-    if !((amount > 0) && (collateral > 0)) { return Err(LendingError::InvalidAmount.into()); }
+    if !((amount > 0) && (collateral > 0)) {
+        return Err(LendingError::InvalidAmount.into());
+    }
     // lifecycle: status := Active
     ctx.loan.status = LoanStatus::Active as u8;
     Ok(())
@@ -695,9 +712,13 @@ pub fn borrow<'info>(ctx: &mut Borrow<'info>, amount: u64, collateral: u64) -> R
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn repay<'info>(ctx: &mut Repay<'info>) -> Result<()> {
     // lifecycle: require status == Active
-    if ctx.loan.status != LoanStatus::Active as u8 { return Err(crate::errors::LendingError::InvalidLifecycle.into()); }
+    if ctx.loan.status != LoanStatus::Active as u8 {
+        return Err(crate::errors::LendingError::InvalidLifecycle.into());
+    }
     // authority: ctx.pool_vault.owner != ctx.pool.key()
-    if ctx.pool_vault.owner != ctx.pool.key() { return Err(LendingError::Unauthorized.into()); }
+    if ctx.pool_vault.owner != ctx.pool.key() {
+        return Err(LendingError::Unauthorized.into());
+    }
     // lifecycle: status := Empty
     ctx.loan.status = LoanStatus::Empty as u8;
     Ok(())
@@ -707,11 +728,17 @@ pub fn repay<'info>(ctx: &mut Repay<'info>) -> Result<()> {
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn liquidate<'info>(ctx: &mut Liquidate<'info>) -> Result<()> {
     // lifecycle: require status == Active
-    if ctx.loan.status != LoanStatus::Active as u8 { return Err(crate::errors::LendingError::InvalidLifecycle.into()); }
+    if ctx.loan.status != LoanStatus::Active as u8 {
+        return Err(crate::errors::LendingError::InvalidLifecycle.into());
+    }
     // authority: ctx.pool_vault.owner != ctx.pool.key()
-    if ctx.pool_vault.owner != ctx.pool.key() { return Err(LendingError::Unauthorized.into()); }
+    if ctx.pool_vault.owner != ctx.pool.key() {
+        return Err(LendingError::Unauthorized.into());
+    }
     // requires: s.amount > s.collateral
-    if !(ctx.loan.amount > ctx.loan.collateral) { return Err(LendingError::AccountHealthy.into()); }
+    if !(ctx.loan.amount > ctx.loan.collateral) {
+        return Err(LendingError::AccountHealthy.into());
+    }
     // lifecycle: status := Liquidated
     ctx.loan.status = LoanStatus::Liquidated as u8;
     Ok(())
@@ -930,11 +957,11 @@ impl<'info> Liquidate<'info> {
 
 --- src/instructions/mod.rs ---
 // ---- GENERATED BY QEDGEN — DO NOT EDIT ---- spec-hash:781acbd1f0eb1b2d
-pub mod init_pool;
-pub mod deposit;
 pub mod borrow;
-pub mod repay;
+pub mod deposit;
+pub mod init_pool;
 pub mod liquidate;
+pub mod repay;
 // ---- END GENERATED ----
 
 --- src/instructions/repay.rs ---

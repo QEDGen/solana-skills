@@ -42,7 +42,6 @@ fn empty(address: Pubkey) -> Account {
         executable: false,
     }
 }
-
 /// Create a pre-populated MultisigAccount account (program-owned).
 fn state_account(
     address: Pubkey,
@@ -84,10 +83,8 @@ fn test_create_vault() {
     let system_program = quasar_svm::system_program::ID;
     let rent = quasar_svm::solana_sdk_ids::sysvar::rent::ID;
     let creator = Pubkey::new_unique();
-    let (vault, _vault_bump) = Pubkey::find_program_address(
-        &[b"vault", creator.as_ref()],
-        &crate::ID,
-    );
+    let (vault, _vault_bump) =
+        Pubkey::find_program_address(&[b"vault", creator.as_ref()], &crate::ID);
 
     // Instruction parameters
     let threshold: u8 = 1; // AGENT: set appropriate value
@@ -102,15 +99,13 @@ fn test_create_vault() {
     }
     .into();
 
-    let result = svm.process_instruction(
-        &instruction,
-        &[
-            signer(creator),
-            empty(vault),
-        ],
-    );
+    let result = svm.process_instruction(&instruction, &[signer(creator), empty(vault)]);
 
-    assert!(result.is_ok(), "create_vault failed: {:?}", result.raw_result);
+    assert!(
+        result.is_ok(),
+        "create_vault failed: {:?}",
+        result.raw_result
+    );
 
     // AGENT: verify account state after instruction
     // let vault_data = &result.account(&vault).unwrap().data;
@@ -130,22 +125,16 @@ fn test_propose() {
 
     // Account addresses
     let creator = Pubkey::new_unique();
-    let (vault, _vault_bump) = Pubkey::find_program_address(
-        &[b"vault", creator.as_ref()],
-        &crate::ID,
-    );
+    let (vault, _vault_bump) =
+        Pubkey::find_program_address(&[b"vault", creator.as_ref()], &crate::ID);
 
-    let instruction: Instruction = ProposeInstruction {
-        creator,
-        vault,
-    }
-    .into();
+    let instruction: Instruction = ProposeInstruction { creator, vault }.into();
 
     let result = svm.process_instruction(
         &instruction,
         &[
             signer(creator),
-            empty(vault) /* AGENT: use state_account() with appropriate fields */,
+            empty(vault), /* AGENT: use state_account() with appropriate fields */
         ],
     );
 
@@ -167,10 +156,8 @@ fn test_approve() {
 
     // Account addresses
     let approver = Pubkey::new_unique();
-    let (vault, _vault_bump) = Pubkey::find_program_address(
-        &[b"vault", creator.as_ref()],
-        &crate::ID,
-    );
+    let (vault, _vault_bump) =
+        Pubkey::find_program_address(&[b"vault", creator.as_ref()], &crate::ID);
 
     // Instruction parameters
     let member_index: u8 = 1; // AGENT: set appropriate value
@@ -186,7 +173,7 @@ fn test_approve() {
         &instruction,
         &[
             signer(approver),
-            empty(vault) /* AGENT: use state_account() with appropriate fields */,
+            empty(vault), /* AGENT: use state_account() with appropriate fields */
         ],
     );
 
@@ -208,10 +195,8 @@ fn test_reject() {
 
     // Account addresses
     let rejecter = Pubkey::new_unique();
-    let (vault, _vault_bump) = Pubkey::find_program_address(
-        &[b"vault", creator.as_ref()],
-        &crate::ID,
-    );
+    let (vault, _vault_bump) =
+        Pubkey::find_program_address(&[b"vault", creator.as_ref()], &crate::ID);
 
     // Instruction parameters
     let member_index: u8 = 1; // AGENT: set appropriate value
@@ -227,7 +212,7 @@ fn test_reject() {
         &instruction,
         &[
             signer(rejecter),
-            empty(vault) /* AGENT: use state_account() with appropriate fields */,
+            empty(vault), /* AGENT: use state_account() with appropriate fields */
         ],
     );
 
@@ -249,10 +234,8 @@ fn test_execute() {
 
     // Account addresses
     let executor = Pubkey::new_unique();
-    let (vault, _vault_bump) = Pubkey::find_program_address(
-        &[b"vault", creator.as_ref()],
-        &crate::ID,
-    );
+    let (vault, _vault_bump) =
+        Pubkey::find_program_address(&[b"vault", creator.as_ref()], &crate::ID);
 
     // Instruction parameters
     let member_index: u8 = 1; // AGENT: set appropriate value
@@ -268,7 +251,7 @@ fn test_execute() {
         &instruction,
         &[
             signer(executor),
-            empty(vault) /* AGENT: use state_account() with appropriate fields */,
+            empty(vault), /* AGENT: use state_account() with appropriate fields */
         ],
     );
 
@@ -290,26 +273,24 @@ fn test_cancel_proposal() {
 
     // Account addresses
     let canceller = Pubkey::new_unique();
-    let (vault, _vault_bump) = Pubkey::find_program_address(
-        &[b"vault", creator.as_ref()],
-        &crate::ID,
-    );
+    let (vault, _vault_bump) =
+        Pubkey::find_program_address(&[b"vault", creator.as_ref()], &crate::ID);
 
-    let instruction: Instruction = CancelProposalInstruction {
-        canceller,
-        vault,
-    }
-    .into();
+    let instruction: Instruction = CancelProposalInstruction { canceller, vault }.into();
 
     let result = svm.process_instruction(
         &instruction,
         &[
             signer(canceller),
-            empty(vault) /* AGENT: use state_account() with appropriate fields */,
+            empty(vault), /* AGENT: use state_account() with appropriate fields */
         ],
     );
 
-    assert!(result.is_ok(), "cancel_proposal failed: {:?}", result.raw_result);
+    assert!(
+        result.is_ok(),
+        "cancel_proposal failed: {:?}",
+        result.raw_result
+    );
 
     // AGENT: verify account state after instruction
     // let vault_data = &result.account(&vault).unwrap().data;
@@ -327,10 +308,8 @@ fn test_add_member() {
 
     // Account addresses
     let creator = Pubkey::new_unique();
-    let (vault, _vault_bump) = Pubkey::find_program_address(
-        &[b"vault", creator.as_ref()],
-        &crate::ID,
-    );
+    let (vault, _vault_bump) =
+        Pubkey::find_program_address(&[b"vault", creator.as_ref()], &crate::ID);
 
     // Instruction parameters
     let member_index: u8 = 1; // AGENT: set appropriate value
@@ -348,7 +327,7 @@ fn test_add_member() {
         &instruction,
         &[
             signer(creator),
-            empty(vault) /* AGENT: use state_account() with appropriate fields */,
+            empty(vault), /* AGENT: use state_account() with appropriate fields */
         ],
     );
 
@@ -369,26 +348,24 @@ fn test_remove_member() {
 
     // Account addresses
     let creator = Pubkey::new_unique();
-    let (vault, _vault_bump) = Pubkey::find_program_address(
-        &[b"vault", creator.as_ref()],
-        &crate::ID,
-    );
+    let (vault, _vault_bump) =
+        Pubkey::find_program_address(&[b"vault", creator.as_ref()], &crate::ID);
 
-    let instruction: Instruction = RemoveMemberInstruction {
-        creator,
-        vault,
-    }
-    .into();
+    let instruction: Instruction = RemoveMemberInstruction { creator, vault }.into();
 
     let result = svm.process_instruction(
         &instruction,
         &[
             signer(creator),
-            empty(vault) /* AGENT: use state_account() with appropriate fields */,
+            empty(vault), /* AGENT: use state_account() with appropriate fields */
         ],
     );
 
-    assert!(result.is_ok(), "remove_member failed: {:?}", result.raw_result);
+    assert!(
+        result.is_ok(),
+        "remove_member failed: {:?}",
+        result.raw_result
+    );
 
     // AGENT: verify account state after instruction
     // let vault_data = &result.account(&vault).unwrap().data;
@@ -416,13 +393,7 @@ fn test_create_vault_unauthorized() {
     }
     .into();
 
-    let result = svm.process_instruction(
-        &instruction,
-        &[
-            signer(wrong_creator),
-            empty(vault),
-        ],
-    );
+    let result = svm.process_instruction(&instruction, &[signer(wrong_creator), empty(vault)]);
 
     assert!(result.is_err(), "create_vault should reject wrong creator");
 }
@@ -445,7 +416,7 @@ fn test_propose_unauthorized() {
         &instruction,
         &[
             signer(wrong_creator),
-            empty(vault) /* AGENT: use state_account() with appropriate fields */,
+            empty(vault), /* AGENT: use state_account() with appropriate fields */
         ],
     );
 
@@ -471,7 +442,7 @@ fn test_approve_unauthorized() {
         &instruction,
         &[
             signer(wrong_approver),
-            empty(vault) /* AGENT: use state_account() with appropriate fields */,
+            empty(vault), /* AGENT: use state_account() with appropriate fields */
         ],
     );
 
@@ -497,7 +468,7 @@ fn test_reject_unauthorized() {
         &instruction,
         &[
             signer(wrong_rejecter),
-            empty(vault) /* AGENT: use state_account() with appropriate fields */,
+            empty(vault), /* AGENT: use state_account() with appropriate fields */
         ],
     );
 
@@ -523,7 +494,7 @@ fn test_execute_unauthorized() {
         &instruction,
         &[
             signer(wrong_executor),
-            empty(vault) /* AGENT: use state_account() with appropriate fields */,
+            empty(vault), /* AGENT: use state_account() with appropriate fields */
         ],
     );
 
@@ -550,7 +521,7 @@ fn test_add_member_unauthorized() {
         &instruction,
         &[
             signer(wrong_creator),
-            empty(vault) /* AGENT: use state_account() with appropriate fields */,
+            empty(vault), /* AGENT: use state_account() with appropriate fields */
         ],
     );
 
@@ -575,7 +546,7 @@ fn test_remove_member_unauthorized() {
         &instruction,
         &[
             signer(wrong_creator),
-            empty(vault) /* AGENT: use state_account() with appropriate fields */,
+            empty(vault), /* AGENT: use state_account() with appropriate fields */
         ],
     );
 
@@ -604,4 +575,3 @@ fn test_lifecycle_sequence() {
     // AGENT: build and execute create_vault instruction
     todo!("build instruction sequence");
 }
-

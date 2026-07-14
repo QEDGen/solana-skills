@@ -3,20 +3,33 @@
 //! Called from user-owned `instructions/<name>::handler` before
 //! business logic; keep guard logic here, policy-free logic there.
 
-#![allow(unused_variables, unused_imports, dead_code, clippy::too_many_arguments)]
+#![allow(
+    unused_variables,
+    unused_imports,
+    dead_code,
+    clippy::too_many_arguments
+)]
 
-use quasar_lang::prelude::*;
 use crate::errors::*;
-use crate::state::*;
 use crate::instructions::*;
+use crate::state::*;
+use quasar_lang::prelude::*;
 
 /// Guards for `initialize`.  
 /// Generated from the `requires` clauses of the spec handler block.
-pub fn initialize<'info>(ctx: &mut Initialize<'info>, deposit_amount: u64, receive_amount: u64) -> Result<(), ProgramError> {
+pub fn initialize<'info>(
+    ctx: &mut Initialize<'info>,
+    deposit_amount: u64,
+    receive_amount: u64,
+) -> Result<(), ProgramError> {
     // authority: (*ctx.escrow_ta.owner()) != (*ctx.escrow.to_account_view().address())
-    if (*ctx.escrow_ta.owner()) != (*ctx.escrow.to_account_view().address()) { return Err(ProgramError::from(EscrowError::Unauthorized)); }
+    if (*ctx.escrow_ta.owner()) != (*ctx.escrow.to_account_view().address()) {
+        return Err(ProgramError::from(EscrowError::Unauthorized));
+    }
     // requires: deposit_amount > 0 ∧ receive_amount > 0
-    if !((deposit_amount > 0) && (receive_amount > 0)) { return Err(ProgramError::from(EscrowError::InvalidAmount)); }
+    if !((deposit_amount > 0) && (receive_amount > 0)) {
+        return Err(ProgramError::from(EscrowError::InvalidAmount));
+    }
     // lifecycle: status := Open
     ctx.escrow.status = Status::Open as u8;
     Ok(())
@@ -26,18 +39,37 @@ pub fn initialize<'info>(ctx: &mut Initialize<'info>, deposit_amount: u64, recei
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn exchange<'info>(ctx: &mut Exchange<'info>) -> Result<(), ProgramError> {
     // lifecycle: require status == Open
-    if ctx.escrow.status != Status::Open as u8 { return Err(ProgramError::from(crate::errors::EscrowError::InvalidLifecycle)); }
+    if ctx.escrow.status != Status::Open as u8 {
+        return Err(ProgramError::from(
+            crate::errors::EscrowError::InvalidLifecycle,
+        ));
+    }
     // R28 PDA check: ctx.escrow matches its declared seeds
     {
-        let __seeds: &[&[u8]] = &[b"escrow", ctx.escrow.initializer.as_ref(), &[ctx.escrow.bump]];
-        if quasar_lang::pda::verify_program_address(__seeds, &crate::ID, ctx.escrow.to_account_view().address()).is_err() {
+        let __seeds: &[&[u8]] = &[
+            b"escrow",
+            ctx.escrow.initializer.as_ref(),
+            &[ctx.escrow.bump],
+        ];
+        if quasar_lang::pda::verify_program_address(
+            __seeds,
+            &crate::ID,
+            ctx.escrow.to_account_view().address(),
+        )
+        .is_err()
+        {
             return Err(ProgramError::from(EscrowError::InvalidPda));
         }
     }
     // authority: (*ctx.escrow_ta.owner()) != (*ctx.escrow.to_account_view().address())
-    if (*ctx.escrow_ta.owner()) != (*ctx.escrow.to_account_view().address()) { return Err(ProgramError::from(EscrowError::Unauthorized)); }
+    if (*ctx.escrow_ta.owner()) != (*ctx.escrow.to_account_view().address()) {
+        return Err(ProgramError::from(EscrowError::Unauthorized));
+    }
     // requires: initializer_ta.pubkey = s.initializer_token_account
-    if !((*ctx.initializer_ta.to_account_view().address()) == ctx.escrow.initializer_token_account) { return Err(ProgramError::from(EscrowError::Unauthorized)); }
+    if !((*ctx.initializer_ta.to_account_view().address()) == ctx.escrow.initializer_token_account)
+    {
+        return Err(ProgramError::from(EscrowError::Unauthorized));
+    }
     // lifecycle: status := Closed
     ctx.escrow.status = Status::Closed as u8;
     Ok(())
@@ -47,11 +79,20 @@ pub fn exchange<'info>(ctx: &mut Exchange<'info>) -> Result<(), ProgramError> {
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn cancel<'info>(ctx: &mut Cancel<'info>) -> Result<(), ProgramError> {
     // lifecycle: require status == Open
-    if ctx.escrow.status != Status::Open as u8 { return Err(ProgramError::from(crate::errors::EscrowError::InvalidLifecycle)); }
+    if ctx.escrow.status != Status::Open as u8 {
+        return Err(ProgramError::from(
+            crate::errors::EscrowError::InvalidLifecycle,
+        ));
+    }
     // authority: (*ctx.escrow_ta.owner()) != (*ctx.escrow.to_account_view().address())
-    if (*ctx.escrow_ta.owner()) != (*ctx.escrow.to_account_view().address()) { return Err(ProgramError::from(EscrowError::Unauthorized)); }
+    if (*ctx.escrow_ta.owner()) != (*ctx.escrow.to_account_view().address()) {
+        return Err(ProgramError::from(EscrowError::Unauthorized));
+    }
     // requires: initializer_ta.pubkey = s.initializer_token_account
-    if !((*ctx.initializer_ta.to_account_view().address()) == ctx.escrow.initializer_token_account) { return Err(ProgramError::from(EscrowError::Unauthorized)); }
+    if !((*ctx.initializer_ta.to_account_view().address()) == ctx.escrow.initializer_token_account)
+    {
+        return Err(ProgramError::from(EscrowError::Unauthorized));
+    }
     // lifecycle: status := Closed
     ctx.escrow.status = Status::Closed as u8;
     Ok(())

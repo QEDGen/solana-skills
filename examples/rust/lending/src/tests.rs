@@ -298,7 +298,10 @@ mod tests {
         let rate: u64 = 1;
         apply_init_pool(&mut state, rate);
         // Property: pool solvency must hold after init_pool
-        assert!(state.total_deposits >= state.total_borrows, "pool_solvency must hold after init_pool");
+        assert!(
+            state.total_deposits >= state.total_borrows,
+            "pool_solvency must hold after init_pool"
+        );
     }
 
     #[test]
@@ -312,7 +315,10 @@ mod tests {
         let amount: u64 = 100;
         apply_deposit(&mut state, amount);
         // Property: pool solvency must hold after deposit
-        assert!(state.total_deposits >= state.total_borrows, "pool_solvency must hold after deposit");
+        assert!(
+            state.total_deposits >= state.total_borrows,
+            "pool_solvency must hold after deposit"
+        );
     }
 
     // pool_solvency.borrow skipped — borrow operates on LoanState, not PoolState
@@ -337,8 +343,14 @@ mod tests {
         let pre_total_borrows = state.total_borrows.clone();
         let pre_interest_rate = state.interest_rate.clone();
         apply_deposit(&mut state, amount);
-        assert_eq!(state.total_borrows, pre_total_borrows, "total_borrows must not change after deposit");
-        assert_eq!(state.interest_rate, pre_interest_rate, "interest_rate must not change after deposit");
+        assert_eq!(
+            state.total_borrows, pre_total_borrows,
+            "total_borrows must not change after deposit"
+        );
+        assert_eq!(
+            state.interest_rate, pre_interest_rate,
+            "interest_rate must not change after deposit"
+        );
     }
 
     #[test]
@@ -351,7 +363,10 @@ mod tests {
         };
         let pre_collateral = state.collateral.clone();
         apply_liquidate(&mut state);
-        assert_eq!(state.collateral, pre_collateral, "collateral must not change after liquidate");
+        assert_eq!(
+            state.collateral, pre_collateral,
+            "collateral must not change after liquidate"
+        );
     }
 
     // ====================================================================
@@ -361,7 +376,11 @@ mod tests {
     #[test]
     fn test_init_pool_transition_uninitialized_to_active() {
         // init_pool requires status == Uninitialized and moves to Active
-        assert_ne!(PoolStatus::Uninitialized, PoolStatus::Active, "init_pool changes status");
+        assert_ne!(
+            PoolStatus::Uninitialized,
+            PoolStatus::Active,
+            "init_pool changes status"
+        );
         let _pre = PoolStatus::Uninitialized;
         let _post = PoolStatus::Active;
         // AGENT: verify handler transitions status from _pre to _post
@@ -370,7 +389,11 @@ mod tests {
     #[test]
     fn test_deposit_transition_active_to_active() {
         // deposit requires status == Active and moves to Active
-        assert_eq!(PoolStatus::Active, PoolStatus::Active, "deposit is a self-transition");
+        assert_eq!(
+            PoolStatus::Active,
+            PoolStatus::Active,
+            "deposit is a self-transition"
+        );
         let _pre = PoolStatus::Active;
         let _post = PoolStatus::Active;
         // AGENT: verify handler transitions status from _pre to _post
@@ -379,7 +402,11 @@ mod tests {
     #[test]
     fn test_borrow_transition_empty_to_active() {
         // borrow requires status == Empty and moves to Active
-        assert_ne!(LoanStatus::Empty, LoanStatus::Active, "borrow changes status");
+        assert_ne!(
+            LoanStatus::Empty,
+            LoanStatus::Active,
+            "borrow changes status"
+        );
         let _pre = LoanStatus::Empty;
         let _post = LoanStatus::Active;
         // AGENT: verify handler transitions status from _pre to _post
@@ -388,7 +415,11 @@ mod tests {
     #[test]
     fn test_repay_transition_active_to_empty() {
         // repay requires status == Active and moves to Empty
-        assert_ne!(LoanStatus::Active, LoanStatus::Empty, "repay changes status");
+        assert_ne!(
+            LoanStatus::Active,
+            LoanStatus::Empty,
+            "repay changes status"
+        );
         let _pre = LoanStatus::Active;
         let _post = LoanStatus::Empty;
         // AGENT: verify handler transitions status from _pre to _post
@@ -397,10 +428,13 @@ mod tests {
     #[test]
     fn test_liquidate_transition_active_to_liquidated() {
         // liquidate requires status == Active and moves to Liquidated
-        assert_ne!(LoanStatus::Active, LoanStatus::Liquidated, "liquidate changes status");
+        assert_ne!(
+            LoanStatus::Active,
+            LoanStatus::Liquidated,
+            "liquidate changes status"
+        );
         let _pre = LoanStatus::Active;
         let _post = LoanStatus::Liquidated;
         // AGENT: verify handler transitions status from _pre to _post
     }
-
 }

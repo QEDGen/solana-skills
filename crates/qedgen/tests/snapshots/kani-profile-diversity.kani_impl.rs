@@ -62,9 +62,8 @@ const MINT_DATA_LEN: usize = 82;
 
 /// SPL Token program ID — the `from_account_info` owner check target.
 const SPL_TOKEN_PROGRAM_ID: [u8; 32] = [
-    0x06, 0xdd, 0xf6, 0xe1, 0xd7, 0x65, 0xa1, 0x93, 0xd9, 0xcb, 0xe1, 0x46, 0xce, 0xeb, 0x79,
-    0xac, 0x1c, 0xb4, 0x85, 0xed, 0x5f, 0x5b, 0x37, 0x91, 0x3a, 0x8c, 0xf5, 0x85, 0x7e, 0xff,
-    0x00, 0xa9,
+    0x06, 0xdd, 0xf6, 0xe1, 0xd7, 0x65, 0xa1, 0x93, 0xd9, 0xcb, 0xe1, 0x46, 0xce, 0xeb, 0x79, 0xac,
+    0x1c, 0xb4, 0x85, 0xed, 0x5f, 0x5b, 0x37, 0x91, 0x3a, 0x8c, 0xf5, 0x85, 0x7e, 0xff, 0x00, 0xa9,
 ];
 const STATE_INITIALIZED: u8 = 1;
 /// Pinocchio tracks borrow availability with set bits. At instruction entry,
@@ -104,7 +103,12 @@ fn build_token_account(
 
 /// Build a stack-resident SPL Token mint. This is enough for
 /// `Mint::from_account_info(..)?.decimals()` and initialized-state checks.
-fn build_mint_account(key: [u8; 32], is_signer: bool, is_writable: bool, decimals: u8) -> StackAccount<MINT_DATA_LEN> {
+fn build_mint_account(
+    key: [u8; 32],
+    is_signer: bool,
+    is_writable: bool,
+    decimals: u8,
+) -> StackAccount<MINT_DATA_LEN> {
     let mut acct = StackAccount {
         hdr: AccountLayout {
             borrow_state: BORROW_STATE_CLEAR,
@@ -412,8 +416,16 @@ fn verify_move_tokens_impl() {
     kani::assume(amount > 0);
     kani::assume((amount as u64) <= u64::MAX as u64);
 
-    let mut source = build_token_account([1u8; 32], true, false, [4u8; 32], authority_key, (amount as u64));
-    let mut destination = build_token_account([2u8; 32], true, false, [4u8; 32], authority_key, (0 as u64));
+    let mut source = build_token_account(
+        [1u8; 32],
+        true,
+        false,
+        [4u8; 32],
+        authority_key,
+        (amount as u64),
+    );
+    let mut destination =
+        build_token_account([2u8; 32], true, false, [4u8; 32], authority_key, (0 as u64));
     let mut authority = build_minimal_account(authority_key, true, false);
     let mut mint = build_mint_account([4u8; 32], false, false, 6u8);
     let mut token_program = build_minimal_account(SPL_TOKEN_PROGRAM_ID, false, false);
@@ -427,9 +439,8 @@ fn verify_move_tokens_impl() {
             ManuallyDrop::new(account_info_from_stack(&mut token_program)),
         ]
     };
-    let accounts_slice: &[AccountInfo] = unsafe {
-        core::slice::from_raw_parts(&accounts as *const _ as *const AccountInfo, 5)
-    };
+    let accounts_slice: &[AccountInfo] =
+        unsafe { core::slice::from_raw_parts(&accounts as *const _ as *const AccountInfo, 5) };
 
     let instruction_tag: u8 = 1u8;
     let mut instruction_data = [0u8; 9];
@@ -453,12 +464,24 @@ fn verify_move_tokens_impl() {
     // Call the user's real dispatcher. Kani's automatic checks
     // (overflow / underflow / pointer UB) verify this path.
     let _result = crate::process_instruction(&program_id, accounts_slice, &instruction_data);
-    kani::cover!(_result.is_ok(), "impl success path reachable under generated profile");
-    assert!(_result.is_ok(), "generated valid ABI/profile witness should reach success");
+    kani::cover!(
+        _result.is_ok(),
+        "impl success path reachable under generated profile"
+    );
+    assert!(
+        _result.is_ok(),
+        "generated valid ABI/profile witness should reach success"
+    );
 
     if _result.is_ok() {
-        assert_eq!(read_token_amount(&source), pre_transfer_0_from - (amount as u64));
-        assert_eq!(read_token_amount(&destination), pre_transfer_0_to + (amount as u64));
+        assert_eq!(
+            read_token_amount(&source),
+            pre_transfer_0_from - (amount as u64)
+        );
+        assert_eq!(
+            read_token_amount(&destination),
+            pre_transfer_0_to + (amount as u64)
+        );
     }
 
     // Spec ensures (reference). Kani's automatic checks cover
@@ -502,14 +525,10 @@ fn verify_move_batch_impl() {
 
     let mut batch_state = build_minimal_account([1u8; 32], false, true);
 
-    let accounts: [ManuallyDrop<AccountInfo>; 1] = unsafe {
-        [
-            ManuallyDrop::new(account_info_from_stack(&mut batch_state)),
-        ]
-    };
-    let accounts_slice: &[AccountInfo] = unsafe {
-        core::slice::from_raw_parts(&accounts as *const _ as *const AccountInfo, 1)
-    };
+    let accounts: [ManuallyDrop<AccountInfo>; 1] =
+        unsafe { [ManuallyDrop::new(account_info_from_stack(&mut batch_state))] };
+    let accounts_slice: &[AccountInfo] =
+        unsafe { core::slice::from_raw_parts(&accounts as *const _ as *const AccountInfo, 1) };
 
     let instruction_tag: u8 = 2u8;
     let mut instruction_data = [0u8; 22];
@@ -541,8 +560,14 @@ fn verify_move_batch_impl() {
     // Call the user's real dispatcher. Kani's automatic checks
     // (overflow / underflow / pointer UB) verify this path.
     let _result = crate::process_instruction(&program_id, accounts_slice, &instruction_data);
-    kani::cover!(_result.is_ok(), "impl success path reachable under generated profile");
-    assert!(_result.is_ok(), "generated valid ABI/profile witness should reach success");
+    kani::cover!(
+        _result.is_ok(),
+        "impl success path reachable under generated profile"
+    );
+    assert!(
+        _result.is_ok(),
+        "generated valid ABI/profile witness should reach success"
+    );
 
     // Spec ensures (reference). Kani's automatic checks cover
     // arithmetic UB; add explicit assertions below for cross-field
@@ -586,14 +611,10 @@ fn verify_touch_config_impl() {
     write_state_pubkey(&mut config, 109, [11u8; 32]);
     write_state_pubkey(&mut config, 141, [12u8; 32]);
 
-    let accounts: [ManuallyDrop<AccountInfo>; 1] = unsafe {
-        [
-            ManuallyDrop::new(account_info_from_stack(&mut config)),
-        ]
-    };
-    let accounts_slice: &[AccountInfo] = unsafe {
-        core::slice::from_raw_parts(&accounts as *const _ as *const AccountInfo, 1)
-    };
+    let accounts: [ManuallyDrop<AccountInfo>; 1] =
+        unsafe { [ManuallyDrop::new(account_info_from_stack(&mut config))] };
+    let accounts_slice: &[AccountInfo] =
+        unsafe { core::slice::from_raw_parts(&accounts as *const _ as *const AccountInfo, 1) };
 
     let instruction_tag: u8 = 3u8;
     let mut instruction_data = [0u8; 3];
@@ -605,8 +626,14 @@ fn verify_touch_config_impl() {
     // Call the user's real dispatcher. Kani's automatic checks
     // (overflow / underflow / pointer UB) verify this path.
     let _result = crate::process_instruction(&program_id, accounts_slice, &instruction_data);
-    kani::cover!(_result.is_ok(), "impl success path reachable under generated profile");
-    assert!(_result.is_ok(), "generated valid ABI/profile witness should reach success");
+    kani::cover!(
+        _result.is_ok(),
+        "impl success path reachable under generated profile"
+    );
+    assert!(
+        _result.is_ok(),
+        "generated valid ABI/profile witness should reach success"
+    );
 
     // Spec ensures (reference). Kani's automatic checks cover
     // arithmetic UB; add explicit assertions below for cross-field
@@ -659,9 +686,8 @@ fn verify_set_fee_impl() {
             ManuallyDrop::new(account_info_from_stack(&mut admin)),
         ]
     };
-    let accounts_slice: &[AccountInfo] = unsafe {
-        core::slice::from_raw_parts(&accounts as *const _ as *const AccountInfo, 2)
-    };
+    let accounts_slice: &[AccountInfo] =
+        unsafe { core::slice::from_raw_parts(&accounts as *const _ as *const AccountInfo, 2) };
 
     let instruction_tag: u8 = 6u8;
     let mut instruction_data = [0u8; 3];
@@ -676,8 +702,14 @@ fn verify_set_fee_impl() {
     // Call the user's real dispatcher. Kani's automatic checks
     // (overflow / underflow / pointer UB) verify this path.
     let _result = crate::process_instruction(&program_id, accounts_slice, &instruction_data);
-    kani::cover!(_result.is_ok(), "impl success path reachable under generated profile");
-    assert!(_result.is_ok(), "generated valid ABI/profile witness should reach success");
+    kani::cover!(
+        _result.is_ok(),
+        "impl success path reachable under generated profile"
+    );
+    assert!(
+        _result.is_ok(),
+        "generated valid ABI/profile witness should reach success"
+    );
 
     if _result.is_ok() {
         assert_eq!(read_state_u16(&config, 104), (new_max_fee_bps as u16));
@@ -734,9 +766,8 @@ fn verify_set_paused_impl() {
             ManuallyDrop::new(account_info_from_stack(&mut admin)),
         ]
     };
-    let accounts_slice: &[AccountInfo] = unsafe {
-        core::slice::from_raw_parts(&accounts as *const _ as *const AccountInfo, 2)
-    };
+    let accounts_slice: &[AccountInfo] =
+        unsafe { core::slice::from_raw_parts(&accounts as *const _ as *const AccountInfo, 2) };
 
     let instruction_tag: u8 = 7u8;
     let mut instruction_data = [0u8; 2];
@@ -749,8 +780,14 @@ fn verify_set_paused_impl() {
     // Call the user's real dispatcher. Kani's automatic checks
     // (overflow / underflow / pointer UB) verify this path.
     let _result = crate::process_instruction(&program_id, accounts_slice, &instruction_data);
-    kani::cover!(_result.is_ok(), "impl success path reachable under generated profile");
-    assert!(_result.is_ok(), "generated valid ABI/profile witness should reach success");
+    kani::cover!(
+        _result.is_ok(),
+        "impl success path reachable under generated profile"
+    );
+    assert!(
+        _result.is_ok(),
+        "generated valid ABI/profile witness should reach success"
+    );
 
     if _result.is_ok() {
         assert_eq!(read_state_bool(&config, 106), (paused_value != 0));
@@ -831,10 +868,32 @@ fn verify_router_swap_impl() {
     write_state_pubkey(&mut config, 109, [7u8; 32]);
     write_state_pubkey(&mut config, 141, [8u8; 32]);
     let mut user_vault = build_minimal_account(authority_key, true, false);
-    let mut user_input = build_token_account([3u8; 32], true, false, [7u8; 32], authority_key, (amount_in as u64));
-    let mut user_output = build_token_account([4u8; 32], true, false, [8u8; 32], authority_key, (0 as u64));
-    let mut vault_input = build_token_account([5u8; 32], true, false, [7u8; 32], vault_authority_key, (0 as u64));
-    let mut vault_output = build_token_account([6u8; 32], true, false, [8u8; 32], vault_authority_key, (amount_out as u64));
+    let mut user_input = build_token_account(
+        [3u8; 32],
+        true,
+        false,
+        [7u8; 32],
+        authority_key,
+        (amount_in as u64),
+    );
+    let mut user_output =
+        build_token_account([4u8; 32], true, false, [8u8; 32], authority_key, (0 as u64));
+    let mut vault_input = build_token_account(
+        [5u8; 32],
+        true,
+        false,
+        [7u8; 32],
+        vault_authority_key,
+        (0 as u64),
+    );
+    let mut vault_output = build_token_account(
+        [6u8; 32],
+        true,
+        false,
+        [8u8; 32],
+        vault_authority_key,
+        (amount_out as u64),
+    );
     let mut input_mint = build_mint_account([7u8; 32], false, false, (input_decimals as u8));
     let mut output_mint = build_mint_account([8u8; 32], false, false, (output_decimals as u8));
     let mut vault_authority = build_minimal_account(vault_authority_key, false, false);
@@ -856,9 +915,8 @@ fn verify_router_swap_impl() {
             ManuallyDrop::new(account_info_from_stack(&mut token_program)),
         ]
     };
-    let accounts_slice: &[AccountInfo] = unsafe {
-        core::slice::from_raw_parts(&accounts as *const _ as *const AccountInfo, 11)
-    };
+    let accounts_slice: &[AccountInfo] =
+        unsafe { core::slice::from_raw_parts(&accounts as *const _ as *const AccountInfo, 11) };
 
     let instruction_tag: u8 = 8u8;
     let mut instruction_data = [0u8; 28];
@@ -912,8 +970,14 @@ fn verify_router_swap_impl() {
     // Call the user's real dispatcher. Kani's automatic checks
     // (overflow / underflow / pointer UB) verify this path.
     let _result = crate::process_instruction(&program_id, accounts_slice, &instruction_data);
-    kani::cover!(_result.is_ok(), "impl success path reachable under generated profile");
-    assert!(_result.is_ok(), "generated valid ABI/profile witness should reach success");
+    kani::cover!(
+        _result.is_ok(),
+        "impl success path reachable under generated profile"
+    );
+    assert!(
+        _result.is_ok(),
+        "generated valid ABI/profile witness should reach success"
+    );
 
     if _result.is_ok() {
         assert_eq!(read_state_u16(&config, 104), pre_state_config_max_fee_bps);
@@ -921,10 +985,22 @@ fn verify_router_swap_impl() {
     }
 
     if _result.is_ok() {
-        assert_eq!(read_token_amount(&user_input), pre_transfer_0_from - (amount_in as u64));
-        assert_eq!(read_token_amount(&vault_input), pre_transfer_0_to + (amount_in as u64));
-        assert_eq!(read_token_amount(&vault_output), pre_transfer_1_from - (amount_out as u64));
-        assert_eq!(read_token_amount(&user_output), pre_transfer_1_to + (amount_out as u64));
+        assert_eq!(
+            read_token_amount(&user_input),
+            pre_transfer_0_from - (amount_in as u64)
+        );
+        assert_eq!(
+            read_token_amount(&vault_input),
+            pre_transfer_0_to + (amount_in as u64)
+        );
+        assert_eq!(
+            read_token_amount(&vault_output),
+            pre_transfer_1_from - (amount_out as u64)
+        );
+        assert_eq!(
+            read_token_amount(&user_output),
+            pre_transfer_1_to + (amount_out as u64)
+        );
     }
 
     // Spec ensures (reference). Kani's automatic checks cover
@@ -971,8 +1047,16 @@ fn verify_router_withdraw_impl() {
     write_state_u8(&mut config, 108, (1 as u8));
     write_state_pubkey(&mut config, 109, [5u8; 32]);
     let mut admin = build_minimal_account(authority_key, true, false);
-    let mut vault_source = build_token_account([3u8; 32], true, false, [5u8; 32], [6u8; 32], (amount as u64));
-    let mut destination = build_token_account([4u8; 32], true, false, [5u8; 32], [9u8; 32], (0 as u64));
+    let mut vault_source = build_token_account(
+        [3u8; 32],
+        true,
+        false,
+        [5u8; 32],
+        [6u8; 32],
+        (amount as u64),
+    );
+    let mut destination =
+        build_token_account([4u8; 32], true, false, [5u8; 32], [9u8; 32], (0 as u64));
     let mut mint = build_mint_account([5u8; 32], false, false, 6u8);
     let mut vault_authority = build_minimal_account([6u8; 32], false, false);
     let mut token_program = build_minimal_account(SPL_TOKEN_PROGRAM_ID, false, false);
@@ -988,9 +1072,8 @@ fn verify_router_withdraw_impl() {
             ManuallyDrop::new(account_info_from_stack(&mut token_program)),
         ]
     };
-    let accounts_slice: &[AccountInfo] = unsafe {
-        core::slice::from_raw_parts(&accounts as *const _ as *const AccountInfo, 7)
-    };
+    let accounts_slice: &[AccountInfo] =
+        unsafe { core::slice::from_raw_parts(&accounts as *const _ as *const AccountInfo, 7) };
 
     let instruction_tag: u8 = 9u8;
     let mut instruction_data = [0u8; 9];
@@ -1017,16 +1100,28 @@ fn verify_router_withdraw_impl() {
     // Call the user's real dispatcher. Kani's automatic checks
     // (overflow / underflow / pointer UB) verify this path.
     let _result = crate::process_instruction(&program_id, accounts_slice, &instruction_data);
-    kani::cover!(_result.is_ok(), "impl success path reachable under generated profile");
-    assert!(_result.is_ok(), "generated valid ABI/profile witness should reach success");
+    kani::cover!(
+        _result.is_ok(),
+        "impl success path reachable under generated profile"
+    );
+    assert!(
+        _result.is_ok(),
+        "generated valid ABI/profile witness should reach success"
+    );
 
     if _result.is_ok() {
         assert_eq!(read_state_u16(&config, 104), pre_state_config_max_fee_bps);
     }
 
     if _result.is_ok() {
-        assert_eq!(read_token_amount(&vault_source), pre_transfer_0_from - (amount as u64));
-        assert_eq!(read_token_amount(&destination), pre_transfer_0_to + (amount as u64));
+        assert_eq!(
+            read_token_amount(&vault_source),
+            pre_transfer_0_from - (amount as u64)
+        );
+        assert_eq!(
+            read_token_amount(&destination),
+            pre_transfer_0_to + (amount as u64)
+        );
     }
 
     // Spec ensures (reference). Kani's automatic checks cover
@@ -1082,8 +1177,16 @@ fn verify_router_rebalance_impl() {
     let mut token_program = build_minimal_account(SPL_TOKEN_PROGRAM_ID, false, false);
     let mut mint = build_mint_account([4u8; 32], false, false, 6u8);
     let mut source_authority = build_minimal_account([5u8; 32], false, false);
-    let mut source_inventory = build_token_account([6u8; 32], true, false, [4u8; 32], [5u8; 32], (amount as u64));
-    let mut destination_inventory = build_token_account([7u8; 32], true, false, [4u8; 32], [9u8; 32], (0 as u64));
+    let mut source_inventory = build_token_account(
+        [6u8; 32],
+        true,
+        false,
+        [4u8; 32],
+        [5u8; 32],
+        (amount as u64),
+    );
+    let mut destination_inventory =
+        build_token_account([7u8; 32], true, false, [4u8; 32], [9u8; 32], (0 as u64));
 
     let accounts: [ManuallyDrop<AccountInfo>; 7] = unsafe {
         [
@@ -1096,9 +1199,8 @@ fn verify_router_rebalance_impl() {
             ManuallyDrop::new(account_info_from_stack(&mut destination_inventory)),
         ]
     };
-    let accounts_slice: &[AccountInfo] = unsafe {
-        core::slice::from_raw_parts(&accounts as *const _ as *const AccountInfo, 7)
-    };
+    let accounts_slice: &[AccountInfo] =
+        unsafe { core::slice::from_raw_parts(&accounts as *const _ as *const AccountInfo, 7) };
 
     let instruction_tag: u8 = 10u8;
     let mut instruction_data = [0u8; 11];
@@ -1127,16 +1229,28 @@ fn verify_router_rebalance_impl() {
     // Call the user's real dispatcher. Kani's automatic checks
     // (overflow / underflow / pointer UB) verify this path.
     let _result = crate::process_instruction(&program_id, accounts_slice, &instruction_data);
-    kani::cover!(_result.is_ok(), "impl success path reachable under generated profile");
-    assert!(_result.is_ok(), "generated valid ABI/profile witness should reach success");
+    kani::cover!(
+        _result.is_ok(),
+        "impl success path reachable under generated profile"
+    );
+    assert!(
+        _result.is_ok(),
+        "generated valid ABI/profile witness should reach success"
+    );
 
     if _result.is_ok() {
         assert_eq!(read_state_u16(&config, 104), pre_state_config_max_fee_bps);
     }
 
     if _result.is_ok() {
-        assert_eq!(read_token_amount(&source_inventory), pre_transfer_0_from - (amount as u64));
-        assert_eq!(read_token_amount(&destination_inventory), pre_transfer_0_to + (amount as u64));
+        assert_eq!(
+            read_token_amount(&source_inventory),
+            pre_transfer_0_from - (amount as u64)
+        );
+        assert_eq!(
+            read_token_amount(&destination_inventory),
+            pre_transfer_0_to + (amount as u64)
+        );
     }
 
     // Spec ensures (reference). Kani's automatic checks cover
@@ -1202,11 +1316,27 @@ fn verify_router_rebalance_pair_impl() {
     let mut token_program = build_minimal_account(SPL_TOKEN_PROGRAM_ID, false, false);
     let mut mint = build_mint_account([4u8; 32], false, false, 6u8);
     let mut source_authority_0 = build_minimal_account([5u8; 32], false, false);
-    let mut source_inventory_0 = build_token_account([6u8; 32], true, false, [4u8; 32], [5u8; 32], (amount_0 as u64));
-    let mut destination_inventory_0 = build_token_account([7u8; 32], true, false, [4u8; 32], [9u8; 32], (0 as u64));
+    let mut source_inventory_0 = build_token_account(
+        [6u8; 32],
+        true,
+        false,
+        [4u8; 32],
+        [5u8; 32],
+        (amount_0 as u64),
+    );
+    let mut destination_inventory_0 =
+        build_token_account([7u8; 32], true, false, [4u8; 32], [9u8; 32], (0 as u64));
     let mut source_authority_1 = build_minimal_account([8u8; 32], false, false);
-    let mut source_inventory_1 = build_token_account([9u8; 32], true, false, [4u8; 32], [8u8; 32], (amount_1 as u64));
-    let mut destination_inventory_1 = build_token_account([10u8; 32], true, false, [4u8; 32], [9u8; 32], (0 as u64));
+    let mut source_inventory_1 = build_token_account(
+        [9u8; 32],
+        true,
+        false,
+        [4u8; 32],
+        [8u8; 32],
+        (amount_1 as u64),
+    );
+    let mut destination_inventory_1 =
+        build_token_account([10u8; 32], true, false, [4u8; 32], [9u8; 32], (0 as u64));
 
     let accounts: [ManuallyDrop<AccountInfo>; 10] = unsafe {
         [
@@ -1222,9 +1352,8 @@ fn verify_router_rebalance_pair_impl() {
             ManuallyDrop::new(account_info_from_stack(&mut destination_inventory_1)),
         ]
     };
-    let accounts_slice: &[AccountInfo] = unsafe {
-        core::slice::from_raw_parts(&accounts as *const _ as *const AccountInfo, 10)
-    };
+    let accounts_slice: &[AccountInfo] =
+        unsafe { core::slice::from_raw_parts(&accounts as *const _ as *const AccountInfo, 10) };
 
     let instruction_tag: u8 = 11u8;
     let mut instruction_data = [0u8; 21];
@@ -1268,18 +1397,36 @@ fn verify_router_rebalance_pair_impl() {
     // Call the user's real dispatcher. Kani's automatic checks
     // (overflow / underflow / pointer UB) verify this path.
     let _result = crate::process_instruction(&program_id, accounts_slice, &instruction_data);
-    kani::cover!(_result.is_ok(), "impl success path reachable under generated profile");
-    assert!(_result.is_ok(), "generated valid ABI/profile witness should reach success");
+    kani::cover!(
+        _result.is_ok(),
+        "impl success path reachable under generated profile"
+    );
+    assert!(
+        _result.is_ok(),
+        "generated valid ABI/profile witness should reach success"
+    );
 
     if _result.is_ok() {
         assert_eq!(read_state_u16(&config, 104), pre_state_config_max_fee_bps);
     }
 
     if _result.is_ok() {
-        assert_eq!(read_token_amount(&source_inventory_0), pre_transfer_0_from - (amount_0 as u64));
-        assert_eq!(read_token_amount(&destination_inventory_0), pre_transfer_0_to + (amount_0 as u64));
-        assert_eq!(read_token_amount(&source_inventory_1), pre_transfer_1_from - (amount_1 as u64));
-        assert_eq!(read_token_amount(&destination_inventory_1), pre_transfer_1_to + (amount_1 as u64));
+        assert_eq!(
+            read_token_amount(&source_inventory_0),
+            pre_transfer_0_from - (amount_0 as u64)
+        );
+        assert_eq!(
+            read_token_amount(&destination_inventory_0),
+            pre_transfer_0_to + (amount_0 as u64)
+        );
+        assert_eq!(
+            read_token_amount(&source_inventory_1),
+            pre_transfer_1_from - (amount_1 as u64)
+        );
+        assert_eq!(
+            read_token_amount(&destination_inventory_1),
+            pre_transfer_1_to + (amount_1 as u64)
+        );
     }
 
     // Spec ensures (reference). Kani's automatic checks cover
@@ -1319,9 +1466,8 @@ fn verify_route_ata_impl() {
             ManuallyDrop::new(account_info_from_stack(&mut vault)),
         ]
     };
-    let accounts_slice: &[AccountInfo] = unsafe {
-        core::slice::from_raw_parts(&accounts as *const _ as *const AccountInfo, 3)
-    };
+    let accounts_slice: &[AccountInfo] =
+        unsafe { core::slice::from_raw_parts(&accounts as *const _ as *const AccountInfo, 3) };
 
     let instruction_tag: u8 = 4u8;
     let mut instruction_data = [0u8; 2];
@@ -1331,8 +1477,14 @@ fn verify_route_ata_impl() {
     // Call the user's real dispatcher. Kani's automatic checks
     // (overflow / underflow / pointer UB) verify this path.
     let _result = crate::process_instruction(&program_id, accounts_slice, &instruction_data);
-    kani::cover!(_result.is_ok(), "impl success path reachable under generated profile");
-    assert!(_result.is_ok(), "generated valid ABI/profile witness should reach success");
+    kani::cover!(
+        _result.is_ok(),
+        "impl success path reachable under generated profile"
+    );
+    assert!(
+        _result.is_ok(),
+        "generated valid ABI/profile witness should reach success"
+    );
 
     // Spec ensures (reference). Kani's automatic checks cover
     // arithmetic UB; add explicit assertions below for cross-field
@@ -1358,14 +1510,10 @@ fn verify_partial_fallback_impl() {
 
     let mut scratch = build_minimal_account([1u8; 32], false, true);
 
-    let accounts: [ManuallyDrop<AccountInfo>; 1] = unsafe {
-        [
-            ManuallyDrop::new(account_info_from_stack(&mut scratch)),
-        ]
-    };
-    let accounts_slice: &[AccountInfo] = unsafe {
-        core::slice::from_raw_parts(&accounts as *const _ as *const AccountInfo, 1)
-    };
+    let accounts: [ManuallyDrop<AccountInfo>; 1] =
+        unsafe { [ManuallyDrop::new(account_info_from_stack(&mut scratch))] };
+    let accounts_slice: &[AccountInfo] =
+        unsafe { core::slice::from_raw_parts(&accounts as *const _ as *const AccountInfo, 1) };
 
     let instruction_tag: u8 = 5u8;
     let mut instruction_data = alloc::vec::Vec::new();
@@ -1375,8 +1523,14 @@ fn verify_partial_fallback_impl() {
     // Call the user's real dispatcher. Kani's automatic checks
     // (overflow / underflow / pointer UB) verify this path.
     let _result = crate::process_instruction(&program_id, accounts_slice, &instruction_data);
-    kani::cover!(_result.is_ok(), "impl success path reachable under generated profile");
-    assert!(_result.is_ok(), "generated valid ABI/profile witness should reach success");
+    kani::cover!(
+        _result.is_ok(),
+        "impl success path reachable under generated profile"
+    );
+    assert!(
+        _result.is_ok(),
+        "generated valid ABI/profile witness should reach success"
+    );
 
     // Spec ensures (reference). Kani's automatic checks cover
     // arithmetic UB; add explicit assertions below for cross-field
@@ -1402,14 +1556,10 @@ fn verify_missing_profile_impl() {
 
     let mut scratch = build_minimal_account([1u8; 32], false, true);
 
-    let accounts: [ManuallyDrop<AccountInfo>; 1] = unsafe {
-        [
-            ManuallyDrop::new(account_info_from_stack(&mut scratch)),
-        ]
-    };
-    let accounts_slice: &[AccountInfo] = unsafe {
-        core::slice::from_raw_parts(&accounts as *const _ as *const AccountInfo, 1)
-    };
+    let accounts: [ManuallyDrop<AccountInfo>; 1] =
+        unsafe { [ManuallyDrop::new(account_info_from_stack(&mut scratch))] };
+    let accounts_slice: &[AccountInfo] =
+        unsafe { core::slice::from_raw_parts(&accounts as *const _ as *const AccountInfo, 1) };
 
     let instruction_tag: u8 = crate::MISSING_PROFILE;
     let mut instruction_data = alloc::vec::Vec::new();
@@ -1419,8 +1569,14 @@ fn verify_missing_profile_impl() {
     // Call the user's real dispatcher. Kani's automatic checks
     // (overflow / underflow / pointer UB) verify this path.
     let _result = crate::process_instruction(&program_id, accounts_slice, &instruction_data);
-    kani::cover!(_result.is_ok(), "impl success path reachable under generated profile");
-    assert!(_result.is_ok(), "generated valid ABI/profile witness should reach success");
+    kani::cover!(
+        _result.is_ok(),
+        "impl success path reachable under generated profile"
+    );
+    assert!(
+        _result.is_ok(),
+        "generated valid ABI/profile witness should reach success"
+    );
 
     // Spec ensures (reference). Kani's automatic checks cover
     // arithmetic UB; add explicit assertions below for cross-field

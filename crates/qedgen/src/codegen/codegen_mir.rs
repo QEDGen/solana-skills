@@ -526,7 +526,7 @@ fn emit_lib(
 
     out.push_str("// ---- END GENERATED ----\n");
 
-    std::fs::write(src_dir.join("lib.rs"), &out)?;
+    crate::codegen_shared::write_generated_file(&src_dir.join("lib.rs"), &out)?;
     Ok(())
 }
 
@@ -572,7 +572,7 @@ fn emit_instructions(
         }
     }
     mod_out.push_str("// ---- END GENERATED ----\n");
-    std::fs::write(instr_dir.join("mod.rs"), &mod_out)?;
+    crate::codegen_shared::write_generated_file(&instr_dir.join("mod.rs"), &mod_out)?;
 
     // Spec source for spec_hash attributes (single- and multi-file specs).
     let spec_src = crate::check::read_spec_source(spec_path).unwrap_or_default();
@@ -619,7 +619,7 @@ fn emit_instructions(
                 target,
             )?
         };
-        std::fs::write(&handler_path, &out)?;
+        crate::codegen_shared::write_generated_file(&handler_path, &out)?;
     }
 
     Ok(())
@@ -651,7 +651,7 @@ fn emit_state(
         std::fs::create_dir_all(&src_dir)?;
         let mut out = String::new();
         crate::codegen_shared::emit_pinocchio_state(parsed, fp, &mut out)?;
-        std::fs::write(src_dir.join("state.rs"), &out)?;
+        crate::codegen_shared::write_generated_file(&src_dir.join("state.rs"), &out)?;
         return Ok(());
     }
 
@@ -829,7 +829,7 @@ fn emit_state(
 
     out.push_str("// ---- END GENERATED ----\n");
 
-    std::fs::write(src_dir.join("state.rs"), &out)?;
+    crate::codegen_shared::write_generated_file(&src_dir.join("state.rs"), &out)?;
     Ok(())
 }
 
@@ -981,7 +981,10 @@ fn emit_imported_mirror(
         }
 
         out.push_str("// ---- END GENERATED ----\n");
-        std::fs::write(imported_dir.join(format!("{}.rs", local_name)), &out)?;
+        crate::codegen_shared::write_generated_file(
+            &imported_dir.join(format!("{}.rs", local_name)),
+            &out,
+        )?;
     }
 
     // mod.rs re-export aggregator.
@@ -1000,7 +1003,7 @@ fn emit_imported_mirror(
         mod_out.push_str(&format!("pub mod {};\n", local_name));
     }
     mod_out.push_str("\n// ---- END GENERATED ----\n");
-    std::fs::write(imported_dir.join("mod.rs"), mod_out)?;
+    crate::codegen_shared::write_generated_file(&imported_dir.join("mod.rs"), &mod_out)?;
 
     Ok(())
 }
@@ -1098,7 +1101,7 @@ fn emit_errors(
     }
     out.push_str("// ---- END GENERATED ----\n");
 
-    std::fs::write(src_dir.join("errors.rs"), &out)?;
+    crate::codegen_shared::write_generated_file(&src_dir.join("errors.rs"), &out)?;
     Ok(())
 }
 
@@ -1154,7 +1157,7 @@ fn emit_ref_impls(
         ));
     }
     out.push_str("// ---- END GENERATED ----\n");
-    std::fs::write(src_dir.join("ref_impls.rs"), &out)?;
+    crate::codegen_shared::write_generated_file(&src_dir.join("ref_impls.rs"), &out)?;
     Ok(())
 }
 
@@ -1224,7 +1227,7 @@ fn emit_events(
 
     out.push_str("// ---- END GENERATED ----\n");
 
-    std::fs::write(src_dir.join("events.rs"), &out)?;
+    crate::codegen_shared::write_generated_file(&src_dir.join("events.rs"), &out)?;
     Ok(())
 }
 
@@ -1271,7 +1274,7 @@ pub fn mul_div_ceil_u128(a: u128, b: u128, d: u128) -> u128 {\n\
 }\n",
     );
     out.push_str("// ---- END GENERATED ----\n");
-    std::fs::write(src_dir.join("math.rs"), &out)?;
+    crate::codegen_shared::write_generated_file(&src_dir.join("math.rs"), &out)?;
     Ok(())
 }
 

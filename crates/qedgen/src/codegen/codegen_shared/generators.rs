@@ -65,7 +65,7 @@ pub(crate) fn emit_pinocchio_program_lib(
     out.push('\n');
     emit_pinocchio_lib_tail(&mut out, spec, program_id);
     out.push_str("// ---- END GENERATED ----\n");
-    std::fs::write(src_dir.join("lib.rs"), &out)?;
+    write_generated_file(&src_dir.join("lib.rs"), &out)?;
     Ok(())
 }
 

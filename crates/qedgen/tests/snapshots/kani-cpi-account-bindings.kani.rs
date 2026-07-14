@@ -18,7 +18,38 @@ use qedgen_kani_prelude::mul_bps_floor_u128;
 
 #[allow(dead_code)]
 fn pubkey_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
-    a[0] == b[0] && a[1] == b[1] && a[2] == b[2] && a[3] == b[3] && a[4] == b[4] && a[5] == b[5] && a[6] == b[6] && a[7] == b[7] && a[8] == b[8] && a[9] == b[9] && a[10] == b[10] && a[11] == b[11] && a[12] == b[12] && a[13] == b[13] && a[14] == b[14] && a[15] == b[15] && a[16] == b[16] && a[17] == b[17] && a[18] == b[18] && a[19] == b[19] && a[20] == b[20] && a[21] == b[21] && a[22] == b[22] && a[23] == b[23] && a[24] == b[24] && a[25] == b[25] && a[26] == b[26] && a[27] == b[27] && a[28] == b[28] && a[29] == b[29] && a[30] == b[30] && a[31] == b[31]
+    a[0] == b[0]
+        && a[1] == b[1]
+        && a[2] == b[2]
+        && a[3] == b[3]
+        && a[4] == b[4]
+        && a[5] == b[5]
+        && a[6] == b[6]
+        && a[7] == b[7]
+        && a[8] == b[8]
+        && a[9] == b[9]
+        && a[10] == b[10]
+        && a[11] == b[11]
+        && a[12] == b[12]
+        && a[13] == b[13]
+        && a[14] == b[14]
+        && a[15] == b[15]
+        && a[16] == b[16]
+        && a[17] == b[17]
+        && a[18] == b[18]
+        && a[19] == b[19]
+        && a[20] == b[20]
+        && a[21] == b[21]
+        && a[22] == b[22]
+        && a[23] == b[23]
+        && a[24] == b[24]
+        && a[25] == b[25]
+        && a[26] == b[26]
+        && a[27] == b[27]
+        && a[28] == b[28]
+        && a[29] == b[29]
+        && a[30] == b[30]
+        && a[31] == b[31]
 }
 
 #[allow(dead_code)]
@@ -126,7 +157,16 @@ fn bound_transfer(s: &mut State, accounts: &BoundTransferAccounts, amount: u64) 
     true
 }
 
-fn stable_swap_large_guard(s: &mut State, accounts: &StableSwapLargeGuardAccounts, amount_in: u128, min_out: u128, fee_bps: u128, lane: u8, input_mint: [u8; 32], output_mint: [u8; 32]) -> bool {
+fn stable_swap_large_guard(
+    s: &mut State,
+    accounts: &StableSwapLargeGuardAccounts,
+    amount_in: u128,
+    min_out: u128,
+    fee_bps: u128,
+    lane: u8,
+    input_mint: [u8; 32],
+    output_mint: [u8; 32],
+) -> bool {
     if !(pubkey_eq(&accounts.admin.pubkey, &s.admin_key)) {
         return false;
     }
@@ -181,15 +221,25 @@ fn verify_unbound_transfer_rejects_invalid() {
     kani::assume(s.status == Status::Active);
     let amount: u64 = kani::any();
     let accounts = UnboundTransferAccounts {
-        admin: KaniAccount { pubkey: kani::any() },
-        pool_ta: KaniAccount { pubkey: kani::any() },
-        user_ta: KaniAccount { pubkey: kani::any() },
-        token_program: KaniAccount { pubkey: kani::any() },
+        admin: KaniAccount {
+            pubkey: kani::any(),
+        },
+        pool_ta: KaniAccount {
+            pubkey: kani::any(),
+        },
+        user_ta: KaniAccount {
+            pubkey: kani::any(),
+        },
+        token_program: KaniAccount {
+            pubkey: kani::any(),
+        },
     };
     kani::assume(!((pubkey_eq(&accounts.admin.pubkey, &s.admin_key)) && (amount > 0)));
     kani::cover!(true, "guard-violation domain is satisfiable");
-    assert!(!unbound_transfer(&mut s, &accounts, amount),
-        "unbound_transfer must reject when guard is violated");
+    assert!(
+        !unbound_transfer(&mut s, &accounts, amount),
+        "unbound_transfer must reject when guard is violated"
+    );
 }
 
 #[kani::proof]
@@ -205,15 +255,25 @@ fn verify_bound_transfer_rejects_invalid() {
     kani::assume(s.status == Status::Active);
     let amount: u64 = kani::any();
     let accounts = BoundTransferAccounts {
-        admin: KaniAccount { pubkey: kani::any() },
-        pool_ta: KaniAccount { pubkey: kani::any() },
-        user_ta: KaniAccount { pubkey: kani::any() },
-        token_program: KaniAccount { pubkey: kani::any() },
+        admin: KaniAccount {
+            pubkey: kani::any(),
+        },
+        pool_ta: KaniAccount {
+            pubkey: kani::any(),
+        },
+        user_ta: KaniAccount {
+            pubkey: kani::any(),
+        },
+        token_program: KaniAccount {
+            pubkey: kani::any(),
+        },
     };
     kani::assume(!((pubkey_eq(&accounts.admin.pubkey, &s.admin_key)) && (amount > 0)));
     kani::cover!(true, "guard-violation domain is satisfiable");
-    assert!(!bound_transfer(&mut s, &accounts, amount),
-        "bound_transfer must reject when guard is violated");
+    assert!(
+        !bound_transfer(&mut s, &accounts, amount),
+        "bound_transfer must reject when guard is violated"
+    );
 }
 
 #[kani::proof]
@@ -234,15 +294,34 @@ fn verify_stable_swap_large_guard_rejects_invalid_1_pubkey_eq_accounts_admin_pub
     let input_mint: [u8; 32] = kani::any();
     let output_mint: [u8; 32] = kani::any();
     let accounts = StableSwapLargeGuardAccounts {
-        admin: KaniAccount { pubkey: kani::any() },
-        pool_ta: KaniAccount { pubkey: kani::any() },
-        user_ta: KaniAccount { pubkey: kani::any() },
-        token_program: KaniAccount { pubkey: kani::any() },
+        admin: KaniAccount {
+            pubkey: kani::any(),
+        },
+        pool_ta: KaniAccount {
+            pubkey: kani::any(),
+        },
+        user_ta: KaniAccount {
+            pubkey: kani::any(),
+        },
+        token_program: KaniAccount {
+            pubkey: kani::any(),
+        },
     };
     kani::assume(!(pubkey_eq(&accounts.admin.pubkey, &s.admin_key)));
     kani::cover!(true, "guard-violation domain is satisfiable");
-    assert!(!stable_swap_large_guard(&mut s, &accounts, amount_in, min_out, fee_bps, lane, input_mint, output_mint),
-        "stable_swap_large_guard must reject when guard term is violated");
+    assert!(
+        !stable_swap_large_guard(
+            &mut s,
+            &accounts,
+            amount_in,
+            min_out,
+            fee_bps,
+            lane,
+            input_mint,
+            output_mint
+        ),
+        "stable_swap_large_guard must reject when guard term is violated"
+    );
 }
 
 #[kani::proof]
@@ -263,16 +342,35 @@ fn verify_stable_swap_large_guard_rejects_invalid_2_amount_in_0() {
     let input_mint: [u8; 32] = kani::any();
     let output_mint: [u8; 32] = kani::any();
     let accounts = StableSwapLargeGuardAccounts {
-        admin: KaniAccount { pubkey: kani::any() },
-        pool_ta: KaniAccount { pubkey: kani::any() },
-        user_ta: KaniAccount { pubkey: kani::any() },
-        token_program: KaniAccount { pubkey: kani::any() },
+        admin: KaniAccount {
+            pubkey: kani::any(),
+        },
+        pool_ta: KaniAccount {
+            pubkey: kani::any(),
+        },
+        user_ta: KaniAccount {
+            pubkey: kani::any(),
+        },
+        token_program: KaniAccount {
+            pubkey: kani::any(),
+        },
     };
     kani::assume(pubkey_eq(&accounts.admin.pubkey, &s.admin_key));
     kani::assume(amount_in <= 0);
     kani::cover!(true, "guard-violation domain is satisfiable");
-    assert!(!stable_swap_large_guard(&mut s, &accounts, amount_in, min_out, fee_bps, lane, input_mint, output_mint),
-        "stable_swap_large_guard must reject when guard term is violated");
+    assert!(
+        !stable_swap_large_guard(
+            &mut s,
+            &accounts,
+            amount_in,
+            min_out,
+            fee_bps,
+            lane,
+            input_mint,
+            output_mint
+        ),
+        "stable_swap_large_guard must reject when guard term is violated"
+    );
 }
 
 #[kani::proof]
@@ -293,17 +391,36 @@ fn verify_stable_swap_large_guard_rejects_invalid_3_min_out_0() {
     let input_mint: [u8; 32] = kani::any();
     let output_mint: [u8; 32] = kani::any();
     let accounts = StableSwapLargeGuardAccounts {
-        admin: KaniAccount { pubkey: kani::any() },
-        pool_ta: KaniAccount { pubkey: kani::any() },
-        user_ta: KaniAccount { pubkey: kani::any() },
-        token_program: KaniAccount { pubkey: kani::any() },
+        admin: KaniAccount {
+            pubkey: kani::any(),
+        },
+        pool_ta: KaniAccount {
+            pubkey: kani::any(),
+        },
+        user_ta: KaniAccount {
+            pubkey: kani::any(),
+        },
+        token_program: KaniAccount {
+            pubkey: kani::any(),
+        },
     };
     kani::assume(pubkey_eq(&accounts.admin.pubkey, &s.admin_key));
     kani::assume(amount_in > 0);
     kani::assume(min_out <= 0);
     kani::cover!(true, "guard-violation domain is satisfiable");
-    assert!(!stable_swap_large_guard(&mut s, &accounts, amount_in, min_out, fee_bps, lane, input_mint, output_mint),
-        "stable_swap_large_guard must reject when guard term is violated");
+    assert!(
+        !stable_swap_large_guard(
+            &mut s,
+            &accounts,
+            amount_in,
+            min_out,
+            fee_bps,
+            lane,
+            input_mint,
+            output_mint
+        ),
+        "stable_swap_large_guard must reject when guard term is violated"
+    );
 }
 
 #[kani::proof]
@@ -324,18 +441,37 @@ fn verify_stable_swap_large_guard_rejects_invalid_4_fee_bps_10000() {
     let input_mint: [u8; 32] = kani::any();
     let output_mint: [u8; 32] = kani::any();
     let accounts = StableSwapLargeGuardAccounts {
-        admin: KaniAccount { pubkey: kani::any() },
-        pool_ta: KaniAccount { pubkey: kani::any() },
-        user_ta: KaniAccount { pubkey: kani::any() },
-        token_program: KaniAccount { pubkey: kani::any() },
+        admin: KaniAccount {
+            pubkey: kani::any(),
+        },
+        pool_ta: KaniAccount {
+            pubkey: kani::any(),
+        },
+        user_ta: KaniAccount {
+            pubkey: kani::any(),
+        },
+        token_program: KaniAccount {
+            pubkey: kani::any(),
+        },
     };
     kani::assume(pubkey_eq(&accounts.admin.pubkey, &s.admin_key));
     kani::assume(amount_in > 0);
     kani::assume(min_out > 0);
     kani::assume(fee_bps > 10000);
     kani::cover!(true, "guard-violation domain is satisfiable");
-    assert!(!stable_swap_large_guard(&mut s, &accounts, amount_in, min_out, fee_bps, lane, input_mint, output_mint),
-        "stable_swap_large_guard must reject when guard term is violated");
+    assert!(
+        !stable_swap_large_guard(
+            &mut s,
+            &accounts,
+            amount_in,
+            min_out,
+            fee_bps,
+            lane,
+            input_mint,
+            output_mint
+        ),
+        "stable_swap_large_guard must reject when guard term is violated"
+    );
 }
 
 #[kani::proof]
@@ -356,10 +492,18 @@ fn verify_stable_swap_large_guard_rejects_invalid_5_lane_32() {
     let input_mint: [u8; 32] = kani::any();
     let output_mint: [u8; 32] = kani::any();
     let accounts = StableSwapLargeGuardAccounts {
-        admin: KaniAccount { pubkey: kani::any() },
-        pool_ta: KaniAccount { pubkey: kani::any() },
-        user_ta: KaniAccount { pubkey: kani::any() },
-        token_program: KaniAccount { pubkey: kani::any() },
+        admin: KaniAccount {
+            pubkey: kani::any(),
+        },
+        pool_ta: KaniAccount {
+            pubkey: kani::any(),
+        },
+        user_ta: KaniAccount {
+            pubkey: kani::any(),
+        },
+        token_program: KaniAccount {
+            pubkey: kani::any(),
+        },
     };
     kani::assume(pubkey_eq(&accounts.admin.pubkey, &s.admin_key));
     kani::assume(amount_in > 0);
@@ -367,8 +511,19 @@ fn verify_stable_swap_large_guard_rejects_invalid_5_lane_32() {
     kani::assume(fee_bps <= 10000);
     kani::assume(lane >= 32);
     kani::cover!(true, "guard-violation domain is satisfiable");
-    assert!(!stable_swap_large_guard(&mut s, &accounts, amount_in, min_out, fee_bps, lane, input_mint, output_mint),
-        "stable_swap_large_guard must reject when guard term is violated");
+    assert!(
+        !stable_swap_large_guard(
+            &mut s,
+            &accounts,
+            amount_in,
+            min_out,
+            fee_bps,
+            lane,
+            input_mint,
+            output_mint
+        ),
+        "stable_swap_large_guard must reject when guard term is violated"
+    );
 }
 
 #[kani::proof]
@@ -389,10 +544,18 @@ fn verify_stable_swap_large_guard_rejects_invalid_6_pubkey_ne_input_mint_output_
     let input_mint: [u8; 32] = kani::any();
     let output_mint: [u8; 32] = kani::any();
     let accounts = StableSwapLargeGuardAccounts {
-        admin: KaniAccount { pubkey: kani::any() },
-        pool_ta: KaniAccount { pubkey: kani::any() },
-        user_ta: KaniAccount { pubkey: kani::any() },
-        token_program: KaniAccount { pubkey: kani::any() },
+        admin: KaniAccount {
+            pubkey: kani::any(),
+        },
+        pool_ta: KaniAccount {
+            pubkey: kani::any(),
+        },
+        user_ta: KaniAccount {
+            pubkey: kani::any(),
+        },
+        token_program: KaniAccount {
+            pubkey: kani::any(),
+        },
     };
     kani::assume(pubkey_eq(&accounts.admin.pubkey, &s.admin_key));
     kani::assume(amount_in > 0);
@@ -401,14 +564,26 @@ fn verify_stable_swap_large_guard_rejects_invalid_6_pubkey_ne_input_mint_output_
     kani::assume(lane < 32);
     kani::assume(!(pubkey_ne(&input_mint, &output_mint)));
     kani::cover!(true, "guard-violation domain is satisfiable");
-    assert!(!stable_swap_large_guard(&mut s, &accounts, amount_in, min_out, fee_bps, lane, input_mint, output_mint),
-        "stable_swap_large_guard must reject when guard term is violated");
+    assert!(
+        !stable_swap_large_guard(
+            &mut s,
+            &accounts,
+            amount_in,
+            min_out,
+            fee_bps,
+            lane,
+            input_mint,
+            output_mint
+        ),
+        "stable_swap_large_guard must reject when guard term is violated"
+    );
 }
 
 #[kani::proof]
 #[kani::unwind(2)]
 #[kani::solver(cadical)]
-fn verify_stable_swap_large_guard_rejects_invalid_7_pubkey_eq_input_mint_output_mint_amount_in_min_out() {
+fn verify_stable_swap_large_guard_rejects_invalid_7_pubkey_eq_input_mint_output_mint_amount_in_min_out(
+) {
     let mut s = State {
         admin_key: kani::any(),
         pool_balance: kani::any(),
@@ -423,10 +598,18 @@ fn verify_stable_swap_large_guard_rejects_invalid_7_pubkey_eq_input_mint_output_
     let input_mint: [u8; 32] = kani::any();
     let output_mint: [u8; 32] = kani::any();
     let accounts = StableSwapLargeGuardAccounts {
-        admin: KaniAccount { pubkey: kani::any() },
-        pool_ta: KaniAccount { pubkey: kani::any() },
-        user_ta: KaniAccount { pubkey: kani::any() },
-        token_program: KaniAccount { pubkey: kani::any() },
+        admin: KaniAccount {
+            pubkey: kani::any(),
+        },
+        pool_ta: KaniAccount {
+            pubkey: kani::any(),
+        },
+        user_ta: KaniAccount {
+            pubkey: kani::any(),
+        },
+        token_program: KaniAccount {
+            pubkey: kani::any(),
+        },
     };
     kani::assume(pubkey_eq(&accounts.admin.pubkey, &s.admin_key));
     kani::assume(amount_in > 0);
@@ -436,14 +619,26 @@ fn verify_stable_swap_large_guard_rejects_invalid_7_pubkey_eq_input_mint_output_
     kani::assume(pubkey_ne(&input_mint, &output_mint));
     kani::assume(!((pubkey_eq(&input_mint, &output_mint)) || (amount_in >= min_out)));
     kani::cover!(true, "guard-violation domain is satisfiable");
-    assert!(!stable_swap_large_guard(&mut s, &accounts, amount_in, min_out, fee_bps, lane, input_mint, output_mint),
-        "stable_swap_large_guard must reject when guard term is violated");
+    assert!(
+        !stable_swap_large_guard(
+            &mut s,
+            &accounts,
+            amount_in,
+            min_out,
+            fee_bps,
+            lane,
+            input_mint,
+            output_mint
+        ),
+        "stable_swap_large_guard must reject when guard term is violated"
+    );
 }
 
 #[kani::proof]
 #[kani::unwind(2)]
 #[kani::solver(cadical)]
-fn verify_stable_swap_large_guard_rejects_invalid_8_mul_bps_floor_u128_amount_in_fee_bps_amount_in() {
+fn verify_stable_swap_large_guard_rejects_invalid_8_mul_bps_floor_u128_amount_in_fee_bps_amount_in()
+{
     let mut s = State {
         admin_key: kani::any(),
         pool_balance: kani::any(),
@@ -458,10 +653,18 @@ fn verify_stable_swap_large_guard_rejects_invalid_8_mul_bps_floor_u128_amount_in
     let input_mint: [u8; 32] = kani::any();
     let output_mint: [u8; 32] = kani::any();
     let accounts = StableSwapLargeGuardAccounts {
-        admin: KaniAccount { pubkey: kani::any() },
-        pool_ta: KaniAccount { pubkey: kani::any() },
-        user_ta: KaniAccount { pubkey: kani::any() },
-        token_program: KaniAccount { pubkey: kani::any() },
+        admin: KaniAccount {
+            pubkey: kani::any(),
+        },
+        pool_ta: KaniAccount {
+            pubkey: kani::any(),
+        },
+        user_ta: KaniAccount {
+            pubkey: kani::any(),
+        },
+        token_program: KaniAccount {
+            pubkey: kani::any(),
+        },
     };
     kani::assume(pubkey_eq(&accounts.admin.pubkey, &s.admin_key));
     kani::assume(amount_in > 0);
@@ -473,8 +676,19 @@ fn verify_stable_swap_large_guard_rejects_invalid_8_mul_bps_floor_u128_amount_in
     let __qed_bps_floor_1 = mul_bps_floor_u128(amount_in, fee_bps);
     kani::assume(__qed_bps_floor_1 > amount_in);
     kani::cover!(true, "guard-violation domain is satisfiable");
-    assert!(!stable_swap_large_guard(&mut s, &accounts, amount_in, min_out, fee_bps, lane, input_mint, output_mint),
-        "stable_swap_large_guard must reject when guard term is violated");
+    assert!(
+        !stable_swap_large_guard(
+            &mut s,
+            &accounts,
+            amount_in,
+            min_out,
+            fee_bps,
+            lane,
+            input_mint,
+            output_mint
+        ),
+        "stable_swap_large_guard must reject when guard term is violated"
+    );
 }
 
 #[kani::proof]
@@ -495,10 +709,18 @@ fn verify_stable_swap_large_guard_rejects_invalid_9_amount_in_min_out() {
     let input_mint: [u8; 32] = kani::any();
     let output_mint: [u8; 32] = kani::any();
     let accounts = StableSwapLargeGuardAccounts {
-        admin: KaniAccount { pubkey: kani::any() },
-        pool_ta: KaniAccount { pubkey: kani::any() },
-        user_ta: KaniAccount { pubkey: kani::any() },
-        token_program: KaniAccount { pubkey: kani::any() },
+        admin: KaniAccount {
+            pubkey: kani::any(),
+        },
+        pool_ta: KaniAccount {
+            pubkey: kani::any(),
+        },
+        user_ta: KaniAccount {
+            pubkey: kani::any(),
+        },
+        token_program: KaniAccount {
+            pubkey: kani::any(),
+        },
     };
     kani::assume(pubkey_eq(&accounts.admin.pubkey, &s.admin_key));
     kani::assume(amount_in > 0);
@@ -511,8 +733,19 @@ fn verify_stable_swap_large_guard_rejects_invalid_9_amount_in_min_out() {
     kani::assume(__qed_bps_floor_1 <= amount_in);
     kani::assume(amount_in < min_out);
     kani::cover!(true, "guard-violation domain is satisfiable");
-    assert!(!stable_swap_large_guard(&mut s, &accounts, amount_in, min_out, fee_bps, lane, input_mint, output_mint),
-        "stable_swap_large_guard must reject when guard term is violated");
+    assert!(
+        !stable_swap_large_guard(
+            &mut s,
+            &accounts,
+            amount_in,
+            min_out,
+            fee_bps,
+            lane,
+            input_mint,
+            output_mint
+        ),
+        "stable_swap_large_guard must reject when guard term is violated"
+    );
 }
 
 #[kani::proof]
@@ -533,10 +766,18 @@ fn verify_stable_swap_large_guard_rejects_invalid_10_amount_in_1000000000000000(
     let input_mint: [u8; 32] = kani::any();
     let output_mint: [u8; 32] = kani::any();
     let accounts = StableSwapLargeGuardAccounts {
-        admin: KaniAccount { pubkey: kani::any() },
-        pool_ta: KaniAccount { pubkey: kani::any() },
-        user_ta: KaniAccount { pubkey: kani::any() },
-        token_program: KaniAccount { pubkey: kani::any() },
+        admin: KaniAccount {
+            pubkey: kani::any(),
+        },
+        pool_ta: KaniAccount {
+            pubkey: kani::any(),
+        },
+        user_ta: KaniAccount {
+            pubkey: kani::any(),
+        },
+        token_program: KaniAccount {
+            pubkey: kani::any(),
+        },
     };
     kani::assume(pubkey_eq(&accounts.admin.pubkey, &s.admin_key));
     kani::assume(amount_in > 0);
@@ -550,8 +791,19 @@ fn verify_stable_swap_large_guard_rejects_invalid_10_amount_in_1000000000000000(
     kani::assume(amount_in >= min_out);
     kani::assume(amount_in > 1000000000000000);
     kani::cover!(true, "guard-violation domain is satisfiable");
-    assert!(!stable_swap_large_guard(&mut s, &accounts, amount_in, min_out, fee_bps, lane, input_mint, output_mint),
-        "stable_swap_large_guard must reject when guard term is violated");
+    assert!(
+        !stable_swap_large_guard(
+            &mut s,
+            &accounts,
+            amount_in,
+            min_out,
+            fee_bps,
+            lane,
+            input_mint,
+            output_mint
+        ),
+        "stable_swap_large_guard must reject when guard term is violated"
+    );
 }
 
 // ============================================================================
@@ -575,10 +827,18 @@ fn verify_unbound_transfer_ensures_0() {
     kani::assume(s.status == Status::Active);
     let amount: u64 = kani::any();
     let accounts = UnboundTransferAccounts {
-        admin: KaniAccount { pubkey: kani::any() },
-        pool_ta: KaniAccount { pubkey: kani::any() },
-        user_ta: KaniAccount { pubkey: kani::any() },
-        token_program: KaniAccount { pubkey: kani::any() },
+        admin: KaniAccount {
+            pubkey: kani::any(),
+        },
+        pool_ta: KaniAccount {
+            pubkey: kani::any(),
+        },
+        user_ta: KaniAccount {
+            pubkey: kani::any(),
+        },
+        token_program: KaniAccount {
+            pubkey: kani::any(),
+        },
     };
     kani::assume((pubkey_eq(&accounts.admin.pubkey, &s.admin_key)) && (amount > 0));
     let pre = s.clone();
@@ -587,8 +847,10 @@ fn verify_unbound_transfer_ensures_0() {
         // CPI ensures-as-fact (Token.transfer):
         // `Token.transfer` ensures skipped: missing `state_binders` for from_balance.
         // `Token.transfer` ensures skipped: missing `state_binders` for to_balance.
-        assert!(post.pool_balance == pre.pool_balance,
-            "ensures clause 0 on unbound_transfer violated by spec-translated transition");
+        assert!(
+            post.pool_balance == pre.pool_balance,
+            "ensures clause 0 on unbound_transfer violated by spec-translated transition"
+        );
     }
 }
 
@@ -605,10 +867,18 @@ fn verify_bound_transfer_ensures_0() {
     kani::assume(s.status == Status::Active);
     let amount: u64 = kani::any();
     let accounts = BoundTransferAccounts {
-        admin: KaniAccount { pubkey: kani::any() },
-        pool_ta: KaniAccount { pubkey: kani::any() },
-        user_ta: KaniAccount { pubkey: kani::any() },
-        token_program: KaniAccount { pubkey: kani::any() },
+        admin: KaniAccount {
+            pubkey: kani::any(),
+        },
+        pool_ta: KaniAccount {
+            pubkey: kani::any(),
+        },
+        user_ta: KaniAccount {
+            pubkey: kani::any(),
+        },
+        token_program: KaniAccount {
+            pubkey: kani::any(),
+        },
     };
     kani::assume((pubkey_eq(&accounts.admin.pubkey, &s.admin_key)) && (amount > 0));
     let pre = s.clone();
@@ -617,8 +887,10 @@ fn verify_bound_transfer_ensures_0() {
         // CPI ensures-as-fact (Token.transfer):
         kani::assume(post.pool_balance == pre.pool_balance - amount);
         kani::assume(post.user_balance == pre.user_balance + amount);
-        assert!(((post.pool_balance) as u128) + ((amount) as u128) == ((pre.pool_balance) as u128),
-            "ensures clause 0 on bound_transfer violated by spec-translated transition");
+        assert!(
+            ((post.pool_balance) as u128) + ((amount) as u128) == ((pre.pool_balance) as u128),
+            "ensures clause 0 on bound_transfer violated by spec-translated transition"
+        );
     }
 }
 
@@ -640,17 +912,47 @@ fn verify_stable_swap_large_guard_ensures_0() {
     let input_mint: [u8; 32] = kani::any();
     let output_mint: [u8; 32] = kani::any();
     let accounts = StableSwapLargeGuardAccounts {
-        admin: KaniAccount { pubkey: kani::any() },
-        pool_ta: KaniAccount { pubkey: kani::any() },
-        user_ta: KaniAccount { pubkey: kani::any() },
-        token_program: KaniAccount { pubkey: kani::any() },
+        admin: KaniAccount {
+            pubkey: kani::any(),
+        },
+        pool_ta: KaniAccount {
+            pubkey: kani::any(),
+        },
+        user_ta: KaniAccount {
+            pubkey: kani::any(),
+        },
+        token_program: KaniAccount {
+            pubkey: kani::any(),
+        },
     };
-    kani::assume((pubkey_eq(&accounts.admin.pubkey, &s.admin_key)) && (amount_in > 0) && (min_out > 0) && (fee_bps <= 10000) && (lane < 32) && (pubkey_ne(&input_mint, &output_mint)) && ((pubkey_eq(&input_mint, &output_mint)) || (amount_in >= min_out)) && (mul_bps_floor_u128(amount_in, fee_bps) <= amount_in) && (amount_in >= min_out) && (amount_in <= 1000000000000000));
+    kani::assume(
+        (pubkey_eq(&accounts.admin.pubkey, &s.admin_key))
+            && (amount_in > 0)
+            && (min_out > 0)
+            && (fee_bps <= 10000)
+            && (lane < 32)
+            && (pubkey_ne(&input_mint, &output_mint))
+            && ((pubkey_eq(&input_mint, &output_mint)) || (amount_in >= min_out))
+            && (mul_bps_floor_u128(amount_in, fee_bps) <= amount_in)
+            && (amount_in >= min_out)
+            && (amount_in <= 1000000000000000),
+    );
     let pre = s.clone();
-    if stable_swap_large_guard(&mut s, &accounts, amount_in, min_out, fee_bps, lane, input_mint, output_mint) {
+    if stable_swap_large_guard(
+        &mut s,
+        &accounts,
+        amount_in,
+        min_out,
+        fee_bps,
+        lane,
+        input_mint,
+        output_mint,
+    ) {
         let post = &s;
-        assert!(post.pool_balance == pre.pool_balance,
-            "ensures clause 0 on stable_swap_large_guard violated by spec-translated transition");
+        assert!(
+            post.pool_balance == pre.pool_balance,
+            "ensures clause 0 on stable_swap_large_guard violated by spec-translated transition"
+        );
     }
 }
 
@@ -674,10 +976,15 @@ fn verify_initialize_effect_admin_key() {
     let pre_pool_balance = s.pool_balance;
     let pre_user_balance = s.user_balance;
     let accounts = InitializeAccounts {
-        admin: KaniAccount { pubkey: kani::any() },
+        admin: KaniAccount {
+            pubkey: kani::any(),
+        },
     };
     if initialize(&mut s, &accounts) {
-        assert!(pubkey_eq(&s.admin_key, &accounts.admin.pubkey), "admin_key must equal accounts.admin.pubkey");
+        assert!(
+            pubkey_eq(&s.admin_key, &accounts.admin.pubkey),
+            "admin_key must equal accounts.admin.pubkey"
+        );
     }
 }
 
@@ -694,7 +1001,9 @@ fn verify_initialize_effect_pool_balance() {
     let pre_admin_key = s.admin_key;
     let pre_user_balance = s.user_balance;
     let accounts = InitializeAccounts {
-        admin: KaniAccount { pubkey: kani::any() },
+        admin: KaniAccount {
+            pubkey: kani::any(),
+        },
     };
     if initialize(&mut s, &accounts) {
         assert!(s.pool_balance == 0, "pool_balance must equal 0");
@@ -714,7 +1023,9 @@ fn verify_initialize_effect_user_balance() {
     let pre_admin_key = s.admin_key;
     let pre_pool_balance = s.pool_balance;
     let accounts = InitializeAccounts {
-        admin: KaniAccount { pubkey: kani::any() },
+        admin: KaniAccount {
+            pubkey: kani::any(),
+        },
     };
     if initialize(&mut s, &accounts) {
         assert!(s.user_balance == 0, "user_balance must equal 0");
@@ -737,14 +1048,28 @@ fn verify_bound_transfer_effect_pool_balance() {
     let pre_pool_balance = s.pool_balance;
     let pre_user_balance = s.user_balance;
     let accounts = BoundTransferAccounts {
-        admin: KaniAccount { pubkey: kani::any() },
-        pool_ta: KaniAccount { pubkey: kani::any() },
-        user_ta: KaniAccount { pubkey: kani::any() },
-        token_program: KaniAccount { pubkey: kani::any() },
+        admin: KaniAccount {
+            pubkey: kani::any(),
+        },
+        pool_ta: KaniAccount {
+            pubkey: kani::any(),
+        },
+        user_ta: KaniAccount {
+            pubkey: kani::any(),
+        },
+        token_program: KaniAccount {
+            pubkey: kani::any(),
+        },
     };
     if bound_transfer(&mut s, &accounts, amount) {
-        assert!(s.pool_balance == pre_pool_balance.wrapping_sub(amount), "pool_balance must decrement by amount");
-        assert!(pubkey_eq(&s.admin_key, &pre_admin_key), "admin_key must not change");
+        assert!(
+            s.pool_balance == pre_pool_balance.wrapping_sub(amount),
+            "pool_balance must decrement by amount"
+        );
+        assert!(
+            pubkey_eq(&s.admin_key, &pre_admin_key),
+            "admin_key must not change"
+        );
     }
 }
 
@@ -764,14 +1089,28 @@ fn verify_bound_transfer_effect_user_balance() {
     let pre_pool_balance = s.pool_balance;
     let pre_user_balance = s.user_balance;
     let accounts = BoundTransferAccounts {
-        admin: KaniAccount { pubkey: kani::any() },
-        pool_ta: KaniAccount { pubkey: kani::any() },
-        user_ta: KaniAccount { pubkey: kani::any() },
-        token_program: KaniAccount { pubkey: kani::any() },
+        admin: KaniAccount {
+            pubkey: kani::any(),
+        },
+        pool_ta: KaniAccount {
+            pubkey: kani::any(),
+        },
+        user_ta: KaniAccount {
+            pubkey: kani::any(),
+        },
+        token_program: KaniAccount {
+            pubkey: kani::any(),
+        },
     };
     if bound_transfer(&mut s, &accounts, amount) {
-        assert!(s.user_balance == pre_user_balance.wrapping_add(amount), "user_balance must increment by amount");
-        assert!(pubkey_eq(&s.admin_key, &pre_admin_key), "admin_key must not change");
+        assert!(
+            s.user_balance == pre_user_balance.wrapping_add(amount),
+            "user_balance must increment by amount"
+        );
+        assert!(
+            pubkey_eq(&s.admin_key, &pre_admin_key),
+            "admin_key must not change"
+        );
     }
 }
 
@@ -792,12 +1131,20 @@ fn verify_bound_transfer_no_overflow() {
     kani::assume(s.status == Status::Active);
     let amount: u64 = kani::any();
     let accounts = BoundTransferAccounts {
-        admin: KaniAccount { pubkey: kani::any() },
-        pool_ta: KaniAccount { pubkey: kani::any() },
-        user_ta: KaniAccount { pubkey: kani::any() },
-        token_program: KaniAccount { pubkey: kani::any() },
+        admin: KaniAccount {
+            pubkey: kani::any(),
+        },
+        pool_ta: KaniAccount {
+            pubkey: kani::any(),
+        },
+        user_ta: KaniAccount {
+            pubkey: kani::any(),
+        },
+        token_program: KaniAccount {
+            pubkey: kani::any(),
+        },
     };
-    bound_transfer(&mut s, &accounts, amount);  // Kani detects overflow on += internally
+    bound_transfer(&mut s, &accounts, amount); // Kani detects overflow on += internally
 }
 
 // ---- GENERATED BY QEDGEN — DO NOT EDIT BELOW THIS LINE ----

@@ -340,107 +340,97 @@ fn render_pinocchio_kani_profile_diversity_impl() -> String {
 }
 
 fn assert_pinocchio_kani_profile_diversity_contract(body: &str) {
+    // Generated Rust is rustfmt-formatted at the write seam, so code
+    // snippets are matched whitespace-insensitively; comment/prose needles
+    // survive compaction too (rustfmt does not rewrap comments).
+    let compact_body = compact_rust(body);
+    let has = |snippet: &str| compact_body.contains(&compact_rust(snippet));
+
     assert!(
-        body.contains("fn verify_move_tokens_impl"),
+        has("fn verify_move_tokens_impl"),
         "missing move_tokens impl harness:\n{body}"
     );
     assert!(
-        body.contains("let pre_transfer_0_from = read_token_amount(&source);")
-            && body.contains("let pre_transfer_0_to = read_token_amount(&destination);")
-            && body.contains("kani::assume(pre_transfer_0_from >= (amount as u64));")
-            && body.contains("kani::assume(pre_transfer_0_to <= u64::MAX - (amount as u64));")
-            && body.contains(
+        has("let pre_transfer_0_from = read_token_amount(&source);")
+            && has("let pre_transfer_0_to = read_token_amount(&destination);")
+            && has("kani::assume(pre_transfer_0_from >= (amount as u64));")
+            && has("kani::assume(pre_transfer_0_to <= u64::MAX - (amount as u64));")
+            && has(
                 "assert_eq!(read_token_amount(&source), pre_transfer_0_from - (amount as u64));"
             )
-            && body.contains(
+            && has(
                 "assert_eq!(read_token_amount(&destination), pre_transfer_0_to + (amount as u64));"
             ),
         "simple SPL token transfer should emit concrete token delta assertions:\n{body}"
     );
     assert!(
-        body.contains("token owner/mint projections:")
-            && body.contains("source mint=mint owner=authority")
-            && body.contains("destination mint=mint owner=authority"),
+        has("token owner/mint projections:")
+            && has("source mint=mint owner=authority")
+            && has("destination mint=mint owner=authority"),
         "token owner/mint profile notes should explain inferred token account projections:\n{body}"
     );
 
     assert!(
-        body.contains("fn verify_move_batch_impl")
-            && body.contains("kani::assume(transfer_count <= 2);")
-            && body.contains("instruction_data[1] = 2u8;")
-            && body.contains("instruction_data[2] = (from_lane_id_0 as u8) as u8;")
-            && body.contains(
-                "let generated_instruction_data_4_bytes = (amount_0 as u64).to_le_bytes();"
-            )
-            && body.contains("instruction_data[12] = (from_lane_id_1 as u8) as u8;")
-            && body.contains(
-                "let generated_instruction_data_14_bytes = (amount_1 as u64).to_le_bytes();"
-            ),
+        has("fn verify_move_batch_impl")
+            && has("kani::assume(transfer_count <= 2);")
+            && has("instruction_data[1] = 2u8;")
+            && has("instruction_data[2] = (from_lane_id_0 as u8) as u8;")
+            && has("let generated_instruction_data_4_bytes = (amount_0 as u64).to_le_bytes();")
+            && has("instruction_data[12] = (from_lane_id_1 as u8) as u8;")
+            && has("let generated_instruction_data_14_bytes = (amount_1 as u64).to_le_bytes();"),
         "repeated record batch should pack indexed fields from the ABI schema:\n{body}"
     );
 
     assert!(
-        body.contains("fn verify_touch_config_impl")
-            && body.contains("// ABI account layout `config_account`: 237 byte data region.")
-            && body.contains("let mut config_data: [u8; 237] = [0u8; 237];")
-            && body.contains("config_data[0] = 67u8;")
-            && body.contains("config_data[7] = 67u8;"),
+        has("fn verify_touch_config_impl")
+            && has("// ABI account layout `config_account`: 237 byte data region.")
+            && has("let mut config_data: [u8; 237] = [0u8; 237];")
+            && has("config_data[0] = 67u8;")
+            && has("config_data[7] = 67u8;"),
         "ABI data account should allocate schema length and stamp CFGMAGIC bytes:\n{body}"
     );
 
     assert!(
-        body.contains("fn verify_set_fee_impl")
-            && body.contains("- source account order: config, admin")
-            && body.contains("- ABI/dispatcher tag: 6")
-            && body.contains("assert!(_result.is_ok()")
-            && body.contains("assert_eq!(read_state_u16(&config, 104),"),
+        has("fn verify_set_fee_impl")
+            && has("- source account order: config, admin")
+            && has("- ABI/dispatcher tag: 6")
+            && has("assert!(_result.is_ok()")
+            && has("assert_eq!(read_state_u16(&config, 104),"),
         "stateful config write proof should use source/ABI profile and assert post-state:\n{body}"
     );
 
     assert!(
-        body.contains("fn verify_route_ata_impl")
-            && body.contains(
-                "let vault_key = crate::derive_token_vault(&authority_key, &[2u8; 32]).0;"
-            )
-            && body.contains("let mut vault = build_minimal_account(vault_key, false, true);"),
+        has("fn verify_route_ata_impl")
+            && has("let vault_key = crate::derive_token_vault(&authority_key, &[2u8; 32]).0;")
+            && has("let mut vault = build_minimal_account(vault_key, false, true);"),
         "non-program_id PDA should use the source tuple helper for a reachable Kani witness:\n{body}"
     );
 
     assert!(
-        body.contains("fn verify_router_swap_impl")
-            && body.contains(
-                "let mut input_mint = build_mint_account([7u8; 32], false, false, (input_decimals as u8));"
-            )
-            && body.contains(
-                "let mut output_mint = build_mint_account([8u8; 32], false, false, (output_decimals as u8));"
-            )
-            && body.contains(
-                "kani::assume(amount_out >= amount_in);"
-            ),
+        has("fn verify_router_swap_impl")
+            && has("let mut input_mint = build_mint_account([7u8; 32], false, false, (input_decimals as u8));")
+            && has("let mut output_mint = build_mint_account([8u8; 32], false, false, (output_decimals as u8));")
+            && has("kani::assume(amount_out >= amount_in);"),
         "router swap proof should bind mint decimals and stable no-loss fee facts to real inputs:\n{body}"
     );
 
     assert!(
-        body.contains("fn verify_router_rebalance_pair_impl")
-            && body.contains("read_token_amount(&source_inventory_0)")
-            && body.contains("read_token_amount(&destination_inventory_1)")
-            && body.contains(
-                "assert_eq!(read_token_amount(&source_inventory_0), pre_transfer_0_from - (amount_0 as u64));"
-            )
-            && body.contains(
-                "assert_eq!(read_token_amount(&destination_inventory_1), pre_transfer_1_to + (amount_1 as u64));"
-            ),
+        has("fn verify_router_rebalance_pair_impl")
+            && has("read_token_amount(&source_inventory_0)")
+            && has("read_token_amount(&destination_inventory_1)")
+            && has("assert_eq!(read_token_amount(&source_inventory_0), pre_transfer_0_from - (amount_0 as u64));")
+            && has("assert_eq!(read_token_amount(&destination_inventory_1), pre_transfer_1_to + (amount_1 as u64));"),
         "two-transfer router rebalance proof should assert indexed token deltas:\n{body}"
     );
 
     assert!(
-        body.contains("fn verify_missing_profile_impl")
-            && body.contains("- source account order: profile unavailable; using spec order")
-            && body.contains("- ABI/dispatcher tag: profile unavailable"),
+        has("fn verify_missing_profile_impl")
+            && has("- source account order: profile unavailable; using spec order")
+            && has("- ABI/dispatcher tag: profile unavailable"),
         "missing source/ABI fallback should be reported in proof profile notes:\n{body}"
     );
     assert!(
-        !body.contains("TODO: concrete account layout from source/ABI profile"),
+        !has("TODO: concrete account layout from source/ABI profile"),
         "profile-backed green proof paths should not carry placeholder TODOs:\n{body}"
     );
 }

@@ -64,20 +64,29 @@ pub struct EscrowCancelled {
 //! Called from user-owned `instructions/<name>::handler` before
 //! business logic; keep guard logic here, policy-free logic there.
 
-#![allow(unused_variables, unused_imports, dead_code, clippy::too_many_arguments)]
+#![allow(
+    unused_variables,
+    unused_imports,
+    dead_code,
+    clippy::too_many_arguments
+)]
 
-use anchor_lang::prelude::*;
 use crate::errors::*;
 use crate::state::*;
 use crate::*;
+use anchor_lang::prelude::*;
 
 /// Guards for `cancel`.  
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn cancel<'info>(ctx: &mut Cancel<'info>) -> Result<()> {
     // lifecycle: require status == Open
-    if ctx.escrow.status != Status::Open as u8 { return Err(crate::errors::EscrowError::InvalidLifecycle.into()); }
+    if ctx.escrow.status != Status::Open as u8 {
+        return Err(crate::errors::EscrowError::InvalidLifecycle.into());
+    }
     // authority: ctx.escrow_ta.owner != ctx.escrow.key()
-    if ctx.escrow_ta.owner != ctx.escrow.key() { return Err(EscrowError::Unauthorized.into()); }
+    if ctx.escrow_ta.owner != ctx.escrow.key() {
+        return Err(EscrowError::Unauthorized.into());
+    }
     // lifecycle: status := Closed
     ctx.escrow.status = Status::Closed as u8;
     Ok(())
@@ -87,9 +96,13 @@ pub fn cancel<'info>(ctx: &mut Cancel<'info>) -> Result<()> {
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn exchange<'info>(ctx: &mut Exchange<'info>) -> Result<()> {
     // lifecycle: require status == Open
-    if ctx.escrow.status != Status::Open as u8 { return Err(crate::errors::EscrowError::InvalidLifecycle.into()); }
+    if ctx.escrow.status != Status::Open as u8 {
+        return Err(crate::errors::EscrowError::InvalidLifecycle.into());
+    }
     // authority: ctx.escrow_ta.owner != ctx.escrow.key()
-    if ctx.escrow_ta.owner != ctx.escrow.key() { return Err(EscrowError::Unauthorized.into()); }
+    if ctx.escrow_ta.owner != ctx.escrow.key() {
+        return Err(EscrowError::Unauthorized.into());
+    }
     // lifecycle: status := Closed
     ctx.escrow.status = Status::Closed as u8;
     Ok(())
@@ -97,11 +110,19 @@ pub fn exchange<'info>(ctx: &mut Exchange<'info>) -> Result<()> {
 
 /// Guards for `initialize`.  
 /// Generated from the `requires` clauses of the spec handler block.
-pub fn initialize<'info>(ctx: &mut Initialize<'info>, deposit_amount: u64, receive_amount: u64) -> Result<()> {
+pub fn initialize<'info>(
+    ctx: &mut Initialize<'info>,
+    deposit_amount: u64,
+    receive_amount: u64,
+) -> Result<()> {
     // authority: ctx.escrow_ta.owner != ctx.escrow.key()
-    if ctx.escrow_ta.owner != ctx.escrow.key() { return Err(EscrowError::Unauthorized.into()); }
+    if ctx.escrow_ta.owner != ctx.escrow.key() {
+        return Err(EscrowError::Unauthorized.into());
+    }
     // requires: deposit_amount > 0 ∧ receive_amount > 0
-    if !((deposit_amount > 0) && (receive_amount > 0)) { return Err(EscrowError::InvalidAmount.into()); }
+    if !((deposit_amount > 0) && (receive_amount > 0)) {
+        return Err(EscrowError::InvalidAmount.into());
+    }
     // lifecycle: status := Open
     ctx.escrow.status = Status::Open as u8;
     Ok(())
@@ -116,13 +137,19 @@ pub fn initialize<'info>(ctx: &mut Initialize<'info>, deposit_amount: u64, recei
 // handler block and the `spec_hash` below fires a compile_error!
 // via the `#[qed(verified, ...)]` macro.
 
-use anchor_lang::prelude::*;
 use crate::guards;
-use qedgen_macros::qed;
 use crate::{Cancel, CancelBumps};
+use anchor_lang::prelude::*;
+use qedgen_macros::qed;
 
 impl<'info> Cancel<'info> {
-    #[qed(verified, spec = "..", handler = "cancel", hash = "424451424ac67012", spec_hash = "030f42b60ac489f1")]
+    #[qed(
+        verified,
+        spec = "..",
+        handler = "cancel",
+        hash = "e8b137050f206ed5",
+        spec_hash = "030f42b60ac489f1"
+    )]
     #[inline(always)]
     pub fn handler(&mut self, bumps: &CancelBumps) -> Result<()> {
         guards::cancel(self)?;
@@ -132,12 +159,15 @@ impl<'info> Cancel<'info> {
         {
             use anchor_spl::token::{self, Transfer};
             let cpi_accounts = Transfer {
-                from:      self.escrow_ta.to_account_info(),
-                to:        self.initializer_ta.to_account_info(),
+                from: self.escrow_ta.to_account_info(),
+                to: self.initializer_ta.to_account_info(),
                 authority: self.escrow.to_account_info(),
             };
             let cpi_program = self.token_program.to_account_info();
-            token::transfer(CpiContext::new(cpi_program, cpi_accounts), self.escrow.initializer_amount)?;
+            token::transfer(
+                CpiContext::new(cpi_program, cpi_accounts),
+                self.escrow.initializer_amount,
+            )?;
         }
         todo!("fill non-mechanical effects, events, transfers, calls")
     }
@@ -150,13 +180,19 @@ impl<'info> Cancel<'info> {
 // handler block and the `spec_hash` below fires a compile_error!
 // via the `#[qed(verified, ...)]` macro.
 
-use anchor_lang::prelude::*;
 use crate::guards;
-use qedgen_macros::qed;
 use crate::{Exchange, ExchangeBumps};
+use anchor_lang::prelude::*;
+use qedgen_macros::qed;
 
 impl<'info> Exchange<'info> {
-    #[qed(verified, spec = "..", handler = "exchange", hash = "7d4afdf9da9f4dcb", spec_hash = "b3781c2e64f2bf85")]
+    #[qed(
+        verified,
+        spec = "..",
+        handler = "exchange",
+        hash = "9146f9898fc03101",
+        spec_hash = "b3781c2e64f2bf85"
+    )]
     #[inline(always)]
     pub fn handler(&mut self, bumps: &ExchangeBumps) -> Result<()> {
         guards::exchange(self)?;
@@ -166,23 +202,29 @@ impl<'info> Exchange<'info> {
         {
             use anchor_spl::token::{self, Transfer};
             let cpi_accounts = Transfer {
-                from:      self.taker_ta.to_account_info(),
-                to:        self.initializer_ta.to_account_info(),
+                from: self.taker_ta.to_account_info(),
+                to: self.initializer_ta.to_account_info(),
                 authority: self.taker.to_account_info(),
             };
             let cpi_program = self.token_program.to_account_info();
-            token::transfer(CpiContext::new(cpi_program, cpi_accounts), self.escrow.taker_amount)?;
+            token::transfer(
+                CpiContext::new(cpi_program, cpi_accounts),
+                self.escrow.taker_amount,
+            )?;
         }
         // Spec call: Token.transfer (Anchor CPI emitted by v2.8 G4)
         {
             use anchor_spl::token::{self, Transfer};
             let cpi_accounts = Transfer {
-                from:      self.escrow_ta.to_account_info(),
-                to:        self.taker_ta.to_account_info(),
+                from: self.escrow_ta.to_account_info(),
+                to: self.taker_ta.to_account_info(),
                 authority: self.escrow.to_account_info(),
             };
             let cpi_program = self.token_program.to_account_info();
-            token::transfer(CpiContext::new(cpi_program, cpi_accounts), self.escrow.initializer_amount)?;
+            token::transfer(
+                CpiContext::new(cpi_program, cpi_accounts),
+                self.escrow.initializer_amount,
+            )?;
         }
         todo!("fill non-mechanical effects, events, transfers, calls")
     }
@@ -195,15 +237,26 @@ impl<'info> Exchange<'info> {
 // handler block and the `spec_hash` below fires a compile_error!
 // via the `#[qed(verified, ...)]` macro.
 
-use anchor_lang::prelude::*;
 use crate::guards;
-use qedgen_macros::qed;
 use crate::{Initialize, InitializeBumps};
+use anchor_lang::prelude::*;
+use qedgen_macros::qed;
 
 impl<'info> Initialize<'info> {
-    #[qed(verified, spec = "..", handler = "initialize", hash = "06dc441f4bb69193", spec_hash = "467f6506b9a3a3ba")]
+    #[qed(
+        verified,
+        spec = "..",
+        handler = "initialize",
+        hash = "49b916ac713a5e1b",
+        spec_hash = "467f6506b9a3a3ba"
+    )]
     #[inline(always)]
-    pub fn handler(&mut self, deposit_amount: u64, receive_amount: u64, bumps: &InitializeBumps) -> Result<()> {
+    pub fn handler(
+        &mut self,
+        deposit_amount: u64,
+        receive_amount: u64,
+        bumps: &InitializeBumps,
+    ) -> Result<()> {
         guards::initialize(self, deposit_amount, receive_amount)?;
         let _ = bumps;
         self.escrow.initializer_amount = deposit_amount;
@@ -213,8 +266,8 @@ impl<'info> Initialize<'info> {
         {
             use anchor_spl::token::{self, Transfer};
             let cpi_accounts = Transfer {
-                from:      self.initializer_ta.to_account_info(),
-                to:        self.escrow_ta.to_account_info(),
+                from: self.initializer_ta.to_account_info(),
+                to: self.escrow_ta.to_account_info(),
                 authority: self.initializer.to_account_info(),
             };
             let cpi_program = self.token_program.to_account_info();
@@ -237,11 +290,11 @@ pub mod initialize;
 
 use anchor_lang::prelude::*;
 
-mod instructions;
-pub mod events;
 pub mod errors;
-pub mod state;
+pub mod events;
 pub mod guards;
+mod instructions;
+pub mod state;
 
 declare_id!("11111111111111111111111111111111");
 
@@ -257,10 +310,14 @@ pub mod escrow {
         ctx.accounts.handler(&ctx.bumps)
     }
 
-    pub fn initialize(ctx: Context<Initialize>, deposit_amount: u64, receive_amount: u64) -> Result<()> {
-        ctx.accounts.handler(deposit_amount, receive_amount, &ctx.bumps)
+    pub fn initialize(
+        ctx: Context<Initialize>,
+        deposit_amount: u64,
+        receive_amount: u64,
+    ) -> Result<()> {
+        ctx.accounts
+            .handler(deposit_amount, receive_amount, &ctx.bumps)
     }
-
 }
 
 // `#[derive(Accounts)]` structs live at the crate root so the

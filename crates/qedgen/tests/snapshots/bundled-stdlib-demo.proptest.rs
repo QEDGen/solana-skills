@@ -52,7 +52,7 @@ prop_compose! {
 }
 
 fn initialize(s: &mut State, initial: u64) -> bool {
-    if !((initial > 0)) {
+    if !(initial > 0) {
         return false;
     }
     if s.status != Status::Uninitialized {
@@ -64,7 +64,7 @@ fn initialize(s: &mut State, initial: u64) -> bool {
 }
 
 fn deposit(s: &mut State, amount: u64) -> bool {
-    if !((amount > 0)) {
+    if !(amount > 0) {
         return false;
     }
     if s.status != Status::Open {
@@ -110,4 +110,3 @@ proptest! {
         }
     }
 }
-

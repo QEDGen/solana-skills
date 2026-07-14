@@ -97,3 +97,5 @@ See `examples/rust/escrow/formal_verification/VERIFICATION_SCOPE.md`.
 - `QEDGEN_VALIDATION_WORKSPACE` — override validation workspace (default: platform cache dir)
 
 Spec writing, validation, and codegen need no API keys or Lean toolchain. First Lean build is expensive (15–45 min for Mathlib) — run `qedgen setup` first. If `lake build` reports "could not resolve 'HEAD' to a commit", remove `.lake/packages/mathlib` and run `lake update`.
+
+Generated Rust is rustfmt-formatted at the single write seam (`codegen_shared::write_generated_file` → `format_rust_source`; new emitters must route through it, gated by `tests/generated_rustfmt_gate.rs`). rustfmt is a soft dependency: absent → unformatted output + one warning. rustfmt is NOT token-neutral (trailing commas, `!((…))` paren removal), so `#[qed(verified, hash=…)]` body hashes are computed AFTER formatting (`scaffold.rs`); tests match generated Rust whitespace-insensitively (`compact` helpers). Static Rust templates live in `crates/qedgen/templates/*.rs` (`include_str!`), kept fmt-clean by the same gate.

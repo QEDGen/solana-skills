@@ -3,12 +3,17 @@
 //! Called from user-owned `instructions/<name>::handler` before
 //! business logic; keep guard logic here, policy-free logic there.
 
-#![allow(unused_variables, unused_imports, dead_code, clippy::too_many_arguments)]
+#![allow(
+    unused_variables,
+    unused_imports,
+    dead_code,
+    clippy::too_many_arguments
+)]
 
-use anchor_lang::prelude::*;
 use crate::errors::*;
 use crate::state::*;
 use crate::*;
+use anchor_lang::prelude::*;
 
 /// Guards for `initialize`.  
 /// Generated from the `requires` clauses of the spec handler block.
@@ -21,9 +26,13 @@ pub fn initialize<'info>(ctx: &mut Initialize<'info>) -> Result<()> {
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn deposit<'info>(ctx: &mut Deposit<'info>, amount: u64) -> Result<()> {
     // lifecycle: require inner == Active
-    if !matches!(ctx.vault.inner, VaultAccountInner::Active { .. }) { return Err(crate::errors::VaultError::InvalidLifecycle.into()); }
+    if !matches!(ctx.vault.inner, VaultAccountInner::Active { .. }) {
+        return Err(crate::errors::VaultError::InvalidLifecycle.into());
+    }
     // requires: amount > 0
-    if !(amount > 0) { return Err(VaultError::InvalidAmount.into()); }
+    if !(amount > 0) {
+        return Err(VaultError::InvalidAmount.into());
+    }
     Ok(())
 }
 
@@ -31,9 +40,13 @@ pub fn deposit<'info>(ctx: &mut Deposit<'info>, amount: u64) -> Result<()> {
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn emergency_close<'info>(ctx: &mut EmergencyClose<'info>) -> Result<()> {
     // lifecycle: require inner == Active
-    if !matches!(ctx.vault.inner, VaultAccountInner::Active { .. }) { return Err(crate::errors::VaultError::InvalidLifecycle.into()); }
+    if !matches!(ctx.vault.inner, VaultAccountInner::Active { .. }) {
+        return Err(crate::errors::VaultError::InvalidLifecycle.into());
+    }
     // requires: admin_config.admin = admin.pubkey
-    if !(ctx.admin_config.admin == ctx.admin.key()) { return Err(VaultError::Unauthorized.into()); }
+    if !(ctx.admin_config.admin == ctx.admin.key()) {
+        return Err(VaultError::Unauthorized.into());
+    }
     Ok(())
 }
 

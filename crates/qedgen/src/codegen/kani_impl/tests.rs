@@ -131,40 +131,41 @@ handler bump (delta : U64) {
 
     // Quasar-flavored header.
     assert!(
-        body.contains("Quasar (`#[program]`) program"),
+        compact(&body).contains(&compact("Quasar (`#[program]`) program")),
         "header must name the Quasar framework; got:\n{body}"
     );
     assert!(
-        body.contains("#[cfg(kani)] mod kani_impl;"),
+        compact(&body).contains(&compact("#[cfg(kani)] mod kani_impl;")),
         "header must document the src/lib.rs placement line; got:\n{body}"
     );
 
     // Struct-based shape, shared with Anchor.
     assert!(
-        body.contains("mod symbolic_accounts {")
-            && body.contains("pub fn build_bump() -> crate::Bump"),
+        compact(&body).contains(&compact("mod symbolic_accounts {"))
+            && compact(&body).contains(&compact("pub fn build_bump() -> crate::Bump")),
         "must emit the symbolic accounts builder for crate::Bump; got:\n{body}"
     );
     assert!(
-        body.contains("fn verify_bump_impl_ensures_0()")
-            && body.contains("accounts.handler(delta)"),
+        compact(&body).contains(&compact("fn verify_bump_impl_ensures_0()"))
+            && compact(&body).contains(&compact("accounts.handler(delta)")),
         "must emit the per-handler proof calling the real .handler(); got:\n{body}"
     );
 
     // The shared module comment must say "Quasar", not "Anchor".
     assert!(
-        body.contains("host for this harness. Quasar"),
+        compact(&body).contains(&compact("host for this harness. Quasar")),
         "symbolic_accounts comment must be Quasar-flavored; got:\n{body}"
     );
 
     // Must NOT leak the word "Anchor" anywhere — the framework label
     // threads through every shared-emitter comment.
     assert!(
-        !body.contains("Anchor"),
+        !compact(&body).contains(&compact("Anchor")),
         "Quasar harness must not leak the Anchor framework name; got:\n{body}"
     );
     assert!(
-        !body.contains("struct AccountLayout") && !body.contains("build_token_account"),
+        !compact(&body).contains(&compact("struct AccountLayout"))
+            && !compact(&body).contains(&compact("build_token_account")),
         "Quasar harness must not emit the Pinocchio stack scaffold; got:\n{body}"
     );
 
@@ -199,17 +200,19 @@ handler set_threshold (new_threshold : U16) {
 
     // The read-only field is snapshotted on both sides of the call.
     assert!(
-        body.contains("pre_num_voters") && body.contains("post_num_voters"),
+        compact(&body).contains(&compact("pre_num_voters"))
+            && compact(&body).contains(&compact("post_num_voters")),
         "read-only field `num_voters` must be snapshotted pre and post; got:\n{body}"
     );
     // The `requires` assume reads the pre-snapshot, not the unbound `s.`
     // accessor.
     assert!(
-        body.contains("kani::assume(") && body.contains("new_threshold <= pre_num_voters"),
+        compact(&body).contains(&compact("kani::assume("))
+            && compact(&body).contains(&compact("new_threshold <= pre_num_voters")),
         "requires assume must read `pre_num_voters`; got:\n{body}"
     );
     assert!(
-        !body.contains("s.num_voters"),
+        !compact(&body).contains(&compact("s.num_voters")),
         "the pure-model `s.<field>` accessor must not leak into the impl harness; got:\n{body}"
     );
 }
@@ -247,34 +250,36 @@ handler set_threshold (new_threshold : U16) {
 
     // Brownfield header, state-struct shape — NOT the greenfield Context shape.
     assert!(
-        body.contains("BROWNFIELD Anchor"),
+        compact(&body).contains(&compact("BROWNFIELD Anchor")),
         "header names the brownfield mode; got:\n{body}"
     );
     assert!(
-        !body.contains("mod symbolic_accounts") && !body.contains("let result = accounts.handler"),
+        !compact(&body).contains(&compact("mod symbolic_accounts"))
+            && !compact(&body).contains(&compact("let result = accounts.handler")),
         "must NOT emit the greenfield Accounts context / accounts.handler shape; got:\n{body}"
     );
     // The `requires` field is pre-snapshotted; the ensures reads its post fields
     // DIRECTLY off `state` by reference — no owned `post_` snapshot (the
     // drop-suppression shape, backlog R2).
     assert!(
-        body.contains("let pre_num_voters = state.num_voters;")
-            && !body.contains("let post_num_voters =")
-            && body.contains("state.threshold <= state.num_voters"),
+        compact(&body).contains(&compact("let pre_num_voters = state.num_voters;"))
+            && !compact(&body).contains(&compact("let post_num_voters ="))
+            && compact(&body).contains(&compact("state.threshold <= state.num_voters")),
         "requires pre-snapshot; ensures reads post fields off `state`; got:\n{body}"
     );
     // requires assume reads the pre-snapshot (not the unbound `s.` accessor).
     assert!(
-        body.contains("new_threshold <= pre_num_voters") && !body.contains("s.num_voters"),
+        compact(&body).contains(&compact("new_threshold <= pre_num_voters"))
+            && !compact(&body).contains(&compact("s.num_voters")),
         "requires assume reads `pre_num_voters`; got:\n{body}"
     );
     // Exactly the two genuine agent-fill sites + the unwind hint. This spec is
     // numeric-only (no `Pubkey`), so the suggested bound is the low value —
     // not the 32-byte-memcmp 34 (see `unwind_bound_tracks_pubkey_presence`).
     assert!(
-        body.contains("AGENT-FILL (1/2)")
-            && body.contains("AGENT-FILL (2/2)")
-            && body.contains("#[kani::unwind(4)]"),
+        compact(&body).contains(&compact("AGENT-FILL (1/2)"))
+            && compact(&body).contains(&compact("AGENT-FILL (2/2)"))
+            && compact(&body).contains(&compact("#[kani::unwind(4)]")),
         "two agent-fill sites + low unwind hint; got:\n{body}"
     );
 }
@@ -320,36 +325,37 @@ handler set_time_lock (new_time_lock : U32) {
 
     // The ctor targets the pragma-named struct, NOT the synthetic `crate::State`.
     assert!(
-        body.contains("fn symbolic_settings() -> crate::Settings")
-            && !body.contains("crate::State"),
+        compact(&body).contains(&compact("fn symbolic_settings() -> crate::Settings"))
+            && !compact(&body).contains(&compact("crate::State")),
         "ctor builds the pragma-named `crate::Settings`; got:\n{body}"
     );
     // Every field constructed symbolically: scalars, Option (Some/None), Vec
     // (bounded loop), and the nested record.
     assert!(
-        body.contains("seed: kani::any()"),
+        compact(&body).contains(&compact("seed: kani::any()")),
         "scalar field; got:\n{body}"
     );
     assert!(
-        body.contains("archival_authority: if kani::any() { Some(")
-            && body.contains(") } else { None }"),
+        compact(&body).contains(&compact("archival_authority: if kani::any() { Some("))
+            && compact(&body).contains(&compact(") } else { None }")),
         "Option<Pubkey> field symbolic Some/None; got:\n{body}"
     );
     assert!(
-        body.contains("signers: vec![crate::SmartAccountSigner {")
-            && body.contains("key: anchor_lang::prelude::Pubkey::new_from_array(kani::any())")
-            && !body.contains("while "),
+        compact(&body).contains(&compact("signers: vec![crate::SmartAccountSigner {"))
+            && compact(&body).contains(&compact("key: anchor_lang::prelude::Pubkey::new_from_array(kani::any())"))
+            && !compact(&body).contains(&compact("while ")),
         "Vec<record> is fixed-length vec![] with nested struct (no symbolic-length loop); got:\n{body}"
     );
     // The harness CALLS the ctor + assumes pre-state validity — construction is
     // no longer agent-fill; only the effect gate (2/2) is.
     assert!(
-        body.contains("let mut state = core::mem::ManuallyDrop::new(symbolic_settings());")
-            && body.contains("kani::assume(state.invariant().is_ok());"),
+        compact(&body).contains(&compact("let mut state = core::mem::ManuallyDrop::new(symbolic_settings());"))
+            && compact(&body).contains(&compact("kani::assume(state.invariant().is_ok());")),
         "harness calls the generated ctor (ManuallyDrop-wrapped, R2) + validity assume; got:\n{body}"
     );
     assert!(
-        !body.contains("AGENT-FILL (1/2)") && body.contains("AGENT-FILL (2/2)"),
+        !compact(&body).contains(&compact("AGENT-FILL (1/2)"))
+            && compact(&body).contains(&compact("AGENT-FILL (2/2)")),
         "construction NOT agent-fill; only the effect gate is; got:\n{body}"
     );
 }
@@ -388,26 +394,26 @@ handler resize (n : U64) {
 
     // The ensures-preservation harness is still emitted...
     assert!(
-        body.contains("fn verify_resize_impl_ensures_0()"),
+        compact(&body).contains(&compact("fn verify_resize_impl_ensures_0()")),
         "ensures harness still emitted; got:\n{body}"
     );
     // ...plus a reject harness that assumes the guard is VIOLATED (negated) and
     // asserts rejection.
     assert!(
-        body.contains("fn verify_resize_rejects()"),
+        compact(&body).contains(&compact("fn verify_resize_rejects()")),
         "reject harness emitted; got:\n{body}"
     );
     assert!(
-        body.contains("kani::assume(!((n <= pre_cap)));"),
+        compact(&body).contains(&compact("kani::assume(!(n <= pre_cap));")),
         "reject harness assumes the negated guard; got:\n{body}"
     );
     assert!(
-        body.contains("assert!(!ok, \"resize must reject"),
+        compact(&body).contains(&compact("assert!(!ok, \"resize must reject")),
         "reject harness asserts `!ok`; got:\n{body}"
     );
     // Snapshots the guard field (`cap`) — NOT the effect/modifies field (`size`).
     assert!(
-        body.contains("let pre_cap = state.cap;"),
+        compact(&body).contains(&compact("let pre_cap = state.cap;")),
         "reject snapshots the guard field; got:\n{body}"
     );
 }
@@ -442,19 +448,22 @@ handler recompute (n : U64) {
     let _ = std::fs::remove_file(&tmp);
 
     assert!(
-        body.contains("fn verify_recompute_panic_free()")
-            && body.contains("let mut state = core::mem::ManuallyDrop::new(symbolic_widget());"),
+        compact(&body).contains(&compact("fn verify_recompute_panic_free()"))
+            && compact(&body).contains(&compact(
+                "let mut state = core::mem::ManuallyDrop::new(symbolic_widget());"
+            )),
         "panic-free harness constructs symbolic state (ManuallyDrop-wrapped, R2); got:\n{body}"
     );
     // Panic-freedom is claimed UNDER the handler's preconditions — the `requires`
     // guard is assumed (not asserted).
     assert!(
-        body.contains("kani::assume((n <= pre_cap));"),
+        compact(&body).contains(&compact("kani::assume((n <= pre_cap));")),
         "panic-free harness assumes the `requires` guard; got:\n{body}"
     );
     // Call-only: no `assert!` and no ensures/reject scaffolding in this proof.
     assert!(
-        !body.contains("assert!(") && !body.contains("_impl_ensures_"),
+        !compact(&body).contains(&compact("assert!("))
+            && !compact(&body).contains(&compact("_impl_ensures_")),
         "panic-free proof asserts nothing (Kani checks panics); got:\n{body}"
     );
 }
@@ -488,14 +497,14 @@ handler validate (n : U64) {
     let _ = std::fs::remove_file(&tmp);
 
     assert!(
-        body.contains("fn verify_validate_rejects()")
-            && body.contains("kani::assume(!((n <= pre_cap)));")
-            && body.contains("assert!(!ok, \"validate must reject"),
+        compact(&body).contains(&compact("fn verify_validate_rejects()"))
+            && compact(&body).contains(&compact("kani::assume(!(n <= pre_cap));"))
+            && compact(&body).contains(&compact("assert!(!ok, \"validate must reject")),
         "requires-only handler gets a reject proof; got:\n{body}"
     );
     // No ensures harness for a postcondition-free handler.
     assert!(
-        !body.contains("_impl_ensures_"),
+        !compact(&body).contains(&compact("_impl_ensures_")),
         "no ensures harness for a requires-only handler; got:\n{body}"
     );
 }
@@ -529,7 +538,8 @@ handler resize (n : U64) {
     let _ = std::fs::remove_file(&tmp);
 
     assert!(
-        !body.contains("_rejects()") && !body.contains("Guard-enforcement"),
+        !compact(&body).contains(&compact("_rejects()"))
+            && !compact(&body).contains(&compact("Guard-enforcement")),
         "no reject harness without the pragma; got:\n{body}"
     );
 }
@@ -588,26 +598,29 @@ handler begin_tally (dummy : U64) {
 
     // No lingering placeholder / wrong-shape stub anywhere.
     assert!(
-        !body.contains("/* ty */") && !body.contains("::Carried(..)"),
+        !compact(&body).contains(&compact("/* ty */"))
+            && !compact(&body).contains(&compact("::Carried(..)")),
         "IsVariant must resolve the enum + shape, not emit the stub; got:\n{body}"
     );
     // Struct variants → resolved enum name + `{ .. }` pattern. Post reads go
     // through `state.<field>` directly (ManuallyDrop deref); pre reads its snapshot.
     assert!(
-        body.contains("matches!(pre_status, BallotStatus::Open { .. })")
-            && body.contains("matches!(state.status, BallotStatus::Carried { .. })"),
+        compact(&body).contains(&compact("matches!(pre_status, BallotStatus::Open { .. })"))
+            && compact(&body).contains(&compact(
+                "matches!(state.status, BallotStatus::Carried { .. })"
+            )),
         "struct-variant `is` → `Enum::V {{ .. }}`; got:\n{body}"
     );
     // Unit variant → bare `Enum::V`, no braces or parens.
     assert!(
-        body.contains("matches!(state.status, BallotStatus::Tallying)")
-            && !body.contains("BallotStatus::Tallying {")
-            && !body.contains("BallotStatus::Tallying("),
+        compact(&body).contains(&compact("matches!(state.status, BallotStatus::Tallying)"))
+            && !compact(&body).contains(&compact("BallotStatus::Tallying {"))
+            && !compact(&body).contains(&compact("BallotStatus::Tallying(")),
         "unit-variant `is` → `Enum::V` (no payload); got:\n{body}"
     );
     // `len(coll)` → `(coll.len() as u64)`, read off `state` for a post field.
     assert!(
-        body.contains("(state.votes.len() as u64) >= quorum"),
+        compact(&body).contains(&compact("(state.votes.len() as u64) >= quorum")),
         "len(coll) → `(coll.len() as u64)`; got:\n{body}"
     );
     // Non-Copy ADT status field: the PRE-snapshot `.clone()`s (a move would leave
@@ -615,20 +628,23 @@ handler begin_tally (dummy : U64) {
     // snapshotted at all — the ensures reads `state.<field>` directly by reference
     // (drop-suppression, R2), so no owned `post_status`/`post_votes` local exists.
     assert!(
-        body.contains("let pre_status = state.status.clone();")
-            && body.contains("let pre_votes = state.votes.clone();"),
+        compact(&body).contains(&compact("let pre_status = state.status.clone();"))
+            && compact(&body).contains(&compact("let pre_votes = state.votes.clone();")),
         "non-Copy pre-snapshot must `.clone()`; got:\n{body}"
     );
     assert!(
-        !body.contains("let post_status =")
-            && !body.contains("let post_votes =")
-            && body.contains("let mut state = core::mem::ManuallyDrop::new(symbolic_ballot());"),
+        !compact(&body).contains(&compact("let post_status ="))
+            && !compact(&body).contains(&compact("let post_votes ="))
+            && compact(&body).contains(&compact(
+                "let mut state = core::mem::ManuallyDrop::new(symbolic_ballot());"
+            )),
         "no owned post snapshot; state is ManuallyDrop-wrapped (R2); got:\n{body}"
     );
     // Crate-level placement glob-imports the crate root so the bare `BallotStatus`
     // name in the `matches!` resolves; the ctor still qualifies with `crate::`.
     assert!(
-        body.contains("use crate::*;") && body.contains("_ => crate::BallotStatus::Tallying"),
+        compact(&body).contains(&compact("use crate::*;"))
+            && compact(&body).contains(&compact("_ => crate::BallotStatus::Tallying")),
         "crate-level harness imports `crate::*`; ctor unit arm has no braces; got:\n{body}"
     );
 }
@@ -662,7 +678,8 @@ handler t (m : U8) { modifies [n] ensures state.n == m effect { n := m } }"#;
     // The field is `vec![]` — `UndeclaredBigType` is never constructed (would
     // otherwise bail the whole ctor since it isn't a declared record/sum type).
     assert!(
-        body.contains("big: vec![],") && body.contains("fn symbolic_holder()"),
+        compact(&body).contains(&compact("big: vec![],"))
+            && compact(&body).contains(&compact("fn symbolic_holder()")),
         "kani_vec_empty field is `vec![]`, ctor still emitted; got:\n{body}"
     );
 }
@@ -698,8 +715,9 @@ handler check (auth : Pubkey) {
     let _ = std::fs::remove_file(&tmp);
 
     assert!(
-        body.contains("Option::Some(h) => (h.keys.iter().any(|k| k == auth))")
-            && body.contains("Option::None => false"),
+        compact(&body).contains(&compact(
+            "Option::Some(h) => (h.keys.iter().any(|k| k == auth))"
+        )) && compact(&body).contains(&compact("Option::None => false")),
         "Option match binds Some's payload + composes with exists-in + field access; got:\n{body}"
     );
 }
@@ -738,7 +756,8 @@ handler check (auth : Pubkey) {
     // `pre_hook` is `None` (no `Some(Hook { .. })` payload construction); the
     // read `post_hook` still gets a full symbolic `if kani::any() { Some(..) }`.
     assert!(
-        body.contains("pre_hook: None,") && body.contains("post_hook: if kani::any()"),
+        compact(&body).contains(&compact("pre_hook: None,"))
+            && compact(&body).contains(&compact("post_hook: if kani::any()")),
         "kani_option_none field is `None`; the read Option stays symbolic; got:\n{body}"
     );
 }
@@ -779,9 +798,9 @@ handler check (auth : Pubkey) {
     // `post_post_hook` snapshot either: the ensures reads `state.post_hook`
     // directly by reference off the `ManuallyDrop`-wrapped state.
     assert!(
-        !body.contains("let post_post_hook")
-            && !body.contains("let pre_post_hook")
-            && body.contains("match &(state.post_hook)"),
+        !compact(&body).contains(&compact("let post_post_hook"))
+            && !compact(&body).contains(&compact("let pre_post_hook"))
+            && compact(&body).contains(&compact("match &(state.post_hook)")),
         "post-only field read off `state` by ref; no owned snapshot, no dead pre_ clone; got:\n{body}"
     );
 }
@@ -826,8 +845,9 @@ handler check (auth : Pubkey) {
         // State is `ManuallyDrop`-wrapped; the ensures reads it by reference with no
         // owned `post_post_hook` snapshot.
         assert!(
-            body.contains("let mut state = core::mem::ManuallyDrop::new(symbolic_pol());")
-                && !body.contains("let post_post_hook"),
+            compact(&body).contains(&compact(
+                "let mut state = core::mem::ManuallyDrop::new(symbolic_pol());"
+            )) && !compact(&body).contains(&compact("let post_post_hook")),
             "ManuallyDrop state, no owned post snapshot; got:\n{body}"
         );
         // Both the outer snapshot match AND the inner `.iter()` enum match render by
@@ -835,9 +855,9 @@ handler check (auth : Pubkey) {
         // payloads never regenerate the `drop_in_place` teardown (the difference
         // between a harness that times out and one that closes in seconds).
         assert!(
-            body.contains("match &(state.post_hook)")
-                && body.contains("match &(c.kind)")
-                && !body.contains(").clone() {"),
+            compact(&body).contains(&compact("match &(state.post_hook)"))
+                && compact(&body).contains(&compact("match &(c.kind)"))
+                && !compact(&body).contains(&compact(").clone() {")),
             "outer + inner matches by-ref; no clone-form scrutinee in the ensures; got:\n{body}"
         );
     });
@@ -873,7 +893,7 @@ handler check (lo : U8) {
     let _ = std::fs::remove_file(&tmp);
 
     assert!(
-        body.contains(".iter().all(|s| s.mask >= lo)"),
+        compact(&body).contains(&compact(".iter().all(|s| s.mask >= lo)")),
         "forall-in → `.iter().all(|x| pred)` with element field access; got:\n{body}"
     );
 }
@@ -909,10 +929,10 @@ handler resize (n : U64) {
     let _ = std::fs::remove_file(&tmp);
 
     assert!(
-        body.contains("fn checked_div_abstract(a: i64, b: i64) -> Option<i64>")
-            && body.contains("#[kani::stub(i64::checked_div, checked_div_abstract)]")
+        compact(&body).contains(&compact("fn checked_div_abstract(a: i64, b: i64) -> Option<i64>"))
+            && compact(&body).contains(&compact("#[kani::stub(i64::checked_div, checked_div_abstract)]"))
             // #182 Shape-1: the exact-contract logic lives in the proven crate.
-            && body.contains("qedgen_kani_prelude::checked_div_i64(a, b)"),
+            && compact(&body).contains(&compact("qedgen_kani_prelude::checked_div_i64(a, b)")),
         "kani_abstract_div emits the stub fn + attr, delegating to qedgen_kani_prelude; got:\n{body}"
     );
 }
@@ -948,7 +968,7 @@ handler resize (n : U64) {
     let _ = std::fs::remove_file(&tmp);
 
     assert!(
-        body.contains("#[kani::proof]\n#[kani::solver(z3)]"),
+        compact(&body).contains(&compact("#[kani::proof]\n#[kani::solver(z3)]")),
         "kani_solver pragma bakes `#[kani::solver(z3)]` after `#[kani::proof]`; got:\n{body}"
     );
 }
@@ -985,9 +1005,9 @@ handler tick (m : U64) {
 
     // Enum resolved, tuple payload bound to `s`, wildcard catch-all — no stub.
     assert!(
-        body.contains("PeriodV2::Custom(s) => s > 0")
-            && body.contains("_ => true")
-            && !body.contains("/* ty */"),
+        compact(&body).contains(&compact("PeriodV2::Custom(s) => s > 0"))
+            && compact(&body).contains(&compact("_ => true"))
+            && !compact(&body).contains(&compact("/* ty */")),
         "match binds the tuple payload with a resolved enum + wildcard; got:\n{body}"
     );
 }
@@ -1023,17 +1043,17 @@ handler tick (m : U64) {
     let _ = std::fs::remove_file(&tmp);
 
     assert!(
-        body.contains("PeriodV2::Custom(..)"),
+        compact(&body).contains(&compact("PeriodV2::Custom(..)")),
         "tuple variant → `Enum::V(..)`; got:\n{body}"
     );
     assert!(
-        body.contains("PeriodV2::OneTime")
-            && !body.contains("PeriodV2::OneTime(")
-            && !body.contains("PeriodV2::OneTime {"),
+        compact(&body).contains(&compact("PeriodV2::OneTime"))
+            && !compact(&body).contains(&compact("PeriodV2::OneTime("))
+            && !compact(&body).contains(&compact("PeriodV2::OneTime {")),
         "unit variant → bare `Enum::V`; got:\n{body}"
     );
     assert!(
-        body.contains("Status::Approved { .. }"),
+        compact(&body).contains(&compact("Status::Approved { .. }")),
         "struct variant → `Enum::V {{ .. }}`; got:\n{body}"
     );
 }
@@ -1073,23 +1093,18 @@ handler resize (n : U64) {
     let body = std::fs::read_to_string(&tmp).unwrap();
     let _ = std::fs::remove_file(&tmp);
 
-    // In-module placement header, then the two requested `use` paths verbatim
-    // (glob + single type) in source order.
+    // In-module placement header, then the two requested `use` paths
+    // verbatim (glob + single type). Relative ordering is owned by rustfmt
+    // (the write seam formats output, and rustfmt sorts consecutive `use`
+    // groups), so only presence is asserted.
     assert!(
-        body.contains("use super::*;"),
+        compact(&body).contains(&compact("use super::*;")),
         "state_module → in-module placement header; got:\n{body}"
     );
     assert!(
-        body.contains("use crate::state::widgets::parts::*;")
-            && body.contains("use crate::core::traits::WidgetTrait;"),
+        compact(&body).contains(&compact("use crate::state::widgets::parts::*;"))
+            && compact(&body).contains(&compact("use crate::core::traits::WidgetTrait;")),
         "harness_use paths emitted verbatim (glob + single type); got:\n{body}"
-    );
-    // Ordering: the glob line precedes the single-type line (source order).
-    let glob = body.find("crate::state::widgets::parts::*").unwrap();
-    let single = body.find("crate::core::traits::WidgetTrait").unwrap();
-    assert!(
-        glob < single,
-        "harness_use lines keep source order; got:\n{body}"
     );
 }
 
@@ -1115,7 +1130,8 @@ handler rotate (new_authority : Pubkey) {
     let body = std::fs::read_to_string(&tmp).unwrap();
     let _ = std::fs::remove_file(&tmp);
     assert!(
-        body.contains("#[kani::unwind(34)]") && !body.contains("#[kani::unwind(4)]"),
+        compact(&body).contains(&compact("#[kani::unwind(34)]"))
+            && !compact(&body).contains(&compact("#[kani::unwind(4)]")),
         "Pubkey-comparing harness must suggest unwind 34; got:\n{body}"
     );
 
@@ -1135,7 +1151,8 @@ handler bump (delta : U64) {
     let body = std::fs::read_to_string(&tmp).unwrap();
     let _ = std::fs::remove_file(&tmp);
     assert!(
-        body.contains("#[kani::unwind(4)]") && !body.contains("#[kani::unwind(34)]"),
+        compact(&body).contains(&compact("#[kani::unwind(4)]"))
+            && !compact(&body).contains(&compact("#[kani::unwind(34)]")),
         "numeric-only harness must suggest a low unwind bound; got:\n{body}"
     );
 
@@ -1167,13 +1184,13 @@ handler admin_bump (caller : Pubkey) (delta : U64) {
     // memcmp-driven bound to a small value (the 34 is only needed with the
     // abstraction OFF — see the opt-out case below).
     assert!(
-        body.contains("fn pk_eq_abstract")
+        compact(&body).contains(&compact("fn pk_eq_abstract"))
             // #182 Shape-1: the wide-compare logic lives in the proven crate;
             // the harness only bridges its own Pubkey to the byte-level API.
-            && body.contains("qedgen_kani_prelude::wide_eq_32(a.to_bytes(), b.to_bytes())")
-            && body.contains("qedgen_kani_prelude::wide_cmp_32(a.to_bytes(), b.to_bytes())")
-            && body.contains("kani::stub(<anchor_lang::prelude::Pubkey")
-            && !body.contains("#[kani::unwind(34)]"),
+            && compact(&body).contains(&compact("qedgen_kani_prelude::wide_eq_32(a.to_bytes(), b.to_bytes())"))
+            && compact(&body).contains(&compact("qedgen_kani_prelude::wide_cmp_32(a.to_bytes(), b.to_bytes())"))
+            && compact(&body).contains(&compact("kani::stub(<anchor_lang::prelude::Pubkey"))
+            && !compact(&body).contains(&compact("#[kani::unwind(34)]")),
         "brownfield Pubkey harness abstracts `==`/`cmp` via qedgen_kani_prelude + drops the bound; got:\n{body}"
     );
 
@@ -1209,7 +1226,8 @@ handler set_threshold (new_threshold : U16) {
     // Abstraction ON (default): stubbed + small bound, even for the
     // unreferenced-Pubkey settings-well-formedness shape.
     assert!(
-        body.contains("fn pk_eq_abstract") && !body.contains("#[kani::unwind(34)]"),
+        compact(&body).contains(&compact("fn pk_eq_abstract"))
+            && !compact(&body).contains(&compact("#[kani::unwind(34)]")),
         "unreferenced Pubkey field: abstracted + small bound; got:\n{body}"
     );
 
@@ -1238,7 +1256,8 @@ handler set_threshold (new_threshold : U16) {
     let body = std::fs::read_to_string(&tmp).unwrap();
     let _ = std::fs::remove_file(&tmp);
     assert!(
-        !body.contains("fn pk_eq_abstract") && body.contains("#[kani::unwind(34)]"),
+        !compact(&body).contains(&compact("fn pk_eq_abstract"))
+            && compact(&body).contains(&compact("#[kani::unwind(34)]")),
         "opt-out: no Pubkey stub, memcmp bound 34; got:\n{body}"
     );
 }
@@ -1275,59 +1294,67 @@ handler transfer (amount : U64) {
 
     // Deterministic scaffold present.
     assert!(
-        body.contains("struct AccountLayout"),
+        compact(&body).contains(&compact("struct AccountLayout")),
         "must emit the Account layout mirror; got:\n{body}"
     );
     assert!(
-        body.contains("assert!(core::mem::size_of::<AccountLayout>() == 88)"),
+        compact(&body).contains(&compact(
+            "assert!(core::mem::size_of::<AccountLayout>() == 88)"
+        )),
         "must emit the layout size assertion; got:\n{body}"
     );
     assert!(
-        body.contains("fn build_token_account")
-            && body.contains("fn build_minimal_account")
-            && body.contains("fn account_info_from_stack"),
+        compact(&body).contains(&compact("fn build_token_account"))
+            && compact(&body).contains(&compact("fn build_minimal_account"))
+            && compact(&body).contains(&compact("fn account_info_from_stack")),
         "must emit the build + transmute helpers; got:\n{body}"
     );
 
     // Per-handler proof.
     assert!(
-        body.contains("#[kani::proof]") && body.contains("#[kani::unwind(34)]"),
+        compact(&body).contains(&compact("#[kani::proof]"))
+            && compact(&body).contains(&compact("#[kani::unwind(34)]")),
         "must emit the proof attribute + memcmp unwind bound; got:\n{body}"
     );
     assert!(
-        body.contains("fn verify_transfer_impl()"),
+        compact(&body).contains(&compact("fn verify_transfer_impl()")),
         "must emit the per-handler proof fn; got:\n{body}"
     );
 
     // Account classification: explicit token accounts -> token account;
     // signer/readonly → minimal.
     assert!(
-        body.contains("let mut source = build_token_account(")
-            && body.contains("let mut destination = build_token_account("),
+        compact(&body).contains(&compact("let mut source = build_token_account("))
+            && compact(&body).contains(&compact("let mut destination = build_token_account(")),
         "explicit token accounts must build as token accounts; got:\n{body}"
     );
     assert!(
-        body.contains("let mut mint = build_minimal_account(")
-            && body.contains("let mut authority = build_minimal_account("),
+        compact(&body).contains(&compact("let mut mint = build_minimal_account("))
+            && compact(&body).contains(&compact("let mut authority = build_minimal_account(")),
         "readonly + signer accounts must build as minimal accounts; got:\n{body}"
     );
 
     // Param packing + real dispatcher call.
     assert!(
-        body.contains("let amount: u64 = kani::any();")
-            && body.contains("let instruction_tag: u8 = crate::TRANSFER;")
-            && body.contains("instruction_data.push(instruction_tag);")
-            && body.contains("instruction_data.extend_from_slice(&amount.to_le_bytes());"),
+        compact(&body).contains(&compact("let amount: u64 = kani::any();"))
+            && compact(&body).contains(&compact("let instruction_tag: u8 = crate::TRANSFER;"))
+            && compact(&body).contains(&compact("instruction_data.push(instruction_tag);"))
+            && compact(&body).contains(&compact(
+                "instruction_data.extend_from_slice(&amount.to_le_bytes());"
+            )),
         "U64 param must be symbolic + tag/LE-packed; got:\n{body}"
     );
     assert!(
-        body.contains("crate::process_instruction(&program_id, accounts_slice, &instruction_data)"),
+        compact(&body).contains(&compact(
+            "crate::process_instruction(&program_id, accounts_slice, &instruction_data)"
+        )),
         "must call the real process_instruction dispatcher; got:\n{body}"
     );
 
     // Must NOT leak the Anchor shape.
     assert!(
-        !body.contains("Context<") && !body.contains("symbolic_accounts"),
+        !compact(&body).contains(&compact("Context<"))
+            && !compact(&body).contains(&compact("symbolic_accounts")),
         "Pinocchio harness must not leak the Anchor Context shape; got:\n{body}"
     );
 
@@ -1374,18 +1401,26 @@ handler batch_16
         .expect("Pinocchio kani_impl must emit");
     let body = std::fs::read_to_string(&tmp).unwrap();
     assert!(
-        body.contains("let instruction_tag: u8 = crate::BATCH;")
-            && body.contains("instruction_data.extend_from_slice(&amount_0.to_le_bytes());")
-            && body.contains("instruction_data.extend_from_slice(&from_lane_id_15.to_le_bytes());")
-            && body.contains("instruction_data.extend_from_slice(&to_lane_id_15.to_le_bytes());")
-            && body.contains("instruction_data.extend_from_slice(&amount_15.to_le_bytes());"),
+        compact(&body).contains(&compact("let instruction_tag: u8 = crate::BATCH;"))
+            && compact(&body).contains(&compact(
+                "instruction_data.extend_from_slice(&amount_0.to_le_bytes());"
+            ))
+            && compact(&body).contains(&compact(
+                "instruction_data.extend_from_slice(&from_lane_id_15.to_le_bytes());"
+            ))
+            && compact(&body).contains(&compact(
+                "instruction_data.extend_from_slice(&to_lane_id_15.to_le_bytes());"
+            ))
+            && compact(&body).contains(&compact(
+                "instruction_data.extend_from_slice(&amount_15.to_le_bytes());"
+            )),
         "generic Pinocchio packing must use the base tag and declared numeric params; got:\n{body}"
     );
     assert!(
-        !body.contains("instruction_data.push(16u8);")
-            && !body.contains("from_lane_id_15 as u8")
-            && !body.contains("to_lane_id_15 as u8")
-            && !body.contains("crate::BATCH_16"),
+        !compact(&body).contains(&compact("instruction_data.push(16u8);"))
+            && !compact(&body).contains(&compact("from_lane_id_15 as u8"))
+            && !compact(&body).contains(&compact("to_lane_id_15 as u8"))
+            && !compact(&body).contains(&compact("crate::BATCH_16")),
         "runtime-specific arity bytes and narrowing casts require an ABI profile; got:\n{body}"
     );
     let _ = std::fs::remove_file(&tmp);
@@ -1452,22 +1487,30 @@ handler batch_2
     let body = std::fs::read_to_string(&output).unwrap();
 
     assert!(
-        body.contains("let instruction_tag: u8 = 4u8;")
-            && body.contains("instruction_data[1] = 2u8;")
-            && body.contains("instruction_data[2] = (from_lane_id_0 as u8) as u8;")
-            && body.contains("instruction_data[3] = (to_lane_id_0 as u8) as u8;")
-            && body.contains(
+        compact(&body).contains(&compact("let instruction_tag: u8 = 4u8;"))
+            && compact(&body).contains(&compact("instruction_data[1] = 2u8;"))
+            && compact(&body).contains(&compact(
+                "instruction_data[2] = (from_lane_id_0 as u8) as u8;"
+            ))
+            && compact(&body).contains(&compact(
+                "instruction_data[3] = (to_lane_id_0 as u8) as u8;"
+            ))
+            && compact(&body).contains(&compact(
                 "let generated_instruction_data_4_bytes = (amount_0 as u64).to_le_bytes();"
-            )
-            && body.contains("instruction_data[12] = (from_lane_id_1 as u8) as u8;")
-            && body.contains("instruction_data[13] = (to_lane_id_1 as u8) as u8;")
-            && body.contains(
+            ))
+            && compact(&body).contains(&compact(
+                "instruction_data[12] = (from_lane_id_1 as u8) as u8;"
+            ))
+            && compact(&body).contains(&compact(
+                "instruction_data[13] = (to_lane_id_1 as u8) as u8;"
+            ))
+            && compact(&body).contains(&compact(
                 "let generated_instruction_data_14_bytes = (amount_1 as u64).to_le_bytes();"
-            ),
+            )),
         "ABI repeat profile must pack count and indexed item fields in ABI order; got:\n{body}"
     );
     assert!(
-            !body.contains("source profile references param `item_count` absent"),
+            !compact(&body).contains(&compact("source profile references param `item_count` absent")),
             "repeat count should be derived from indexed params, not treated as a missing param; got:\n{body}"
         );
 }
@@ -1548,9 +1591,9 @@ handler transfer (amount : U64) {
     let body = std::fs::read_to_string(&output).unwrap();
 
     assert!(
-            body.contains("#[kani::stub_verified(crate::validation::check_amount)]")
-                && body.contains("fn verify_transfer_impl()")
-                && body.contains("crate::process_instruction(&program_id"),
+            compact(&body).contains(&compact("#[kani::stub_verified(crate::validation::check_amount)]"))
+                && compact(&body).contains(&compact("fn verify_transfer_impl()"))
+                && compact(&body).contains(&compact("crate::process_instruction(&program_id")),
             "contracted source helper calls should emit verified stubs on the real-dispatcher harness; got:\n{body}"
         );
 }
@@ -1611,24 +1654,31 @@ handler batch_2
     let body = std::fs::read_to_string(&output).unwrap();
 
     assert!(
-        body.contains("let mint_0: [u8; 32] = kani::any(); // spec type: Pubkey")
-            && body.contains("let mint_1: [u8; 32] = kani::any(); // spec type: Pubkey"),
+        compact(&body).contains(&compact(
+            "let mint_0: [u8; 32] = kani::any(); // spec type: Pubkey"
+        )) && compact(&body).contains(&compact(
+            "let mint_1: [u8; 32] = kani::any(); // spec type: Pubkey"
+        )),
         "indexed Pubkey repeat fields must be declared as symbolic 32-byte arrays; got:\n{body}"
     );
     assert!(
-        body.contains("instruction_data[1] = 2u8;")
-            && body.contains("write_fixed_32(&mut instruction_data, 2, mint_0);")
-            && body.contains(
+        compact(&body).contains(&compact("instruction_data[1] = 2u8;"))
+            && compact(&body).contains(&compact(
+                "write_fixed_32(&mut instruction_data, 2, mint_0);"
+            ))
+            && compact(&body).contains(&compact(
                 "let generated_instruction_data_34_bytes = (amount_0 as u64).to_le_bytes();"
-            )
-            && body.contains("write_fixed_32(&mut instruction_data, 42, mint_1);")
-            && body.contains(
+            ))
+            && compact(&body).contains(&compact(
+                "write_fixed_32(&mut instruction_data, 42, mint_1);"
+            ))
+            && compact(&body).contains(&compact(
                 "let generated_instruction_data_74_bytes = (amount_1 as u64).to_le_bytes();"
-            ),
+            )),
         "ABI repeat profile must pack indexed Pubkey fields in ABI order; got:\n{body}"
     );
     assert!(
-        !body.contains("TODO: pack repeat field `mint`"),
+        !compact(&body).contains(&compact("TODO: pack repeat field `mint`")),
         "Pubkey repeat fields should no longer be dropped from the ABI profile; got:\n{body}"
     );
 }
@@ -1662,20 +1712,25 @@ handler move_tokens (amount : U64) {
         .expect("Pinocchio kani_impl must emit");
     let body = std::fs::read_to_string(&tmp).unwrap();
     assert!(
-        body.contains("let pre_transfer_0_from = read_token_amount(&source);")
-            && body.contains("let pre_transfer_0_to = read_token_amount(&destination);")
-            && body.contains("kani::assume(pre_transfer_0_from >= (amount as u64));")
-            && body.contains("kani::assume(pre_transfer_0_to <= u64::MAX - (amount as u64));"),
+        compact(&body).contains(&compact(
+            "let pre_transfer_0_from = read_token_amount(&source);"
+        )) && compact(&body).contains(&compact(
+            "let pre_transfer_0_to = read_token_amount(&destination);"
+        )) && compact(&body).contains(&compact(
+            "kani::assume(pre_transfer_0_from >= (amount as u64));"
+        )) && compact(&body).contains(&compact(
+            "kani::assume(pre_transfer_0_to <= u64::MAX - (amount as u64));"
+        )),
         "must snapshot and constrain Token.transfer balances; got:\n{body}"
     );
     assert!(
-        body.contains("if _result.is_ok() {")
-            && body.contains(
+        compact(&body).contains(&compact("if _result.is_ok() {"))
+            && compact(&body).contains(&compact(
                 "assert_eq!(read_token_amount(&source), pre_transfer_0_from - (amount as u64));"
-            )
-            && body.contains(
+            ))
+            && compact(&body).contains(&compact(
                 "assert_eq!(read_token_amount(&destination), pre_transfer_0_to + (amount as u64));"
-            ),
+            )),
         "must assert Token.transfer balance deltas on success; got:\n{body}"
     );
     let _ = std::fs::remove_file(&tmp);
@@ -1710,11 +1765,11 @@ handler move_tokens (amount : U64) {
     let body = std::fs::read_to_string(&tmp).unwrap();
 
     assert!(
-            body.contains("let mut config = build_minimal_account(")
-                && body.contains("let mut source = build_token_account(")
-                && body.contains("let mut destination = build_token_account(")
-                && body.contains("let mut token_program = build_minimal_account(")
-                && !body.contains("let config_amount: u64 = kani::any();"),
+            compact(&body).contains(&compact("let mut config = build_minimal_account("))
+                && compact(&body).contains(&compact("let mut source = build_token_account("))
+                && compact(&body).contains(&compact("let mut destination = build_token_account("))
+                && compact(&body).contains(&compact("let mut token_program = build_minimal_account("))
+                && !compact(&body).contains(&compact("let config_amount: u64 = kani::any();")),
             "only explicit token accounts or Token.transfer resources should use token layout; got:\n{body}"
         );
     let _ = std::fs::remove_file(&tmp);
@@ -1776,12 +1831,12 @@ handler move_tokens (amount : U64) {
     let body = std::fs::read_to_string(&output).unwrap();
 
     assert!(
-            body.contains("let mut source = build_token_account([1u8; 32], true, false")
-                && body
-                    .contains("let mut destination = build_token_account([2u8; 32], true, false")
-                && body.contains("let mut mint = build_mint_account([3u8; 32], false, false, 6u8);")
-                && body.contains("let mut token_program = build_minimal_account(SPL_TOKEN_PROGRAM_ID, false, false)")
-                && !body.contains("let token_program_amount: u64 = kani::any();"),
+            compact(&body).contains(&compact("let mut source = build_token_account([1u8; 32], true, false"))
+                && compact(&body)
+                    .contains(&compact("let mut destination = build_token_account([2u8; 32], true, false"))
+                && compact(&body).contains(&compact("let mut mint = build_mint_account([3u8; 32], false, false, 6u8);"))
+                && compact(&body).contains(&compact("let mut token_program = build_minimal_account(SPL_TOKEN_PROGRAM_ID, false, false)"))
+                && !compact(&body).contains(&compact("let token_program_amount: u64 = kani::any();")),
             "ABI account roles should project token accounts and mints without treating token_program as token data; got:\n{body}"
         );
 }
@@ -1855,9 +1910,9 @@ handler move_tokens (amount : U64) {
     let body = std::fs::read_to_string(&output).unwrap();
 
     assert!(
-            body.contains("let source_amount: u64 = kani::any();")
-                && body.contains("let mut source = build_token_account([1u8; 32], true, false, [2u8; 32], authority_key, (source_amount as u64));")
-                && body.contains("let mut mint = build_mint_account([2u8; 32], false, false, 6u8);"),
+            compact(&body).contains(&compact("let source_amount: u64 = kani::any();"))
+                && compact(&body).contains(&compact("let mut source = build_token_account([1u8; 32], true, false, [2u8; 32], authority_key, (source_amount as u64));"))
+                && compact(&body).contains(&compact("let mut mint = build_mint_account([2u8; 32], false, false, 6u8);")),
             "source-inferred token account bindings should project mint and owner bytes; got:\n{body}"
         );
 }
@@ -1954,15 +2009,15 @@ handler move_tokens (amount : U64) (lane_id : U64) {
     let body = std::fs::read_to_string(&output).unwrap();
 
     assert!(
-            body.contains("let source_authority_0_key = crate::derive_authority(&program_id, lane_id as u8).0;")
-                && body.contains("let source_0_amount: u64 = kani::any();")
-                && body.contains("let mut source_0 = build_token_account([1u8; 32], true, false, [3u8; 32], source_authority_0_key, (source_0_amount as u64));"),
+            compact(&body).contains(&compact("let source_authority_0_key = crate::derive_authority(&program_id, lane_id as u8).0;"))
+                && compact(&body).contains(&compact("let source_0_amount: u64 = kani::any();"))
+                && compact(&body).contains(&compact("let mut source_0 = build_token_account([1u8; 32], true, false, [3u8; 32], source_authority_0_key, (source_0_amount as u64));")),
             "repeated token account should inherit source loop binding and owner key alias; got:\n{body}"
         );
     assert!(
-            body.contains("let destination_0_owner_key = crate::derive_authority(&program_id, lane_id as u8).0;")
-                && body.contains("let destination_0_amount: u64 = kani::any();")
-                && body.contains("let mut destination_0 = build_token_account([2u8; 32], true, false, [3u8; 32], destination_0_owner_key, (destination_0_amount as u64));"),
+            compact(&body).contains(&compact("let destination_0_owner_key = crate::derive_authority(&program_id, lane_id as u8).0;"))
+                && compact(&body).contains(&compact("let destination_0_amount: u64 = kani::any();"))
+                && compact(&body).contains(&compact("let mut destination_0 = build_token_account([2u8; 32], true, false, [3u8; 32], destination_0_owner_key, (destination_0_amount as u64));")),
             "repeated token account should project owner bytes from a source-derived key; got:\n{body}"
         );
 }
@@ -2026,14 +2081,14 @@ handler update_config (max_fee_bps : U64) {
     let body = std::fs::read_to_string(&output).unwrap();
 
     assert!(
-            body.contains("fn build_data_account")
-                && body.contains("// ABI account layout `config_account`: 43 byte data region.")
-                && body.contains("let mut config_data: [u8; 43] = [0u8; 43];")
-                && body.contains("config_data[0] = 67u8;")
-                && body.contains("config_data[7] = 67u8;")
-                && body.contains("let mut config = build_data_account([1u8; 32], program_id, false, true, config_data);")
-                && body.contains("write_state_u16(&mut config, 40, (max_fee_bps as u16));")
-                && !body.contains("let mut config = build_minimal_account("),
+            compact(&body).contains(&compact("fn build_data_account"))
+                && compact(&body).contains(&compact("// ABI account layout `config_account`: 43 byte data region."))
+                && compact(&body).contains(&compact("let mut config_data: [u8; 43] = [0u8; 43];"))
+                && compact(&body).contains(&compact("config_data[0] = 67u8;"))
+                && compact(&body).contains(&compact("config_data[7] = 67u8;"))
+                && compact(&body).contains(&compact("let mut config = build_data_account([1u8; 32], program_id, false, true, config_data);"))
+                && compact(&body).contains(&compact("write_state_u16(&mut config, 40, (max_fee_bps as u16));"))
+                && !compact(&body).contains(&compact("let mut config = build_minimal_account(")),
             "ABI account layouts should emit program-owned data accounts with profiled byte length and state witnesses; got:\n{body}"
         );
 }
@@ -2104,20 +2159,14 @@ handler route (lane_id : U64) {
     let body = std::fs::read_to_string(&output).unwrap();
 
     assert!(
-            body.contains("let config_key = crate::derive_config(&program_id).0;")
-                && body.contains("let vault_authority_key = crate::derive_vault_authority(&program_id, lane_id as u8).0;")
-                && body.contains(
-                    "let mut config = build_minimal_account(config_key, false, true);"
-                )
-                && body.contains(
-                    "let mut vault_authority = build_minimal_account(vault_authority_key, false, false);"
-                ),
+            compact(&body).contains(&compact("let config_key = crate::derive_config(&program_id).0;"))
+                && compact(&body).contains(&compact("let vault_authority_key = crate::derive_vault_authority(&program_id, lane_id as u8).0;"))
+                && compact(&body).contains(&compact("let mut config = build_minimal_account(config_key, false, true);"))
+                && compact(&body).contains(&compact("let mut vault_authority = build_minimal_account(vault_authority_key, false, false);")),
             "profiled PDA derivations should bind exact account keys generically; got:\n{body}"
         );
     assert!(
-            body.contains(
-                "/// - PDA derivations: config -> config (found); vault_authority -> vault_authority (found)"
-            ),
+            compact(&body).contains(&compact("/// - PDA derivations: config -> config (found); vault_authority -> vault_authority (found)")),
             "generated impl harness should report inferred PDA derivations; got:\n{body}"
         );
 }
@@ -2197,9 +2246,11 @@ handler route (lane_id : U64) {
     let body = std::fs::read_to_string(&output).unwrap();
 
     assert!(
-        body.contains(
+        compact(&body).contains(&compact(
             "let vault_key = crate::derive_vault_authority(&program_id, lane_id as u8).0;"
-        ) && body.contains("let mut vault = build_minimal_account(vault_key, false, false);"),
+        )) && compact(&body).contains(&compact(
+            "let mut vault = build_minimal_account(vault_key, false, false);"
+        )),
         "source require_key derived-key guards should bind exact account keys; got:\n{body}"
     );
 }
@@ -2276,8 +2327,8 @@ handler route (nonce : U64) {
     let body = std::fs::read_to_string(&output).unwrap();
 
     assert!(
-            body.contains("let vault_key = crate::derive_token_vault(&[1u8; 32], &[2u8; 32]).0;")
-                && body.contains("let mut vault = build_minimal_account(vault_key, false, true);"),
+            compact(&body).contains(&compact("let vault_key = crate::derive_token_vault(&[1u8; 32], &[2u8; 32]).0;"))
+                && compact(&body).contains(&compact("let mut vault = build_minimal_account(vault_key, false, true);")),
             "non-program-id PDA account keys should render from source require_key derivations; got:\n{body}"
         );
 }
@@ -2377,9 +2428,9 @@ handler route (lane_id : U64) {
     let body = std::fs::read_to_string(&output).unwrap();
 
     assert!(
-            body.contains("let vault_authority_key = crate::derive_authority(&program_id, lane_id as u8).0;")
-                && body.contains("let vault_key = crate::derive_token_vault(&program_id, &[1u8; 32], lane_id as u8).0;")
-                && body.contains("let mut vault = build_minimal_account(vault_key, false, true);"),
+            compact(&body).contains(&compact("let vault_authority_key = crate::derive_authority(&program_id, lane_id as u8).0;"))
+                && compact(&body).contains(&compact("let vault_key = crate::derive_token_vault(&program_id, &[1u8; 32], lane_id as u8).0;"))
+                && compact(&body).contains(&compact("let mut vault = build_minimal_account(vault_key, false, true);")),
             "nested derived-key PDA seeds should render before the outer non-program-id PDA; got:\n{body}"
         );
 }
@@ -2496,12 +2547,12 @@ handler route_2
     let body = std::fs::read_to_string(&output).unwrap();
 
     assert!(
-            body.contains("let source_vault_0_authority_key = crate::derive_authority(&program_id, from_lane_id_0 as u8).0;")
-                && body.contains("let source_vault_0_key = crate::derive_token_vault(&program_id, &[1u8; 32], from_lane_id_0 as u8).0;")
-                && body.contains("let destination_vault_1_authority_key = crate::derive_authority(&program_id, to_lane_id_1 as u8).0;")
-                && body.contains("let destination_vault_1_key = crate::derive_token_vault(&program_id, &[1u8; 32], to_lane_id_1 as u8).0;")
-                && body.contains("let mut source_vault_0 = build_minimal_account(source_vault_0_key, false, true);")
-                && body.contains("let mut destination_vault_1 = build_minimal_account(destination_vault_1_key, false, true);"),
+            compact(&body).contains(&compact("let source_vault_0_authority_key = crate::derive_authority(&program_id, from_lane_id_0 as u8).0;"))
+                && compact(&body).contains(&compact("let source_vault_0_key = crate::derive_token_vault(&program_id, &[1u8; 32], from_lane_id_0 as u8).0;"))
+                && compact(&body).contains(&compact("let destination_vault_1_authority_key = crate::derive_authority(&program_id, to_lane_id_1 as u8).0;"))
+                && compact(&body).contains(&compact("let destination_vault_1_key = crate::derive_token_vault(&program_id, &[1u8; 32], to_lane_id_1 as u8).0;"))
+                && compact(&body).contains(&compact("let mut source_vault_0 = build_minimal_account(source_vault_0_key, false, true);"))
+                && compact(&body).contains(&compact("let mut destination_vault_1 = build_minimal_account(destination_vault_1_key, false, true);")),
             "repeated loop account-key derivations should bind suffixed accounts from source; got:\n{body}"
         );
 }
@@ -2584,13 +2635,14 @@ pub fn process_move_tokens(accounts: &[AccountInfo], instruction_data: &[u8]) ->
     let body = std::fs::read_to_string(&output).unwrap();
 
     assert!(
-        body.contains("let instruction_tag: u8 = 9u8;"),
+        compact(&body).contains(&compact("let instruction_tag: u8 = 9u8;")),
         "must use source-inferred dispatcher tag; got:\n{body}"
     );
     assert!(
-        body.contains("/// - source account order: destination, authority, source")
-            && body.contains("/// - ABI/dispatcher tag: 9")
-            && body.contains("/// - PDA derivations: none inferred"),
+        compact(&body).contains(&compact(
+            "/// - source account order: destination, authority, source"
+        )) && compact(&body).contains(&compact("/// - ABI/dispatcher tag: 9"))
+            && compact(&body).contains(&compact("/// - PDA derivations: none inferred")),
         "generated impl harness should explain profile facts and fallbacks; got:\n{body}"
     );
     let destination_pos = body
@@ -2607,10 +2659,10 @@ pub fn process_move_tokens(accounts: &[AccountInfo], instruction_data: &[u8]) ->
         "must use source-inferred account order; got:\n{body}"
     );
     assert!(
-        body.contains("instruction_data[1] = (lane as u8) as u8;")
-            && body.contains(
+        compact(&body).contains(&compact("instruction_data[1] = (lane as u8) as u8;"))
+            && compact(&body).contains(&compact(
                 "let generated_instruction_data_2_bytes = (amount as u64).to_le_bytes();"
-            ),
+            )),
         "must use source-inferred payload order and widths; got:\n{body}"
     );
 }
@@ -2663,13 +2715,9 @@ handler upload (amount : U64) {
     let body = std::fs::read_to_string(&output).unwrap();
 
     assert!(
-            body.contains("let mut instruction_data = [0u8; 17];")
-                && body.contains(
-                    "TODO: unsupported instruction field `memo` type `bytes8` at offset 1..9"
-                )
-                && body.contains(
-                    "let generated_instruction_data_9_bytes = (amount as u64).to_le_bytes();"
-                ),
+            compact(&body).contains(&compact("let mut instruction_data = [0u8; 17];"))
+                && compact(&body).contains(&compact("TODO: unsupported instruction field `memo` type `bytes8` at offset 1..9"))
+                && compact(&body).contains(&compact("let generated_instruction_data_9_bytes = (amount as u64).to_le_bytes();")),
             "non-trailing unsupported ABI fields must keep absolute layout visible and pack later fields at the right offset; got:\n{body}"
         );
 }
@@ -2692,8 +2740,8 @@ fn pinocchio_token_delta_assertions_skip_aliasing_transfers() {
     emit_pinocchio_token_pre_snapshots(&mut body, &chained);
     emit_pinocchio_token_post_assertions(&mut body, &chained);
     assert!(
-        body.contains("token transfer delta assertions skipped")
-            && !body.contains("assert_eq!(read_token_amount"),
+        compact(&body).contains(&compact("token transfer delta assertions skipped"))
+            && !compact(&body).contains(&compact("assert_eq!(read_token_amount")),
         "chained transfers should not emit independent per-transfer final assertions; got:\n{body}"
     );
 
@@ -2706,8 +2754,8 @@ fn pinocchio_token_delta_assertions_skip_aliasing_transfers() {
     emit_pinocchio_token_pre_snapshots(&mut body, &self_transfer);
     emit_pinocchio_token_post_assertions(&mut body, &self_transfer);
     assert!(
-        body.contains("token transfer delta assertions skipped")
-            && !body.contains("assert_eq!(read_token_amount"),
+        compact(&body).contains(&compact("token transfer delta assertions skipped"))
+            && !compact(&body).contains(&compact("assert_eq!(read_token_amount")),
         "self-transfer aliases should not emit independent debit/credit assertions; got:\n{body}"
     );
 }
@@ -2784,9 +2832,7 @@ handler route {
     let mut notes = String::new();
     emit_pinocchio_profile_notes(&mut notes, handler, None, Some(&profile));
     assert!(
-            notes.contains(
-                "source account order: inferred order unusable; profile account `tokenProgramExtra` did not match spec accounts; using spec order"
-            ),
+            compact(&notes).contains(&compact("source account order: inferred order unusable; profile account `tokenProgramExtra` did not match spec accounts; using spec order")),
             "unusable inferred order should leave a generated breadcrumb; got:\n{notes}"
         );
 }
@@ -2839,15 +2885,11 @@ handler swap
     emit_pinocchio_fee_normalization_assumptions(&mut body, handler, Some(&profile));
 
     assert!(
-            body.contains(
-                "let generated_fee_min_output = ((amount_in as u128) * generated_fee_retained_bps) / 10000u128;"
-            ) && body.contains(
-                "kani::assume((amount_out as u128) >= generated_fee_min_output);"
-            ),
+            compact(&body).contains(&compact("let generated_fee_min_output = ((amount_in as u128) * generated_fee_retained_bps) / 10000u128;")) && compact(&body).contains(&compact("kani::assume((amount_out as u128) >= generated_fee_min_output);")),
             "equal literal decimals should cancel the shared normalization scale and emit the bounded fee floor; got:\n{body}"
         );
     assert!(
-        !body.contains("generated_fee_input_normalized"),
+        !compact(&body).contains(&compact("generated_fee_input_normalized")),
         "equal literal decimals must not emit normalization-scale multiplication; got:\n{body}"
     );
 }
@@ -2874,10 +2916,10 @@ handler update_limit (new_max_fee_bps : U128) {
         .expect("Pinocchio kani_impl must emit");
     let body = std::fs::read_to_string(&tmp).unwrap();
     assert!(
-            body.contains("fn verify_update_limit_impl")
-                && body.contains("kani::cover!(_result.is_ok()")
-                && body.contains("let program_id: [u8; 32] = [42u8; 32];")
-                && body.contains("crate::process_instruction(&program_id"),
+            compact(&body).contains(&compact("fn verify_update_limit_impl"))
+                && compact(&body).contains(&compact("kani::cover!(_result.is_ok()"))
+                && compact(&body).contains(&compact("let program_id: [u8; 32] = [42u8; 32];"))
+                && compact(&body).contains(&compact("crate::process_instruction(&program_id")),
             "effect-only handlers should emit generic state assertions without project-specific branches; got:\n{body}"
         );
 }
@@ -2900,16 +2942,18 @@ handler register (member : Pubkey) {
     let body = std::fs::read_to_string(&tmp).unwrap();
 
     assert!(
-        body.contains("let member: [u8; 32] = kani::any(); // spec type: Pubkey"),
+        compact(&body).contains(&compact(
+            "let member: [u8; 32] = kani::any(); // spec type: Pubkey"
+        )),
         "Pubkey params must be declared as symbolic 32-byte arrays; got:\n{body}"
     );
     assert!(
-        body.contains("instruction_data.extend_from_slice(&member);"),
+        compact(&body).contains(&compact("instruction_data.extend_from_slice(&member);")),
         "Pubkey params must pack raw 32-byte values into instruction data; got:\n{body}"
     );
     assert!(
-        !body.contains("TODO: declare symbolic param `member`")
-            && !body.contains("TODO: pack param `member`"),
+        !compact(&body).contains(&compact("TODO: declare symbolic param `member`"))
+            && !compact(&body).contains(&compact("TODO: pack param `member`")),
         "Pubkey params should no longer fall through to TODOs; got:\n{body}"
     );
     let _ = std::fs::remove_file(&tmp);
@@ -2935,12 +2979,12 @@ handler bump (delta : U64) {
     assert!(tmp.is_file(), "explicit flag must emit the file");
     let body = std::fs::read_to_string(&tmp).unwrap();
     assert!(
-        body.contains("fn verify_bump_impl_ensures_0()"),
+        compact(&body).contains(&compact("fn verify_bump_impl_ensures_0()")),
         "explicit flag must emit per-handler harness; got:\n{}",
         body
     );
     assert!(
-        body.contains("accounts.handler(delta)"),
+        compact(&body).contains(&compact("accounts.handler(delta)")),
         "harness must call the user's real handler; got:\n{}",
         body
     );
@@ -2971,12 +3015,14 @@ handler open (deposit_amount : U64) {
     generate_from_spec(&spec, &tmp, /*explicit_flag=*/ false, Target::Anchor).expect("generate");
     let body = std::fs::read_to_string(&tmp).unwrap();
     assert!(
-        body.contains("find_program_address(&[b\"escrow\", initializer.as_ref()]"),
+        compact(&body).contains(&compact(
+            "find_program_address(&[b\"escrow\", initializer.as_ref()]"
+        )),
         "PDA derivation must come from the spec's `pda` declaration; got:\n{}",
         body
     );
     assert!(
-        body.contains("`initializer`: signer"),
+        compact(&body).contains(&compact("`initializer`: signer")),
         "signer account must appear in the symbolic builder; got:\n{}",
         body
     );
@@ -3006,12 +3052,12 @@ handler swap (lane_id : U64) {
     generate_from_spec(&spec, &tmp, /*explicit_flag=*/ true, Target::Anchor).expect("generate");
     let body = std::fs::read_to_string(&tmp).unwrap();
     assert!(
-        body.contains("lane_id.to_le_bytes().as_ref()"),
+        compact(&body).contains(&compact("lane_id.to_le_bytes().as_ref()")),
         "integer-param seed must serialize via to_le_bytes; got:\n{}",
         body
     );
     assert!(
-        !body.contains("[b\"vault-authority\", lane_id.as_ref()"),
+        !compact(&body).contains(&compact("[b\"vault-authority\", lane_id.as_ref()")),
         "must not emit bare `lane_id.as_ref()` for a u64 param; got:\n{}",
         body
     );
@@ -3090,7 +3136,7 @@ handler deposit (amt : U64) {
     // 1. The splice-marker comment from Track H must be GONE — Track I
     //    replaces it with the actual emission, no stale marker.
     assert!(
-        !body.contains("<Track I CPI ensures-as-fact splice point>"),
+        !compact(&body).contains(&compact("<Track I CPI ensures-as-fact splice point>")),
         "Track H's splice marker must be removed once Track I has emitted; got:\n{}",
         body
     );
@@ -3098,12 +3144,12 @@ handler deposit (amt : U64) {
     // 2. The CPI ensures-as-fact comment + assume line must be present,
     //    with `amount` substituted to the caller's `amt` expression.
     assert!(
-        body.contains("// CPI ensures-as-fact (Token.transfer):"),
+        compact(&body).contains(&compact("// CPI ensures-as-fact (Token.transfer):")),
         "missing CPI ensures-as-fact comment for Token.transfer; got:\n{}",
         body
     );
     assert!(
-        body.contains("kani::assume(amt > 0)"),
+        compact(&body).contains(&compact("kani::assume(amt > 0)")),
         "missing substituted kani::assume(amt > 0); got:\n{}",
         body
     );
@@ -3163,19 +3209,19 @@ handler refresh (b : U64) {
     let body = std::fs::read_to_string(&tmp).unwrap();
 
     assert!(
-        body.contains("// CPI ensures-as-fact (Oracle.quote):"),
+        compact(&body).contains(&compact("// CPI ensures-as-fact (Oracle.quote):")),
         "missing CPI ensures-as-fact comment for Oracle.quote; got:\n{}",
         body,
     );
     // The callee uses `price` as its return binder; the caller's
     // `let p = …` makes `p` the substituted form.
     assert!(
-        body.contains("kani::assume(p > 0)"),
+        compact(&body).contains(&compact("kani::assume(p > 0)")),
         "expected `kani::assume(p > 0)` from named binder substitution; got:\n{}",
         body,
     );
     assert!(
-        !body.contains("price > 0"),
+        !compact(&body).contains(&compact("price > 0")),
         "binder name `price` must be substituted away; got:\n{}",
         body,
     );
@@ -3237,13 +3283,15 @@ handler deposit (amt : U64) {
     // those to the snapshot locals `pre_pool_balance` /
     // `post_pool_balance`.
     assert!(
-        body.contains("kani::assume(post_pool_balance + amt == pre_pool_balance)"),
+        compact(&body).contains(&compact(
+            "kani::assume(post_pool_balance + amt == pre_pool_balance)"
+        )),
         "expected flat snapshot locals in kani::assume; got:\n{}",
         body,
     );
     // The callee abstract field name must NOT survive.
     assert!(
-        !body.contains("from_balance"),
+        !compact(&body).contains(&compact("from_balance")),
         "abstract callee field `from_balance` must be substituted; got:\n{}",
         body,
     );
@@ -3251,12 +3299,12 @@ handler deposit (amt : U64) {
     // side binder field) — otherwise `pre_pool_balance` /
     // `post_pool_balance` references the assume emits don't compile.
     assert!(
-        body.contains("let pre_pool_balance"),
+        compact(&body).contains(&compact("let pre_pool_balance")),
         "snapshot block must capture pre_pool_balance; got:\n{}",
         body,
     );
     assert!(
-        body.contains("let post_pool_balance"),
+        compact(&body).contains(&compact("let post_pool_balance")),
         "snapshot block must capture post_pool_balance; got:\n{}",
         body,
     );
@@ -3300,13 +3348,13 @@ handler tick (val : U64) {
     let body = std::fs::read_to_string(&tmp).unwrap();
 
     assert!(
-        !body.contains("CPI ensures-as-fact (Logger.log)"),
+        !compact(&body).contains(&compact("CPI ensures-as-fact (Logger.log)")),
         "Tier-0 callee (no ensures) must not emit any CPI assume block; got:\n{}",
         body
     );
     // Caller's own assert! still emits.
     assert!(
-        body.contains("assert!("),
+        compact(&body).contains(&compact("assert!(")),
         "caller's own assert! must still emit; got:\n{}",
         body
     );
@@ -3366,14 +3414,14 @@ handler liquidate (loss : U64) {
     let body = std::fs::read_to_string(&tmp).unwrap();
 
     assert!(
-        body.contains("// CPI ensures-as-fact (Pool.absorb):"),
+        compact(&body).contains(&compact("// CPI ensures-as-fact (Pool.absorb):")),
         "missing CPI ensures-as-fact for Pool.absorb; got:\n{}",
         body
     );
     // `result <= amount` substitutes `amount → loss` and
     // `result → burned`.
     assert!(
-        body.contains("kani::assume(burned <= loss)"),
+        compact(&body).contains(&compact("kani::assume(burned <= loss)")),
         "let-binding result must substitute to caller's binder; got:\n{}",
         body
     );
@@ -3440,12 +3488,12 @@ handler split (a : U64) (b : U64) {
     // 2. The breadcrumb WARNING must appear in the harness body
     //    (above the CPI assume block).
     assert!(
-        body.contains("WARNING: multi-CPI ordering"),
+        compact(&body).contains(&compact("WARNING: multi-CPI ordering")),
         "Track J breadcrumb must emit when multi_cpi_shared_fields fires; got:\n{}",
         body
     );
     assert!(
-        body.contains("`multi_cpi_same_field`"),
+        compact(&body).contains(&compact("`multi_cpi_same_field`")),
         "breadcrumb must reference the lint rule name; got:\n{}",
         body
     );
@@ -3583,48 +3631,54 @@ fn context_mode_emits_try_accounts_gate() {
     let body = generate_context_mode(CONTEXT_SPEC);
 
     assert!(
-        body.contains("CONTEXT/instruction mode (#169)"),
+        compact(&body).contains(&compact("CONTEXT/instruction mode (#169)")),
         "header names the mode; got:\n{body}"
     );
     // The account-info plumbing + the real constraint gate call.
     assert!(
-        body.contains("fn leak_account_info(")
-            && body.contains("<crate::Gate as anchor_lang::Accounts<_>>::try_accounts(")
-            && body.contains("let mut bumps = crate::GateBumps::default();"),
+        compact(&body).contains(&compact("fn leak_account_info("))
+            && compact(&body).contains(&compact(
+                "<crate::Gate as anchor_lang::Accounts<_>>::try_accounts("
+            ))
+            && compact(&body).contains(&compact("let mut bumps = crate::GateBumps::default();")),
         "leaked AccountInfos + real try_accounts on the pragma-named struct; got:\n{body}"
     );
     // T3 escape hatch: try_deserialize stubbed to the generated symbolic ctor.
     assert!(
-        body.contains("fn symbolic_settings() -> crate::Settings")
-            && body.contains("fn stub_try_deserialize_settings(")
-            && body.contains("Ok(symbolic_settings())")
-            && body.contains(
+        compact(&body).contains(&compact("fn symbolic_settings() -> crate::Settings"))
+            && compact(&body).contains(&compact("fn stub_try_deserialize_settings("))
+            && compact(&body).contains(&compact("Ok(symbolic_settings())"))
+            && compact(&body).contains(&compact(
                 "#[kani::stub(crate::Settings::try_deserialize, stub_try_deserialize_settings)]"
-            ),
+            )),
         "deserialize stub wired to the symbolic ctor; got:\n{body}"
     );
     // The signer flag is SYMBOLIC and the signer-gate assert is GENERATED —
     // the crown-jewel "no unauthorized execution" property.
     assert!(
-        body.contains("let admin_signer: bool = kani::any();")
-            && body.contains(
+        compact(&body).contains(&compact("let admin_signer: bool = kani::any();"))
+            && compact(&body).contains(&compact(
                 "assert!(admin_signer, \"instruction succeeded without `admin`'s signature\");"
-            ),
+            )),
         "symbolic signer flag + generated signer-gate assert; got:\n{body}"
     );
     // Requires lowers to a pre-snapshot assume; ensures reads the deserialized
     // state account in place (`ctx_accounts.settings.<field>`).
     assert!(
-        body.contains("let pre_status = ctx_accounts.settings.status;")
-            && body.contains("kani::assume((pre_status == 1));")
-            && body.contains("ctx_accounts.settings.threshold == new_threshold"),
+        compact(&body).contains(&compact("let pre_status = ctx_accounts.settings.status;"))
+            && compact(&body).contains(&compact("kani::assume((pre_status == 1));"))
+            && compact(&body)
+                .contains(&compact("ctx_accounts.settings.threshold == new_threshold")),
         "requires assume off the pre-snapshot; ensures reads ctx_accounts.<state>; got:\n{body}"
     );
     // The instruction-fn call is the ONE agent-fill site; non-vacuity cover
     // is generated.
     assert!(
-        body.contains("todo!(\"call the real instruction fn via Context::new\")")
-            && body.contains("kani::cover!(true, \"instruction success path reachable"),
+        compact(&body).contains(&compact(
+            "todo!(\"call the real instruction fn via Context::new\")"
+        )) && compact(&body).contains(&compact(
+            "kani::cover!(true, \"instruction success path reachable"
+        )),
         "agent-fill instruction call + non-vacuity cover; got:\n{body}"
     );
 }
@@ -3636,8 +3690,9 @@ fn context_mode_defaults_struct_name_to_pascal() {
     let src = CONTEXT_SPEC.replace("pragma context_struct = set_threshold::Gate\n", "");
     let body = generate_context_mode(&src);
     assert!(
-        body.contains("<crate::SetThreshold as anchor_lang::Accounts<_>>::try_accounts(")
-            && body.contains("crate::SetThresholdBumps::default()"),
+        compact(&body).contains(&compact(
+            "<crate::SetThreshold as anchor_lang::Accounts<_>>::try_accounts("
+        )) && compact(&body).contains(&compact("crate::SetThresholdBumps::default()")),
         "struct name defaults to PascalCase(handler); got:\n{body}"
     );
 }
@@ -3663,15 +3718,15 @@ handler sweep {
 }"#;
     let body = generate_context_mode(src);
     assert!(
-        body.contains("anchor_spl::token::ID"),
+        compact(&body).contains(&compact("anchor_spl::token::ID")),
         "token program uses its well-known id; got:\n{body}"
     );
     assert!(
-        body.contains("todo!(\"real program id for `oracle_program`\")"),
+        compact(&body).contains(&compact("todo!(\"real program id for `oracle_program`\")")),
         "unknown program id is fail-loud, never symbolic; got:\n{body}"
     );
     assert!(
-        body.contains("/*executable=*/ true"),
+        compact(&body).contains(&compact("/*executable=*/ true")),
         "program accounts are executable; got:\n{body}"
     );
 }
@@ -3709,15 +3764,17 @@ handler decrement (amount : U64) {
     let _ = std::fs::remove_file(&tmp);
 
     assert!(
-        body.contains("let pre_window = state.window.clone();"),
+        compact(&body).contains(&compact("let pre_window = state.window.clone();")),
         "nested-old parent record snapshotted via clone; got:\n{body}"
     );
     assert!(
-        body.contains("kani::assume((amount <= pre_window.remaining));"),
+        compact(&body).contains(&compact("kani::assume((amount <= pre_window.remaining));")),
         "requires reads the nested pre-snapshot path; got:\n{body}"
     );
     assert!(
-        body.contains("state.window.remaining == pre_window.remaining - amount"),
+        compact(&body).contains(&compact(
+            "state.window.remaining == pre_window.remaining - amount"
+        )),
         "ensures compares post in-place read vs nested pre-snapshot; got:\n{body}"
     );
 }
@@ -3763,13 +3820,13 @@ handler decrement (amount : U64) {
     );
     // Panic-free harness: statement call, `let _ =` to swallow #[must_use].
     assert!(
-        body.contains("let _ = state.try_decrement(amount);"),
+        compact(&body).contains(&compact("let _ = state.try_decrement(amount);")),
         "panic-free calls the target as a statement; got:\n{body}"
     );
     // No agent-fill effect todo remains anywhere (the header PROSE mentions
     // `todo!()` as the fallback; only real call sites carry a message string).
     assert!(
-        !body.contains("todo!(\""),
+        !compact(&body).contains(&compact("todo!(\"")),
         "kani_target leaves NO agent-fill todo; got:\n{body}"
     );
 }
@@ -3806,7 +3863,7 @@ handler poke (v : U64) {
         let body = std::fs::read_to_string(&tmp).unwrap();
         let _ = std::fs::remove_file(&tmp);
         assert!(
-            body.contains(expect),
+            compact(&body).contains(&compact(expect)),
             "kind `{kind}` maps the return shape; got:\n{body}"
         );
     }
@@ -3845,12 +3902,12 @@ handler record_sig (sig : Bytes64) {
     let _ = std::fs::remove_file(&tmp);
 
     assert!(
-        body.contains("#[kani::unwind(66)]"),
+        compact(&body).contains(&compact("#[kani::unwind(66)]")),
         "Bytes64 present → 66 floor, NOT the abstracted-Pubkey small bound; got:\n{body}"
     );
     // The symbolic ctor builds the raw array directly — no Pubkey wrapper.
     assert!(
-        body.contains("last_sig: kani::any(),"),
+        compact(&body).contains(&compact("last_sig: kani::any(),")),
         "Bytes64 field constructs as a plain `kani::any()` array; got:\n{body}"
     );
 }
@@ -3887,7 +3944,7 @@ handler set_root (new_root : Bytes32) {
     let _ = std::fs::remove_file(&tmp);
 
     assert!(
-        body.contains("#[kani::unwind(34)]"),
+        compact(&body).contains(&compact("#[kani::unwind(34)]")),
         "Bytes32 present → 34 memcmp floor; got:\n{body}"
     );
 }
@@ -3923,18 +3980,19 @@ handler deposit (amount : U64) {
     let _ = std::fs::remove_file(&tmp);
 
     assert!(
-        body.contains("static QEDGEN_PDA_UF: qedgen_kani_prelude::UfCell32<8>")
-            && body.contains("fn find_pda_abstract(")
-            && body.contains("fn create_pda_abstract("),
+        compact(&body).contains(&compact(
+            "static QEDGEN_PDA_UF: qedgen_kani_prelude::UfCell32<8>"
+        )) && compact(&body).contains(&compact("fn find_pda_abstract("))
+            && compact(&body).contains(&compact("fn create_pda_abstract(")),
         "PDA stub is the UfMap-backed deterministic pair; got:\n{body}"
     );
     assert!(
-        body.contains("#[kani::stub(solana_program::pubkey::Pubkey::find_program_address, find_pda_abstract)]")
-            && body.contains("#[kani::stub(solana_program::pubkey::Pubkey::create_program_address, create_pda_abstract)]"),
+        compact(&body).contains(&compact("#[kani::stub(solana_program::pubkey::Pubkey::find_program_address, find_pda_abstract)]"))
+            && compact(&body).contains(&compact("#[kani::stub(solana_program::pubkey::Pubkey::create_program_address, create_pda_abstract)]")),
         "both PDA entry points are stubbed; got:\n{body}"
     );
     assert!(
-        body.contains("#[kani::unwind(10)]"),
+        compact(&body).contains(&compact("#[kani::unwind(10)]")),
         "UfMap memo scan floors the unwind at 10; got:\n{body}"
     );
 }
@@ -3981,7 +4039,7 @@ handler bump (amount : U64) {
         "static QEDGEN_SECP_UF: qedgen_kani_prelude::UfCell64<8>",
         "#[kani::stub(solana_program::secp256k1_recover::secp256k1_recover, secp256k1_recover_abstract)]",
     ] {
-        assert!(body.contains(needle), "missing `{needle}` in:\n{body}");
+        assert!(compact(&body).contains(&compact(needle)), "missing `{needle}` in:\n{body}");
     }
 }
 
@@ -4036,4 +4094,16 @@ handler noop (x : U16) {
         state_ctor::vec_bound_undercoverage_warnings(&spec).is_empty(),
         "scalar-only ensures stays silent"
     );
+}
+
+/// Whitespace-insensitive needle match: generated Rust is rustfmt-formatted
+/// at the write seam, so tests must not depend on line wrapping.
+fn compact(s: &str) -> String {
+    let squeezed: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    // rustfmt adds trailing commas when it wraps a call/struct/array across
+    // lines; normalize them away so needles match either rendering.
+    squeezed
+        .replace(",)", ")")
+        .replace(",]", "]")
+        .replace(",}", "}")
 }

@@ -499,7 +499,10 @@ mod tests {
         let member_count: u8 = 1;
         apply_create_vault(&mut state, threshold, member_count);
         // Property: threshold bounded must hold after create_vault
-        assert!(state.threshold <= state.member_count && state.threshold > 0, "threshold_bounded must hold after create_vault");
+        assert!(
+            state.threshold <= state.member_count && state.threshold > 0,
+            "threshold_bounded must hold after create_vault"
+        );
     }
 
     #[test]
@@ -515,7 +518,10 @@ mod tests {
         };
         apply_propose(&mut state);
         // Property: threshold bounded must hold after propose
-        assert!(state.threshold <= state.member_count && state.threshold > 0, "threshold_bounded must hold after propose");
+        assert!(
+            state.threshold <= state.member_count && state.threshold > 0,
+            "threshold_bounded must hold after propose"
+        );
     }
 
     #[test]
@@ -532,7 +538,10 @@ mod tests {
         let member_index: u8 = 0;
         apply_approve(&mut state, member_index);
         // Property: threshold bounded must hold after approve
-        assert!(state.threshold <= state.member_count && state.threshold > 0, "threshold_bounded must hold after approve");
+        assert!(
+            state.threshold <= state.member_count && state.threshold > 0,
+            "threshold_bounded must hold after approve"
+        );
     }
 
     #[test]
@@ -549,7 +558,10 @@ mod tests {
         let member_index: u8 = 0;
         apply_reject(&mut state, member_index);
         // Property: threshold bounded must hold after reject
-        assert!(state.threshold <= state.member_count && state.threshold > 0, "threshold_bounded must hold after reject");
+        assert!(
+            state.threshold <= state.member_count && state.threshold > 0,
+            "threshold_bounded must hold after reject"
+        );
     }
 
     #[test]
@@ -566,7 +578,10 @@ mod tests {
         let member_index: u8 = 0;
         apply_execute(&mut state, member_index);
         // Property: threshold bounded must hold after execute
-        assert!(state.threshold <= state.member_count && state.threshold > 0, "threshold_bounded must hold after execute");
+        assert!(
+            state.threshold <= state.member_count && state.threshold > 0,
+            "threshold_bounded must hold after execute"
+        );
     }
 
     #[test]
@@ -582,7 +597,10 @@ mod tests {
         };
         apply_cancel_proposal(&mut state);
         // Property: threshold bounded must hold after cancel_proposal
-        assert!(state.threshold <= state.member_count && state.threshold > 0, "threshold_bounded must hold after cancel_proposal");
+        assert!(
+            state.threshold <= state.member_count && state.threshold > 0,
+            "threshold_bounded must hold after cancel_proposal"
+        );
     }
 
     #[test]
@@ -600,7 +618,10 @@ mod tests {
         let member_pubkey: [u8; 32] = [1u8; 32];
         apply_add_member(&mut state, member_index, member_pubkey);
         // Property: threshold bounded must hold after add_member
-        assert!(state.threshold <= state.member_count && state.threshold > 0, "threshold_bounded must hold after add_member");
+        assert!(
+            state.threshold <= state.member_count && state.threshold > 0,
+            "threshold_bounded must hold after add_member"
+        );
     }
 
     #[test]
@@ -616,7 +637,10 @@ mod tests {
         };
         apply_remove_member(&mut state);
         // Property: threshold bounded must hold after remove_member
-        assert!(state.threshold <= state.member_count && state.threshold > 0, "threshold_bounded must hold after remove_member");
+        assert!(
+            state.threshold <= state.member_count && state.threshold > 0,
+            "threshold_bounded must hold after remove_member"
+        );
     }
 
     #[test]
@@ -634,7 +658,10 @@ mod tests {
         let member_count: u8 = 1;
         apply_create_vault(&mut state, threshold, member_count);
         // Property: votes bounded must hold after create_vault
-        assert!(state.approval_count + state.rejection_count <= state.member_count, "votes_bounded must hold after create_vault");
+        assert!(
+            state.approval_count + state.rejection_count <= state.member_count,
+            "votes_bounded must hold after create_vault"
+        );
     }
 
     #[test]
@@ -650,7 +677,10 @@ mod tests {
         };
         apply_propose(&mut state);
         // Property: votes bounded must hold after propose
-        assert!(state.approval_count + state.rejection_count <= state.member_count, "votes_bounded must hold after propose");
+        assert!(
+            state.approval_count + state.rejection_count <= state.member_count,
+            "votes_bounded must hold after propose"
+        );
     }
 
     #[test]
@@ -667,7 +697,10 @@ mod tests {
         let member_index: u8 = 0;
         apply_execute(&mut state, member_index);
         // Property: votes bounded must hold after execute
-        assert!(state.approval_count + state.rejection_count <= state.member_count, "votes_bounded must hold after execute");
+        assert!(
+            state.approval_count + state.rejection_count <= state.member_count,
+            "votes_bounded must hold after execute"
+        );
     }
 
     #[test]
@@ -683,7 +716,10 @@ mod tests {
         };
         apply_cancel_proposal(&mut state);
         // Property: votes bounded must hold after cancel_proposal
-        assert!(state.approval_count + state.rejection_count <= state.member_count, "votes_bounded must hold after cancel_proposal");
+        assert!(
+            state.approval_count + state.rejection_count <= state.member_count,
+            "votes_bounded must hold after cancel_proposal"
+        );
     }
 
     #[test]
@@ -699,7 +735,10 @@ mod tests {
         };
         apply_remove_member(&mut state);
         // Property: votes bounded must hold after remove_member
-        assert!(state.approval_count + state.rejection_count <= state.member_count, "votes_bounded must hold after remove_member");
+        assert!(
+            state.approval_count + state.rejection_count <= state.member_count,
+            "votes_bounded must hold after remove_member"
+        );
     }
 
     // ====================================================================
@@ -722,8 +761,14 @@ mod tests {
         let pre_members = state.members.clone();
         let pre_voted = state.voted.clone();
         apply_create_vault(&mut state, threshold, member_count);
-        assert_eq!(state.members, pre_members, "members must not change after create_vault");
-        assert_eq!(state.voted, pre_voted, "voted must not change after create_vault");
+        assert_eq!(
+            state.members, pre_members,
+            "members must not change after create_vault"
+        );
+        assert_eq!(
+            state.voted, pre_voted,
+            "voted must not change after create_vault"
+        );
     }
 
     #[test]
@@ -742,10 +787,22 @@ mod tests {
         let pre_members = state.members.clone();
         let pre_voted = state.voted.clone();
         apply_propose(&mut state);
-        assert_eq!(state.threshold, pre_threshold, "threshold must not change after propose");
-        assert_eq!(state.member_count, pre_member_count, "member_count must not change after propose");
-        assert_eq!(state.members, pre_members, "members must not change after propose");
-        assert_eq!(state.voted, pre_voted, "voted must not change after propose");
+        assert_eq!(
+            state.threshold, pre_threshold,
+            "threshold must not change after propose"
+        );
+        assert_eq!(
+            state.member_count, pre_member_count,
+            "member_count must not change after propose"
+        );
+        assert_eq!(
+            state.members, pre_members,
+            "members must not change after propose"
+        );
+        assert_eq!(
+            state.voted, pre_voted,
+            "voted must not change after propose"
+        );
     }
 
     #[test]
@@ -765,10 +822,22 @@ mod tests {
         let pre_members = state.members.clone();
         let pre_rejection_count = state.rejection_count.clone();
         apply_approve(&mut state, member_index);
-        assert_eq!(state.threshold, pre_threshold, "threshold must not change after approve");
-        assert_eq!(state.member_count, pre_member_count, "member_count must not change after approve");
-        assert_eq!(state.members, pre_members, "members must not change after approve");
-        assert_eq!(state.rejection_count, pre_rejection_count, "rejection_count must not change after approve");
+        assert_eq!(
+            state.threshold, pre_threshold,
+            "threshold must not change after approve"
+        );
+        assert_eq!(
+            state.member_count, pre_member_count,
+            "member_count must not change after approve"
+        );
+        assert_eq!(
+            state.members, pre_members,
+            "members must not change after approve"
+        );
+        assert_eq!(
+            state.rejection_count, pre_rejection_count,
+            "rejection_count must not change after approve"
+        );
     }
 
     #[test]
@@ -788,10 +857,22 @@ mod tests {
         let pre_members = state.members.clone();
         let pre_approval_count = state.approval_count.clone();
         apply_reject(&mut state, member_index);
-        assert_eq!(state.threshold, pre_threshold, "threshold must not change after reject");
-        assert_eq!(state.member_count, pre_member_count, "member_count must not change after reject");
-        assert_eq!(state.members, pre_members, "members must not change after reject");
-        assert_eq!(state.approval_count, pre_approval_count, "approval_count must not change after reject");
+        assert_eq!(
+            state.threshold, pre_threshold,
+            "threshold must not change after reject"
+        );
+        assert_eq!(
+            state.member_count, pre_member_count,
+            "member_count must not change after reject"
+        );
+        assert_eq!(
+            state.members, pre_members,
+            "members must not change after reject"
+        );
+        assert_eq!(
+            state.approval_count, pre_approval_count,
+            "approval_count must not change after reject"
+        );
     }
 
     #[test]
@@ -811,10 +892,22 @@ mod tests {
         let pre_members = state.members.clone();
         let pre_voted = state.voted.clone();
         apply_execute(&mut state, member_index);
-        assert_eq!(state.threshold, pre_threshold, "threshold must not change after execute");
-        assert_eq!(state.member_count, pre_member_count, "member_count must not change after execute");
-        assert_eq!(state.members, pre_members, "members must not change after execute");
-        assert_eq!(state.voted, pre_voted, "voted must not change after execute");
+        assert_eq!(
+            state.threshold, pre_threshold,
+            "threshold must not change after execute"
+        );
+        assert_eq!(
+            state.member_count, pre_member_count,
+            "member_count must not change after execute"
+        );
+        assert_eq!(
+            state.members, pre_members,
+            "members must not change after execute"
+        );
+        assert_eq!(
+            state.voted, pre_voted,
+            "voted must not change after execute"
+        );
     }
 
     #[test]
@@ -833,10 +926,22 @@ mod tests {
         let pre_members = state.members.clone();
         let pre_voted = state.voted.clone();
         apply_cancel_proposal(&mut state);
-        assert_eq!(state.threshold, pre_threshold, "threshold must not change after cancel_proposal");
-        assert_eq!(state.member_count, pre_member_count, "member_count must not change after cancel_proposal");
-        assert_eq!(state.members, pre_members, "members must not change after cancel_proposal");
-        assert_eq!(state.voted, pre_voted, "voted must not change after cancel_proposal");
+        assert_eq!(
+            state.threshold, pre_threshold,
+            "threshold must not change after cancel_proposal"
+        );
+        assert_eq!(
+            state.member_count, pre_member_count,
+            "member_count must not change after cancel_proposal"
+        );
+        assert_eq!(
+            state.members, pre_members,
+            "members must not change after cancel_proposal"
+        );
+        assert_eq!(
+            state.voted, pre_voted,
+            "voted must not change after cancel_proposal"
+        );
     }
 
     #[test]
@@ -858,11 +963,26 @@ mod tests {
         let pre_approval_count = state.approval_count.clone();
         let pre_rejection_count = state.rejection_count.clone();
         apply_add_member(&mut state, member_index, member_pubkey);
-        assert_eq!(state.threshold, pre_threshold, "threshold must not change after add_member");
-        assert_eq!(state.member_count, pre_member_count, "member_count must not change after add_member");
-        assert_eq!(state.voted, pre_voted, "voted must not change after add_member");
-        assert_eq!(state.approval_count, pre_approval_count, "approval_count must not change after add_member");
-        assert_eq!(state.rejection_count, pre_rejection_count, "rejection_count must not change after add_member");
+        assert_eq!(
+            state.threshold, pre_threshold,
+            "threshold must not change after add_member"
+        );
+        assert_eq!(
+            state.member_count, pre_member_count,
+            "member_count must not change after add_member"
+        );
+        assert_eq!(
+            state.voted, pre_voted,
+            "voted must not change after add_member"
+        );
+        assert_eq!(
+            state.approval_count, pre_approval_count,
+            "approval_count must not change after add_member"
+        );
+        assert_eq!(
+            state.rejection_count, pre_rejection_count,
+            "rejection_count must not change after add_member"
+        );
     }
 
     #[test]
@@ -882,11 +1002,26 @@ mod tests {
         let pre_approval_count = state.approval_count.clone();
         let pre_rejection_count = state.rejection_count.clone();
         apply_remove_member(&mut state);
-        assert_eq!(state.threshold, pre_threshold, "threshold must not change after remove_member");
-        assert_eq!(state.members, pre_members, "members must not change after remove_member");
-        assert_eq!(state.voted, pre_voted, "voted must not change after remove_member");
-        assert_eq!(state.approval_count, pre_approval_count, "approval_count must not change after remove_member");
-        assert_eq!(state.rejection_count, pre_rejection_count, "rejection_count must not change after remove_member");
+        assert_eq!(
+            state.threshold, pre_threshold,
+            "threshold must not change after remove_member"
+        );
+        assert_eq!(
+            state.members, pre_members,
+            "members must not change after remove_member"
+        );
+        assert_eq!(
+            state.voted, pre_voted,
+            "voted must not change after remove_member"
+        );
+        assert_eq!(
+            state.approval_count, pre_approval_count,
+            "approval_count must not change after remove_member"
+        );
+        assert_eq!(
+            state.rejection_count, pre_rejection_count,
+            "rejection_count must not change after remove_member"
+        );
     }
 
     // ====================================================================
@@ -896,7 +1031,11 @@ mod tests {
     #[test]
     fn test_create_vault_transition_uninitialized_to_active() {
         // create_vault requires status == Uninitialized and moves to Active
-        assert_ne!(Status::Uninitialized, Status::Active, "create_vault changes status");
+        assert_ne!(
+            Status::Uninitialized,
+            Status::Active,
+            "create_vault changes status"
+        );
         let _pre = Status::Uninitialized;
         let _post = Status::Active;
         // AGENT: verify handler transitions status from _pre to _post
@@ -905,7 +1044,11 @@ mod tests {
     #[test]
     fn test_propose_transition_active_to_hasproposal() {
         // propose requires status == Active and moves to HasProposal
-        assert_ne!(Status::Active, Status::HasProposal, "propose changes status");
+        assert_ne!(
+            Status::Active,
+            Status::HasProposal,
+            "propose changes status"
+        );
         let _pre = Status::Active;
         let _post = Status::HasProposal;
         // AGENT: verify handler transitions status from _pre to _post
@@ -914,7 +1057,11 @@ mod tests {
     #[test]
     fn test_approve_transition_hasproposal_to_hasproposal() {
         // approve requires status == HasProposal and moves to HasProposal
-        assert_eq!(Status::HasProposal, Status::HasProposal, "approve is a self-transition");
+        assert_eq!(
+            Status::HasProposal,
+            Status::HasProposal,
+            "approve is a self-transition"
+        );
         let _pre = Status::HasProposal;
         let _post = Status::HasProposal;
         // AGENT: verify handler transitions status from _pre to _post
@@ -923,7 +1070,11 @@ mod tests {
     #[test]
     fn test_reject_transition_hasproposal_to_hasproposal() {
         // reject requires status == HasProposal and moves to HasProposal
-        assert_eq!(Status::HasProposal, Status::HasProposal, "reject is a self-transition");
+        assert_eq!(
+            Status::HasProposal,
+            Status::HasProposal,
+            "reject is a self-transition"
+        );
         let _pre = Status::HasProposal;
         let _post = Status::HasProposal;
         // AGENT: verify handler transitions status from _pre to _post
@@ -932,7 +1083,11 @@ mod tests {
     #[test]
     fn test_execute_transition_hasproposal_to_active() {
         // execute requires status == HasProposal and moves to Active
-        assert_ne!(Status::HasProposal, Status::Active, "execute changes status");
+        assert_ne!(
+            Status::HasProposal,
+            Status::Active,
+            "execute changes status"
+        );
         let _pre = Status::HasProposal;
         let _post = Status::Active;
         // AGENT: verify handler transitions status from _pre to _post
@@ -941,7 +1096,11 @@ mod tests {
     #[test]
     fn test_cancel_proposal_transition_hasproposal_to_active() {
         // cancel_proposal requires status == HasProposal and moves to Active
-        assert_ne!(Status::HasProposal, Status::Active, "cancel_proposal changes status");
+        assert_ne!(
+            Status::HasProposal,
+            Status::Active,
+            "cancel_proposal changes status"
+        );
         let _pre = Status::HasProposal;
         let _post = Status::Active;
         // AGENT: verify handler transitions status from _pre to _post
@@ -950,7 +1109,11 @@ mod tests {
     #[test]
     fn test_add_member_transition_active_to_active() {
         // add_member requires status == Active and moves to Active
-        assert_eq!(Status::Active, Status::Active, "add_member is a self-transition");
+        assert_eq!(
+            Status::Active,
+            Status::Active,
+            "add_member is a self-transition"
+        );
         let _pre = Status::Active;
         let _post = Status::Active;
         // AGENT: verify handler transitions status from _pre to _post
@@ -959,10 +1122,13 @@ mod tests {
     #[test]
     fn test_remove_member_transition_active_to_active() {
         // remove_member requires status == Active and moves to Active
-        assert_eq!(Status::Active, Status::Active, "remove_member is a self-transition");
+        assert_eq!(
+            Status::Active,
+            Status::Active,
+            "remove_member is a self-transition"
+        );
         let _pre = Status::Active;
         let _post = Status::Active;
         // AGENT: verify handler transitions status from _pre to _post
     }
-
 }
