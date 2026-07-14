@@ -104,6 +104,7 @@ struct AccountSemanticShape {
     is_writable: bool,
     is_program: bool,
     account_type: Option<String>,
+    authority: Option<String>,
     imported_namespace: Option<String>,
 }
 
@@ -161,6 +162,7 @@ impl From<&ParsedHandlerAccount> for AccountSemanticShape {
             is_writable: account.is_writable,
             is_program: account.is_program,
             account_type: account.account_type.clone(),
+            authority: account.authority.clone(),
             imported_namespace: account.imported_namespace.clone(),
         }
     }
@@ -185,6 +187,7 @@ fn fixture_account_inventory(
                 shape.is_writable,
                 shape.is_program,
                 shape.account_type.clone(),
+                shape.authority.clone(),
                 shape.imported_namespace.clone(),
             )
         });
@@ -350,7 +353,7 @@ fn validate_fixture_compatibility(
     }
 
     bail!(
-        "fixture target `{fixture}` is not semantically compatible with `{handler}.{account}`; signer/writable/program/type constraints do not match"
+        "fixture target `{fixture}` is not semantically compatible with `{handler}.{account}`; signer/writable/program/type/authority constraints do not match"
     );
 }
 
@@ -366,6 +369,11 @@ fn candidate_compatible(source: &AccountSemanticShape, candidate: &AccountSemant
     }
     if let Some(source_type) = &source.account_type {
         if candidate.account_type.as_ref() != Some(source_type) {
+            return false;
+        }
+    }
+    if let Some(source_authority) = &source.authority {
+        if candidate.authority.as_ref() != Some(source_authority) {
             return false;
         }
     }
@@ -565,6 +573,18 @@ mod tests {
         let mut spec = spec();
         spec.handlers[0].accounts[0].is_writable = true;
         spec.handlers[0].accounts[0].account_type = Some("token".to_string());
+
+        let input = resolved(vec![plan("plan-a", "fixture:authority")]);
+        assert!(collapse_account_binding_overlay(&spec, &input)
+            .unwrap_err()
+            .to_string()
+            .contains("not semantically compatible"));
+    }
+
+    #[test]
+    fn rejects_fixture_targets_with_incompatible_authority() {
+        let mut spec = spec();
+        spec.handlers[0].accounts[0].authority = Some("vault_owner".to_string());
 
         let input = resolved(vec![plan("plan-a", "fixture:authority")]);
         assert!(collapse_account_binding_overlay(&spec, &input)

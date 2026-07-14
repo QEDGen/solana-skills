@@ -116,9 +116,10 @@ against non-PDA, non-default spec accounts, collapses them into
 `account-binding-overlay.json`, rejects conflicts across plans, and compiles
 that overlay into action account literals and signer selection before encoding
 handler arguments. The collapse step also rejects same-action fixture aliasing
-and fixture targets whose signer, writable, program, account-type, or imported
-namespace constraints cannot satisfy the source account. Default-address and
-PDA accounts remain generator-managed and must not appear in the overlay.
+and fixture targets whose signer, writable, program, account-type,
+authority/owner, or imported namespace constraints cannot satisfy the source
+account. Default-address and PDA accounts remain generator-managed and must not
+appear in the overlay.
 
 ```bash
 <skill-root>/scripts/check-domain-artifacts.sh \
