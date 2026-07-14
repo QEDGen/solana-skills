@@ -639,9 +639,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 ctx.stateful = stateful;
                 ctx.invariant_mode = mode;
                 if let Some(report) = domain_seed_report {
-                    ctx.domain_seed_corpus = Some(report.corpus_dir);
-                    ctx.domain_replay_seeds =
-                        report.seeds.into_iter().map(|seed| seed.path).collect();
+                    ctx.domain_seed_report = Some(report);
                 }
                 let findings = crucible_probe::run_fuzz_probe(&ctx)?;
                 let output = probe::ProbeOutput {

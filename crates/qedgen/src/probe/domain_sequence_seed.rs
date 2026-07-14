@@ -19,6 +19,9 @@ use super::domain_sequence_binding::{ResolvedDomainSequenceDocument, ResolvedSeq
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct DomainSeedReport {
     pub corpus_dir: PathBuf,
+    pub resolved_document_sha256: String,
+    pub account_binding_overlay_sha256: String,
+    pub harness_sha256: String,
     pub seeds: Vec<DomainSeed>,
 }
 
@@ -27,6 +30,11 @@ pub struct DomainSeed {
     pub plan_id: String,
     pub path: PathBuf,
     pub action_count: usize,
+    pub seed_sha256: String,
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 /// Write one byte-stable seed per resolved plan. The content-addressed leaf
@@ -38,7 +46,14 @@ pub fn write_domain_seed_corpus(
     account_overlay: Option<&AccountBindingOverlay>,
 ) -> Result<DomainSeedReport> {
     let canonical = serde_json::to_vec(resolved)?;
-    let digest = format!("{:x}", Sha256::digest(&canonical));
+    let digest = sha256_hex(&canonical);
+    let overlay_bytes = serde_json::to_vec(&account_overlay)?;
+    let account_binding_overlay_sha256 = sha256_hex(&overlay_bytes);
+    let harness_path = harness_dir.join("src").join("main.rs");
+    let harness_sha256 = sha256_hex(
+        &std::fs::read(&harness_path)
+            .with_context(|| format!("reading generated harness {}", harness_path.display()))?,
+    );
     let corpus_dir = harness_dir
         .join(".qedgen")
         .join("domain-sequence-corpus")
@@ -72,18 +87,26 @@ pub fn write_domain_seed_corpus(
             })
             .collect();
         let path = corpus_dir.join(format!("{index:03}-{safe_id}.seed"));
+        let seed_sha256 = sha256_hex(&bytes);
         std::fs::write(&path, bytes)
             .with_context(|| format!("writing domain seed {}", path.display()))?;
         seeds.push(DomainSeed {
             plan_id: plan.id.clone(),
             path,
             action_count: actions.len(),
+            seed_sha256,
         });
     }
     if seeds.is_empty() {
         bail!("resolved domain sequence document has no plans to replay");
     }
-    Ok(DomainSeedReport { corpus_dir, seeds })
+    Ok(DomainSeedReport {
+        corpus_dir,
+        resolved_document_sha256: digest,
+        account_binding_overlay_sha256,
+        harness_sha256,
+        seeds,
+    })
 }
 
 fn encode_actions(
@@ -374,9 +397,14 @@ mod tests {
             exclusions: vec![],
         };
         let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
         let report = write_domain_seed_corpus(&spec, &resolved, dir.path(), None).unwrap();
         assert_eq!(report.seeds[0].action_count, 1);
         assert!(report.seeds[0].path.ends_with("000-plan_one.seed"));
-        assert_eq!(std::fs::read(&report.seeds[0].path).unwrap().len(), 14);
+        let seed = std::fs::read(&report.seeds[0].path).unwrap();
+        assert_eq!(seed.len(), 14);
+        assert_eq!(report.seeds[0].seed_sha256, sha256_hex(&seed));
+        assert_eq!(report.harness_sha256, sha256_hex(b"fn main() {}\n"));
     }
 }

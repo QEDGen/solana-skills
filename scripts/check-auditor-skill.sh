@@ -86,6 +86,7 @@ for required in \
   "$skill_root/schemas/domain-sequence-bindings.schema.json" \
   "$skill_root/schemas/resolved-domain-sequences.schema.json" \
   "$skill_root/schemas/account-binding-overlay.schema.json" \
+  "$skill_root/schemas/domain-replay-report.schema.json" \
   "$skill_root/scripts/check-domain-artifacts.sh"; do
   if [[ ! -f "$required" ]]; then
     echo "auditor domain artifact schema is missing: $required" >&2

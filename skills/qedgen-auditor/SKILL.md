@@ -110,7 +110,13 @@ For exact replay, author `domain-sequence-bindings.json` against
 explicit; never infer accounts or argument values. Domain-mode Crucible writes
 `resolved-domain-sequences.json`, validates it against
 `resolved-domain-sequences.schema.json`, replays each byte-exact seed before
-exploratory fuzzing, and feeds the same corpus into the subsequent run. Account
+exploratory fuzzing, and feeds the same corpus into the subsequent run. Each
+exact replay appends durable evidence at
+`<harness>/.qedgen/domain-replay-report.json`, validated against
+`domain-replay-report.schema.json`; the report pins the resolved document,
+account overlay, generated harness, seed content, native replay command, exit
+status, and plan ID. A seed merely present in the exploratory corpus is not
+exact-sequence coverage. Account
 targets use the explicit `fixture:<account>` namespace. QEDGen verifies them
 against non-PDA, non-default spec accounts, collapses them into
 `account-binding-overlay.json`, rejects conflicts across plans, and compiles
@@ -134,7 +140,8 @@ remain absent for the instruction to create.
   --sequences .qed/audit/<timestamp>/domain-sequences.json \
   --bindings .qed/audit/<timestamp>/domain-sequence-bindings.json \
   --resolved-sequences .qed/audit/<timestamp>/resolved-domain-sequences.json \
-  --account-overlay .qed/audit/<timestamp>/account-binding-overlay.json
+  --account-overlay .qed/audit/<timestamp>/account-binding-overlay.json \
+  --replay-report fuzz/<program>/.qedgen/domain-replay-report.json
 ```
 
 Read only the relevant detailed references:

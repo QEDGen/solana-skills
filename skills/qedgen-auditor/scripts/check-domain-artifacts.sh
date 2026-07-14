@@ -17,6 +17,7 @@ for schema in \
   "$schemas/domain-sequence-bindings.schema.json" \
   "$schemas/resolved-domain-sequences.schema.json" \
   "$schemas/account-binding-overlay.schema.json" \
+  "$schemas/domain-replay-report.schema.json" \
   "$schemas/spec-handoff.schema.json"; do
   jq -e '
     .["$schema"] == "https://json-schema.org/draft/2020-12/schema" and
@@ -260,6 +261,27 @@ validate_account_overlay() {
   ' "$1" >/dev/null
 }
 
+validate_replay_report() {
+  jq -e '
+    def sha256: type == "string" and test("^[0-9a-f]{64}$");
+    .schema_version == 1 and
+    .schema_uri == "https://qedgen.dev/schemas/auditor/domain-replay-report-v1.schema.json" and
+    (.resolved_document_sha256 | sha256) and
+    (.account_binding_overlay_sha256 | sha256) and
+    (.harness_sha256 | sha256) and
+    (.records | type == "array" and length > 0 and all(.[];
+      (.plan_id | type == "string" and length > 0) and
+      (.seed_path | type == "string" and length > 0) and
+      (.seed_sha256 | sha256) and
+      (.action_count | type == "number" and . >= 1) and
+      (.command | type == "array" and length >= 8) and
+      (.status | IN("completed_zero_exit", "completed_nonzero_exit", "spawn_failed")) and
+      (if .status == "completed_zero_exit" then .exit_code == 0 and .error == null
+       elif .status == "spawn_failed" then .exit_code == null and (.error | type == "string" and length > 0)
+       else (.exit_code | type == "number") and .error == null end)))
+  ' "$1" >/dev/null
+}
+
 if [[ $# -gt 0 ]]; then
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -298,8 +320,13 @@ if [[ $# -gt 0 ]]; then
         validate_account_overlay "$2"
         shift 2
         ;;
+      --replay-report)
+        [[ $# -ge 2 ]] || { echo "--replay-report requires a path" >&2; exit 2; }
+        validate_replay_report "$2"
+        shift 2
+        ;;
       *)
-        echo "usage: check-auditor-domain-artifacts.sh [--dossier <json>] [--manifest <json>] [--handoff <json>] [--sequences <json>] [--bindings <json>] [--resolved-sequences <json>] [--account-overlay <json>]" >&2
+        echo "usage: check-auditor-domain-artifacts.sh [--dossier <json>] [--manifest <json>] [--handoff <json>] [--sequences <json>] [--bindings <json>] [--resolved-sequences <json>] [--account-overlay <json>] [--replay-report <json>]" >&2
         exit 2
         ;;
     esac
@@ -336,5 +363,6 @@ fi
 validate_sequence_bindings "$fixtures/valid-domain-sequence-bindings.json"
 validate_resolved_sequences "$fixtures/valid-resolved-domain-sequences.json"
 validate_account_overlay "$fixtures/valid-account-binding-overlay.json"
+validate_replay_report "$fixtures/valid-domain-replay-report.json"
 
 echo "auditor domain artifact checks passed"

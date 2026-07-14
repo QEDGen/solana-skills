@@ -7,6 +7,7 @@
 //! full run → per-crash tmin → categorize → dedupe by `(handler, dedupe_key)`.
 
 use anyhow::{bail, Context, Result};
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -23,6 +24,39 @@ const DOMAIN_FACT_ARRAYS: &[&str] = &[
     "economic_equations",
     "external_assumptions",
 ];
+
+pub const DOMAIN_REPLAY_REPORT_SCHEMA_URI: &str =
+    "https://qedgen.dev/schemas/auditor/domain-replay-report-v1.schema.json";
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DomainReplayReport {
+    pub schema_version: u32,
+    pub schema_uri: String,
+    pub resolved_document_sha256: String,
+    pub account_binding_overlay_sha256: String,
+    pub harness_sha256: String,
+    pub records: Vec<DomainReplayRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DomainReplayRecord {
+    pub plan_id: String,
+    pub seed_path: String,
+    pub seed_sha256: String,
+    pub action_count: usize,
+    pub command: Vec<String>,
+    pub status: DomainReplayStatus,
+    pub exit_code: Option<i32>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DomainReplayStatus {
+    CompletedZeroExit,
+    CompletedNonzeroExit,
+    SpawnFailed,
+}
 
 /// Validate the domain handoff before Crucible claims semantic coverage.
 /// Only facts explicitly assigned to the Crucible lane participate. Every
@@ -253,9 +287,9 @@ pub struct FuzzProbeContext<'a> {
     /// protocol-only crashes distinctly from spec violations.
     pub invariant_mode: InvariantMode,
     /// Optional byte-exact corpus synthesized from explicitly bound domain
-    /// sequences. These seeds are replayed once before exploratory fuzzing.
-    pub domain_seed_corpus: Option<PathBuf>,
-    pub domain_replay_seeds: Vec<PathBuf>,
+    /// sequences. Each seed is replayed once and written to a durable evidence
+    /// report before the same corpus is used for exploratory fuzzing.
+    pub domain_seed_report: Option<super::domain_sequence_seed::DomainSeedReport>,
 }
 
 impl<'a> FuzzProbeContext<'a> {
@@ -270,8 +304,7 @@ impl<'a> FuzzProbeContext<'a> {
             fuzz_budget: DEFAULT_FUZZ_BUDGET,
             stateful: false,
             invariant_mode: InvariantMode::Spec,
-            domain_seed_corpus: None,
-            domain_replay_seeds: Vec::new(),
+            domain_seed_report: None,
         }
     }
 }
@@ -295,11 +328,8 @@ pub fn run_fuzz_probe(ctx: &FuzzProbeContext) -> Result<Vec<Finding>> {
 
     let mut findings = Vec::new();
 
-    for seed in &ctx.domain_replay_seeds {
-        run_crucible_replay(&ctx.harness_dir, seed)
-            .with_context(|| format!("replaying domain seed {}", seed.display()))?;
-    }
-    if !ctx.domain_replay_seeds.is_empty() {
+    if let Some(seed_report) = &ctx.domain_seed_report {
+        replay_domain_seed_report(&ctx.harness_dir, seed_report)?;
         findings.extend(harvest_crucible_findings(ctx)?);
     }
 
@@ -334,7 +364,9 @@ fn run_crucible_round(
         &ctx.harness_dir,
         budget,
         ctx.stateful,
-        ctx.domain_seed_corpus.as_deref(),
+        ctx.domain_seed_report
+            .as_ref()
+            .map(|report| report.corpus_dir.as_path()),
     )
     .with_context(|| format!("crucible run ({label}) failed"))?;
     harvest_crucible_findings_from(ctx, &crash_dir)
@@ -660,24 +692,117 @@ fn run_crucible(
     Ok(harness_dir.join("crashes").join(HARNESS_TEST_NAME))
 }
 
-fn run_crucible_replay(harness_dir: &Path, seed: &Path) -> Result<()> {
+fn crucible_replay_command(harness_dir: &Path, seed: &Path) -> Result<Vec<String>> {
     let prog = harness_dir
         .file_name()
         .and_then(|s| s.to_str())
         .ok_or_else(|| anyhow::anyhow!("harness_dir has no leaf name"))?;
-    let status = Command::new("crucible")
-        .arg("run")
-        .arg(prog)
-        .arg(HARNESS_TEST_NAME)
-        .arg("-C")
-        .arg(harness_dir)
-        .arg("--replay")
-        .arg(seed)
+    Ok(vec![
+        "crucible".to_string(),
+        "run".to_string(),
+        prog.to_string(),
+        HARNESS_TEST_NAME.to_string(),
+        "-C".to_string(),
+        harness_dir.display().to_string(),
+        "--replay".to_string(),
+        seed.display().to_string(),
+    ])
+}
+
+fn run_crucible_replay(harness_dir: &Path, seed: &Path) -> Result<Option<i32>> {
+    let command = crucible_replay_command(harness_dir, seed)?;
+    let status = Command::new(&command[0])
+        .args(&command[1..])
         .status()
         .context("spawning `crucible run --replay`")?;
     // As in fuzz mode, a non-zero status may mean that the replay reproduced
     // a violation. Crash harvesting is the source of truth.
-    let _ = status;
+    Ok(status.code())
+}
+
+fn replay_domain_seed_report(
+    harness_dir: &Path,
+    seeds: &super::domain_sequence_seed::DomainSeedReport,
+) -> Result<PathBuf> {
+    replay_domain_seed_report_with(harness_dir, seeds, run_crucible_replay)
+}
+
+fn replay_domain_seed_report_with<F>(
+    harness_dir: &Path,
+    seeds: &super::domain_sequence_seed::DomainSeedReport,
+    mut replay: F,
+) -> Result<PathBuf>
+where
+    F: FnMut(&Path, &Path) -> Result<Option<i32>>,
+{
+    let mut report = DomainReplayReport {
+        schema_version: 1,
+        schema_uri: DOMAIN_REPLAY_REPORT_SCHEMA_URI.to_string(),
+        resolved_document_sha256: seeds.resolved_document_sha256.clone(),
+        account_binding_overlay_sha256: seeds.account_binding_overlay_sha256.clone(),
+        harness_sha256: seeds.harness_sha256.clone(),
+        records: Vec::with_capacity(seeds.seeds.len()),
+    };
+    let report_path = harness_dir
+        .join(".qedgen")
+        .join("domain-replay-report.json");
+
+    for seed in &seeds.seeds {
+        let command = crucible_replay_command(harness_dir, &seed.path)?;
+        match replay(harness_dir, &seed.path) {
+            Ok(exit_code) => {
+                report.records.push(DomainReplayRecord {
+                    plan_id: seed.plan_id.clone(),
+                    seed_path: seed.path.display().to_string(),
+                    seed_sha256: seed.seed_sha256.clone(),
+                    action_count: seed.action_count,
+                    command,
+                    status: if exit_code == Some(0) {
+                        DomainReplayStatus::CompletedZeroExit
+                    } else {
+                        DomainReplayStatus::CompletedNonzeroExit
+                    },
+                    exit_code,
+                    error: None,
+                });
+                write_domain_replay_report(&report_path, &report)?;
+            }
+            Err(error) => {
+                report.records.push(DomainReplayRecord {
+                    plan_id: seed.plan_id.clone(),
+                    seed_path: seed.path.display().to_string(),
+                    seed_sha256: seed.seed_sha256.clone(),
+                    action_count: seed.action_count,
+                    command,
+                    status: DomainReplayStatus::SpawnFailed,
+                    exit_code: None,
+                    error: Some(format!("{error:#}")),
+                });
+                write_domain_replay_report(&report_path, &report)?;
+                return Err(error).with_context(|| {
+                    format!(
+                        "replaying domain plan `{}`; evidence written to {}",
+                        seed.plan_id,
+                        report_path.display()
+                    )
+                });
+            }
+        }
+    }
+    eprintln!(
+        "Crucible domain replay evidence written to {}.",
+        report_path.display()
+    );
+    Ok(report_path)
+}
+
+fn write_domain_replay_report(path: &Path, report: &DomainReplayReport) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, format!("{}\n", serde_json::to_string_pretty(report)?))?;
+    std::fs::rename(&tmp, path)?;
     Ok(())
 }
 
@@ -877,6 +1002,96 @@ mod tests {
         assert_eq!(manifest["status"], "running");
         assert_eq!(manifest["lanes"][0]["status"], "queued");
         assert!(manifest["lanes"][0]["reason"].is_null());
+    }
+
+    fn seed_report(harness: &Path) -> super::super::domain_sequence_seed::DomainSeedReport {
+        super::super::domain_sequence_seed::DomainSeedReport {
+            corpus_dir: harness.join("corpus"),
+            resolved_document_sha256: "11".repeat(32),
+            account_binding_overlay_sha256: "22".repeat(32),
+            harness_sha256: "33".repeat(32),
+            seeds: vec![
+                super::super::domain_sequence_seed::DomainSeed {
+                    plan_id: "plan-a".to_string(),
+                    path: harness.join("corpus/plan-a.seed"),
+                    action_count: 2,
+                    seed_sha256: "44".repeat(32),
+                },
+                super::super::domain_sequence_seed::DomainSeed {
+                    plan_id: "plan-b".to_string(),
+                    path: harness.join("corpus/plan-b.seed"),
+                    action_count: 1,
+                    seed_sha256: "55".repeat(32),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn replay_command_uses_native_crucible_replay_surface() {
+        let command = crucible_replay_command(
+            Path::new("/tmp/vault"),
+            Path::new("/tmp/vault/corpus/plan.seed"),
+        )
+        .unwrap();
+        assert_eq!(
+            command,
+            vec![
+                "crucible",
+                "run",
+                "vault",
+                "invariant_test",
+                "-C",
+                "/tmp/vault",
+                "--replay",
+                "/tmp/vault/corpus/plan.seed",
+            ]
+        );
+    }
+
+    #[test]
+    fn replay_ledger_records_each_plan_and_fingerprint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let harness = tmp.path().join("vault");
+        std::fs::create_dir_all(&harness).unwrap();
+        let seeds = seed_report(&harness);
+        let mut calls = 0;
+        let path = replay_domain_seed_report_with(&harness, &seeds, |_, _| {
+            calls += 1;
+            Ok(if calls == 1 { Some(0) } else { Some(1) })
+        })
+        .unwrap();
+        let report: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(report["schema_uri"], DOMAIN_REPLAY_REPORT_SCHEMA_URI);
+        assert_eq!(report["resolved_document_sha256"], "11".repeat(32));
+        assert_eq!(report["records"][0]["plan_id"], "plan-a");
+        assert_eq!(report["records"][0]["status"], "completed_zero_exit");
+        assert_eq!(report["records"][1]["status"], "completed_nonzero_exit");
+        assert_eq!(report["records"][1]["exit_code"], 1);
+        assert_eq!(report["records"][1]["seed_sha256"], "55".repeat(32));
+    }
+
+    #[test]
+    fn replay_ledger_persists_spawn_failure_before_returning_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let harness = tmp.path().join("vault");
+        std::fs::create_dir_all(&harness).unwrap();
+        let mut seeds = seed_report(&harness);
+        seeds.seeds.truncate(1);
+        let error = replay_domain_seed_report_with(&harness, &seeds, |_, _| {
+            Err(anyhow::anyhow!("fake crucible unavailable"))
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("plan-a"));
+        let path = harness.join(".qedgen/domain-replay-report.json");
+        let report: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(report["records"][0]["status"], "spawn_failed");
+        assert!(report["records"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("fake crucible unavailable"));
     }
     use serde_json::json;
 
