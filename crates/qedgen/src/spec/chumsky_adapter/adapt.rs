@@ -520,24 +520,25 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                 let mut mutates: Vec<(String, String)> = Vec::new();
                 let mut constraints_lean: Vec<String> = Vec::new();
                 let mut constraints_rust: Vec<String> = Vec::new();
+                let mut typed_constraints: Vec<crate::check::ParsedEnvironmentConstraint> =
+                    Vec::new();
                 for Node { node: c, .. } in &envd.clauses {
                     match c {
                         a::EnvClause::Mutates { field, ty } => {
                             mutates.push((field.clone(), ty.clone()));
                         }
                         a::EnvClause::Constraint(e) => {
-                            constraints_lean.push(expr_to_lean(
-                                &e.node,
-                                Ctx::Ensures,
-                                consts,
-                                &env,
-                            ));
-                            constraints_rust.push(expr_to_rust(
-                                &e.node,
-                                Ctx::Ensures,
-                                consts,
-                                opts_native(&env),
-                            ));
+                            let lean_expr = expr_to_lean(&e.node, Ctx::Ensures, consts, &env);
+                            let rust_expr =
+                                expr_to_rust(&e.node, Ctx::Ensures, consts, opts_native(&env));
+                            constraints_lean.push(lean_expr.clone());
+                            constraints_rust.push(rust_expr.clone());
+                            typed_constraints.push(crate::check::ParsedEnvironmentConstraint {
+                                lean_expr,
+                                rust_expr,
+                                tree: Some(build_expr_tree(e, &spec_tcx)),
+                                class: classify_property_body(e),
+                            });
                         }
                     }
                 }
@@ -546,6 +547,7 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                     mutates,
                     constraints: constraints_lean,
                     constraints_rust,
+                    typed_constraints,
                 });
             }
             TopItem::Interface(iface) => {

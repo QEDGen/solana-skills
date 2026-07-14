@@ -168,8 +168,29 @@ pub struct ParsedInvariant {
 pub struct ParsedEnvironment {
     pub name: String,
     pub mutates: Vec<(String, String)>, // (field, type)
-    pub constraints: Vec<String>,       // lean form
+    /// Legacy target-rendered forms, retained while environment codegen
+    /// migrates to [`ParsedEnvironmentConstraint`]. Indices correspond to
+    /// `typed_constraints`.
+    pub constraints: Vec<String>, // lean form
     pub constraints_rust: Vec<String>,  // rust form
+    /// Typed metadata for each constraint. Adapter-produced specs populate
+    /// this one-for-one with `constraints`; legacy ingest paths may leave it
+    /// empty and continue to use the rendered strings above.
+    pub typed_constraints: Vec<ParsedEnvironmentConstraint>,
+}
+
+/// Structural carrier for an environment constraint.
+///
+/// The rendered strings deliberately coexist with the tree during the
+/// migration: current generators still consume them, while new consumers can
+/// distinguish a unary post-state assumption from a binary pre/post relation
+/// without parsing target code.
+#[derive(Debug, Clone)]
+pub struct ParsedEnvironmentConstraint {
+    pub lean_expr: String,
+    pub rust_expr: String,
+    pub tree: Option<crate::mir::ExprTree>,
+    pub class: PropertyClass,
 }
 
 /// Temporal shape of a property body, computed at parse time: any

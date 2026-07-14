@@ -14,6 +14,8 @@ for schema in \
   "$schemas/domain-dossier.schema.json" \
   "$schemas/audit-run-manifest.schema.json" \
   "$schemas/domain-sequences.schema.json" \
+  "$schemas/domain-sequence-bindings.schema.json" \
+  "$schemas/resolved-domain-sequences.schema.json" \
   "$schemas/spec-handoff.schema.json"; do
   jq -e '
     .["$schema"] == "https://json-schema.org/draft/2020-12/schema" and
@@ -201,6 +203,48 @@ validate_sequences() {
   ' "$1" >/dev/null
 }
 
+validate_sequence_bindings() {
+  jq -e '
+    def kind: . == "handler_argument" or . == "account_bindings" or . == "lifecycle_association";
+    .schema_version == 1 and
+    .schema_uri == "https://qedgen.dev/schemas/auditor/domain-sequence-bindings-v1.schema.json" and
+    .source_sequence_schema_uri == "https://qedgen.dev/schemas/auditor/domain-sequences-v1.schema.json" and
+    ((.source_audit_id == null) or (.source_audit_id | type == "string" and length > 0)) and
+    (.bindings | type == "array" and all(.[];
+      (.plan_id | type == "string" and length > 0) and
+      ((.action == null) or
+       ((.action.phase | IN("setup", "forward", "reverse", "teardown")) and
+        (.action.index | type == "number" and . >= 0))) and
+      (.parameter.name | type == "string" and length > 0) and
+      (.parameter.kind | kind)))
+  ' "$1" >/dev/null
+}
+
+validate_resolved_sequences() {
+  jq -e '
+    def resolved_binding:
+      type == "object" and
+      (.parameter.name | type == "string" and length > 0) and
+      .provenance.source == "user" and
+      (.provenance.plan_id | type == "string" and length > 0);
+    def action:
+      type == "object" and
+      (.handler | type == "string" and length > 0) and
+      (.resolved_bindings | type == "array" and all(.[]; resolved_binding));
+    .schema_version == 1 and
+    .schema_uri == "https://qedgen.dev/schemas/auditor/resolved-domain-sequences-v1.schema.json" and
+    .source_sequence_schema_uri == "https://qedgen.dev/schemas/auditor/domain-sequences-v1.schema.json" and
+    .source_bindings_schema_uri == "https://qedgen.dev/schemas/auditor/domain-sequence-bindings-v1.schema.json" and
+    (.plans | type == "array" and all(.[];
+      (.id | type == "string" and length > 0) and
+      (.setup | all(.[]; action)) and
+      (.forward | all(.[]; action)) and
+      (.reverse | all(.[]; action)) and
+      (.teardown | all(.[]; action)) and
+      (.resolved_plan_bindings | all(.[]; resolved_binding))))
+  ' "$1" >/dev/null
+}
+
 if [[ $# -gt 0 ]]; then
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -224,8 +268,18 @@ if [[ $# -gt 0 ]]; then
         validate_sequences "$2"
         shift 2
         ;;
+      --bindings)
+        [[ $# -ge 2 ]] || { echo "--bindings requires a path" >&2; exit 2; }
+        validate_sequence_bindings "$2"
+        shift 2
+        ;;
+      --resolved-sequences)
+        [[ $# -ge 2 ]] || { echo "--resolved-sequences requires a path" >&2; exit 2; }
+        validate_resolved_sequences "$2"
+        shift 2
+        ;;
       *)
-        echo "usage: check-auditor-domain-artifacts.sh [--dossier <json>] [--manifest <json>] [--handoff <json>] [--sequences <json>]" >&2
+        echo "usage: check-auditor-domain-artifacts.sh [--dossier <json>] [--manifest <json>] [--handoff <json>] [--sequences <json>] [--bindings <json>] [--resolved-sequences <json>]" >&2
         exit 2
         ;;
     esac
@@ -258,5 +312,8 @@ if validate_sequences "$fixtures/invalid-domain-sequences.json"; then
   echo "invalid domain sequences fixture unexpectedly passed" >&2
   exit 1
 fi
+
+validate_sequence_bindings "$fixtures/valid-domain-sequence-bindings.json"
+validate_resolved_sequences "$fixtures/valid-resolved-domain-sequences.json"
 
 echo "auditor domain artifact checks passed"

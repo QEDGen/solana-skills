@@ -294,6 +294,18 @@ pub(crate) enum Commands {
         #[arg(long, requires = "fuzz")]
         domain_dossier: Option<PathBuf>,
 
+        /// Deterministic action targets emitted by `qedgen ratify`. With
+        /// `--domain-sequence-bindings`, every target must resolve before
+        /// domain-mode replay starts.
+        #[arg(long, requires = "fuzz", requires = "domain_sequence_bindings")]
+        domain_sequences: Option<PathBuf>,
+
+        /// Explicit user values for every unresolved account, argument, and
+        /// lifecycle association in `--domain-sequences`. Values are never
+        /// inferred from names or nearby source.
+        #[arg(long, requires = "fuzz", requires = "domain_sequences")]
+        domain_sequence_bindings: Option<PathBuf>,
+
         /// Crucible harness directory. Defaults to `./fuzz/<spec_program>`,
         /// matching `qedgen codegen --crucible` output.
         #[arg(long)]
@@ -1217,6 +1229,53 @@ mod tests {
         };
         assert_eq!(crucible_mode, Some(CrucibleMode::Domain));
         assert_eq!(domain_dossier, Some(PathBuf::from("domain-dossier.json")));
+    }
+
+    #[test]
+    fn domain_sequence_replay_requires_and_parses_both_artifacts() {
+        let cli = Cli::try_parse_from([
+            "qedgen",
+            "probe",
+            "--fuzz",
+            "30",
+            "--crucible-mode",
+            "domain",
+            "--spec",
+            "vault.qedspec",
+            "--domain-dossier",
+            "domain-dossier.json",
+            "--domain-sequences",
+            "domain-sequences.json",
+            "--domain-sequence-bindings",
+            "domain-sequence-bindings.json",
+        ])
+        .unwrap();
+        let Commands::Probe {
+            domain_sequences,
+            domain_sequence_bindings,
+            ..
+        } = cli.command
+        else {
+            panic!("expected probe command");
+        };
+        assert_eq!(
+            domain_sequences,
+            Some(PathBuf::from("domain-sequences.json"))
+        );
+        assert_eq!(
+            domain_sequence_bindings,
+            Some(PathBuf::from("domain-sequence-bindings.json"))
+        );
+
+        let missing_bindings = Cli::try_parse_from([
+            "qedgen",
+            "probe",
+            "--fuzz",
+            "30",
+            "--domain-sequences",
+            "domain-sequences.json",
+        ]);
+        assert!(missing_bindings.is_err());
     }
 
     #[test]

@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qedgen.dev/schemas/auditor/domain-sequence-bindings-v1.schema.json",
+  "title": "QEDGen Auditor Domain Sequence Bindings",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "schema_uri", "source_sequence_schema_uri", "source_audit_id", "bindings"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "schema_uri": { "const": "https://qedgen.dev/schemas/auditor/domain-sequence-bindings-v1.schema.json" },
+    "source_sequence_schema_uri": { "const": "https://qedgen.dev/schemas/auditor/domain-sequences-v1.schema.json" },
+    "source_audit_id": { "type": ["string", "null"] },
+    "bindings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["plan_id", "action", "parameter", "value"],
+        "properties": {
+          "plan_id": { "type": "string", "minLength": 1 },
+          "action": {
+            "oneOf": [
+              { "type": "null" },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["phase", "index"],
+                "properties": {
+                  "phase": { "enum": ["setup", "forward", "reverse", "teardown"] },
+                  "index": { "type": "integer", "minimum": 0 }
+                }
+              }
+            ]
+          },
+          "parameter": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "kind"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "kind": { "enum": ["handler_argument", "account_bindings", "lifecycle_association"] }
+            }
+          },
+          "value": {}
+        }
+      }
+    }
+  }
+}

@@ -252,6 +252,10 @@ pub struct FuzzProbeContext<'a> {
     /// Invariant family the harness was built against — lets triage label
     /// protocol-only crashes distinctly from spec violations.
     pub invariant_mode: InvariantMode,
+    /// Optional byte-exact corpus synthesized from explicitly bound domain
+    /// sequences. These seeds are replayed once before exploratory fuzzing.
+    pub domain_seed_corpus: Option<PathBuf>,
+    pub domain_replay_seeds: Vec<PathBuf>,
 }
 
 impl<'a> FuzzProbeContext<'a> {
@@ -266,6 +270,8 @@ impl<'a> FuzzProbeContext<'a> {
             fuzz_budget: DEFAULT_FUZZ_BUDGET,
             stateful: false,
             invariant_mode: InvariantMode::Spec,
+            domain_seed_corpus: None,
+            domain_replay_seeds: Vec::new(),
         }
     }
 }
@@ -288,6 +294,14 @@ pub fn run_fuzz_probe(ctx: &FuzzProbeContext) -> Result<Vec<Finding>> {
     build_harness(&ctx.harness_dir).context("building Crucible harness")?;
 
     let mut findings = Vec::new();
+
+    for seed in &ctx.domain_replay_seeds {
+        run_crucible_replay(&ctx.harness_dir, seed)
+            .with_context(|| format!("replaying domain seed {}", seed.display()))?;
+    }
+    if !ctx.domain_replay_seeds.is_empty() {
+        findings.extend(harvest_crucible_findings(ctx)?);
+    }
 
     if !ctx.smoke_budget.is_zero() {
         let smoke = run_crucible_round(ctx, ctx.smoke_budget, "smoke")
@@ -316,8 +330,27 @@ fn run_crucible_round(
     budget: Duration,
     label: &str,
 ) -> Result<Vec<Finding>> {
-    let crash_dir = run_crucible(&ctx.harness_dir, budget, ctx.stateful)
-        .with_context(|| format!("crucible run ({label}) failed"))?;
+    let crash_dir = run_crucible(
+        &ctx.harness_dir,
+        budget,
+        ctx.stateful,
+        ctx.domain_seed_corpus.as_deref(),
+    )
+    .with_context(|| format!("crucible run ({label}) failed"))?;
+    harvest_crucible_findings_from(ctx, &crash_dir)
+}
+
+fn harvest_crucible_findings(ctx: &FuzzProbeContext) -> Result<Vec<Finding>> {
+    harvest_crucible_findings_from(
+        ctx,
+        &ctx.harness_dir.join("crashes").join(HARNESS_TEST_NAME),
+    )
+}
+
+fn harvest_crucible_findings_from(
+    ctx: &FuzzProbeContext,
+    crash_dir: &Path,
+) -> Result<Vec<Finding>> {
     let crashes = collect_crash_files(&crash_dir).unwrap_or_default();
     if !crashes.is_empty() {
         // tmin failure is non-fatal — raw crashes are still valid
@@ -596,7 +629,12 @@ fn build_harness(harness_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn run_crucible(harness_dir: &Path, budget: Duration, stateful: bool) -> Result<PathBuf> {
+fn run_crucible(
+    harness_dir: &Path,
+    budget: Duration,
+    stateful: bool,
+    corpus_in: Option<&Path>,
+) -> Result<PathBuf> {
     let prog = harness_dir
         .file_name()
         .and_then(|s| s.to_str())
@@ -612,11 +650,35 @@ fn run_crucible(harness_dir: &Path, budget: Duration, stateful: bool) -> Result<
     if stateful {
         cmd.arg("--stateful");
     }
+    if let Some(corpus_in) = corpus_in {
+        cmd.arg("--corpus-in").arg(corpus_in);
+    }
     let status = cmd.status().context("spawning `crucible run`")?;
     // Non-zero exit can mean "found crashes", not failure — harvest the
     // crashes dir regardless.
     let _ = status;
     Ok(harness_dir.join("crashes").join(HARNESS_TEST_NAME))
+}
+
+fn run_crucible_replay(harness_dir: &Path, seed: &Path) -> Result<()> {
+    let prog = harness_dir
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| anyhow::anyhow!("harness_dir has no leaf name"))?;
+    let status = Command::new("crucible")
+        .arg("run")
+        .arg(prog)
+        .arg(HARNESS_TEST_NAME)
+        .arg("-C")
+        .arg(harness_dir)
+        .arg("--replay")
+        .arg(seed)
+        .status()
+        .context("spawning `crucible run --replay`")?;
+    // As in fuzz mode, a non-zero status may mean that the replay reproduced
+    // a violation. Crash harvesting is the source of truth.
+    let _ = status;
+    Ok(())
 }
 
 /// Minimize every crash in one shot via `crucible tmin --all`. Per-crash

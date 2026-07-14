@@ -658,7 +658,17 @@ pub struct LivenessMir {
 pub struct EnvironmentMir {
     pub name: Symbol,
     pub mutates: Vec<(Symbol, Ty)>,
+    /// Legacy predicate list retained for byte-stable generators.
     pub constraints: Vec<Predicate>,
+    /// Typed, temporally classified constraint metadata. Empty for legacy
+    /// parsed specs which only supplied `constraints`.
+    pub typed_constraints: Vec<EnvironmentConstraintMir>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnvironmentConstraintMir {
+    pub predicate: Predicate,
+    pub class: crate::check::PropertyClass,
 }
 
 /// `ref_impl <name> (params) : <return_type> = <expr>` declaration; carries
@@ -1363,6 +1373,17 @@ fn lower_environments(parsed: &ParsedSpec) -> Vec<EnvironmentMir> {
                     ))
                 })
                 .collect(),
+            typed_constraints: env
+                .typed_constraints
+                .iter()
+                .map(|constraint| EnvironmentConstraintMir {
+                    predicate: Predicate(
+                        Expr::from_lean_rust(&constraint.lean_expr, &constraint.rust_expr)
+                            .with_tree(constraint.tree.clone()),
+                    ),
+                    class: constraint.class,
+                })
+                .collect(),
         })
         .collect()
 }
@@ -2045,6 +2066,26 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
     fn lower_lending_pilot() {
         let mir = lower_fixture("examples/rust/lending/lending.qedspec");
         assert!(!mir.handlers.is_empty(), "lending has handlers");
+        let environment = mir
+            .environments
+            .iter()
+            .find(|environment| environment.name == "interest_rate_change")
+            .expect("lending environment");
+        assert_eq!(environment.constraints.len(), 1);
+        assert_eq!(environment.typed_constraints.len(), 1);
+        assert_eq!(
+            environment.typed_constraints[0].class,
+            crate::check::PropertyClass::Unary
+        );
+        assert!(environment.typed_constraints[0].predicate.0.tree.is_some());
+        assert_eq!(
+            environment.typed_constraints[0].predicate.0.lean, environment.constraints[0].0.lean,
+            "typed lowering must preserve the legacy Lean rendering"
+        );
+        assert_eq!(
+            environment.typed_constraints[0].predicate.0.rust, environment.constraints[0].0.rust,
+            "typed lowering must preserve the legacy Rust rendering"
+        );
         // Lending uses TokenTransfer for deposit/withdraw flows.
         let total_xfers: usize = mir
             .handlers
@@ -2067,6 +2108,32 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
                 h.name
             );
         }
+    }
+
+    #[test]
+    fn lower_environment_preserves_binary_constraint_tree() {
+        let parsed = crate::chumsky_adapter::parse_str(
+            r#"spec EnvironmentTree
+program_id "11111111111111111111111111111111"
+
+type State = { rate : U64, }
+type Error | Bad
+
+environment rate_change {
+  mutates rate : U64
+  constraint state.rate >= old(state.rate)
+}
+"#,
+        )
+        .expect("parse binary environment constraint");
+        let mir = lower(&parsed);
+        let environment = &mir.environments[0];
+        let typed = &environment.typed_constraints[0];
+
+        assert_eq!(typed.class, crate::check::PropertyClass::Binary);
+        assert!(matches!(typed.predicate.0.tree, Some(ExprTree::Cmp { .. })));
+        assert_eq!(typed.predicate.0.lean, environment.constraints[0].0.lean);
+        assert_eq!(typed.predicate.0.rust, environment.constraints[0].0.rust);
     }
 
     #[test]

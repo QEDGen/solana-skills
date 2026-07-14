@@ -9,6 +9,51 @@ use crate::*;
 use anyhow::{Context as _, Result};
 use std::path::{Path, PathBuf};
 
+fn prepare_domain_sequence_replay(
+    spec: &check::ParsedSpec,
+    sequences_path: &Path,
+    bindings_path: &Path,
+    harness: &Path,
+) -> Result<probe::domain_sequence_seed::DomainSeedReport> {
+    let sequences: probe::domain_sequence::DomainSequenceDocument = serde_json::from_slice(
+        &std::fs::read(sequences_path)
+            .with_context(|| format!("reading domain sequences {}", sequences_path.display()))?,
+    )
+    .with_context(|| format!("parsing domain sequences {}", sequences_path.display()))?;
+    let bindings: probe::domain_sequence_binding::DomainSequenceBindings =
+        serde_json::from_slice(&std::fs::read(bindings_path).with_context(|| {
+            format!(
+                "reading domain sequence bindings {}",
+                bindings_path.display()
+            )
+        })?)
+        .with_context(|| {
+            format!(
+                "parsing domain sequence bindings {}",
+                bindings_path.display()
+            )
+        })?;
+    let resolved = probe::domain_sequence_binding::bind_domain_sequences(&sequences, &bindings)?;
+
+    let resolved_path = sequences_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("resolved-domain-sequences.json");
+    let tmp_path = resolved_path.with_extension("json.tmp");
+    std::fs::write(&tmp_path, serde_json::to_vec_pretty(&resolved)?)
+        .with_context(|| format!("writing {}", tmp_path.display()))?;
+    std::fs::rename(&tmp_path, &resolved_path)
+        .with_context(|| format!("publishing {}", resolved_path.display()))?;
+
+    let report = probe::domain_sequence_seed::write_domain_seed_corpus(spec, &resolved, harness)?;
+    eprintln!(
+        "Crucible domain mode: prepared {} deterministic replay seed(s); resolved artifact: {}.",
+        report.seeds.len(),
+        resolved_path.display()
+    );
+    Ok(report)
+}
+
 /// #182 Shape-1: deliver the `qedgen_kani_prelude` crate beside a just-generated
 /// Kani harness and depend on it — but only when the harness actually references
 /// it. The Pubkey/div stubs (impl path) and the `mul_div` imports (spec-model
@@ -223,6 +268,8 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             fuzz,
             crucible_mode,
             domain_dossier,
+            domain_sequences,
+            domain_sequence_bindings,
             harness_dir,
             no_smoke,
             stateful,
@@ -366,9 +413,12 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                                 "--crucible-mode protocol requires --root <project-path> and does not accept --spec"
                             ));
                         }
-                        if domain_dossier.is_some() {
+                        if domain_dossier.is_some()
+                            || domain_sequences.is_some()
+                            || domain_sequence_bindings.is_some()
+                        {
                             return Err(anyhow::anyhow!(
-                                "--domain-dossier is only valid with --crucible-mode domain"
+                                "domain dossier and sequence inputs are only valid with --crucible-mode domain"
                             ));
                         }
                     }
@@ -378,9 +428,12 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                                 "--crucible-mode skeleton requires --spec <path>"
                             ));
                         }
-                        if domain_dossier.is_some() {
+                        if domain_dossier.is_some()
+                            || domain_sequences.is_some()
+                            || domain_sequence_bindings.is_some()
+                        {
                             return Err(anyhow::anyhow!(
-                                "--domain-dossier is only valid with --crucible-mode domain"
+                                "domain dossier and sequence inputs are only valid with --crucible-mode domain"
                             ));
                         }
                     }
@@ -401,9 +454,12 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                         );
                     }
                     None => {
-                        if domain_dossier.is_some() {
+                        if domain_dossier.is_some()
+                            || domain_sequences.is_some()
+                            || domain_sequence_bindings.is_some()
+                        {
                             return Err(anyhow::anyhow!(
-                                "--domain-dossier requires --crucible-mode domain"
+                                "domain dossier and sequence inputs require --crucible-mode domain"
                             ));
                         }
                     }
@@ -495,6 +551,27 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                     crucible_brownfield::write_synthesized_idl(&harness, &prog, idl_json)
                         .context("writing synthesised IDL")?;
                 }
+                let domain_seed_report = match (
+                    requested_mode,
+                    domain_sequences.as_deref(),
+                    domain_sequence_bindings.as_deref(),
+                ) {
+                    (Some(CrucibleMode::Domain), Some(sequences), Some(bindings)) => {
+                        Some(prepare_domain_sequence_replay(
+                            &synthesised_spec,
+                            sequences,
+                            bindings,
+                            &harness,
+                        )?)
+                    }
+                    (Some(CrucibleMode::Domain), None, None) => None,
+                    (Some(CrucibleMode::Domain), _, _) => {
+                        return Err(anyhow::anyhow!(
+                            "domain sequence replay requires both --domain-sequences and --domain-sequence-bindings"
+                        ));
+                    }
+                    _ => None,
+                };
                 // Budget 0 = emit the harness and exit (dry-run preview
                 // without the Crucible build cost).
                 if budget_secs == 0 {
@@ -532,6 +609,11 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 }
                 ctx.stateful = stateful;
                 ctx.invariant_mode = mode;
+                if let Some(report) = domain_seed_report {
+                    ctx.domain_seed_corpus = Some(report.corpus_dir);
+                    ctx.domain_replay_seeds =
+                        report.seeds.into_iter().map(|seed| seed.path).collect();
+                }
                 let findings = crucible_probe::run_fuzz_probe(&ctx)?;
                 let output = probe::ProbeOutput {
                     version: 1,

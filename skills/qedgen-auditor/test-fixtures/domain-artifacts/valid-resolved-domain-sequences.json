@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "schema_uri": "https://qedgen.dev/schemas/auditor/resolved-domain-sequences-v1.schema.json",
+  "source_sequence_schema_uri": "https://qedgen.dev/schemas/auditor/domain-sequences-v1.schema.json",
+  "source_bindings_schema_uri": "https://qedgen.dev/schemas/auditor/domain-sequence-bindings-v1.schema.json",
+  "audit_id": "audit_vault",
+  "source_dossier_schema_version": 1,
+  "plans": [
+    {
+      "id": "sequence:pair_deposit_withdraw:deposit:withdraw:setup=none:teardown=none",
+      "kind": "paired_round_trip",
+      "title": "deposit then withdraw",
+      "setup": [],
+      "forward": [
+        {
+          "handler": "deposit",
+          "role": "forward",
+          "from_state": null,
+          "to_state": null,
+          "guards": [],
+          "provenance_candidate_ids": ["pair_deposit_withdraw"],
+          "resolved_bindings": [
+            {
+              "parameter": {
+                "handler": "deposit",
+                "name": "amount",
+                "kind": "handler_argument",
+                "declared_type": "U64",
+                "reason": "explicit value required"
+              },
+              "value": 42,
+              "provenance": {
+                "source": "user",
+                "plan_id": "sequence:pair_deposit_withdraw:deposit:withdraw:setup=none:teardown=none",
+                "action": { "phase": "forward", "index": 0 }
+              }
+            }
+          ]
+        }
+      ],
+      "reverse": [],
+      "teardown": [],
+      "provenance_candidate_ids": ["pair_deposit_withdraw"],
+      "resolved_plan_bindings": []
+    }
+  ],
+  "exclusions": []
+}

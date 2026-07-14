@@ -232,6 +232,13 @@ It also writes `domain-sequences.json`: paired round trips and lifecycle
 setup/teardown coverage targets. Bind every unresolved account and argument
 before deterministic replay; until then, use the plans to guide stateful
 exploration without claiming exact sequence coverage.
+Once bindings are complete, run domain mode with both
+`--domain-sequences` and `--domain-sequence-bindings`. QEDGen rejects partial,
+unknown, duplicate, and cross-audit bindings, writes the resolved artifact,
+replays every plan exactly, then uses those seeds as the exploratory corpus.
+Structured seeds encode handler choice and arguments, not fixture account
+identity. If a resolved plan still requires account materialization, stop and
+record that limitation rather than silently discarding the account binding.
 
 ### Step 2 — auto-ratify *high-confidence* clusters
 

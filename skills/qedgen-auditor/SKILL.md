@@ -105,12 +105,25 @@ setup/forward/reverse/teardown plans as stateful coverage targets, but do not
 claim exact-sequence coverage while any `unresolved_parameters` remain or the
 runner has not replayed that plan. Validate the artifacts with:
 
+For exact replay, author `domain-sequence-bindings.json` against
+`domain-sequence-bindings.schema.json`. Every plan/action/parameter key must be
+explicit; never infer accounts or argument values. Domain-mode Crucible writes
+`resolved-domain-sequences.json`, validates it against
+`resolved-domain-sequences.schema.json`, replays each byte-exact seed before
+exploratory fuzzing, and feeds the same corpus into the subsequent run. Today
+this is executable for argument-only plans. Because Crucible action seeds do
+not encode account identity, a plan containing account bindings stays blocked
+until those bindings are materialized in the generated fixture; never report
+that plan as replayed merely because its handler arguments were encoded.
+
 ```bash
 <skill-root>/scripts/check-domain-artifacts.sh \
   --dossier .qed/audit/<timestamp>/domain-dossier.json \
   --manifest .qed/audit/<timestamp>/run-manifest.json \
   --handoff .qed/audit/<timestamp>/spec-handoff.json \
-  --sequences .qed/audit/<timestamp>/domain-sequences.json
+  --sequences .qed/audit/<timestamp>/domain-sequences.json \
+  --bindings .qed/audit/<timestamp>/domain-sequence-bindings.json \
+  --resolved-sequences .qed/audit/<timestamp>/resolved-domain-sequences.json
 ```
 
 Read only the relevant detailed references:

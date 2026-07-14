@@ -1146,6 +1146,43 @@ fn classify_property_constant_body_is_unary() {
     );
 }
 
+#[test]
+fn environment_constraints_retain_typed_temporal_metadata() {
+    let src = format!(
+        "{}{}",
+        CLASSIFY_SPEC_HEAD,
+        r#"
+environment rate_change {
+  mutates balance : U64
+  constraint state.balance >= old(state.balance)
+  constraint state.balance > 0
+}
+"#
+    );
+    let spec = parse_str(&src).expect("parse environment constraints");
+    let environment = &spec.environments[0];
+
+    assert_eq!(environment.constraints.len(), 2);
+    assert_eq!(environment.constraints_rust.len(), 2);
+    assert_eq!(environment.typed_constraints.len(), 2);
+    for (index, typed) in environment.typed_constraints.iter().enumerate() {
+        assert_eq!(typed.lean_expr, environment.constraints[index]);
+        assert_eq!(typed.rust_expr, environment.constraints_rust[index]);
+        assert!(
+            typed.tree.is_some(),
+            "constraint {index} must retain its tree"
+        );
+    }
+    assert_eq!(
+        environment.typed_constraints[0].class,
+        crate::check::PropertyClass::Binary
+    );
+    assert_eq!(
+        environment.typed_constraints[1].class,
+        crate::check::PropertyClass::Unary
+    );
+}
+
 // ========================================================================
 // RustOpts.state_mode + inside_old round-trips
 // ========================================================================
