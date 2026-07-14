@@ -1259,9 +1259,10 @@ fn emit_action_fn(
         .iter()
         .filter_map(|h| h.post_status.as_deref())
         .collect();
-    let is_init = op.pre_status.as_deref().is_some_and(|pre| {
-        check::state_name_is_nonexistent(pre) || !produced_states.contains(pre)
-    });
+    let is_init = op
+        .pre_status
+        .as_deref()
+        .is_some_and(|pre| check::state_name_is_nonexistent(pre) || !produced_states.contains(pre));
     for account in &pda_accounts {
         let seeds = pda_seeds_for_account(spec, account).unwrap_or_default();
         let local = pda_local_ident(&account.name);
@@ -1718,12 +1719,14 @@ handler withdraw (amount : U64) : State.Active -> State.Active {
         let with_abs =
             emit_harness_with_deploy(&spec, InvariantMode::Both, None, Some(abs)).unwrap();
         assert!(
-            with_abs.contains(
-                "ctx.add_program(&program_id, \"/tmp/proj/target/deploy/counter.so\")"
-            ),
+            with_abs
+                .contains("ctx.add_program(&program_id, \"/tmp/proj/target/deploy/counter.so\")"),
             "{with_abs}"
         );
-        assert!(!with_abs.contains("../.."), "no relative prefix when absolute");
+        assert!(
+            !with_abs.contains("../.."),
+            "no relative prefix when absolute"
+        );
         syn::parse_file(&with_abs).expect("absolute harness is valid Rust");
 
         // Without one, fall back to the layout-relative path.
@@ -1798,7 +1801,10 @@ handler liquidate (amount : U64) : State.Active -> State.Active {
             harness.contains("Placeholder empty-seed derivation"),
             "{harness}"
         );
-        assert!(harness.contains("cannot resolve PDA seed `borrower`"), "{harness}");
+        assert!(
+            harness.contains("cannot resolve PDA seed `borrower`"),
+            "{harness}"
+        );
         syn::parse_file(&harness).expect("degraded harness must still be valid Rust");
     }
 
@@ -1816,7 +1822,9 @@ handler liquidate (amount : U64) : State.Active -> State.Active {
         };
         let err = emit_harness(&spec, InvariantMode::Spec, Some(&overlay))
             .expect_err("overlay generation must reject unresolved seeds");
-        assert!(err.to_string().contains("cannot resolve PDA seed `borrower`"));
+        assert!(err
+            .to_string()
+            .contains("cannot resolve PDA seed `borrower`"));
     }
 
     /// Lifecycle spec exercising both directions of the init gate: `Init` is
@@ -1855,8 +1863,15 @@ handler resume : State.Inactive -> State.Active {
     fn init_gate_follows_state_machine_structure_not_name_list() {
         let spec = parse_str(LIFECYCLE_PDA_SPEC).expect("parse spec");
         let mut out = String::new();
-        emit_fixture_impl(&mut out, &spec, "LifecycleFixture", InvariantMode::Spec, None, None)
-            .expect("emit");
+        emit_fixture_impl(
+            &mut out,
+            &spec,
+            "LifecycleFixture",
+            InvariantMode::Spec,
+            None,
+            None,
+        )
+        .expect("emit");
         let action_of = |name: &str| {
             let start = out.find(&format!("pub fn action_{name}")).expect(name);
             let end = out[start..]
@@ -1918,8 +1933,15 @@ handler resume : State.Inactive -> State.Active {
     fn emits_action_fn_per_handler() {
         let spec = parse_str(MINIMAL_SPEC).expect("parse");
         let mut out = String::new();
-        emit_fixture_impl(&mut out, &spec, "CounterFixture", InvariantMode::Spec, None, None)
-            .expect("emit");
+        emit_fixture_impl(
+            &mut out,
+            &spec,
+            "CounterFixture",
+            InvariantMode::Spec,
+            None,
+            None,
+        )
+        .expect("emit");
         assert!(out.contains("#[fuzz_fixture]"));
         assert!(out.contains("impl CounterFixture {"));
         assert!(out.contains("pub fn setup() -> Self"));

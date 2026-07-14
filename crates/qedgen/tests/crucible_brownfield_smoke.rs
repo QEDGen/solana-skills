@@ -506,12 +506,22 @@ fn budget_zero_bindings_compile_overlay_and_remap_account_literals() {
         r#"{ "authority": "fixture:authority" }"#,
         r#"{ "authority": "fixture:recipient", "recipient": "fixture:authority" }"#,
     );
-    assert_ne!(patched, bindings_src, "fixture bindings lost the account map");
+    assert_ne!(
+        patched, bindings_src,
+        "fixture bindings lost the account map"
+    );
     std::fs::write(&bindings_path, patched).expect("patch bindings");
 
     let harness = tmp.path().join("domain/domain_boundary");
     let out = Command::new(qedgen_bin())
-        .args(["probe", "--fuzz", "0", "--crucible-mode", "domain", "--spec"])
+        .args([
+            "probe",
+            "--fuzz",
+            "0",
+            "--crucible-mode",
+            "domain",
+            "--spec",
+        ])
         .arg(program.join("domain.qedspec"))
         .arg("--domain-dossier")
         .arg(program.join("domain-dossier.json"))
@@ -537,8 +547,7 @@ fn budget_zero_bindings_compile_overlay_and_remap_account_literals() {
     .expect("resolved doc parses");
     let action = &resolved["plans"][0]["forward"][0];
     assert_eq!(resolved["plans"][0]["id"], "domain-limit-accept");
-    let bound: std::collections::BTreeMap<&str, &serde_json::Value> = action
-        ["resolved_bindings"]
+    let bound: std::collections::BTreeMap<&str, &serde_json::Value> = action["resolved_bindings"]
         .as_array()
         .expect("resolved_bindings array")
         .iter()
@@ -604,7 +613,14 @@ fn domain_mode_does_not_regenerate_existing_harness() {
 
     let run = || {
         let out = Command::new(qedgen_bin())
-            .args(["probe", "--fuzz", "0", "--crucible-mode", "domain", "--spec"])
+            .args([
+                "probe",
+                "--fuzz",
+                "0",
+                "--crucible-mode",
+                "domain",
+                "--spec",
+            ])
             .arg(program.join("domain.qedspec"))
             .arg("--domain-dossier")
             .arg(program.join("domain-dossier.json"))
@@ -745,11 +761,8 @@ fn live_domain_boundary_protocol_misses_and_domain_finds() {
     // Durable replay evidence: the one-action `domain-limit-accept` plan with
     // all four provenance digests pinned.
     let report: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(
-            program
-                .join("fuzz/domain_boundary/.qedgen/domain-replay-report.json"),
-        )
-        .expect("domain replay report"),
+        &std::fs::read(program.join("fuzz/domain_boundary/.qedgen/domain-replay-report.json"))
+            .expect("domain replay report"),
     )
     .expect("parse domain replay report");
     assert_eq!(report["records"][0]["plan_id"], "domain-limit-accept");

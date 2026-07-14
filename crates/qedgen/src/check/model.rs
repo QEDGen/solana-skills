@@ -281,7 +281,8 @@ pub const QEDGEN_UNSUPPORTED_SUM_MARKER: &str = "QEDGEN_UNSUPPORTED_SUM";
 
 /// Does this Rust-rendered expression require harness-level scaffolding?
 pub fn rust_expr_is_unsupported(rust_expr: &str) -> bool {
-    rust_expr.contains(QEDGEN_UNSUPPORTED_MARKER) || rust_expr.contains(QEDGEN_UNSUPPORTED_SUM_MARKER)
+    rust_expr.contains(QEDGEN_UNSUPPORTED_MARKER)
+        || rust_expr.contains(QEDGEN_UNSUPPORTED_SUM_MARKER)
 }
 
 /// Does this lifecycle state NAME denote account nonexistence (the account
