@@ -684,6 +684,7 @@ fn wallet_tracked_pubkey_exprs(
 /// closures matter on non-signer writables too.
 fn account_tracked_pubkey_exprs(
     spec: &ParsedSpec,
+    op: &ParsedHandler,
     mode: InvariantMode,
     force_fixture_accounts: bool,
 ) -> Vec<String> {
@@ -692,14 +693,10 @@ fn account_tracked_pubkey_exprs(
         for name in collect_brownfield_keypair_names(spec) {
             exprs.push(format!("self.{}.pubkey()", brownfield_keypair_ident(&name)));
         }
-        let has_pda = spec
-            .handlers
-            .iter()
-            .any(|h| h.accounts.iter().any(|a| a.pda_seeds.is_some()));
-        if has_pda {
-            // Re-derived the same way as the per-action accounts literal and
-            // the setup vault creation (empty-seed placeholder).
-            exprs.push("Pubkey::find_program_address(&[], &self.program_id).0".to_string());
+        for account in &op.accounts {
+            if account.pda_seeds.is_some() {
+                exprs.push(pda_local_ident(&account.name));
+            }
         }
     } else {
         for sig in collect_signer_idents(spec) {
@@ -707,6 +704,164 @@ fn account_tracked_pubkey_exprs(
         }
     }
     exprs
+}
+
+fn pda_local_ident(account_name: &str) -> String {
+    format!("__pda_{}", brownfield_keypair_ident(account_name))
+}
+
+fn pda_seeds_for_account<'a>(
+    spec: &'a ParsedSpec,
+    account: &'a crate::check::ParsedHandlerAccount,
+) -> Option<&'a [String]> {
+    let inline = account.pda_seeds.as_deref()?;
+    spec.pdas
+        .iter()
+        .find(|pda| pda.name == account.name)
+        .or_else(|| {
+            (inline.len() == 1)
+                .then(|| spec.pdas.iter().find(|pda| pda.name == inline[0]))
+                .flatten()
+        })
+        .map(|pda| pda.seeds.as_slice())
+        .or(Some(inline))
+}
+
+fn is_integer_type(ty: &str) -> bool {
+    matches!(
+        ty,
+        "U8" | "U16" | "U32" | "U64" | "U128" | "I8" | "I16" | "I32" | "I64" | "I128"
+    )
+}
+
+fn render_pda_seed_expr(
+    spec: &ParsedSpec,
+    op: &ParsedHandler,
+    seed: &str,
+    account_overlay: Option<&crate::probe::domain_account_overlay::AccountBindingOverlay>,
+) -> Result<String> {
+    if let Some(hex) = seed.strip_prefix("bytes:") {
+        if hex.len() % 2 != 0 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            bail!(
+                "Crucible PDA seed `{seed}` in handler `{}` has an invalid encoded byte literal",
+                op.name
+            );
+        }
+        let bytes = hex
+            .as_bytes()
+            .chunks(2)
+            .map(|pair| format!("0x{}", std::str::from_utf8(pair).unwrap_or("00")))
+            .collect::<Vec<_>>();
+        return Ok(format!("&[{}]", bytes.join(", ")));
+    }
+    if (seed.starts_with('"') && seed.ends_with('"'))
+        || (seed.starts_with('\'') && seed.ends_with('\''))
+    {
+        return Ok(format!("b{}", seed));
+    }
+
+    if let Some(account) = op.accounts.iter().find(|account| account.name == seed) {
+        if account.pda_seeds.is_some() {
+            return Ok(format!("{}.as_ref()", pda_local_ident(&account.name)));
+        }
+        if let Some(pubkey) = &account.default_pubkey {
+            return Ok(format!("solana_pubkey::pubkey!(\"{pubkey}\").as_ref()"));
+        }
+        let target = account_overlay_target(account_overlay, &op.name, &account.name)?;
+        return Ok(format!(
+            "self.{}.pubkey().as_ref()",
+            brownfield_keypair_ident(target)
+        ));
+    }
+
+    if let Some((_, ty)) = op.takes_params.iter().find(|(name, _)| name == seed) {
+        return Ok(if is_integer_type(ty) {
+            format!("{seed}.to_le_bytes().as_ref()")
+        } else if ty == "Bool" {
+            format!("&[{seed} as u8]")
+        } else if ty == "Pubkey" {
+            // Pubkey action arguments are deliberately fixed because Crucible
+            // cannot derive Arbitrary for Solana's Address wrapper. Match the
+            // `instruction::X` literal emitted below.
+            "Pubkey::default().as_ref()".to_string()
+        } else {
+            bail!(
+                "Crucible PDA seed `{seed}` in handler `{}` has unsupported argument type `{ty}`",
+                op.name
+            )
+        });
+    }
+
+    let state_fields = rust_codegen_util::resolve_state_fields(spec);
+    if let Some((_, ty)) = state_fields.iter().find(|(name, _)| name == seed) {
+        return Ok(if is_integer_type(ty) {
+            format!("self.{seed}.to_le_bytes().as_ref()")
+        } else if ty == "Bool" {
+            format!("&[self.{seed} as u8]")
+        } else if ty == "Pubkey" {
+            format!("self.{seed}.as_ref()")
+        } else {
+            bail!(
+                "Crucible PDA seed `{seed}` in handler `{}` has unsupported state-field type `{ty}`",
+                op.name
+            )
+        });
+    }
+
+    bail!(
+        "Crucible cannot resolve PDA seed `{seed}` in handler `{}`; bind it as an account, instruction argument, state field, or literal",
+        op.name
+    )
+}
+
+fn ordered_pda_accounts<'a>(
+    spec: &ParsedSpec,
+    op: &'a ParsedHandler,
+) -> Result<Vec<&'a crate::check::ParsedHandlerAccount>> {
+    fn visit<'a>(
+        spec: &ParsedSpec,
+        op: &'a ParsedHandler,
+        account: &'a crate::check::ParsedHandlerAccount,
+        visiting: &mut std::collections::BTreeSet<String>,
+        emitted: &mut std::collections::BTreeSet<String>,
+        ordered: &mut Vec<&'a crate::check::ParsedHandlerAccount>,
+    ) -> Result<()> {
+        if emitted.contains(&account.name) {
+            return Ok(());
+        }
+        if !visiting.insert(account.name.clone()) {
+            bail!(
+                "Crucible PDA derivation cycle in handler `{}` at account `{}`",
+                op.name,
+                account.name
+            );
+        }
+        for seed in pda_seeds_for_account(spec, account).unwrap_or_default() {
+            if let Some(dependency) = op
+                .accounts
+                .iter()
+                .find(|candidate| candidate.name == *seed && candidate.pda_seeds.is_some())
+            {
+                visit(spec, op, dependency, visiting, emitted, ordered)?;
+            }
+        }
+        visiting.remove(&account.name);
+        emitted.insert(account.name.clone());
+        ordered.push(account);
+        Ok(())
+    }
+
+    let mut visiting = std::collections::BTreeSet::new();
+    let mut emitted = std::collections::BTreeSet::new();
+    let mut ordered = Vec::new();
+    for account in op
+        .accounts
+        .iter()
+        .filter(|account| account.pda_seeds.is_some())
+    {
+        visit(spec, op, account, &mut visiting, &mut emitted, &mut ordered)?;
+    }
+    Ok(ordered)
 }
 
 fn header(spec: &ParsedSpec, mode: InvariantMode) -> String {
@@ -969,23 +1124,6 @@ fn emit_fixture_impl(
             ));
         }
     }
-    // PDA-derived accounts (e.g. a program-owned vault) are created owned
-    // by *the program* + funded, so the program can debit them — the
-    // realistic drain shape. The brownfield placeholder derives every PDA
-    // from empty seeds (`find_program_address(&[], program_id)`), so they
-    // collapse to a single address; create it once. Matches the per-action
-    // `accounts(...)` literal, which derives the same address.
-    let has_pda_account = spec
-        .handlers
-        .iter()
-        .any(|h| h.accounts.iter().any(|a| a.pda_seeds.is_some()));
-    if is_brownfield && has_pda_account {
-        out.push_str("        let __pda = Pubkey::find_program_address(&[], &program_id).0;\n");
-        out.push_str(
-            "        ctx.create_account()\n            .pubkey(__pda)\n            .lamports(100_000_000_000)\n            .owner(program_id)\n            .create()\n            .unwrap();\n",
-        );
-    }
-
     let state_fields = rust_codegen_util::resolve_state_fields(spec);
     let mutable_fields = rust_codegen_util::field_refs(state_fields);
 
@@ -1062,6 +1200,34 @@ fn emit_action_fn(
         op.name, params
     ));
 
+    // Derive every PDA from its declared seed tuple. Dependencies between
+    // PDAs are topologically ordered, and non-init PDAs are materialized on
+    // demand so argument-dependent addresses can vary across fuzz actions.
+    // Init transitions must leave the target absent for the program/system
+    // instruction to create it.
+    let pda_accounts = ordered_pda_accounts(spec, op)?;
+    let is_init = matches!(
+        op.pre_status.as_deref(),
+        Some("Uninitialized" | "Empty" | "Inactive")
+    );
+    for account in &pda_accounts {
+        let seeds = pda_seeds_for_account(spec, account).unwrap_or_default();
+        let seed_exprs = seeds
+            .iter()
+            .map(|seed| render_pda_seed_expr(spec, op, seed, account_overlay))
+            .collect::<Result<Vec<_>>>()?;
+        let local = pda_local_ident(&account.name);
+        out.push_str(&format!(
+            "        let {local} = Pubkey::find_program_address(&[{}], &self.program_id).0;\n",
+            seed_exprs.join(", ")
+        ));
+        if !is_init {
+            out.push_str(&format!(
+                "        if self.ctx.svm.get_account(&{local}).is_none() {{\n            self.ctx.create_account()\n                .pubkey({local})\n                .lamports(100_000_000_000)\n                .owner(self.program_id)\n                .create()\n                .unwrap();\n        }}\n"
+            ));
+        }
+    }
+
     // The Anchor `.call(...).accounts(...).send()` chain. `.send()` returns
     // `Result<TxOutcome, ...>`; both layers collapse into one bool —
     // transport errors count as failed actions, same as program errors.
@@ -1090,7 +1256,7 @@ fn emit_action_fn(
     let force_fixture_accounts =
         account_overlay.is_some_and(|overlay| !overlay.handlers.is_empty());
     let wallet_exprs = wallet_tracked_pubkey_exprs(spec, mode, force_fixture_accounts);
-    let account_exprs = account_tracked_pubkey_exprs(spec, mode, force_fixture_accounts);
+    let account_exprs = account_tracked_pubkey_exprs(spec, op, mode, force_fixture_accounts);
     let use_wallet = want_protocol && !wallet_exprs.is_empty();
     let use_account = want_protocol && !account_exprs.is_empty();
     if use_wallet {
@@ -1122,9 +1288,7 @@ fn emit_action_fn(
     // Crucible's generated struct OMITS fixed-pubkey accounts (auto-filled
     // by the macro) and snake-cases the remaining field names. So:
     //   - `default_pubkey` → SKIP (Crucible auto-fills).
-    //   - PDA (`pda_seeds`) → placeholder `find_program_address(&[], ..).0`;
-    //     it compiles and the program's PDA check rejects the call — fine
-    //     signal for a crash-first fuzzer.
+    //   - PDA (`pda_seeds`) → the seed-derived local emitted above.
     //   - Otherwise → `self.<keypair_ident>.pubkey()`.
     // Empty list (no IDL, no spec accounts block) → `todo!()` agent-fill.
     if op.accounts.is_empty() {
@@ -1139,7 +1303,7 @@ fn emit_action_fn(
                 continue;
             }
             let value = if acc.pda_seeds.is_some() {
-                "Pubkey::find_program_address(&[], &self.program_id).0".to_string()
+                pda_local_ident(&acc.name)
             } else {
                 let target = account_overlay_target(account_overlay, &op.name, &acc.name)?;
                 format!("self.{}.pubkey()", brownfield_keypair_ident(target))
@@ -1732,6 +1896,85 @@ handler bump (delta : U64) : State.Active -> State.Active {
         assert!(harness.contains("authority: self.recipient.pubkey(),"));
         assert!(harness.contains("recipient: self.authority.pubkey(),"));
         assert!(harness.contains(".signers(&[&*self.recipient])"));
+    }
+
+    #[test]
+    fn derives_nested_pdas_from_literal_account_and_numeric_argument_seeds() {
+        let src = r#"spec SeededVault
+program_id "11111111111111111111111111111111"
+
+pda pool ["pool", authority]
+pda ticket ["ticket", pool, lane]
+
+type State
+  | Active of { balance : U64 }
+
+type Error
+  | E
+
+handler withdraw (lane : U64) : State.Active -> State.Active {
+  accounts { ticket : writable, pda [ticket]
+             pool : writable, pda [pool]
+             authority : signer, writable }
+  effect { balance := balance }
+}
+"#;
+        let spec = parse_str(src).expect("parse");
+        let harness =
+            emit_harness(&spec, InvariantMode::Protocol, None).expect("emit protocol harness");
+        let pool = harness
+            .find("let __pda_pool = Pubkey::find_program_address")
+            .expect("pool derivation");
+        let ticket = harness
+            .find("let __pda_ticket = Pubkey::find_program_address")
+            .expect("ticket derivation");
+        assert!(
+            pool < ticket,
+            "dependency PDA must be derived first:\n{harness}"
+        );
+        assert!(harness.contains(
+            "let __pda_pool = Pubkey::find_program_address(&[b\"pool\", self.authority.pubkey().as_ref()], &self.program_id).0;"
+        ));
+        assert!(harness.contains(
+            "let __pda_ticket = Pubkey::find_program_address(&[b\"ticket\", __pda_pool.as_ref(), lane.to_le_bytes().as_ref()], &self.program_id).0;"
+        ));
+        assert!(harness.contains("ticket: __pda_ticket,"));
+        assert!(harness.contains("pool: __pda_pool,"));
+        assert!(harness.contains("__pda_ticket,") && harness.contains("__pda_pool,"));
+        assert!(!harness.contains("find_program_address(&[],"));
+    }
+
+    #[test]
+    fn init_handler_derives_pda_without_precreating_it() {
+        let src = r#"spec Initializer
+program_id "11111111111111111111111111111111"
+
+pda vault ["vault", payer]
+
+type State
+  | Uninitialized
+  | Active of { value : U64 }
+
+type Error
+  | E
+
+handler initialize : State.Uninitialized -> State.Active {
+  accounts { payer : signer, writable
+             vault : writable, pda [vault] }
+  effect { value := 0 }
+}
+"#;
+        let spec = parse_str(src).expect("parse");
+        let harness =
+            emit_harness(&spec, InvariantMode::Protocol, None).expect("emit protocol harness");
+        assert!(harness.contains(
+            "let __pda_vault = Pubkey::find_program_address(&[b\"vault\", self.payer.pubkey().as_ref()], &self.program_id).0;"
+        ));
+        assert!(harness.contains("vault: __pda_vault,"));
+        assert!(
+            !harness.contains("get_account(&__pda_vault).is_none()"),
+            "init target must remain absent before dispatch:\n{harness}"
+        );
     }
 
     #[test]

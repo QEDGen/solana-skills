@@ -119,7 +119,12 @@ handler arguments. The collapse step also rejects same-action fixture aliasing
 and fixture targets whose signer, writable, program, account-type,
 authority/owner, or imported namespace constraints cannot satisfy the source
 account. Default-address and PDA accounts remain generator-managed and must not
-appear in the overlay.
+appear in the overlay. For PDAs, QEDGen retains Anchor IDL seed tuples and
+derives each action's address from literal, account, numeric argument, and
+supported state-field seeds. Dependent PDAs are ordered before their consumers;
+unresolved or cyclic derivations stop codegen instead of falling back to an
+empty-seed address. Non-init PDAs are materialized on demand, while init targets
+remain absent for the instruction to create.
 
 ```bash
 <skill-root>/scripts/check-domain-artifacts.sh \

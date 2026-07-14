@@ -306,9 +306,11 @@ fn handlers_with_args_from_idl(idl_text: &str) -> Vec<(String, Vec<(String, Stri
 /// - `isSigner` / `isWritable` → flags.
 /// - `defaultValue.kind: "publicKeyValueNode"` → base58 in `default_pubkey`
 ///   so the emitter renders `solana_pubkey::pubkey!("...")`.
-/// - `defaultValue.kind: "pdaValueNode"` → `pda_seeds: Some(vec![])` so the
-///   emitter derives via `Pubkey::find_program_address` (currently a
-///   placeholder; seed-aware derivation TODO).
+/// - Anchor `pda.seeds` → literal/account/argument seed expressions retained
+///   for seed-aware `Pubkey::find_program_address` codegen.
+/// - `defaultValue.kind: "pdaValueNode"` → `pda_seeds: Some(vec![])` when
+///   Codama does not carry the derivation inline (an empty seed tuple is also
+///   a valid Anchor PDA and remains distinguishable only from the IDL shape).
 fn accounts_per_handler_from_idl(
     idl_text: &str,
 ) -> std::collections::HashMap<String, Vec<ParsedHandlerAccount>> {
@@ -355,12 +357,11 @@ fn accounts_per_handler_from_idl(
                     .unwrap_or(false);
                 let default = a.get("defaultValue");
                 let default_kind = default.and_then(|d| d.get("kind")).and_then(|k| k.as_str());
-                let (default_pubkey, pda_seeds, is_program) = if a.get("pda").is_some() {
+                let (default_pubkey, pda_seeds, is_program) = if let Some(pda) = a.get("pda") {
                     // Anchor ≥0.30 marks a PDA account with a top-level
-                    // `"pda"` object (seeds live there). The emitter derives
-                    // it via `find_program_address` and the harness setup
-                    // creates it program-owned.
-                    (None, Some(vec![]), false)
+                    // `"pda"` object. Preserve its seed tuple so Crucible
+                    // derives the same address as the deployed program.
+                    (None, Some(render_idl_pda_seeds(pda)), false)
                 } else {
                     match default_kind {
                         Some("publicKeyValueNode") => {
@@ -402,6 +403,40 @@ fn accounts_per_handler_from_idl(
         out.insert(snake, accounts);
     }
     out
+}
+
+/// Render Anchor 0.30 PDA seed nodes into the same compact representation
+/// used by `ParsedHandlerAccount::pda_seeds`: quoted UTF-8 literals and bare
+/// account/argument identifiers. Unknown constants remain explicit instead
+/// of being silently converted into an empty seed tuple.
+fn render_idl_pda_seeds(pda: &serde_json::Value) -> Vec<String> {
+    pda.get("seeds")
+        .and_then(|seeds| seeds.as_array())
+        .into_iter()
+        .flatten()
+        .map(|seed| {
+            if let Some(path) = seed.get("path").and_then(|path| path.as_str()) {
+                return path.split('.').next_back().unwrap_or(path).to_string();
+            }
+            if let Some(bytes) = seed.get("value").and_then(|value| value.as_array()) {
+                let bytes: Vec<u8> = bytes
+                    .iter()
+                    .filter_map(|byte| byte.as_u64().and_then(|n| u8::try_from(n).ok()))
+                    .collect();
+                if let Ok(text) = String::from_utf8(bytes.clone()) {
+                    return format!("\"{}\"", text.escape_default());
+                }
+                return format!(
+                    "bytes:{}",
+                    bytes
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>()
+                );
+            }
+            "__qedgen_unsupported_const_seed".to_string()
+        })
+        .collect()
 }
 
 fn camel_to_snake(name: &str) -> String {
@@ -813,6 +848,37 @@ version = "0.1.0"
             .map(|h| h.name.as_str())
             .collect();
         assert_eq!(handler_names, vec!["create_plan", "update_plan"]);
+    }
+
+    #[test]
+    fn anchor_idl_pda_seeds_survive_brownfield_synthesis() {
+        let idl = r#"{
+  "metadata": { "name": "seeded_vault" },
+  "instructions": [{
+    "name": "withdraw",
+    "accounts": [
+      { "name": "authority", "signer": true },
+      { "name": "vault", "writable": true, "pda": { "seeds": [
+        { "kind": "const", "value": [118, 97, 117, 108, 116] },
+        { "kind": "account", "path": "authority" },
+        { "kind": "arg", "path": "laneId" }
+      ] } }
+    ],
+    "args": [{ "name": "laneId", "type": "u64" }]
+  }]
+}"#;
+        let accounts = accounts_per_handler_from_idl(idl);
+        let vault = accounts["withdraw"]
+            .iter()
+            .find(|account| account.name == "vault")
+            .expect("vault account");
+        assert_eq!(
+            vault
+                .pda_seeds
+                .as_ref()
+                .map(|seeds| seeds.iter().map(String::as_str).collect::<Vec<_>>()),
+            Some(vec!["\"vault\"", "authority", "laneId"])
+        );
     }
 
     #[test]
