@@ -97,8 +97,22 @@ nothing about the classes it cannot observe; treat it as a fast win for the
 state-diff-observable shapes, not a general crash lane, and never let an
 empty fuzz pass downgrade or reject findings in the unobservable classes.
 
-**Default tier — gated on the auto-chain (brownfield needs a skeleton
-spec first).**
+**Default tier — run at the earliest supported entry point and re-run when the
+invariant set becomes stronger.**
+
+Crucible has three entry points:
+
+1. **Protocol mode, Phase 1:** start immediately when runtime metadata exposes a
+   spec-less harness, including an IDL where the runtime requires one. This
+   covers only the mechanical state-diff suite above.
+2. **Skeleton mode, Phase 1:** start after literal, source-anchored clauses are
+   merged into `skeleton.qedspec`. Do not wait for a finding or user interview.
+3. **Domain mode, Phase 3:** re-run after the user ratifies derived/semantic
+   invariants. Enable cross-handler sequences and domain counterexamples.
+
+If ordinary probe failed because the QEDGen executable, build, runtime adapter,
+or instruction metadata is unavailable, mark Crucible blocked. Continue the
+read-driven dossier and preserve the intended command for resumption.
 
 ---
 
@@ -250,6 +264,9 @@ fired finding — same event-driven rule as Mollusk:
 > Found `<category>` [SEV]: <one-line>. Repro at <crucible.json#fN>.
 > Continuing.
 
+This is the Phase 1 skeleton-mode run. It starts as soon as Step 2 completes;
+the first MED+ finding is not a prerequisite.
+
 ### Step 4 — risk and mitigation
 
 **The risk:** auto-ratification encodes wrong invariants → Crucible
@@ -272,6 +289,15 @@ requirement is what keeps the false-positive rate low.
 **When in doubt, defer.** A cluster that doesn't meet the bar goes to
 Phase 2's interview, where the user ratifies it directly. Phase 3
 re-runs Crucible with the user-ratified skeleton.
+
+### Step 5 — enrich and re-run after ratification
+
+Merge user-ratified domain equations, lifecycle edges, authority capabilities,
+external assumptions, and intentional bounds into the skeleton. Preserve
+rejected candidates with rationale outside the executable spec. Launch a new
+bounded background `--fuzz` run and identify it as **domain mode** in artifacts
+and the report. Do not reuse a dry skeleton-mode result as evidence that the
+stronger domain properties hold.
 
 ---
 

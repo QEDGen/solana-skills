@@ -31,11 +31,29 @@ finding's JSON or markdown, (b) look up the construct family below,
 (c) draft the spec snippet, (d) emit it into the user's `.qedspec`
 naming the finding it codifies, (e) move to the next finding.
 
+Before converting individual findings, author the specification in three
+layers:
+
+1. **Structural:** accounts, identities, PDAs, handlers, authorization, and
+   lifecycle shape derivable from code.
+2. **Domain:** user-ratified economic equations, units, rounding, temporal
+   rules, authority capabilities, and external assumptions from the domain
+   dossier.
+3. **Regression:** the finding-derived guards in the families below.
+
+Do not claim the protocol is specified merely because every known finding maps
+to a guard. Record missing or pending domain properties explicitly.
+
 The agent fills placeholder slots from code-derivable facts
 (handler name, field name, error code symbol). Interview the user
 **only** for intent-level decisions per
 `[[feedback_audit_interview_intent_not_sites]]` — never for facts
 the auditor already extracted.
+
+Validate each layer separately. Structural checks establish harness shape;
+domain checks define intended behavior; regression checks prove that known bug
+shapes fail. Run Crucible again after the domain layer is ratified, even if the
+structural skeleton already had a dry fuzz result.
 
 ---
 

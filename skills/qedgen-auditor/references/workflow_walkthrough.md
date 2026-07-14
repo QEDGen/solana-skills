@@ -81,6 +81,11 @@ ratification candidates):
   `depositor` (any signer, owns shares).
 - **Threats:** compromised user signer; permissionless drain.
 
+Producer B records these with asset flows, units, candidate equations, external
+assumptions, source anchors, and confidence in
+`.qed/audit/2026-05-17-1432/domain-dossier.md`. This work continues unchanged
+if Producer A's ordinary probe fails or returns no sites.
+
 ### T+0:05 — Producer A emits 14 Mollusk repros in parallel
 
 One message, 14 Writes:
@@ -268,6 +273,10 @@ MED+ repro has fired, the agent offers the user the audit→specify
 handoff with the pitch *"I helped find so many bugs, now let's get
 you to specify them so they never come back."*
 
+The handoff authors structural contracts first, ratified domain properties
+second, and finding-derived regression guards third. Finding coverage alone is
+not treated as protocol-spec completeness.
+
 ---
 
 ## What this walkthrough shows (pattern-match literally)
@@ -281,8 +290,9 @@ you to specify them so they never come back."*
 - **Phase 2 fires on the first MED+**, not on probe completion. If
   Phase 1 finishes dry, Phase 2 still fires with the "deepening needs
   your input" framing.
-- **Phase 3 re-prioritizes by ratified intent**, not by re-running
-  the probe. Same catalogue, new sort order.
+- **Phase 3 re-prioritizes by ratified intent**, not by re-running the ordinary
+  pattern probe. It does launch a new Crucible domain-mode fuzz run against the
+  enriched spec; a dry skeleton run cannot stand in for this stronger pass.
 - **Stop is event-driven**: user / budget / N consecutive units
   without a fire. Not a category checklist.
 

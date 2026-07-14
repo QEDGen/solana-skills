@@ -15,7 +15,9 @@ Require:
 
 - canonical auditor skill directory;
 - corpus manifest containing repository, audited commit, program root, runtime,
-  setup/test commands, sanitization rules, and labeled findings;
+  setup/test commands, sanitization rules, labeled findings, and optional
+  domain expectations (units, equations, lifecycle, authorities, and external
+  assumptions);
 - explicit benchmark output directory;
 - audit profile and run count;
 - exact discovery and judge model identifiers when the venue permits selection.
@@ -150,6 +152,24 @@ Emit per-run and union metrics:
 - total wall time and, when exposed, token/cost usage;
 - exact skill version, commit, model identifiers, reasoning settings, and
   QEDGen version.
+
+When the corpus entry includes domain expectations, also emit:
+
+- domain-invariant candidate recall before user ratification;
+- false-ratification rate (unsupported candidates promoted to executable spec);
+- unit/scale identification accuracy;
+- structural, domain, and regression-layer spec completeness;
+- Crucible entry-point selection and whether domain mode re-ran after
+  ratification;
+- dry-fuzz overclaim count (claims inferred from an empty lane outside that
+  lane's observable coverage).
+
+Run a probe-failure variant for local or sanitized fixtures by disabling the
+ordinary probe while leaving source readable — set `QEDGEN_BIN` to a stub
+executable that exits nonzero so preflight reports QEDGen as missing. Require a completed domain
+dossier, explicit blocked-lane status, no clean-audit claim, and resumable
+verification commands. Score this separately from vulnerability recall so an
+intentional tooling fault is not counted as a missed finding.
 
 Do not count fixed ground truth as a miss. Do not count hypotheses as true
 positives. Report structural precision separately from confirmed precision.
