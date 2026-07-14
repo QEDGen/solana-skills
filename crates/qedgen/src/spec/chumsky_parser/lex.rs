@@ -67,6 +67,7 @@ pub(super) const KEYWORDS: &[&str] = &[
     "spec",
     "const",
     "type",
+    "dimension",
     "of",
     "handler",
     "property",

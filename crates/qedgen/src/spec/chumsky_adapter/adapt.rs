@@ -500,6 +500,15 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                 out.type_aliases
                     .push((ta.name.clone(), type_ref_to_string(&ta.target)));
             }
+            TopItem::Dimension(dimension) => {
+                let base = type_ref_to_string(&dimension.base);
+                out.type_aliases
+                    .push((dimension.name.clone(), base.clone()));
+                out.dimensions.push(crate::check::ParsedDimension {
+                    name: dimension.name.clone(),
+                    base,
+                });
+            }
             TopItem::ProgramId(pid) => {
                 out.program_id = Some(pid.clone());
             }

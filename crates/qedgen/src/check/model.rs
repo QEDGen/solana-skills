@@ -283,6 +283,12 @@ pub struct ParsedPda {
     pub seeds: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedDimension {
+    pub name: String,
+    pub base: String,
+}
+
 /// Event declaration from a qedspec block.
 #[derive(Debug, Clone)]
 pub struct ParsedEvent {
@@ -720,6 +726,9 @@ pub struct ParsedSpec {
     /// Stored as (alias_name, rendered_target). Target is `Fin[N]`, `Nat`,
     /// a record name, etc. — whatever `TypeRef` the source points at.
     pub type_aliases: Vec<(String, String)>,
+    /// Nominal numeric declarations. Each also appears in `type_aliases` so
+    /// codegen erases it to the declared integer ABI type.
+    pub dimensions: Vec<ParsedDimension>,
     /// Cover blocks (reachability properties).
     pub covers: Vec<ParsedCover>,
     /// Liveness properties (leads-to).

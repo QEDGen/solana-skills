@@ -102,7 +102,7 @@ records language gaps instead of flattening unsupported domain semantics into
 comments. For each `needs_authoring` domain clause, follow its
 `authoring.constructs`, parser-shaped `authoring.template`, and
 `authoring.notes`; each language gap states `current_language_support` so
-finite sums, floor/ceiling, lifecycle transitions, and authority guards are not
+finite sums, nominal dimensions, floor/ceiling, lifecycle transitions, and authority guards are not
 mistaken for missing syntax. Also require `domain-sequences.json` against
 `<skill-root>/schemas/domain-sequences.schema.json`. Use its ratified
 setup/forward/reverse/teardown plans as stateful coverage targets, but do not

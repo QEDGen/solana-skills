@@ -230,7 +230,7 @@ structural clauses, ratified domain facts that still need authoring, regression
 guards, and explicit language gaps. Every ratified domain clause carries
 construct names, a parser-shaped authoring template, and limitations; every
 language gap records what the current language can express so supported floor,
-ceiling, finite-sum, lifecycle, and authority patterns are not mislabeled as
+ceiling, finite-sum, nominal-dimension, lifecycle, and authority patterns are not mislabeled as
 documentary-only.
 It also writes `domain-sequences.json`: paired round trips and lifecycle
 setup/teardown coverage targets. Bind every unresolved account and argument

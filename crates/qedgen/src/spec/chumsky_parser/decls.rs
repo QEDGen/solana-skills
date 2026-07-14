@@ -148,6 +148,17 @@ pub(super) fn type_alias_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>
         .map(|(name, target)| TopItem::TypeAlias(TypeAliasDecl { name, target }))
 }
 
+// Nominal numeric dimension: `dimension Lamports = U64`.
+pub(super) fn dimension_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
+    kw("dimension")
+        .ignore_then(non_keyword_ident())
+        .then_ignore(wsc())
+        .then_ignore(just('='))
+        .then_ignore(wsc())
+        .then(type_ref())
+        .map(|(name, base)| TopItem::Dimension(DimensionDecl { name, base }))
+}
+
 // ADT variant: `| Name [= code] ["desc"] [of { fields }]`
 pub(super) fn variant<'a>() -> impl Parser<'a, &'a str, Variant, Err<'a>> + Clone {
     let code = just('=')

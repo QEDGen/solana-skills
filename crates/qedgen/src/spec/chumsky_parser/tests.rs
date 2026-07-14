@@ -490,6 +490,7 @@ fn parses_full_pool_spec() {
             TopItem::Environment(_) => "environment",
             TopItem::ProgramId(_) => "program_id",
             TopItem::TypeAlias(_) => "type_alias",
+            TopItem::Dimension(_) => "dimension",
             TopItem::Pubkey(_) => "pubkey",
             TopItem::Errors(_) => "errors",
             TopItem::Instruction(_) => "instruction",

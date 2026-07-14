@@ -397,9 +397,9 @@ fn domain_authoring_guidance(kind: &str, item: &serde_json::Value) -> serde_json
                 _ => "<rounding policy must be ratified>",
             };
             (
-                vec!["const", "requires", "mul_div_floor", "mul_div_ceil"],
-                format!("const <SCALE> = <ratified scale>\nlet <quantity> = {expression}"),
-                vec!["Floor and ceiling are executable today; nominal unit checking is not yet enforced by the type system."],
+                vec!["dimension", "const", "requires", "mul_div_floor", "mul_div_ceil"],
+                format!("dimension <Unit> = U64\nconst <SCALE> = <ratified scale>\nlet <quantity> = {expression}"),
+                vec!["Declare each ratified nominal unit with `dimension`; literals remain polymorphic, while cross-unit arithmetic and comparisons fail typechecking."],
             )
         }
         "paired_operation" => (
@@ -418,9 +418,9 @@ fn domain_authoring_guidance(kind: &str, item: &serde_json::Value) -> serde_json
             vec!["Choose dotted `auth` only when one signer is unambiguous; otherwise write the explicit key equality."],
         ),
         "economic_equation" => (
-            vec!["property", "invariant", "sum", "mul_div_floor", "mul_div_ceil"],
-            "property <equation_name> : <ratified equation> preserved_by [<handlers>]".to_string(),
-            vec!["Finite sums and floor/ceiling arithmetic are executable; dimensional compatibility still requires review."],
+            vec!["dimension", "property", "invariant", "sum", "mul_div_floor", "mul_div_ceil"],
+            "dimension <Unit> = U64\nproperty <equation_name> : <ratified equation> preserved_by [<handlers>]".to_string(),
+            vec!["Declare nominal units before authoring the equation; finite sums, floor/ceiling arithmetic, and dimensional compatibility are executable."],
         ),
         "external_assumption" => (
             vec!["environment", "constraint", "old"],
@@ -440,13 +440,6 @@ fn domain_language_gaps(kind: &str, item: &serde_json::Value) -> Vec<&'static st
     let mut gaps = Vec::new();
     match kind {
         "quantity" => {
-            let unit = item
-                .get("unit")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("unknown");
-            if !matches!(unit, "dimensionless" | "count" | "boolean") {
-                gaps.push("dimensional_unit_types");
-            }
             match item
                 .get("rounding")
                 .and_then(serde_json::Value::as_str)
@@ -457,7 +450,7 @@ fn domain_language_gaps(kind: &str, item: &serde_json::Value) -> Vec<&'static st
                 _ => gaps.push("rounding_policy_unresolved"),
             }
         }
-        "economic_equation" => gaps.push("dimensional_unit_types"),
+        "economic_equation" => {}
         "external_assumption" => gaps.push("external_environment_model"),
         _ => {}
     }
@@ -467,7 +460,7 @@ fn domain_language_gaps(kind: &str, item: &serde_json::Value) -> Vec<&'static st
 fn current_language_support(reason: &str) -> &'static str {
     match reason {
         "dimensional_unit_types" => {
-            "Numeric scales can be constants, but the type checker does not enforce nominal units or dimensional compatibility."
+            "Declare `dimension Name = U64` (or another integer base); the checker enforces nominal compatibility and codegen erases the name to its integer ABI."
         }
         "rounding_mode_nearest" => {
             "`mul_div_floor` and `mul_div_ceil` are executable; nearest and tie-breaking modes have no builtin."
@@ -1003,10 +996,6 @@ mod tests {
         );
         assert_eq!(
             handoff["language_gaps"][0]["reason"],
-            "dimensional_unit_types"
-        );
-        assert_eq!(
-            handoff["language_gaps"][1]["reason"],
             "rounding_policy_unresolved"
         );
         assert!(handoff["layers"]["domain"][0]["authoring"]["template"]
@@ -1041,10 +1030,7 @@ mod tests {
     #[test]
     fn quantity_handoff_distinguishes_supported_rounding_from_true_gaps() {
         let floor = serde_json::json!({ "unit": "lamports", "rounding": "floor" });
-        assert_eq!(
-            domain_language_gaps("quantity", &floor),
-            vec!["dimensional_unit_types"]
-        );
+        assert!(domain_language_gaps("quantity", &floor).is_empty());
         let dimensionless = serde_json::json!({ "unit": "dimensionless", "rounding": "ceil" });
         assert!(domain_language_gaps("quantity", &dimensionless).is_empty());
         let nearest = serde_json::json!({ "unit": "count", "rounding": "nearest" });
@@ -1056,7 +1042,7 @@ mod tests {
         assert!(guidance["template"]
             .as_str()
             .unwrap()
-            .contains("mul_div_floor"));
+            .contains("dimension <Unit> = U64"));
     }
 
     #[test]

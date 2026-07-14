@@ -363,7 +363,7 @@ fn build_path(p: &a::Path, cx: &TreeCx, shadow: &[String]) -> TreePath {
     // Leaf type from the environment: state-rooted paths walk fields /
     // records / Map subscripts; bare params resolve through the handler
     // signature. Everything else stays untyped.
-    let ty = path_leaf_type(p, cx.env).map(ty_of_type_ref);
+    let ty = path_leaf_type(p, cx.env).map(|ty| ty_of_type_ref(ty, cx.env));
 
     TreePath {
         root: p.root.clone(),
@@ -388,13 +388,13 @@ fn path_leaf_type<'e>(p: &a::Path, env: &TypeEnv<'e>) -> Option<&'e a::TypeRef> 
 /// stay consistent; DSL-only forms `Ty` doesn't model natively (`Fin[N]`,
 /// parameterized types) land in `Custom` and are classified by
 /// `expr_tree::ty_num_kind`.
-fn ty_of_type_ref(t: &a::TypeRef) -> crate::mir::Ty {
+fn ty_of_type_ref(t: &a::TypeRef, env: &TypeEnv<'_>) -> crate::mir::Ty {
     match t {
-        a::TypeRef::Named(n) => crate::mir::parse_ty(n),
+        a::TypeRef::Named(n) => crate::mir::parse_ty(&env.resolve_alias_name(n)),
         a::TypeRef::Param(head, tail) => crate::mir::Ty::Custom(format!("{} {}", head, tail)),
         a::TypeRef::Map { bound, inner } => crate::mir::Ty::Map {
             capacity: bound.clone(),
-            value: Box::new(ty_of_type_ref(inner)),
+            value: Box::new(ty_of_type_ref(inner, env)),
         },
         a::TypeRef::Fin { bound } => crate::mir::Ty::Custom(format!("Fin[{}]", bound)),
     }

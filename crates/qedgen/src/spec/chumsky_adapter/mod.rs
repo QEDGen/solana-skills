@@ -148,6 +148,10 @@ impl<'a> TypeEnv<'a> {
                     env.aliases
                         .insert(ta.name.clone(), type_ref_to_string(&ta.target));
                 }
+                TopItem::Dimension(dimension) => {
+                    env.aliases
+                        .insert(dimension.name.clone(), type_ref_to_string(&dimension.base));
+                }
                 // Ghosts render as state fields: `state.<ghost>` must resolve
                 // in properties / invariants / `requires` / `ensures` and in
                 // other ghosts' update RHS. They are rendering-only here — the
@@ -187,7 +191,7 @@ impl<'a> TypeEnv<'a> {
     /// Resolve a source-language TypeRef to its Lean `Kind`.
     fn type_ref_kind(&self, t: &a::TypeRef) -> Kind {
         match t {
-            a::TypeRef::Named(n) => match n.as_str() {
+            a::TypeRef::Named(n) => match self.resolve_alias_name(n).as_str() {
                 "U8" | "U16" | "U32" | "U64" | "U128" => Kind::Nat,
                 "I8" | "I16" | "I32" | "I64" | "I128" => Kind::Int,
                 "Bool" => Kind::Bool,
@@ -198,6 +202,18 @@ impl<'a> TypeEnv<'a> {
             a::TypeRef::Fin { .. } => Kind::Nat, // Fin n coerces to Nat for arithmetic.
             a::TypeRef::Param(_, _) => Kind::Other,
         }
+    }
+
+    fn resolve_alias_name(&self, name: &str) -> String {
+        let mut resolved = name.trim().to_string();
+        let mut seen = std::collections::BTreeSet::new();
+        while seen.insert(resolved.clone()) {
+            let Some(next) = self.aliases.get(&resolved) else {
+                break;
+            };
+            resolved = next.trim().to_string();
+        }
+        resolved
     }
 
     /// Shared walking core for [`Self::path_kind`] / [`Self::path_type_name`]
@@ -415,7 +431,7 @@ impl<'a> TypeEnv<'a> {
         };
         match t {
             a::TypeRef::Named(n) => matches!(
-                n.as_str(),
+                self.resolve_alias_name(n).as_str(),
                 "U16" | "U32" | "U64" | "U128" | "I16" | "I32" | "I64" | "I128" | "Bool"
             ),
             _ => false,

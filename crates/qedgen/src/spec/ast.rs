@@ -73,6 +73,9 @@ pub enum TopItem {
     ProgramId(String),
     /// `type Name = <type_ref>` — type alias, expands to its target.
     TypeAlias(TypeAliasDecl),
+    /// `dimension Name = U64` — nominal numeric type. Runtime ABI erases to
+    /// the integer base while the checker preserves `Name` across arithmetic.
+    Dimension(DimensionDecl),
     /// `pubkey NAME [u64, u64, u64, u64]` — 4-chunk U64 pubkey literal (sBPF sugar).
     Pubkey(PubkeyDecl),
     /// `errors [Name = code "desc", ...]` — top-level error list (sBPF sugar,
@@ -263,6 +266,12 @@ pub enum SbpfFlowKind {
 pub struct TypeAliasDecl {
     pub name: String,
     pub target: TypeRef,
+}
+
+#[derive(Debug, Clone)]
+pub struct DimensionDecl {
+    pub name: String,
+    pub base: TypeRef,
 }
 
 // ============================================================================

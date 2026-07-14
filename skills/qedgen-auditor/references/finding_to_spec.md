@@ -72,6 +72,11 @@ Finite aggregate conservation is executable when the binder resolves to
 inside `old(...)` for pre/post properties. Unbounded sums remain a visible
 language gap. `mul_div_floor` and `mul_div_ceil` are executable rounding
 constructs; only unsupported policies such as ties-to-even remain documentary.
+Nominal numeric units are executable with `dimension Lamports = U64` (or
+another integer base). Use the dimension name on state fields and handler
+parameters; literals adopt the surrounding unit, while incompatible unit
+arithmetic, comparisons, and assignments fail during spec checking. Dimensions
+erase to their declared integer base at generated-code ABI boundaries.
 
 ---
 
