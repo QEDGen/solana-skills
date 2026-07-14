@@ -76,8 +76,14 @@ arithmetic, CPIs, and documented invariants.
 
 Read only the relevant detailed references:
 
-- [audit handbook](references/audit-handbook.md): category predicates,
-  runtime-specific patterns, cross-cutting passes, and composition cookbook.
+- [category catalog](references/category-catalog.md): per-category
+  predicates, runtime-specific patterns, and the composition cookbook.
+- [manual review passes](references/manual-review-passes.md): the detailed
+  investigation workflow when the compact steps here need expansion.
+- [report and grading](references/report-and-grading.md): classification
+  rules, the severity grading procedure, and the report format.
+- [audit handbook](references/audit-handbook.md): adversarial mindset, tool
+  surface, and the reproducer-only contract.
 - [trust-surface primitives](references/trust_surface_primitives.md): only when
   a small dependency supplies a security-critical primitive.
 - [data-structure dependency invariants](references/data_structure_dep_invariants.md):
