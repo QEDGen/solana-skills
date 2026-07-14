@@ -387,7 +387,7 @@ fn harvest_crucible_findings_from(
     ctx: &FuzzProbeContext,
     crash_dir: &Path,
 ) -> Result<Vec<Finding>> {
-    let crashes = collect_crash_files(&crash_dir).unwrap_or_default();
+    let crashes = collect_crash_files(crash_dir).unwrap_or_default();
     if !crashes.is_empty() {
         // tmin failure is non-fatal — raw crashes are still valid
         // reproducers, we just lose minimization.
