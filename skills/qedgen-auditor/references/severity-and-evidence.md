@@ -32,8 +32,8 @@ second primitive that is absent or unreachable in the audited code. Do not
 downgrade impact merely because exploitation is inconvenient; instead record
 the gate and reflect it in priority.
 
-To grade consistently, apply the four-step procedure in the
-[audit handbook](audit-handbook.md) ("Severity grading
+To grade consistently, apply the four-step procedure in
+[report-and-grading.md](report-and-grading.md) ("Severity grading
 (attacker-capability rubric)") to every finding: rate the impact ceiling
 with preconditions assumed true, record gates as qualifiers rather than
 discounts, downgrade only for no articulable attacker capability or genuine

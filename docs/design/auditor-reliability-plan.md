@@ -2,9 +2,11 @@
 
 > **Status (2026-07): implemented, with deltas.** This is the
 > pre-implementation plan, kept for rationale. As shipped: the category and
-> manual-pass material landed as a single `references/audit-handbook.md`
-> (not the `category-catalog.md` / `manual-review-passes.md` named in §11),
-> and `references/model-selection.md` was added; the compile gate is a
+> manual-pass material landed as `references/category-catalog.md` and
+> `references/manual-review-passes.md` (per §11) plus
+> `references/report-and-grading.md`, routed from a slim
+> `references/audit-handbook.md`, and `references/model-selection.md` was
+> added; the compile gate is a
 > synchronous `--compile` flag rather than an async handle; the CLI-contract
 > check asserts clap field definitions in `cli.rs`, not full schema or
 > snippet validation.
