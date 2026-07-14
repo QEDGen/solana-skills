@@ -55,6 +55,14 @@ domain checks define intended behavior; regression checks prove that known bug
 shapes fail. Run Crucible again after the domain layer is ratified, even if the
 structural skeleton already had a dry fuzz result.
 
+`qedgen ratify` writes `spec-handoff.json` beside the dossier. Treat
+`disposition: emitted` as executable only when the generated `.qedspec`
+contains the matching `// provenance: domain-candidate <id>` line.
+`needs_authoring` means intent is ratified but no executable clause exists.
+Resolve every `language_gaps[]` entry by extending the language or retaining
+an explicit documentary property with a manual lane; never silently count it
+as covered.
+
 ---
 
 ## How each entry reads

@@ -82,9 +82,11 @@ ratification candidates):
 - **Threats:** compromised user signer; permissionless drain.
 
 Producer B records these with asset flows, units, candidate equations, external
-assumptions, source anchors, and confidence in
-`.qed/audit/2026-05-17-1432/domain-dossier.md`. This work continues unchanged
-if Producer A's ordinary probe fails or returns no sites.
+assumptions, source anchors, and confidence in the canonical
+`.qed/audit/2026-05-17-1432/domain-dossier.json`, then renders the paired
+Markdown. It also updates `run-manifest.json` as lanes start, finish, or block.
+This work continues unchanged if Producer A's ordinary probe fails or returns
+no sites.
 
 ### T+0:05 — Producer A emits 14 Mollusk repros in parallel
 

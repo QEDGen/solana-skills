@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "schema_uri": "https://qedgen.dev/schemas/auditor/audit-run-manifest-v1.schema.json",
+  "audit_id": "audit_probe_failure",
+  "status": "tooling-blocked",
+  "target": {
+    "program_root": "programs/vault",
+    "runtime": "unknown",
+    "mode": "spec-less",
+    "spec": null,
+    "source_commit": null
+  },
+  "tool_versions": {},
+  "lanes": [
+    {
+      "name": "source-review",
+      "status": "passed",
+      "reason": null,
+      "resume_command": null,
+      "started_at": null,
+      "finished_at": null,
+      "artifact_paths": ["domain-dossier.json", "domain-interview.json"]
+    },
+    {
+      "name": "ordinary-probe",
+      "status": "blocked",
+      "reason": "runtime adapter is unsupported",
+      "resume_command": "qedgen probe --program programs/vault --emit-spec-candidates --audit-dir .qed/audit/retry",
+      "started_at": null,
+      "finished_at": null,
+      "artifact_paths": []
+    },
+    {
+      "name": "crucible-domain",
+      "status": "blocked",
+      "reason": "ratified executable domain assertions are not available yet",
+      "resume_command": "qedgen probe --fuzz 300 --crucible-mode domain --spec vault.qedspec --domain-dossier domain-dossier.json",
+      "started_at": null,
+      "finished_at": null,
+      "artifact_paths": ["domain-dossier.json"]
+    }
+  ],
+  "artifacts": {
+    "domain_dossier_json": "domain-dossier.json",
+    "domain_dossier_markdown": "domain-dossier.md",
+    "domain_interview": "domain-interview.json",
+    "ratified_intent": null,
+    "spec_handoff": null,
+    "report": null,
+    "suppressions": null
+  }
+}

@@ -513,8 +513,10 @@ output format in [report-and-grading.md](report-and-grading.md).
 
    - Write the full audit report to `.qed/findings/audit-<timestamp>.md`.
    - Write the source-cited domain dossier to
-     `.qed/audit/<timestamp>/domain-dossier.md`, including rejected and pending
-     candidates and blocked verification lanes.
+     `.qed/audit/<timestamp>/domain-dossier.json` plus a Markdown rendering,
+     including rejected and pending candidates.
+   - Write `.qed/audit/<timestamp>/run-manifest.json`; update lane status,
+     artifacts, blocked reasons, and resume commands throughout the audit.
    - Write `.qed/probe-suppress.toml` for auto-detected false positives.
    - Reproducers live under `target/qedgen-repros/audit/<finding-id>.rs`
      (ephemeral; don't commit).

@@ -6,8 +6,12 @@ or compilation is blocked.
 
 ## Output: domain dossier
 
-Write `.qed/audit/<timestamp>/domain-dossier.md` and retain source citations for
-every candidate. Organize it into six sections:
+Write `.qed/audit/<timestamp>/domain-dossier.json`, validate it against
+`../schemas/domain-dossier.schema.json`, and render
+`.qed/audit/<timestamp>/domain-dossier.md` for the user. The JSON is canonical;
+the Markdown must not introduce candidates or ratification decisions absent
+from it. Retain source citations for every candidate and organize both forms
+into six sections:
 
 1. **Asset-flow graph:** handler, asset, source, destination, nominal amount,
    delivered amount, fees, authority, and corresponding state mutation.
@@ -23,9 +27,23 @@ every candidate. Organize it into six sections:
 6. **External assumptions:** oracle semantics, token extensions, CPI guarantees,
    clock/epoch assumptions, keeper behavior, governance, and trusted libraries.
 
-For each entry record `candidate`, `source anchors`, `confidence` (`literal`,
+For each entry record a stable `id`, `candidate`, `source anchors`, `confidence` (`literal`,
 `derived`, or `semantic`), `ratification` (`auto`, `user`, `rejected`, or
 `pending`), and `verification lanes` (`manual`, `Mollusk`, `Miri`, `Crucible`).
+Never reuse an ID for a semantically different candidate within the same audit.
+When `qedgen probe --emit-spec-candidates --audit-dir <dir>` succeeds, it seeds
+the canonical JSON with `structural_candidates` derived from probe clusters.
+Preserve those IDs while enriching the six domain sections; do not copy them
+into new IDs merely because the confidence or ratification state changes.
+`qedgen ratify --audit-dir <dir>` persists `user`, `rejected`, and `bug`
+outcomes back onto those same candidates. Unanswered candidates remain
+`pending`; rejected and bug outcomes retain the interview rationale.
+
+Maintain `.qed/audit/<timestamp>/run-manifest.json` against
+`../schemas/audit-run-manifest.schema.json`. It is the canonical status of
+source review, ordinary probe, compilation, Mollusk, Miri, and each Crucible
+entry point. A blocked lane records both why it is blocked and the exact command
+that resumes it.
 
 ## Extraction procedure
 
@@ -87,7 +105,7 @@ totals.
 ## Probe-failure behavior
 
 When ordinary probe or compilation fails, finish the dossier and record the
-blocked lane and reason. Continue manual authority, lifecycle, accounting,
+blocked lane, reason, and resume command in the run manifest. Continue manual authority, lifecycle, accounting,
 paired-operation, and intent-drift passes. Draft specs as `pending verification`
 and retain commands needed to resume. When tooling recovers, validate syntax,
 run targeted Mollusk/Miri tests, then run the applicable Crucible entry point.

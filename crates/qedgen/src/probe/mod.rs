@@ -21,6 +21,8 @@ pub(crate) mod arithmetic_symbol_probe;
 pub(crate) mod cluster;
 pub(crate) mod crucible_brownfield;
 pub(crate) mod crucible_probe;
+pub(crate) mod domain_extract;
+pub(crate) mod domain_interview;
 pub(crate) mod handler_intent;
 pub(crate) mod lifecycle_probe;
 pub(crate) mod paired_validator_probe;

@@ -4,6 +4,7 @@
 //! `main.rs` (v3.0 prep). `use crate::*` pulls in the crate-root
 //! re-export hub (the `crate::<module>` aliases these helpers reach).
 
+use crate::probe::{domain_extract, domain_interview};
 use crate::*;
 use anyhow::{ensure, Result};
 use std::path::{Path, PathBuf};
@@ -48,7 +49,8 @@ pub(crate) fn note_sbpf_skip(artifact: &str) {
 }
 
 /// Materialize the audit working set (`interview.md`, `clusters.json`,
-/// `skeleton.qedspec`) under `dir` — shared by the Pinocchio (run.rs),
+/// `skeleton.qedspec`, domain dossier seed, and run manifest) under `dir` —
+/// shared by the Pinocchio (run.rs),
 /// Anchor, and Native probe paths, which previously each carried this
 /// block inline. `lenient_skeleton`: the Anchor path falls back to a
 /// minimal stub when the structural adapter fails (non-standard
@@ -58,6 +60,7 @@ pub(crate) fn write_audit_working_set(
     prog_root: &Path,
     clusters: &[cluster::Cluster],
     framework: program_model::ProgramFramework,
+    dossier_runtime: &str,
     lenient_skeleton: bool,
 ) -> Result<()> {
     std::fs::create_dir_all(dir)?;
@@ -77,24 +80,382 @@ pub(crate) fn write_audit_working_set(
     // skeleton.qedspec — handler stubs only.
     let anchor_overrides = std::collections::HashMap::new();
     let adapter_config = adapt::AdapterConfig::new(&program_name, &anchor_overrides);
-    let skeleton = match adapt::render_skeleton_for_framework(framework, prog_root, adapter_config)
-    {
-        Ok(s) => s,
+    let adapter = adapt::adapter_for_framework(framework, adapter_config);
+    let model = match adapter.extract(prog_root) {
+        Ok(model) => Some(model),
         Err(e) if lenient_skeleton => {
             eprintln!(
                 "warning: program adapter failed ({}); writing minimal skeleton",
                 e
             );
-            format!(
-                "spec {}\n\ntype State | Init | Active\ntype Error | InvalidArgument\n",
-                program_name
-            )
+            None
         }
         Err(e) => return Err(e),
     };
+    let minimal_skeleton = || {
+        format!(
+            "spec {}\n\ntype State | Init | Active\ntype Error | InvalidArgument\n",
+            program_name
+        )
+    };
+    let skeleton = match model.as_ref() {
+        Some(model) => match adapter.render_spec(model) {
+            Ok(skeleton) => skeleton,
+            Err(e) if lenient_skeleton => {
+                eprintln!(
+                    "warning: program adapter render failed ({}); writing minimal skeleton",
+                    e
+                );
+                minimal_skeleton()
+            }
+            Err(e) => return Err(e),
+        },
+        None => minimal_skeleton(),
+    };
     std::fs::write(dir.join("skeleton.qedspec"), skeleton)?;
+    write_domain_artifact_seeds(
+        dir,
+        prog_root,
+        &program_name,
+        clusters,
+        dossier_runtime,
+        model.as_ref(),
+    )?;
     eprintln!("Wrote audit working set to {}", dir.display());
     Ok(())
+}
+
+/// Emit the machine-readable handoff that connects structural probe clusters
+/// to the read-driven domain pass. QEDGen owns only code-derived structural
+/// candidates here; semantic domain arrays intentionally start empty and the
+/// auditor fills them from source review before ratification.
+fn write_domain_artifact_seeds(
+    dir: &Path,
+    prog_root: &Path,
+    program_name: &str,
+    clusters: &[cluster::Cluster],
+    runtime: &str,
+    model: Option<&program_model::ProgramModel>,
+) -> Result<()> {
+    let run_name = dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("run");
+    let audit_id = stable_audit_id(&format!("{program_name}_{run_name}"));
+    let structural_candidates: Vec<serde_json::Value> = clusters
+        .iter()
+        .map(|candidate| {
+            let confidence = match candidate.confidence {
+                cluster::Confidence::High => "high",
+                cluster::Confidence::Medium => "medium",
+                cluster::Confidence::Low => "low",
+            };
+            serde_json::json!({
+                "id": candidate.id,
+                "kind": candidate.kind.as_str(),
+                "scope": candidate.scope.as_key(),
+                "summary": candidate.proto_clause_text,
+                "suggested_syntax": candidate.suggested_syntax,
+                "probe_confidence": confidence,
+                "ratification": "pending",
+                "rationale": null,
+                "finding_ids": candidate.finding_ids,
+                "evidence_count": candidate.evidence_count,
+            })
+        })
+        .collect();
+    let handlers: Vec<serde_json::Value> = model
+        .map(|model| {
+            model
+                .handlers
+                .iter()
+                .map(|handler| {
+                    let args: Vec<serde_json::Value> = handler
+                        .args
+                        .iter()
+                        .map(|arg| {
+                            serde_json::json!({
+                                "name": arg.name,
+                                "qedspec_type": arg.qedspec_type,
+                            })
+                        })
+                        .collect();
+                    serde_json::json!({
+                        "name": handler.name,
+                        "source_path": handler.source_path.as_ref().map(|path| path.display().to_string()),
+                        "accounts_type": handler.accounts_type,
+                        "args": args,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let source_facts = domain_extract::extract_program(prog_root)?;
+    let asset_flows: Vec<_> = source_facts
+        .asset_flows
+        .iter()
+        .map(|flow| {
+            let nominal_amount = flow
+                .quantity_references
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "pending:user".to_string());
+            serde_json::json!({
+                "id": flow.id,
+                "handler": flow.handler.as_deref().unwrap_or("unknown_handler"),
+                "asset": "token_or_lamports_pending",
+                "source": "pending:source_account",
+                "destination": "pending:destination_account",
+                "nominal_amount": nominal_amount,
+                "delivered_amount": null,
+                "fee_expression": null,
+                "authority": null,
+                "state_mutations": [],
+                "metadata": source_hint_metadata(&flow.source_span, &flow.claim_limit),
+            })
+        })
+        .collect();
+    let quantities: Vec<_> = source_facts
+        .quantities
+        .iter()
+        .map(|quantity| {
+            let unit = serde_json::to_value(&quantity.unit_hint)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .unwrap_or_else(|| "unknown".to_string());
+            serde_json::json!({
+                "id": quantity.id,
+                "symbol": quantity.identifier,
+                "unit": unit,
+                "scale": "pending:user",
+                "rounding": "unknown",
+                "valid_range": null,
+                "conversions": [],
+                "metadata": source_hint_metadata(&quantity.source_span, &quantity.claim_limit),
+            })
+        })
+        .collect();
+    let paired_operations: Vec<_> = source_facts
+        .paired_operations
+        .iter()
+        .map(|pair| {
+            let anchors: Vec<_> = pair.evidence.iter().map(source_anchor).collect();
+            serde_json::json!({
+                "id": pair.id,
+                "left_operation": pair.left_operation,
+                "right_operation": pair.right_operation,
+                "relationship": pair.relationship,
+                "left_handlers": pair.left_handlers,
+                "right_handlers": pair.right_handlers,
+                "metadata": {
+                    "confidence": "derived",
+                    "ratification": "pending",
+                    "rationale": pair.claim_limit,
+                    "source_anchors": anchors,
+                    "verification_lanes": ["manual", "crucible"]
+                }
+            })
+        })
+        .collect();
+
+    let dossier = serde_json::json!({
+        "schema_version": 1,
+        "schema_uri": "https://qedgen.dev/schemas/auditor/domain-dossier-v1.schema.json",
+        "audit_id": audit_id,
+        "target": {
+            "program_root": prog_root.display().to_string(),
+            "runtime": runtime,
+            "mode": "spec-less",
+            "spec": null,
+            "source_commit": null,
+        },
+        "handlers": handlers,
+        "structural_candidates": structural_candidates,
+        "asset_flows": asset_flows,
+        "quantities": quantities,
+        "paired_operations": paired_operations,
+        "lifecycle_edges": [],
+        "authority_capabilities": [],
+        "economic_equations": [],
+        "external_assumptions": [],
+    });
+    let dossier_json = format!("{}\n", serde_json::to_string_pretty(&dossier)?);
+    std::fs::write(dir.join("domain-dossier.json"), dossier_json)?;
+    let domain_questions = domain_interview::generate_questions(&dossier);
+    std::fs::write(
+        dir.join("domain-interview.json"),
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema_version": 1,
+                "questions": domain_questions,
+                "answers": []
+            }))?
+        ),
+    )?;
+    let mut domain_interview_md = String::from(
+        "# Domain intent interview\n\nAnswer only intent questions; source locations and code facts are already captured in `domain-dossier.json`. Record `confirm`, `reject`, or `bug` plus rationale in `domain-interview.json`.\n\n",
+    );
+    for question in &domain_questions {
+        domain_interview_md.push_str(&format!(
+            "## `{}`\n\n{}\n\n- Decision: pending\n- Rationale:\n\n",
+            question.candidate_id, question.prompt
+        ));
+    }
+    if domain_questions.is_empty() {
+        domain_interview_md.push_str("No pending domain candidates were extracted.\n");
+    }
+    std::fs::write(dir.join("domain-interview.md"), domain_interview_md)?;
+
+    let mut dossier_md = format!(
+        "# Domain dossier — {}\n\nCanonical data: `domain-dossier.json`.\n\n## Structural candidates\n\n| ID | Kind | Scope | Confidence | Summary |\n|---|---|---|---|---|\n",
+        program_name
+    );
+    for candidate in clusters {
+        let confidence = match candidate.confidence {
+            cluster::Confidence::High => "high",
+            cluster::Confidence::Medium => "medium",
+            cluster::Confidence::Low => "low",
+        };
+        let summary = candidate
+            .proto_clause_text
+            .replace('|', "\\|")
+            .replace('\n', " ");
+        dossier_md.push_str(&format!(
+            "| `{}` | `{}` | `{}` | {} | {} |\n",
+            candidate.id,
+            candidate.kind.as_str(),
+            candidate.scope.as_key(),
+            confidence,
+            summary
+        ));
+    }
+    dossier_md.push_str(
+        "\n## Asset flows\n\nPending source review.\n\n## Quantities and units\n\nPending source review.\n\n## Lifecycle\n\nPending source review.\n\n## Authority capabilities\n\nPending source review.\n\n## Economic equations\n\nPending user ratification.\n\n## External assumptions\n\nPending source review.\n",
+    );
+    std::fs::write(dir.join("domain-dossier.md"), dossier_md)?;
+
+    let manifest = serde_json::json!({
+        "schema_version": 1,
+        "schema_uri": "https://qedgen.dev/schemas/auditor/audit-run-manifest-v1.schema.json",
+        "audit_id": audit_id,
+        "status": "running",
+        "target": {
+            "program_root": prog_root.display().to_string(),
+            "runtime": runtime,
+            "mode": "spec-less",
+            "spec": null,
+            "source_commit": null,
+        },
+        "tool_versions": {},
+        "lanes": [
+            { "name": "source-review", "status": "not-run", "reason": null, "resume_command": null, "started_at": null, "finished_at": null, "artifact_paths": [] },
+            { "name": "ordinary-probe", "status": "passed", "reason": null, "resume_command": null, "started_at": null, "finished_at": null, "artifact_paths": ["clusters.json", "domain-dossier.json"] },
+            { "name": "compile", "status": "not-run", "reason": null, "resume_command": null, "started_at": null, "finished_at": null, "artifact_paths": [] },
+            { "name": "mollusk", "status": "not-run", "reason": null, "resume_command": null, "started_at": null, "finished_at": null, "artifact_paths": [] },
+            { "name": "miri", "status": "not-run", "reason": null, "resume_command": null, "started_at": null, "finished_at": null, "artifact_paths": [] },
+            { "name": "crucible-protocol", "status": "not-run", "reason": null, "resume_command": null, "started_at": null, "finished_at": null, "artifact_paths": [] },
+            { "name": "crucible-skeleton", "status": "not-run", "reason": null, "resume_command": null, "started_at": null, "finished_at": null, "artifact_paths": [] },
+            { "name": "crucible-domain", "status": "not-run", "reason": null, "resume_command": null, "started_at": null, "finished_at": null, "artifact_paths": [] }
+        ],
+        "artifacts": {
+            "domain_dossier_json": "domain-dossier.json",
+            "domain_dossier_markdown": "domain-dossier.md",
+            "ratified_intent": null,
+            "domain_interview": "domain-interview.json",
+            "spec_handoff": null,
+            "report": null,
+            "suppressions": null,
+        }
+    });
+    let manifest_json = format!("{}\n", serde_json::to_string_pretty(&manifest)?);
+    std::fs::write(dir.join("run-manifest.json"), manifest_json)?;
+    Ok(())
+}
+
+fn source_anchor(span: &domain_extract::SourceSpan) -> serde_json::Value {
+    serde_json::json!({
+        "path": span.path,
+        "line_start": span.start_line,
+        "line_end": span.end_line,
+        "symbol": null,
+        "excerpt": null,
+    })
+}
+
+fn source_hint_metadata(span: &domain_extract::SourceSpan, claim_limit: &str) -> serde_json::Value {
+    serde_json::json!({
+        "confidence": "derived",
+        "ratification": "pending",
+        "rationale": claim_limit,
+        "source_anchors": [source_anchor(span)],
+        "verification_lanes": ["manual", "crucible"]
+    })
+}
+
+pub(crate) fn dossier_runtime_label(runtime: &probe::Runtime) -> &'static str {
+    match runtime {
+        probe::Runtime::Anchor => "anchor",
+        probe::Runtime::Native => "native-rust",
+        probe::Runtime::Sbpf => "sbpf",
+        probe::Runtime::Quasar => "quasar",
+        probe::Runtime::QedgenCodegen => "qedgen-codegen",
+        probe::Runtime::Pinocchio => "pinocchio",
+        probe::Runtime::Unknown => "unknown",
+    }
+}
+
+/// Preserve source-derived domain artifacts when runtime-specific probing is
+/// unavailable. The dossier remains usable for manual review and intent
+/// ratification; the manifest makes the missing executable lane explicit.
+pub(crate) fn mark_ordinary_probe_blocked(
+    audit_dir: &Path,
+    reason: &str,
+    resume_command: &str,
+) -> Result<()> {
+    let path = audit_dir.join("run-manifest.json");
+    let mut manifest: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
+    manifest["status"] = serde_json::Value::String("tooling-blocked".to_string());
+    if let Some(lane) = manifest
+        .get_mut("lanes")
+        .and_then(serde_json::Value::as_array_mut)
+        .and_then(|lanes| {
+            lanes
+                .iter_mut()
+                .find(|lane| lane["name"] == "ordinary-probe")
+        })
+    {
+        lane["status"] = serde_json::Value::String("blocked".to_string());
+        lane["reason"] = serde_json::Value::String(reason.to_string());
+        lane["resume_command"] = serde_json::Value::String(resume_command.to_string());
+        lane["artifact_paths"] =
+            serde_json::json!(["domain-dossier.json", "domain-interview.json"]);
+    }
+    std::fs::write(
+        &path,
+        format!("{}\n", serde_json::to_string_pretty(&manifest)?),
+    )?;
+    Ok(())
+}
+
+fn stable_audit_id(program_name: &str) -> String {
+    let normalized: String = program_name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let normalized = normalized.trim_matches('_');
+    if normalized.is_empty() {
+        "audit_program".to_string()
+    } else {
+        format!("audit_{normalized}")
+    }
 }
 /// Redirect a `…/tests/kani_impl.rs` path to a sibling `…/src/kani_impl.rs`.
 /// Pinocchio Kani harnesses must live in the lib (`src/`) because
@@ -450,6 +811,7 @@ pub(crate) fn run_anchor_probe(
             prog_root,
             clusters_ref,
             program_model::ProgramFramework::Anchor,
+            dossier_runtime_label(&runtime_final),
             /*lenient_skeleton=*/ true,
         )?;
     }
@@ -495,6 +857,7 @@ pub(crate) fn run_native_probe(
             prog_root,
             clusters_ref,
             program_model::ProgramFramework::Native,
+            dossier_runtime_label(&runtime_final),
             /*lenient_skeleton=*/ false,
         )?;
     }
@@ -573,9 +936,11 @@ pub(crate) fn narrow_shank_handler(
 mod tests {
     use super::{
         expand_ci_template, format_lint_warning, redirect_kani_impl_to_src,
-        runtime_agnostic_findings,
+        runtime_agnostic_findings, write_audit_working_set,
     };
     use crate::check::{CompletenessWarning, Severity};
+    use crate::cluster::{cluster_protos, ClusterKind, ProtoClause};
+    use crate::program_model::ProgramFramework;
     use std::path::PathBuf;
 
     /// #196: the runtime-agnostic scanners fire on an ANCHOR-shaped crate —
@@ -609,6 +974,66 @@ pub fn process_transfer(ctx: Context<T>, current_ts: i64) -> Result<()> {
                 .any(|f| f.category_tag == "silent_success_arithmetic"),
             "agnostic scanner must fire on Anchor-shaped source; got {findings:#?}"
         );
+    }
+
+    #[test]
+    fn audit_working_set_seeds_domain_dossier_and_run_manifest() {
+        let root = tempfile::tempdir().unwrap();
+        let audit_dir = root.path().join("audit");
+        std::fs::create_dir_all(root.path().join("src")).unwrap();
+        std::fs::write(
+            root.path().join("src/lib.rs"),
+            "pub fn update_fee(fee_bps: u16) {}\n",
+        )
+        .unwrap();
+        let clusters = cluster_protos(vec![ProtoClause {
+            kind: ClusterKind::AccountSignerCheck,
+            handler: "update_fee".to_string(),
+            finding_id: "finding_fee_signer".to_string(),
+            evidence_text: "admin.is_signer".to_string(),
+        }]);
+
+        write_audit_working_set(
+            &audit_dir,
+            root.path(),
+            &clusters,
+            ProgramFramework::Native,
+            "native-rust",
+            false,
+        )
+        .unwrap();
+
+        let dossier: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(audit_dir.join("domain-dossier.json")).unwrap())
+                .unwrap();
+        assert_eq!(dossier["schema_version"], 1);
+        assert_eq!(
+            dossier["schema_uri"],
+            "https://qedgen.dev/schemas/auditor/domain-dossier-v1.schema.json"
+        );
+        assert_eq!(dossier["target"]["runtime"], "native-rust");
+        assert_eq!(dossier["handlers"][0]["name"], "update_fee");
+        assert_eq!(dossier["structural_candidates"][0]["id"], clusters[0].id);
+        assert_eq!(
+            dossier["structural_candidates"][0]["ratification"],
+            "pending"
+        );
+        assert_eq!(dossier["economic_equations"], serde_json::json!([]));
+
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(audit_dir.join("run-manifest.json")).unwrap())
+                .unwrap();
+        assert_eq!(manifest["status"], "running");
+        assert_eq!(
+            manifest["schema_uri"],
+            "https://qedgen.dev/schemas/auditor/audit-run-manifest-v1.schema.json"
+        );
+        assert!(manifest["lanes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|lane| lane["name"] == "ordinary-probe" && lane["status"] == "passed"));
+        assert!(audit_dir.join("domain-dossier.md").is_file());
     }
 
     #[test]

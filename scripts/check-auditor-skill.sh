@@ -79,6 +79,22 @@ for required in \
 done
 
 for required in \
+  "$skill_root/schemas/domain-dossier.schema.json" \
+  "$skill_root/schemas/audit-run-manifest.schema.json" \
+  "$skill_root/schemas/spec-handoff.schema.json" \
+  "$skill_root/scripts/check-domain-artifacts.sh"; do
+  if [[ ! -f "$required" ]]; then
+    echo "auditor domain artifact schema is missing: $required" >&2
+    fail=1
+  fi
+done
+
+if ! "$repo_root/scripts/check-auditor-domain-artifacts.sh" >/dev/null; then
+  echo "auditor domain artifact validation failed" >&2
+  fail=1
+fi
+
+for required in \
   'Asset-flow graph' \
   'Quantity and unit table' \
   'Lifecycle graph' \

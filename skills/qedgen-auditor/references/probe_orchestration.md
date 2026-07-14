@@ -112,7 +112,8 @@ Crucible has three entry points:
 
 If ordinary probe failed because the QEDGen executable, build, runtime adapter,
 or instruction metadata is unavailable, mark Crucible blocked. Continue the
-read-driven dossier and preserve the intended command for resumption.
+read-driven dossier and preserve the intended command for resumption in
+`run-manifest.json`.
 
 ---
 
@@ -209,11 +210,24 @@ Bash: qedgen probe --program <root> \
         --audit-dir .qed/audit/<ts>/
 ```
 
-Writes three files to the audit dir:
+Writes eight files to the audit dir:
 - `interview.md` — markdown checkboxes, one section per cluster.
 - `clusters.json` — full schema-v3 envelope.
 - `skeleton.qedspec` — pre-interview structural skeleton (handler
   stubs, no `requires` / `effect` bodies yet).
+- `domain-dossier.json` — canonical schema-v1 dossier seeded with stable
+  structural candidates plus conservative source-derived asset-flow, quantity,
+  paired-operation, and source-span hints; all inferred semantics remain pending.
+- `domain-dossier.md` — human-readable rendering of the dossier.
+- `domain-interview.json` — deterministic stable-ID questions and the canonical
+  answer array consumed by `qedgen ratify`.
+- `domain-interview.md` — readable rendering for file-driven review.
+- `run-manifest.json` — initial lane status; ordinary probe is complete and
+later verification lanes are resumable.
+
+`qedgen ratify` additionally writes `spec-handoff.json`, separating emitted
+structural clauses, ratified domain facts that still need authoring, regression
+guards, and explicit language gaps.
 
 ### Step 2 — auto-ratify *high-confidence* clusters
 

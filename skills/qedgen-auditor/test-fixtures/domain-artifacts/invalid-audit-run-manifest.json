@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "schema_uri": "https://qedgen.dev/schemas/auditor/audit-run-manifest-v1.schema.json",
+  "audit_id": "fee_vault_20260714",
+  "status": "tooling-blocked",
+  "target": {
+    "program_root": "programs/fee-vault",
+    "runtime": "anchor",
+    "mode": "spec-less"
+  },
+  "lanes": [
+    {
+      "name": "ordinary-probe",
+      "status": "blocked"
+    }
+  ],
+  "artifacts": {
+    "domain_dossier_json": ".qed/audit/fee_vault_20260714/domain-dossier.json",
+    "domain_dossier_markdown": ".qed/audit/fee_vault_20260714/domain-dossier.md",
+    "report": ".qed/findings/audit-fee_vault_20260714.md"
+  }
+}

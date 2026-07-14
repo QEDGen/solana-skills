@@ -88,6 +88,26 @@ ratification immediately; preserve it for spec drafting and later executable
 verification when blocked lanes recover. Read [domain invariant extraction](references/domain-invariant-extraction.md)
 before interviewing the user or drafting domain properties.
 
+Write both `.qed/audit/<timestamp>/domain-dossier.json` and its human-readable
+`.md` rendering. Validate the JSON against
+`<skill-root>/schemas/domain-dossier.schema.json`; use its stable candidate IDs
+in interviews, specs, findings, and fuzz results. Also maintain
+`.qed/audit/<timestamp>/run-manifest.json` against
+`<skill-root>/schemas/audit-run-manifest.schema.json`. Update each lane as it
+starts or finishes; blocked lanes require a concrete reason and exact resume
+command. After ratification, require `spec-handoff.json` against
+`<skill-root>/schemas/spec-handoff.schema.json`. It separates structural,
+domain, and regression layers, links clauses to stable provenance IDs, and
+records language gaps instead of flattening unsupported domain semantics into
+comments. Validate the artifacts with:
+
+```bash
+<skill-root>/scripts/check-domain-artifacts.sh \
+  --dossier .qed/audit/<timestamp>/domain-dossier.json \
+  --manifest .qed/audit/<timestamp>/run-manifest.json \
+  --handoff .qed/audit/<timestamp>/spec-handoff.json
+```
+
 Read only the relevant detailed references:
 
 - [category catalog](references/category-catalog.md): per-category
@@ -193,8 +213,9 @@ Write the full report to `.qed/findings/audit-<timestamp>.md`. Reproducers stay
 ephemeral under `target/`. Write suppression rules only for stable,
 machine-detectable false positives.
 
-Give the report header a run status: `completed`, `build-blocked` (source
-review finished but executable evidence was unavailable), or
+Give the report header a run status: `completed`, `build-blocked` (the program
+did not compile), `tooling-blocked` (QEDGen, metadata, simulator, or another
+verification lane was unavailable while source review continued), or
 `policy-interfered` (a venue or provider policy stopped, truncated, or
 redirected the analysis). If an audit worker halts mid-run — refusal,
 truncation, or silent stop — the run is `policy-interfered`: report what was
@@ -209,6 +230,9 @@ Order the digest:
 3. Specification gaps.
 4. Open hypotheses, clearly excluded from vulnerability totals.
 5. Suppressed count and emitted artifacts.
+
+Include the dossier JSON/Markdown and run manifest in the artifact footer. A
+blocked run must point to the manifest's resume commands.
 
 Every surfaced finding must include:
 

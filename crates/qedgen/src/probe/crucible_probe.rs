@@ -14,6 +14,201 @@ use std::time::Duration;
 use crate::crucible_gen::InvariantMode;
 use crate::probe::{Category, CrucibleCrashMetadata, Finding, Reproducer, Severity};
 
+const DOMAIN_FACT_ARRAYS: &[&str] = &[
+    "asset_flows",
+    "quantities",
+    "paired_operations",
+    "lifecycle_edges",
+    "authority_capabilities",
+    "economic_equations",
+    "external_assumptions",
+];
+
+/// Validate the domain handoff before Crucible claims semantic coverage.
+/// Only facts explicitly assigned to the Crucible lane participate. Every
+/// participating fact must be ratified, and an empty domain lane is blocked.
+/// If an adjacent run manifest exists, failures are persisted there so an
+/// audit remains resumable even though the fuzz process never starts.
+pub fn require_ratified_domain_facts(dossier_path: &Path, spec_path: &Path) -> Result<usize> {
+    let result = inspect_ratified_domain_facts(dossier_path);
+    if let Err(error) = &result {
+        let _ = mark_domain_lane_blocked(dossier_path, spec_path, &error.to_string());
+    }
+    result
+}
+
+/// Refuse a domain run whose spec compiles to no executable Crucible
+/// assertions. Ratified prose is valuable audit evidence, but it is not fuzz
+/// coverage until represented by a Rust-renderable invariant or property.
+pub fn require_executable_domain_assertions(
+    dossier_path: &Path,
+    spec_path: &Path,
+    assertion_count: usize,
+) -> Result<()> {
+    if assertion_count > 0 {
+        return Ok(());
+    }
+    let reason = "domain spec has no Rust-renderable linked invariants or properties; author executable assertions before domain fuzzing";
+    let _ = mark_domain_lane_blocked(dossier_path, spec_path, reason);
+    bail!(reason)
+}
+
+/// Clear this lane's previous readiness block once both the dossier and spec
+/// gates pass. This records readiness, not a successful fuzz result.
+pub fn mark_domain_lane_ready(dossier_path: &Path) -> Result<()> {
+    let Some(parent) = dossier_path.parent() else {
+        return Ok(());
+    };
+    let manifest_path = parent.join("run-manifest.json");
+    if !manifest_path.exists() {
+        return Ok(());
+    }
+    let mut manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest_path)?)?;
+    let lanes = manifest
+        .get_mut("lanes")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or_else(|| anyhow::anyhow!("run manifest has no lanes array"))?;
+    if let Some(lane) = lanes.iter_mut().find(|lane| {
+        lane.get("name").and_then(serde_json::Value::as_str) == Some("crucible-domain")
+    }) {
+        lane["status"] = serde_json::Value::String("queued".to_string());
+        lane["reason"] = serde_json::Value::Null;
+        lane["resume_command"] = serde_json::Value::Null;
+    } else {
+        lanes.push(serde_json::json!({
+            "name": "crucible-domain",
+            "status": "queued",
+            "reason": null,
+            "resume_command": null,
+            "started_at": null,
+            "finished_at": null,
+            "artifact_paths": [dossier_path.display().to_string()]
+        }));
+    }
+    let any_blocked = lanes.iter().any(|lane| lane["status"] == "blocked");
+    if !any_blocked && manifest["status"] == "tooling-blocked" {
+        manifest["status"] = serde_json::Value::String("running".to_string());
+    }
+    std::fs::write(
+        &manifest_path,
+        format!("{}\n", serde_json::to_string_pretty(&manifest)?),
+    )?;
+    Ok(())
+}
+
+fn inspect_ratified_domain_facts(dossier_path: &Path) -> Result<usize> {
+    let raw = std::fs::read_to_string(dossier_path)
+        .with_context(|| format!("reading domain dossier {}", dossier_path.display()))?;
+    let dossier: serde_json::Value = serde_json::from_str(&raw)
+        .with_context(|| format!("parsing domain dossier {}", dossier_path.display()))?;
+    if dossier
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        != Some(1)
+        || dossier
+            .get("schema_uri")
+            .and_then(serde_json::Value::as_str)
+            != Some("https://qedgen.dev/schemas/auditor/domain-dossier-v1.schema.json")
+    {
+        bail!(
+            "domain mode requires a canonical schema-v1 domain dossier; validate it with `check-domain-artifacts.sh --dossier {}`",
+            dossier_path.display()
+        );
+    }
+
+    let mut eligible = 0usize;
+    let mut pending = Vec::new();
+    for array_name in DOMAIN_FACT_ARRAYS {
+        let facts = dossier
+            .get(array_name)
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| anyhow::anyhow!("domain dossier is missing `{array_name}` array"))?;
+        for fact in facts {
+            let metadata = fact.get("metadata").ok_or_else(|| {
+                anyhow::anyhow!("domain fact in `{array_name}` is missing metadata")
+            })?;
+            let targets_crucible = metadata
+                .get("verification_lanes")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|lanes| lanes.iter().any(|lane| lane.as_str() == Some("crucible")));
+            if !targets_crucible {
+                continue;
+            }
+            eligible += 1;
+            let ratification = metadata
+                .get("ratification")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("missing");
+            if !matches!(ratification, "auto" | "user") {
+                pending.push(
+                    fact.get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("<missing-id>")
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    if eligible == 0 {
+        bail!(
+            "domain dossier has no facts assigned to the Crucible verification lane; ratify domain intent and add `crucible` to the selected facts' verification_lanes"
+        );
+    }
+    if !pending.is_empty() {
+        bail!(
+            "domain dossier has unratified Crucible facts: {}; resolve each to `auto` or `user` before domain fuzzing",
+            pending.join(", ")
+        );
+    }
+    Ok(eligible)
+}
+
+fn mark_domain_lane_blocked(dossier_path: &Path, spec_path: &Path, reason: &str) -> Result<()> {
+    let Some(parent) = dossier_path.parent() else {
+        return Ok(());
+    };
+    let manifest_path = parent.join("run-manifest.json");
+    if !manifest_path.exists() {
+        return Ok(());
+    }
+    let mut manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest_path)?)?;
+    manifest["status"] = serde_json::Value::String("tooling-blocked".to_string());
+    let lanes = manifest
+        .get_mut("lanes")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or_else(|| anyhow::anyhow!("run manifest has no lanes array"))?;
+    let resume = format!(
+        "qedgen probe --fuzz 300 --crucible-mode domain --spec {} --domain-dossier {}",
+        spec_path.display(),
+        dossier_path.display()
+    );
+    let lane = lanes.iter_mut().find(|lane| {
+        lane.get("name").and_then(serde_json::Value::as_str) == Some("crucible-domain")
+    });
+    let blocked = serde_json::json!({
+        "name": "crucible-domain",
+        "status": "blocked",
+        "reason": reason,
+        "resume_command": resume,
+        "started_at": null,
+        "finished_at": null,
+        "artifact_paths": [dossier_path.display().to_string()]
+    });
+    if let Some(lane) = lane {
+        *lane = blocked;
+    } else {
+        lanes.push(blocked);
+    }
+    std::fs::write(
+        &manifest_path,
+        format!("{}\n", serde_json::to_string_pretty(&manifest)?),
+    )?;
+    Ok(())
+}
+
 /// Per-crash `crucible tmin` cap — keeps minimization from eating the
 /// user's budget after a productive fuzz run.
 pub const TMIN_BUDGET_PER_CRASH: Duration = Duration::from_secs(30);
@@ -476,6 +671,151 @@ fn crucible_version() -> Option<String> {
 mod tests {
     use super::*;
     use crate::probe::{CrucibleActionRecord, CrucibleCrashMetadata};
+
+    fn domain_dossier(ratification: &str, lanes: &[&str]) -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": 1,
+            "schema_uri": "https://qedgen.dev/schemas/auditor/domain-dossier-v1.schema.json",
+            "asset_flows": [{
+                "id": "flow_deposit",
+                "metadata": {
+                    "ratification": ratification,
+                    "verification_lanes": lanes
+                }
+            }],
+            "quantities": [],
+            "paired_operations": [],
+            "lifecycle_edges": [],
+            "authority_capabilities": [],
+            "economic_equations": [],
+            "external_assumptions": []
+        })
+    }
+
+    #[test]
+    fn domain_mode_accepts_only_ratified_crucible_facts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dossier = tmp.path().join("domain-dossier.json");
+        std::fs::write(
+            &dossier,
+            serde_json::to_string(&domain_dossier("user", &["manual", "crucible"])).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            require_ratified_domain_facts(&dossier, Path::new("vault.qedspec")).unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn domain_mode_rejects_empty_crucible_lane() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dossier = tmp.path().join("domain-dossier.json");
+        std::fs::write(
+            &dossier,
+            serde_json::to_string(&domain_dossier("user", &["manual"])).unwrap(),
+        )
+        .unwrap();
+
+        let error = require_ratified_domain_facts(&dossier, Path::new("vault.qedspec"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no facts assigned to the Crucible"));
+    }
+
+    #[test]
+    fn domain_mode_persists_blocked_lane_for_pending_facts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dossier = tmp.path().join("domain-dossier.json");
+        std::fs::write(
+            &dossier,
+            serde_json::to_string(&domain_dossier("pending", &["crucible"])).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("run-manifest.json"),
+            serde_json::to_string(&serde_json::json!({
+                "status": "running",
+                "lanes": [{"name": "source-review", "status": "passed"}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let error = require_ratified_domain_facts(&dossier, Path::new("vault.qedspec"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("flow_deposit"));
+        let manifest: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.path().join("run-manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest["status"], "tooling-blocked");
+        let lane = manifest["lanes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|lane| lane["name"] == "crucible-domain")
+            .unwrap();
+        assert_eq!(lane["status"], "blocked");
+        assert!(lane["resume_command"]
+            .as_str()
+            .unwrap()
+            .contains("--crucible-mode domain"));
+    }
+
+    #[test]
+    fn domain_mode_rejects_ratified_prose_without_executable_assertions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dossier = tmp.path().join("domain-dossier.json");
+        std::fs::write(&dossier, "{}").unwrap();
+        std::fs::write(
+            tmp.path().join("run-manifest.json"),
+            r#"{"status":"running","lanes":[]}"#,
+        )
+        .unwrap();
+
+        let error = require_executable_domain_assertions(&dossier, Path::new("vault.qedspec"), 0)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no Rust-renderable"));
+        let manifest: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.path().join("run-manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest["lanes"][0]["name"], "crucible-domain");
+    }
+
+    #[test]
+    fn domain_mode_clears_previous_readiness_block() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dossier = tmp.path().join("domain-dossier.json");
+        std::fs::write(&dossier, "{}").unwrap();
+        std::fs::write(
+            tmp.path().join("run-manifest.json"),
+            serde_json::to_string(&serde_json::json!({
+                "status": "tooling-blocked",
+                "lanes": [{
+                    "name": "crucible-domain",
+                    "status": "blocked",
+                    "reason": "pending facts",
+                    "resume_command": "retry"
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        mark_domain_lane_ready(&dossier).unwrap();
+        let manifest: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.path().join("run-manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest["status"], "running");
+        assert_eq!(manifest["lanes"][0]["status"], "queued");
+        assert!(manifest["lanes"][0]["reason"].is_null());
+    }
     use serde_json::json;
 
     /// Real `.meta.json` from `crucible run` on Crucible's bundled escrow

@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "schema_uri": "https://qedgen.dev/schemas/auditor/spec-handoff-v1.schema.json",
+  "spec_path": "",
+  "layers": {
+    "structural": [],
+    "domain": [{ "candidate_id": "qty_fee_amount", "disposition": "emitted", "verification_lanes": ["pretend"] }],
+    "regression": []
+  },
+  "language_gaps": []
+}

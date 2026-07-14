@@ -73,7 +73,7 @@ pub fn generate(spec: &ParsedSpec, output_dir: &Path, mode: InvariantMode) -> Re
     )?;
 
     let assertion_count = match mode {
-        InvariantMode::Spec | InvariantMode::Both => linked_invariant_count(spec),
+        InvariantMode::Spec | InvariantMode::Both => executable_assertion_count(spec),
         InvariantMode::Protocol => 0,
     };
     let label = match mode {
@@ -139,8 +139,12 @@ fn is_sbpf_target(spec: &ParsedSpec) -> bool {
     spec.is_assembly_target()
 }
 
-fn linked_invariant_count(spec: &ParsedSpec) -> usize {
-    spec.invariants
+/// Assertions that Crucible can actually execute after each action. Domain
+/// mode uses this as a coverage gate: a ratified dossier paired with a spec
+/// containing no renderable assertions must not be reported as domain fuzzing.
+pub(crate) fn executable_assertion_count(spec: &ParsedSpec) -> usize {
+    let invariants = spec
+        .invariants
         .iter()
         .filter(|i| {
             i.rust_expr
@@ -153,7 +157,19 @@ fn linked_invariant_count(spec: &ParsedSpec) -> usize {
                 .iter()
                 .any(|h| h.invariants.contains(&i.name) || h.establishes.contains(&i.name))
         })
-        .count()
+        .count();
+    let properties = spec
+        .properties
+        .iter()
+        .filter(|property| {
+            property
+                .rust_expression
+                .as_ref()
+                .map(|expression| !check::rust_expr_is_unsupported(expression))
+                .unwrap_or(false)
+        })
+        .count();
+    invariants + properties
 }
 
 // ============================================================================

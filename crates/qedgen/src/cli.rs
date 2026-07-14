@@ -64,6 +64,19 @@ impl From<RuntimeOverride> for crate::probe::Runtime {
     }
 }
 
+/// User-facing Crucible verification layer for `qedgen probe --fuzz`.
+/// Kept distinct from codegen's internal invariant-family enum so the CLI
+/// can enforce the artifacts each audit layer needs before fuzzing starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub(crate) enum CrucibleMode {
+    /// Behavioral/protocol guards derived mechanically from account state.
+    Protocol,
+    /// Structural assertions compiled from a `.qedspec` skeleton.
+    Skeleton,
+    /// Ratified domain intent from a dossier, compiled through its `.qedspec`.
+    Domain,
+}
+
 #[derive(Subcommand)]
 pub(crate) enum Commands {
     /// Generate Lean 4 proofs using Leanstral API
@@ -264,6 +277,23 @@ pub(crate) enum Commands {
         #[arg(long)]
         fuzz: Option<u64>,
 
+        /// Select the Crucible verification layer explicitly:
+        /// - `protocol`: mechanical behavioral guards; requires `--root`.
+        /// - `skeleton`: structural `.qedspec` assertions; requires `--spec`.
+        /// - `domain`: ratified domain facts plus protocol guards; requires
+        ///   `--spec` and `--domain-dossier`.
+        ///
+        /// When omitted, the legacy argument-based inference remains:
+        /// root-only = protocol, spec-only = skeleton, spec + root = both.
+        #[arg(long, value_enum, requires = "fuzz")]
+        crucible_mode: Option<CrucibleMode>,
+
+        /// Canonical `domain-dossier.json` consumed by
+        /// `--crucible-mode domain`. Facts assigned to the Crucible lane
+        /// must all be ratified (`auto` or `user`) before fuzzing starts.
+        #[arg(long, requires = "fuzz")]
+        domain_dossier: Option<PathBuf>,
+
         /// Crucible harness directory. Defaults to `./fuzz/<spec_program>`,
         /// matching `qedgen codegen --crucible` output.
         #[arg(long)]
@@ -290,10 +320,13 @@ pub(crate) enum Commands {
         /// v2.19 M1.5/M1.7: when `--emit-spec-candidates` is also set,
         /// materialize the full audit working set into this directory:
         /// `interview.md` (user-editable prompts), `clusters.json` (the
-        /// full cluster envelope), and `skeleton.qedspec` (the
-        /// pre-interview structural skeleton). The companion
-        /// `qedgen ratify --audit-dir <path>` consumes all three to
-        /// produce the final spec. Conventionally
+        /// full cluster envelope), `skeleton.qedspec` (the pre-interview
+        /// structural skeleton), `domain-dossier.json` plus its Markdown
+        /// rendering, `domain-interview.json` plus its Markdown rendering,
+        /// and `run-manifest.json` (resumable lane status). The
+        /// companion `qedgen ratify --audit-dir <path>` consumes the interview,
+        /// clusters, and skeleton; the domain artifacts remain the audit/spec
+        /// provenance record. Conventionally
         /// `.qed/audit/<timestamp>/`.
         #[arg(long, requires = "emit_spec_candidates")]
         audit_dir: Option<PathBuf>,
@@ -309,6 +342,10 @@ pub(crate) enum Commands {
     ///   merged into handler bodies / top-level invariants.
     /// - `.qed/plan/scoping.md` — rejected clusters with rationale.
     /// - `.qed/findings/scaffold-to-spec-<id>.md` — bug-flagged clusters.
+    /// - `domain-dossier.json` — structural candidate ratification states,
+    ///   when the audit working set carries schema-v1 domain artifacts.
+    /// - `spec-handoff.json` — structural/domain/regression layer status,
+    ///   provenance IDs, and explicit language gaps.
     Ratify {
         /// Audit working-set directory (the one passed to `probe
         /// --audit-dir`). Must contain `interview.md`, `clusters.json`,
@@ -1147,4 +1184,53 @@ pub(crate) enum AristotleCommands {
         #[arg(long)]
         status: Option<String>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_explicit_domain_crucible_mode() {
+        let cli = Cli::try_parse_from([
+            "qedgen",
+            "probe",
+            "--fuzz",
+            "0",
+            "--crucible-mode",
+            "domain",
+            "--spec",
+            "vault.qedspec",
+            "--domain-dossier",
+            "domain-dossier.json",
+        ])
+        .unwrap();
+        let Commands::Probe {
+            crucible_mode,
+            domain_dossier,
+            ..
+        } = cli.command
+        else {
+            panic!("expected probe command");
+        };
+        assert_eq!(crucible_mode, Some(CrucibleMode::Domain));
+        assert_eq!(domain_dossier, Some(PathBuf::from("domain-dossier.json")));
+    }
+
+    #[test]
+    fn crucible_mode_requires_fuzz_flag() {
+        let parsed = Cli::try_parse_from([
+            "qedgen",
+            "probe",
+            "--crucible-mode",
+            "protocol",
+            "--root",
+            ".",
+        ]);
+        let error = match parsed {
+            Ok(_) => panic!("mode without --fuzz should fail"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("--fuzz"));
+    }
 }

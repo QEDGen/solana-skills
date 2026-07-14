@@ -91,14 +91,6 @@ pub(crate) fn render_skeleton(root: &Path, config: AdapterConfig<'_>) -> Result<
     detect_adapter(root, config)?.adapt(root)
 }
 
-pub(crate) fn render_skeleton_for_framework(
-    framework: ProgramFramework,
-    root: &Path,
-    config: AdapterConfig<'_>,
-) -> Result<String> {
-    adapter_for_framework(framework, config).adapt(root)
-}
-
 pub(crate) fn render_skeleton_to_file(
     root: &Path,
     output_path: &Path,
