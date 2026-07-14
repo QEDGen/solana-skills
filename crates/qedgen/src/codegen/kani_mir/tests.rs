@@ -161,6 +161,43 @@ environment clock_advance {
 }
 
 #[test]
+fn environment_unary_state_constraint_with_external_binds_post() {
+    // Regression: an external field forces the two-state (PrePost) binder, so
+    // a UNARY state constraint renders `post.rate` — the harness must bind
+    // `post` even though there is no `old(...)`/`pre`. Previously `post` was
+    // emitted only for binary constraints, leaving `post` unbound → the
+    // generated Kani harness failed to compile.
+    let src = format!(
+        "{}{}",
+        ENVIRONMENT_SPEC_HEAD,
+        r#"
+environment clock_check {
+  external clock.slot : U64
+  constraint state.rate > 0
+}
+"#
+    );
+    let (mir, parsed) = lower_inline(&src);
+    let out = render(&mir, &parsed);
+    let harness = out
+        .split("fn verify_rate_positive_under_clock_check()")
+        .nth(1)
+        .expect("external+unary environment harness");
+    assert!(
+        harness.contains("    kani::assume(post.rate > 0);\n"),
+        "unary state read renders through the post receiver:\n{harness}"
+    );
+    assert!(
+        harness.contains("    let post = &s;\n"),
+        "post must be bound for the unary state read:\n{harness}"
+    );
+    assert!(
+        !harness.contains("    let pre = s.clone();\n"),
+        "no old(...) read, so pre must not be emitted:\n{harness}"
+    );
+}
+
+#[test]
 fn environment_unary_constraint_keeps_legacy_rendering() {
     let src = format!(
         "{}{}",

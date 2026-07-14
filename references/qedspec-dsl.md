@@ -314,6 +314,23 @@ type Amount     = U128
 `Fin[N]` is a bounded natural index domain of size `N` — the canonical shape
 for subscripting a `Map[N] T` field.
 
+### `dimension` — nominal numeric units
+
+```fsharp
+dimension Lamports = U64
+dimension Bps      = U64
+```
+
+Declares a nominal unit over an integer base type. Values typed as a
+`dimension` carry the same on-chain ABI as the base (`Lamports` **is** a
+`U64` to codegen — the nominal name erases), but the spec checker treats
+distinct dimensions as **incompatible**: cross-unit arithmetic, comparison,
+and assignment between `Lamports` and `Bps` (or between either and a bare
+`U64`) are rejected at `qedgen check`, catching unit-confusion bugs before
+codegen. Unlike a `type` alias (which is fully transparent), a `dimension`
+is a one-way relationship — it accepts its base but is not accepted where
+the base or another dimension is expected.
+
 ### Parameterised and map types
 
 Type expressions: `Pubkey`, `Bytes32`, `Bytes64`, `U8`, `U16`, `U64`, `U128`,
@@ -1036,11 +1053,12 @@ let authority =
     | .Resetting => 0
 ```
 
-### `mul_div_floor` / `mul_div_ceil` — fixed-point helpers
+### `mul_div_floor` / `mul_div_ceil` / `mul_div_round_half_up` — fixed-point helpers
 
 ```fsharp
 requires mul_div_floor(size_q, exec_price, POS_SCALE) <= MAX_ACCOUNT_NOTIONAL
 ensures state.F == old(state.F) + mul_div_ceil(fee, numerator, denominator)
+ensures state.payout == mul_div_round_half_up(shares, pool, total)
 ```
 
 Integer VMs (EVM, Solana sBPF) have no native fixed-point arithmetic and
@@ -1048,6 +1066,13 @@ users writing `(a * b) / d` by hand routinely get the widen-before-divide
 step wrong. These helpers are built-in so the spec, the generated Rust
 (promoted to `u256`/`U512` locally), and the Lean proof (using Mathlib
 `mul_div_cancel` / `Nat.div_add_mod` lemmas) all agree on exact semantics.
+
+`mul_div_round_half_up(a, b, d)` computes the nearest integer to `(a * b) / d`
+with exact half-way cases rounded **up** (nearest-with-ties-up), for
+non-negative quantities with `d > 0`. It lowers to one shared rounding body
+across Rust scaffold, Kani, and proptest, and to `(a * b + d / 2) / d` in
+Lean. Ties-down or banker's rounding are not built in; a generic "nearest"
+still requires you to pick and declare a tie policy.
 
 ### Function application
 
@@ -1228,6 +1253,29 @@ environment interest_rate_change {
   constraint interest_rate > 0
 }
 ```
+
+- `mutates <field> : <Ty>` — a state field the environment may change; the
+  constraint bounds the new value.
+- `external <object>.<field> : <Ty>` — a typed value read from **outside**
+  program state (an oracle price, the clock slot). Each `<object>` is a
+  distinct namespace: `clock.slot` and `oracle.price` are independent
+  symbols, and `old(clock.slot)` denotes the value before the environment
+  step. Kani and Lean receive separate pre/post symbolic values for each
+  external rather than rewriting program state.
+
+```fsharp
+environment oracle_step {
+  external oracle.price : U64
+  mutates cached_price  : U64
+  constraint cached_price == oracle.price
+  constraint oracle.price >= old(oracle.price)
+}
+```
+
+Externals are **scoped to the environment that declares them**: a constraint
+may only reference externals declared in its own `environment` block (declare
+the `external` again in another block to use it there). The reserved namespace
+`state` cannot be used as an external object.
 
 ## Pragmas
 

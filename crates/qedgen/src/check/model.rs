@@ -273,9 +273,27 @@ pub struct QuantifierLint {
 /// property body has no valid `fn p(&State) -> bool` lowering.
 pub const QEDGEN_UNSUPPORTED_MARKER: &str = "QEDGEN_UNSUPPORTED_QUANTIFIER";
 
+/// Sentinel embedded by the Rust sum lowerings when a `sum` binder has no
+/// finite `Fin[N]` domain. Unlike the quantifier marker (a comment plus a
+/// `true` stub), this renders as a bare comment in expression position, so
+/// every consumer MUST skip expressions carrying it.
+pub const QEDGEN_UNSUPPORTED_SUM_MARKER: &str = "QEDGEN_UNSUPPORTED_SUM";
+
 /// Does this Rust-rendered expression require harness-level scaffolding?
 pub fn rust_expr_is_unsupported(rust_expr: &str) -> bool {
-    rust_expr.contains(QEDGEN_UNSUPPORTED_MARKER)
+    rust_expr.contains(QEDGEN_UNSUPPORTED_MARKER) || rust_expr.contains(QEDGEN_UNSUPPORTED_SUM_MARKER)
+}
+
+/// Does this lifecycle state NAME denote account nonexistence (the account
+/// has not been created yet / was closed)? Shared by the Crucible PDA
+/// materialization gate and domain-sequence seeding so the two never drift.
+/// Deliberately excludes names like `Inactive`/`Paused`, which describe an
+/// EXISTING account in a logical state.
+pub fn state_name_is_nonexistent(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "uninitialized" | "uninitialised" | "not_initialized" | "not_initialised" | "empty"
+    )
 }
 
 /// PDA seed declaration from a qedspec block.

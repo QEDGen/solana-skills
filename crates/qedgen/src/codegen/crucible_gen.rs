@@ -48,7 +48,7 @@ pub enum InvariantMode {
 /// invariant family asserted after each action; brownfield callers (no
 /// spec) pass `InvariantMode::Protocol`.
 pub fn generate(spec: &ParsedSpec, output_dir: &Path, mode: InvariantMode) -> Result<()> {
-    generate_with_account_overlay(spec, output_dir, mode, None)
+    generate_with_account_overlay(spec, output_dir, mode, None, None)
 }
 
 pub(crate) fn generate_with_account_overlay(
@@ -56,6 +56,10 @@ pub(crate) fn generate_with_account_overlay(
     output_dir: &Path,
     mode: InvariantMode,
     account_overlay: Option<&crate::probe::domain_account_overlay::AccountBindingOverlay>,
+    // Absolute path to `<project>/target/deploy/<prog>.so`. When set, the
+    // harness loads the program from this exact path so it works from any
+    // location; when None it falls back to a layout-relative path.
+    deploy_so: Option<&Path>,
 ) -> Result<()> {
     if spec.handlers.is_empty() {
         bail!("No handlers found in spec — nothing to fuzz");
@@ -78,7 +82,7 @@ pub(crate) fn generate_with_account_overlay(
     std::fs::write(dir.join("idls").join("README.md"), emit_idls_readme(spec))?;
     crate::codegen_shared::write_generated_file(
         &dir.join("src").join("main.rs"),
-        &emit_harness(spec, mode, account_overlay)?,
+        &emit_harness_with_deploy(spec, mode, account_overlay, deploy_so)?,
     )?;
 
     let assertion_count = match mode {
@@ -104,7 +108,12 @@ pub(crate) fn generate_with_account_overlay(
 /// Pick the harness leaf directory. If `output_dir` already ends with the
 /// spec's snake-case name, treat it as the leaf; otherwise append it. Lets
 /// callers pass either `./fuzz/` (parent) or `./fuzz/my_program/` (leaf).
-fn harness_dir_for(spec: &ParsedSpec, output_dir: &Path) -> std::path::PathBuf {
+///
+/// `pub(crate)`: the CLI must resolve the harness dir with THIS function
+/// before threading it to the build / seed-corpus / replay consumers —
+/// `generate` appends the leaf internally, so a caller that keeps the raw
+/// `--harness-dir` would look one level too shallow (see run.rs).
+pub(crate) fn harness_dir_for(spec: &ParsedSpec, output_dir: &Path) -> std::path::PathBuf {
     let leaf = spec_program_name(spec);
     if output_dir.file_name().and_then(|s| s.to_str()) == Some(leaf.as_str()) {
         output_dir.to_path_buf()
@@ -281,10 +290,23 @@ invariant_test = []
 // Harness body
 // ============================================================================
 
+/// Test-only convenience: emit a harness with the layout-relative `.so`
+/// path. Production goes through `emit_harness_with_deploy` with an absolute
+/// path from the CLI.
+#[cfg(test)]
 fn emit_harness(
     spec: &ParsedSpec,
     mode: InvariantMode,
     account_overlay: Option<&crate::probe::domain_account_overlay::AccountBindingOverlay>,
+) -> Result<String> {
+    emit_harness_with_deploy(spec, mode, account_overlay, None)
+}
+
+fn emit_harness_with_deploy(
+    spec: &ParsedSpec,
+    mode: InvariantMode,
+    account_overlay: Option<&crate::probe::domain_account_overlay::AccountBindingOverlay>,
+    deploy_so: Option<&Path>,
 ) -> Result<String> {
     let prog = spec_program_name(spec);
     let fixture = fixture_name(spec);
@@ -322,7 +344,7 @@ use {prog}::accounts;
         account_overlay.is_some_and(|overlay| !overlay.handlers.is_empty());
     emit_fixture_struct(&mut out, spec, &fixture, mode, force_fixture_accounts);
     out.push('\n');
-    emit_fixture_impl(&mut out, spec, &fixture, mode, account_overlay)?;
+    emit_fixture_impl(&mut out, spec, &fixture, mode, account_overlay, deploy_so)?;
     out.push('\n');
     emit_invariant_fn(&mut out, spec, &fixture, mode);
 
@@ -1072,12 +1094,20 @@ pub(crate) fn brownfield_keypair_ident(name: &str) -> String {
     out
 }
 
+/// Render `s` as a double-quoted Rust string literal, escaping backslashes
+/// and quotes (filesystem paths on Windows, or with spaces/quotes, would
+/// otherwise produce invalid source).
+fn rust_string_literal(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
 fn emit_fixture_impl(
     out: &mut String,
     spec: &ParsedSpec,
     fixture: &str,
     mode: InvariantMode,
     account_overlay: Option<&crate::probe::domain_account_overlay::AccountBindingOverlay>,
+    deploy_so: Option<&Path>,
 ) -> Result<()> {
     let prog = spec_program_name(spec);
     let force_fixture_accounts =
@@ -1097,15 +1127,25 @@ fn emit_fixture_impl(
     out.push_str("    pub fn setup() -> Self {\n");
     out.push_str("        let mut ctx = TestContext::new();\n");
     out.push_str(&format!("        let program_id = {prog}::ID;\n"));
-    // Spec-mode harness lives at <root>/fuzz/<prog>/; brownfield (protocol)
-    // at <root>/.qed/fuzz/<prog>/ — one extra level. Wrong depth panics at
-    // `ctx.add_program` on startup (No such file or directory).
-    let so_path_prefix = match mode {
-        InvariantMode::Protocol => "../../..",
-        InvariantMode::Spec | InvariantMode::Both => "../..",
+    // The `.so` path. When the CLI knows the project root it passes an
+    // ABSOLUTE path (`deploy_so`) so the harness resolves the program from
+    // any location — the fix for a `--harness-dir` outside the project.
+    // Otherwise (`qedgen codegen --crucible`, unit tests) fall back to a
+    // RELATIVE path from the standard harness depth: spec-mode harness lives
+    // at <root>/fuzz/<prog>/, brownfield (protocol) at <root>/.qed/fuzz/<prog>/
+    // — one extra level. Wrong depth panics at `ctx.add_program` on startup.
+    let so_literal = match deploy_so {
+        Some(path) => rust_string_literal(&path.display().to_string()),
+        None => {
+            let prefix = match mode {
+                InvariantMode::Protocol => "../../..",
+                InvariantMode::Spec | InvariantMode::Both => "../..",
+            };
+            rust_string_literal(&format!("{prefix}/target/deploy/{prog}.so"))
+        }
     };
     out.push_str(&format!(
-        "        ctx.add_program(&program_id, \"{so_path_prefix}/target/deploy/{prog}.so\")\n"
+        "        ctx.add_program(&program_id, {so_literal})\n"
     ));
     out.push_str("            .unwrap();\n");
     if is_brownfield {
@@ -1206,17 +1246,43 @@ fn emit_action_fn(
     // Init transitions must leave the target absent for the program/system
     // instruction to create it.
     let pda_accounts = ordered_pda_accounts(spec, op)?;
-    let is_init = matches!(
-        op.pre_status.as_deref(),
-        Some("Uninitialized" | "Empty" | "Inactive")
-    );
+    // A handler is an init transition — its PDAs must be left absent for the
+    // program/system instruction to create them — when its pre-state cannot
+    // belong to an existing account: the state name denotes nonexistence, or
+    // no handler in the spec produces it (unreachable except by creation).
+    // A name list alone is wrong in both directions: the minimal skeleton's
+    // `Init` is a creation state, while a produced `Inactive` is a paused
+    // EXISTING account that must be materialized on demand. Per-account init
+    // constraints (Anchor `init`) are not modeled, so this stays per-handler.
+    let produced_states: std::collections::BTreeSet<&str> = spec
+        .handlers
+        .iter()
+        .filter_map(|h| h.post_status.as_deref())
+        .collect();
+    let is_init = op.pre_status.as_deref().is_some_and(|pre| {
+        check::state_name_is_nonexistent(pre) || !produced_states.contains(pre)
+    });
     for account in &pda_accounts {
         let seeds = pda_seeds_for_account(spec, account).unwrap_or_default();
-        let seed_exprs = seeds
+        let local = pda_local_ident(&account.name);
+        let rendered = seeds
             .iter()
             .map(|seed| render_pda_seed_expr(spec, op, seed, account_overlay))
-            .collect::<Result<Vec<_>>>()?;
-        let local = pda_local_ident(&account.name);
+            .collect::<Result<Vec<_>>>();
+        let seed_exprs = match rendered {
+            Ok(exprs) => exprs,
+            // Domain replay pins byte-exact addresses, so an overlay run must
+            // fail loudly rather than derive a placeholder the resolved plan
+            // never referenced.
+            Err(err) if account_overlay.is_some() => return Err(err),
+            Err(err) => {
+                out.push_str(&format!(
+                    "        // qedgen: {err}.\n        // Placeholder empty-seed derivation — fuzzing proceeds, but this\n        // PDA's real address is NOT exercised; agent-fill the seed tuple\n        // if `{}` matters to the properties under test.\n",
+                    account.name
+                ));
+                Vec::new()
+            }
+        };
         out.push_str(&format!(
             "        let {local} = Pubkey::find_program_address(&[{}], &self.program_id).0;\n",
             seed_exprs.join(", ")
@@ -1642,6 +1708,32 @@ handler withdraw (amount : U64) : State.Active -> State.Active {
 }
 "#;
 
+    #[test]
+    fn deploy_so_emits_absolute_path_else_relative_fallback() {
+        let spec = parse_str(MINIMAL_SPEC).expect("parse spec");
+
+        // With an absolute deploy path the harness loads it verbatim, so a
+        // `--harness-dir` outside the project still resolves the program.
+        let abs = Path::new("/tmp/proj/target/deploy/counter.so");
+        let with_abs =
+            emit_harness_with_deploy(&spec, InvariantMode::Both, None, Some(abs)).unwrap();
+        assert!(
+            with_abs.contains(
+                "ctx.add_program(&program_id, \"/tmp/proj/target/deploy/counter.so\")"
+            ),
+            "{with_abs}"
+        );
+        assert!(!with_abs.contains("../.."), "no relative prefix when absolute");
+        syn::parse_file(&with_abs).expect("absolute harness is valid Rust");
+
+        // Without one, fall back to the layout-relative path.
+        let with_rel = emit_harness_with_deploy(&spec, InvariantMode::Both, None, None).unwrap();
+        assert!(
+            with_rel.contains("../../target/deploy/counter.so"),
+            "{with_rel}"
+        );
+    }
+
     /// Compile/parse gate: the emitted harness must be syntactically valid
     /// Rust in every mode. `syn::parse_file` validates syntax without the
     /// crucible git deps or the Solana toolchain (a full `crucible run` build
@@ -1670,6 +1762,125 @@ handler withdraw (amount : U64) : State.Active -> State.Active {
                 panic!("emitted harness ({label}) is not valid Rust: {e}\n---\n{harness}");
             }
         }
+    }
+
+    /// A `liquidate`-shaped handler whose PDA seed tuple references a name
+    /// (`borrower`) that is neither an account, an argument, nor a flat
+    /// state field — the shape that must degrade to the placeholder
+    /// derivation, never abort generation (regression: lending example).
+    const UNRESOLVED_SEED_SPEC: &str = r#"spec Lending
+program_id "11111111111111111111111111111111"
+
+type State
+  | Active of { total : U64 }
+
+type Error
+  | E
+
+handler liquidate (amount : U64) : State.Active -> State.Active {
+  accounts { liquidator : signer, writable
+             loan : writable, pda ["loan", borrower] }
+  requires state.total >= amount
+  effect { total := total - amount }
+}
+"#;
+
+    #[test]
+    fn unresolved_pda_seed_degrades_to_placeholder_without_overlay() {
+        let spec = parse_str(UNRESOLVED_SEED_SPEC).expect("parse spec");
+        let harness = emit_harness(&spec, InvariantMode::Spec, None)
+            .expect("unresolved seed must not abort generation");
+        assert!(
+            harness.contains("Pubkey::find_program_address(&[], &self.program_id)"),
+            "{harness}"
+        );
+        assert!(
+            harness.contains("Placeholder empty-seed derivation"),
+            "{harness}"
+        );
+        assert!(harness.contains("cannot resolve PDA seed `borrower`"), "{harness}");
+        syn::parse_file(&harness).expect("degraded harness must still be valid Rust");
+    }
+
+    #[test]
+    fn unresolved_pda_seed_stays_fatal_under_account_overlay() {
+        // Domain replay pins byte-exact addresses: with an overlay present a
+        // placeholder would silently diverge from the resolved plan.
+        let spec = parse_str(UNRESOLVED_SEED_SPEC).expect("parse spec");
+        let overlay = crate::probe::domain_account_overlay::AccountBindingOverlay {
+            schema_version: 1,
+            schema_uri: String::new(),
+            source_resolved_sequence_schema_uri: String::new(),
+            audit_id: None,
+            handlers: Default::default(),
+        };
+        let err = emit_harness(&spec, InvariantMode::Spec, Some(&overlay))
+            .expect_err("overlay generation must reject unresolved seeds");
+        assert!(err.to_string().contains("cannot resolve PDA seed `borrower`"));
+    }
+
+    /// Lifecycle spec exercising both directions of the init gate: `Init` is
+    /// produced by no handler (creation state → PDA left absent), while
+    /// `Inactive` is produced by `pause` (existing paused account → PDA
+    /// materialized on demand).
+    const LIFECYCLE_PDA_SPEC: &str = r#"spec Lifecycle
+program_id "11111111111111111111111111111111"
+
+type State
+  | Init
+  | Active of { balance : U64 }
+  | Inactive
+
+type Error
+  | E
+
+handler initialize : State.Init -> State.Active {
+  accounts { payer : signer, writable
+             vault : writable, pda ["vault"] }
+  effect { balance := 0 }
+}
+
+handler pause : State.Active -> State.Inactive {
+  accounts { admin : signer, writable
+             vault : writable, pda ["vault"] }
+}
+
+handler resume : State.Inactive -> State.Active {
+  accounts { admin : signer, writable
+             vault : writable, pda ["vault"] }
+}
+"#;
+
+    #[test]
+    fn init_gate_follows_state_machine_structure_not_name_list() {
+        let spec = parse_str(LIFECYCLE_PDA_SPEC).expect("parse spec");
+        let mut out = String::new();
+        emit_fixture_impl(&mut out, &spec, "LifecycleFixture", InvariantMode::Spec, None, None)
+            .expect("emit");
+        let action_of = |name: &str| {
+            let start = out.find(&format!("pub fn action_{name}")).expect(name);
+            let end = out[start..]
+                .find("\n    /// ")
+                .map(|o| start + o)
+                .unwrap_or(out.len());
+            &out[start..end]
+        };
+        // `Init` is unproduced → initialize is a creation transition: the
+        // PDA must be left absent (no on-demand create_account block).
+        assert!(
+            !action_of("initialize").contains("create_account"),
+            "initialize must leave its PDA absent:\n{}",
+            action_of("initialize")
+        );
+        // `Inactive` is produced by `pause` → resume acts on an EXISTING
+        // paused account: the PDA must be materialized on demand.
+        assert!(
+            action_of("resume").contains("create_account"),
+            "resume must materialize its PDA on demand:\n{}",
+            action_of("resume")
+        );
+        // `Active` is produced by initialize/resume → pause also materializes.
+        assert!(action_of("pause").contains("create_account"));
     }
 
     #[test]
@@ -1707,7 +1918,7 @@ handler withdraw (amount : U64) : State.Active -> State.Active {
     fn emits_action_fn_per_handler() {
         let spec = parse_str(MINIMAL_SPEC).expect("parse");
         let mut out = String::new();
-        emit_fixture_impl(&mut out, &spec, "CounterFixture", InvariantMode::Spec, None)
+        emit_fixture_impl(&mut out, &spec, "CounterFixture", InvariantMode::Spec, None, None)
             .expect("emit");
         assert!(out.contains("#[fuzz_fixture]"));
         assert!(out.contains("impl CounterFixture {"));

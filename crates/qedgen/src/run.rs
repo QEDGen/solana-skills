@@ -540,8 +540,15 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 } else {
                     project_root_for_idl.join("fuzz")
                 };
+                // `generate` appends the program-name leaf when the passed
+                // dir's leaf differs (harness_dir_for). Resolve to that same
+                // leaf HERE so the build cwd, seed corpus, and replay all read
+                // the directory generate actually wrote — otherwise a
+                // `--harness-dir` whose leaf ≠ program name looks one level
+                // too shallow and the Crucible build fails "no Cargo.toml".
                 let harness = harness_dir
                     .clone()
+                    .map(|dir| crucible_gen::harness_dir_for(&synthesised_spec, &dir))
                     .unwrap_or_else(|| harness_parent.join(&prog));
                 let prepared_domain_replay = match (
                     requested_mode,
@@ -559,12 +566,32 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                     }
                     _ => None,
                 };
-                // Brownfield: emit the harness under `.qed/fuzz/<prog>/` if
-                // absent. Spec mode expects a prior `codegen --crucible`;
-                // never auto-regen.
-                let generate_harness = (matches!(mode, crucible_gen::InvariantMode::Protocol)
-                    && !harness.exists())
+                // Auto-emit the harness only when it is ABSENT — for
+                // brownfield protocol runs and the first domain run. Never
+                // regenerate an existing harness: it may carry agent-filled
+                // `todo!()` account literals (or other manual fixes) that a
+                // silent regen would clobber. Plain spec/skeleton mode expects
+                // a prior `codegen --crucible` and likewise never auto-regens.
+                // To pick up changed bindings, delete the harness and re-run.
+                let auto_emits = matches!(mode, crucible_gen::InvariantMode::Protocol)
                     || matches!(requested_mode, Some(CrucibleMode::Domain));
+                let generate_harness = auto_emits && !harness.exists();
+                if auto_emits && harness.exists() {
+                    eprintln!(
+                        "Reusing existing Crucible harness at {} (not regenerating; delete it to pick up spec or binding changes).",
+                        harness.display()
+                    );
+                }
+                // Absolute path to the built program so the harness loads it
+                // from any location (a `--harness-dir` outside the project
+                // can't reach it with the layout-relative fallback). The `.so`
+                // need not exist yet (budget-0 emit), so anchor on the project
+                // root — which does — rather than canonicalizing the `.so`.
+                let deploy_so = std::fs::canonicalize(&project_root_for_idl)
+                    .unwrap_or_else(|_| project_root_for_idl.clone())
+                    .join("target")
+                    .join("deploy")
+                    .join(format!("{prog}.so"));
                 if generate_harness {
                     std::fs::create_dir_all(&harness_parent)?;
                     crucible_gen::generate_with_account_overlay(
@@ -574,6 +601,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                         prepared_domain_replay
                             .as_ref()
                             .map(|prepared| &prepared.overlay),
+                        Some(&deploy_so),
                     )?;
                 }
                 // Brownfield ships its own IDL (no `anchor build` to feed

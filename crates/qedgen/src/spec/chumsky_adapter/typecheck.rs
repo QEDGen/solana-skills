@@ -162,6 +162,7 @@ pub fn typecheck_spec(spec: &a::Spec, parsed: &ParsedSpec) -> anyhow::Result<()>
     let const_literals = collect_numeric_consts(spec);
     let dimensions = validate_dimensions(parsed)?;
     validate_external_fields(spec)?;
+    validate_environment_external_scope(spec)?;
 
     for Node { node, .. } in &spec.items {
         if let TopItem::Handler(h) = node {
@@ -296,6 +297,145 @@ fn validate_external_fields(spec: &a::Spec) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// External fields are scoped to the environment that declares them: the
+/// tree builder classifies a constraint path whose root is an external of a
+/// DIFFERENT environment as `Unresolved`, which then renders verbatim into
+/// uncompilable Kani/Lean artifacts with no other diagnostic. Reject it here.
+fn validate_environment_external_scope(spec: &a::Spec) -> anyhow::Result<()> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    // External object name -> environments that declare it.
+    let mut object_owners: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for item in &spec.items {
+        if let TopItem::Environment(env) = &item.node {
+            for clause in &env.clauses {
+                if let a::EnvClause::External { object, .. } = &clause.node {
+                    object_owners
+                        .entry(object.clone())
+                        .or_default()
+                        .insert(env.name.clone());
+                }
+            }
+        }
+    }
+
+    for item in &spec.items {
+        let TopItem::Environment(env) = &item.node else {
+            continue;
+        };
+        let local: BTreeSet<&str> = env
+            .clauses
+            .iter()
+            .filter_map(|clause| match &clause.node {
+                a::EnvClause::External { object, .. } => Some(object.as_str()),
+                _ => None,
+            })
+            .collect();
+        for clause in &env.clauses {
+            let a::EnvClause::Constraint(expr) = &clause.node else {
+                continue;
+            };
+            let mut roots = BTreeSet::new();
+            collect_path_roots(&expr.node, &mut roots);
+            for root in &roots {
+                if local.contains(root.as_str()) {
+                    continue;
+                }
+                if let Some(owners) = object_owners.get(root) {
+                    if let Some(other) = owners.iter().find(|owner| owner.as_str() != env.name) {
+                        anyhow::bail!(
+                            "environment `{}` constraint references external `{}`, which is \
+                             declared in environment `{}`. Externals are scoped to their own \
+                             environment — declare `external {}.<field> : <Ty>` inside `{}`, or \
+                             move the constraint.",
+                            env.name,
+                            root,
+                            other,
+                            root,
+                            env.name
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Collect the root identifier of every `Expr::Path` in `e`. Used to detect
+/// external namespace references in environment constraints.
+fn collect_path_roots(e: &a::Expr, out: &mut std::collections::BTreeSet<String>) {
+    use a::Expr::*;
+    let recur = |node: &a::Node<a::Expr>, out: &mut _| collect_path_roots(&node.node, out);
+    match e {
+        Int(_) | Bool(_) => {}
+        Path(p) => {
+            out.insert(p.root.clone());
+        }
+        Old(inner) | Not(inner) | Paren(inner) | Len(inner) => recur(inner, out),
+        Sum { body, .. } | Quant { body, .. } => recur(body, out),
+        BoolOp { lhs, rhs, .. } | Cmp { lhs, rhs, .. } | Arith { lhs, rhs, .. } => {
+            recur(lhs, out);
+            recur(rhs, out);
+        }
+        MulDivFloor { a, b, d } | MulDivCeil { a, b, d } | MulDivRoundHalfUp { a, b, d } => {
+            recur(a, out);
+            recur(b, out);
+            recur(d, out);
+        }
+        Contains { coll, elem } => {
+            recur(coll, out);
+            recur(elem, out);
+        }
+        QuantIn { coll, body, .. } => {
+            recur(coll, out);
+            recur(body, out);
+        }
+        Match { scrutinee, arms } => {
+            recur(scrutinee, out);
+            for arm in arms {
+                collect_path_roots(&arm.body.node, out);
+            }
+        }
+        Ctor { payload, .. } => {
+            if let Some(payload) = payload {
+                recur(payload, out);
+            }
+        }
+        RecordLit(fields) => {
+            for (_, value) in fields {
+                collect_path_roots(&value.node, out);
+            }
+        }
+        RecordUpdate { base, updates } => {
+            recur(base, out);
+            for (_, value) in updates {
+                collect_path_roots(&value.node, out);
+            }
+        }
+        IsVariant { scrutinee, .. } => recur(scrutinee, out),
+        App { args, .. } => {
+            for arg in args {
+                collect_path_roots(&arg.node, out);
+            }
+        }
+        Field { base, .. } => recur(base, out),
+        Let { value, body, .. } => {
+            recur(value, out);
+            recur(body, out);
+        }
+        IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            recur(cond, out);
+            recur(then_branch, out);
+            recur(else_branch, out);
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -297,6 +297,21 @@ mod tests {
     }
 
     #[test]
+    fn no_argument_handler_encodes_to_six_byte_seed() {
+        // A `drain`-shaped handler with no arguments produces the minimal
+        // Crucible seed: 4-byte action count + 2-byte variant index, and no
+        // trailing field bytes. This is the `live-drain` replay shape.
+        let spec = crate::chumsky_adapter::parse_str(
+            "spec Replay\n\ntype State\n  | Active of { n : U64 }\n\nhandler drain : State.Active -> State.Active {\n  effect { n := n }\n}\n",
+        )
+        .unwrap();
+        let bytes = encode_actions(&spec, &[&action("drain", &[])], None).unwrap();
+        assert_eq!(bytes.len(), 6, "count(4) + variant(2), no field bytes");
+        assert_eq!(&bytes[0..4], &1u32.to_le_bytes());
+        assert_eq!(&bytes[4..6], &0u16.to_le_bytes());
+    }
+
+    #[test]
     fn rejects_unbound_and_unsupported_fields() {
         let spec = crate::chumsky_adapter::parse_str(
             "spec Replay\n\ntype State\n  | Active of { n : U64 }\n\nhandler first (amount : U64) : State.Active -> State.Active {\n  effect { n := n }\n}\n",

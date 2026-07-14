@@ -55,6 +55,10 @@ pub struct DomainReplayRecord {
 pub enum DomainReplayStatus {
     CompletedZeroExit,
     CompletedNonzeroExit,
+    /// The replay child was killed by a signal (SIGSEGV/SIGABRT/OOM), so it
+    /// has no numeric exit code. This is a REPRODUCED crash — exactly what a
+    /// fuzzer cares about — not a spawn failure.
+    TerminatedBySignal,
     SpawnFailed,
 }
 
@@ -757,10 +761,11 @@ where
                     seed_sha256: seed.seed_sha256.clone(),
                     action_count: seed.action_count,
                     command,
-                    status: if exit_code == Some(0) {
-                        DomainReplayStatus::CompletedZeroExit
-                    } else {
-                        DomainReplayStatus::CompletedNonzeroExit
+                    status: match exit_code {
+                        Some(0) => DomainReplayStatus::CompletedZeroExit,
+                        Some(_) => DomainReplayStatus::CompletedNonzeroExit,
+                        // No code → killed by a signal (a reproduced crash).
+                        None => DomainReplayStatus::TerminatedBySignal,
                     },
                     exit_code,
                     error: None,
@@ -1070,6 +1075,25 @@ mod tests {
         assert_eq!(report["records"][1]["status"], "completed_nonzero_exit");
         assert_eq!(report["records"][1]["exit_code"], 1);
         assert_eq!(report["records"][1]["seed_sha256"], "55".repeat(32));
+    }
+
+    #[test]
+    fn replay_ledger_records_signal_termination_as_reproduced_crash() {
+        // A replay killed by a signal (no exit code) is a reproduced crash,
+        // not a spawn failure. It must serialize as `terminated_by_signal`
+        // with a null exit_code and no error — the shape the shipped
+        // validator accepts.
+        let tmp = tempfile::tempdir().unwrap();
+        let harness = tmp.path().join("vault");
+        std::fs::create_dir_all(&harness).unwrap();
+        let mut seeds = seed_report(&harness);
+        seeds.seeds.truncate(1);
+        let path = replay_domain_seed_report_with(&harness, &seeds, |_, _| Ok(None)).unwrap();
+        let report: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(report["records"][0]["status"], "terminated_by_signal");
+        assert!(report["records"][0]["exit_code"].is_null());
+        assert!(report["records"][0]["error"].is_null());
     }
 
     #[test]

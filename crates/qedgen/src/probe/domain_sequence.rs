@@ -581,14 +581,7 @@ fn string_array(value: Option<&Value>) -> Vec<String> {
 }
 
 fn is_initial_state(state: Option<&str>) -> bool {
-    state
-        .map(|state| {
-            matches!(
-                state.to_ascii_lowercase().as_str(),
-                "uninitialized" | "uninitialised" | "not_initialized" | "not_initialised"
-            )
-        })
-        .unwrap_or(false)
+    state.is_some_and(crate::check::state_name_is_nonexistent)
 }
 
 #[cfg(test)]

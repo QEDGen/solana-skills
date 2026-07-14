@@ -668,7 +668,7 @@ pub(crate) fn emit_file_level_features(
                 if prop.expression.is_none() {
                     continue;
                 }
-                let (rust_constraints, has_binary_constraint) = render_environment_constraints(
+                let (rust_constraints, needs_pre, needs_post) = render_environment_constraints(
                     mir_env,
                     &env.constraints_rust,
                     !env.external_fields.is_empty(),
@@ -690,11 +690,12 @@ pub(crate) fn emit_file_level_features(
                 );
                 out.push_str(&format!("    kani::assume({}(&s));\n", prop.name));
 
-                // A Binary environment constraint relates the value before
-                // the external mutation (`old(...)`) to the new value. Keep a
-                // full state snapshot so the tree renderer can route those
-                // reads through `pre` / `post` without rewriting strings.
-                if has_binary_constraint {
+                // `pre` snapshots the pre-mutation state for `old(state.x)`
+                // reads; it must be taken BEFORE the `s.<field> = kani::any()`
+                // mutations below. `post` (emitted after) aliases the mutated
+                // state for `state.x` reads. Emit each only when a rendered
+                // constraint actually references it.
+                if needs_pre {
                     out.push_str("    let pre = s.clone();\n");
                 }
 
@@ -714,7 +715,7 @@ pub(crate) fn emit_file_level_features(
                     out.push_str(&format!("    s.{} = kani::any();\n", field));
                     let _ = ftype;
                 }
-                if has_binary_constraint {
+                if needs_post {
                     out.push_str("    let post = &s;\n");
                 }
                 for constraint in &rust_constraints {
@@ -734,46 +735,55 @@ pub(crate) fn emit_file_level_features(
     Ok(())
 }
 
-/// Render environment constraints from typed MIR when it is complete.
+/// Render environment constraints from typed MIR when it is complete, and
+/// report which snapshot bindings the rendered constraints require.
 ///
 /// Unary constraints intentionally keep their legacy Rust strings for byte
 /// stability. Binary constraints need the structural tree so `old(state.x)`
 /// and `state.x` route to distinct `pre` / `post` receivers. An incomplete or
 /// legacy MIR carrier falls back wholesale to the parsed string list.
+///
+/// Returns `(constraints, needs_pre, needs_post)`. A state-field read renders
+/// as a `pre.` / `post.` receiver (external fields render as `pre_` / `post_`,
+/// so the trailing dot cleanly selects state receivers). `pre` appears only
+/// for `old(state.x)`; `post` for any two-state state read — including a Unary
+/// constraint over `state.x` once the environment has external fields, which
+/// forces the two-state (`PrePost`) binder. The caller must emit exactly the
+/// bindings the constraints reference, or the harness fails to compile.
 fn render_environment_constraints(
     mir_env: Option<&crate::mir::EnvironmentMir>,
     legacy: &[String],
     has_external_fields: bool,
-) -> (Vec<String>, bool) {
+) -> (Vec<String>, bool, bool) {
     use crate::rust_codegen_util::tree_render::{render_rust, Binder, RustCx};
 
-    let Some(mir_env) = mir_env else {
-        return (legacy.to_vec(), false);
-    };
-    if mir_env.typed_constraints.is_empty() || mir_env.typed_constraints.len() != legacy.len() {
-        return (legacy.to_vec(), false);
-    }
-    if mir_env.typed_constraints.iter().any(|constraint| {
-        constraint.class == crate::check::PropertyClass::Binary
-            && constraint.predicate.0.tree.is_none()
-    }) {
-        return (legacy.to_vec(), false);
-    }
+    let usable = mir_env.filter(|mir_env| {
+        !mir_env.typed_constraints.is_empty()
+            && mir_env.typed_constraints.len() == legacy.len()
+            && !mir_env.typed_constraints.iter().any(|constraint| {
+                constraint.class == crate::check::PropertyClass::Binary
+                    && constraint.predicate.0.tree.is_none()
+            })
+    });
 
-    let mut has_binary = false;
-    let constraints = mir_env
-        .typed_constraints
-        .iter()
-        .enumerate()
-        .map(|(index, constraint)| {
-            if constraint.class == crate::check::PropertyClass::Binary || has_external_fields {
-                if let Some(tree) = &constraint.predicate.0.tree {
-                    has_binary |= constraint.class == crate::check::PropertyClass::Binary;
-                    return render_rust(tree, RustCx::native().with_binder(Binder::PrePost));
+    let constraints: Vec<String> = match usable {
+        Some(mir_env) => mir_env
+            .typed_constraints
+            .iter()
+            .enumerate()
+            .map(|(index, constraint)| {
+                if constraint.class == crate::check::PropertyClass::Binary || has_external_fields {
+                    if let Some(tree) = &constraint.predicate.0.tree {
+                        return render_rust(tree, RustCx::native().with_binder(Binder::PrePost));
+                    }
                 }
-            }
-            legacy[index].clone()
-        })
-        .collect();
-    (constraints, has_binary)
+                legacy[index].clone()
+            })
+            .collect(),
+        None => legacy.to_vec(),
+    };
+
+    let needs_pre = constraints.iter().any(|c| c.contains("pre."));
+    let needs_post = constraints.iter().any(|c| c.contains("post."));
+    (constraints, needs_pre, needs_post)
 }

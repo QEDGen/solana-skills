@@ -115,7 +115,8 @@ pub(super) fn expr_to_rust(
                 expr_to_rust(&body.node, ctx, consts, opts)
             ),
             None => format!(
-                "/* QEDGEN_UNSUPPORTED_SUM: {binder} : {binder_ty} requires a finite Fin[N] domain */"
+                "/* {}: {binder} : {binder_ty} requires a finite Fin[N] domain */",
+                crate::check::QEDGEN_UNSUPPORTED_SUM_MARKER
             ),
         },
         Expr::Quant {

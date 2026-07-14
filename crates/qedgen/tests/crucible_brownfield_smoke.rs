@@ -340,10 +340,16 @@ fn fixture_buggy_anchor_drives_brownfield_emit() {
         "IDL-driven brownfield emit should leave no todo!() in the action bodies"
     );
     // The `vault` PDA must be staged program-owned + funded so the program
-    // can debit it — without this, drain errors and nothing fires.
+    // can debit it — without this, drain errors and nothing fires. Staging
+    // is on-demand inside the action (setup-time pre-creation would break
+    // genuine init instructions with "account already in use").
     assert!(
-        body.contains(".owner(program_id)"),
-        "vault PDA should be created program-owned in setup()"
+        body.contains("if self.ctx.svm.get_account(&__pda_vault).is_none()"),
+        "vault PDA should be materialized on demand in the action"
+    );
+    assert!(
+        body.contains(".owner(self.program_id)"),
+        "vault PDA should be created program-owned"
     );
 }
 
@@ -469,8 +475,192 @@ fn domain_boundary_fixture_is_replayable_and_protocol_blind() {
     assert!(overlay.contains("\"authority\": \"fixture:authority\""));
 }
 
-/// Opt-in live proof of the fixture's headline claim. This is skipped in the
-/// ordinary suite because it requires the Solana SBF and Crucible toolchains.
+/// Joint budget-zero contract for strict sequence bindings: one CLI run that
+/// supplies `domain-sequences.json` + `domain-sequence-bindings.json` and
+/// asserts, together, the resolved sequence document, the compiled
+/// `account-binding-overlay.json`, the REMAPPED account/signer literals in
+/// the generated harness, and the byte-exact 14-byte one-action Crucible
+/// seed. Uses a cross-remap (authority ↔ recipient) so a wrong-direction or
+/// dropped overlay lookup cannot pass by identity.
+#[test]
+fn budget_zero_bindings_compile_overlay_and_remap_account_literals() {
+    ensure_qedgen_built();
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let program = tmp.path().join("domain_boundary");
+    copy_dir_recursive(&domain_boundary_fixture(), &program);
+
+    // Give `accept` a second fixture identity so the bindings can remap
+    // rather than restate: authority ↔ recipient.
+    let spec_path = program.join("domain.qedspec");
+    let spec_src = std::fs::read_to_string(&spec_path).expect("read spec");
+    let patched = spec_src.replace(
+        "authority : signer, writable",
+        "authority : signer, writable\n    recipient : signer, writable",
+    );
+    assert_ne!(patched, spec_src, "fixture spec lost its accounts block");
+    std::fs::write(&spec_path, patched).expect("patch spec");
+
+    let bindings_path = program.join("domain-sequence-bindings.json");
+    let bindings_src = std::fs::read_to_string(&bindings_path).expect("read bindings");
+    let patched = bindings_src.replace(
+        r#"{ "authority": "fixture:authority" }"#,
+        r#"{ "authority": "fixture:recipient", "recipient": "fixture:authority" }"#,
+    );
+    assert_ne!(patched, bindings_src, "fixture bindings lost the account map");
+    std::fs::write(&bindings_path, patched).expect("patch bindings");
+
+    let harness = tmp.path().join("domain/domain_boundary");
+    let out = Command::new(qedgen_bin())
+        .args(["probe", "--fuzz", "0", "--crucible-mode", "domain", "--spec"])
+        .arg(program.join("domain.qedspec"))
+        .arg("--domain-dossier")
+        .arg(program.join("domain-dossier.json"))
+        .arg("--domain-sequences")
+        .arg(program.join("domain-sequences.json"))
+        .arg("--domain-sequence-bindings")
+        .arg(program.join("domain-sequence-bindings.json"))
+        .arg("--harness-dir")
+        .arg(&harness)
+        .output()
+        .expect("emit domain harness");
+    assert!(
+        out.status.success(),
+        "domain emit failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // 1. Resolved sequence document: both unresolved parameters bound, with
+    //    the remapped account map and the boundary witness carried verbatim.
+    let resolved: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(program.join("resolved-domain-sequences.json")).unwrap(),
+    )
+    .expect("resolved doc parses");
+    let action = &resolved["plans"][0]["forward"][0];
+    assert_eq!(resolved["plans"][0]["id"], "domain-limit-accept");
+    let bound: std::collections::BTreeMap<&str, &serde_json::Value> = action
+        ["resolved_bindings"]
+        .as_array()
+        .expect("resolved_bindings array")
+        .iter()
+        .map(|b| (b["parameter"]["name"].as_str().unwrap(), &b["value"]))
+        .collect();
+    assert_eq!(bound["amount"], &serde_json::json!(11));
+    assert_eq!(
+        bound["Accept"],
+        &serde_json::json!({
+            "authority": "fixture:recipient",
+            "recipient": "fixture:authority"
+        })
+    );
+
+    // 2. Compiled overlay: the per-handler account -> fixture map.
+    let overlay: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(program.join("account-binding-overlay.json")).unwrap(),
+    )
+    .expect("overlay parses");
+    assert_eq!(
+        overlay["handlers"]["accept"]["accounts"],
+        serde_json::json!({
+            "authority": "fixture:recipient",
+            "recipient": "fixture:authority"
+        })
+    );
+
+    // 3. Remapped account + signer literals in the generated harness.
+    let body = std::fs::read_to_string(harness.join("src/main.rs")).expect("read harness");
+    assert!(
+        body.contains("authority: self.recipient.pubkey(),"),
+        "authority must be remapped to the recipient fixture identity:\n{body}"
+    );
+    assert!(
+        body.contains("recipient: self.authority.pubkey(),"),
+        "recipient must be remapped to the authority fixture identity:\n{body}"
+    );
+    let signers_line = body
+        .lines()
+        .find(|l| l.contains(".signers(&["))
+        .expect("accept action must sign");
+    assert!(
+        signers_line.contains("self.recipient") && signers_line.contains("self.authority"),
+        "both remapped identities must sign: {signers_line}"
+    );
+
+    // 4. Byte-exact one-action replay seed: Crucible's action envelope plus
+    //    the little-endian u64 boundary witness.
+    let seed = std::fs::read(only_domain_seed(&harness)).expect("read replay seed");
+    assert_eq!(seed, [1, 0, 0, 0, 0, 0, 11, 0, 0, 0, 0, 0, 0, 0]);
+}
+
+/// A second domain-mode run must NOT regenerate an existing harness — agent
+/// fills in `src/main.rs` (filled `todo!()` account literals, manual fixes)
+/// would otherwise be silently clobbered on every re-run.
+#[test]
+fn domain_mode_does_not_regenerate_existing_harness() {
+    ensure_qedgen_built();
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let program = tmp.path().join("domain_boundary");
+    copy_dir_recursive(&domain_boundary_fixture(), &program);
+    let harness = tmp.path().join("domain/domain_boundary");
+
+    let run = || {
+        let out = Command::new(qedgen_bin())
+            .args(["probe", "--fuzz", "0", "--crucible-mode", "domain", "--spec"])
+            .arg(program.join("domain.qedspec"))
+            .arg("--domain-dossier")
+            .arg(program.join("domain-dossier.json"))
+            .arg("--domain-sequences")
+            .arg(program.join("domain-sequences.json"))
+            .arg("--domain-sequence-bindings")
+            .arg(program.join("domain-sequence-bindings.json"))
+            .arg("--harness-dir")
+            .arg(&harness)
+            .output()
+            .expect("emit domain harness");
+        assert!(
+            out.status.success(),
+            "domain emit failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+
+    // First run generates the harness.
+    run();
+    let main_rs = harness.join("src/main.rs");
+    let original = std::fs::read_to_string(&main_rs).expect("read generated harness");
+
+    // Simulate an agent fill / manual edit.
+    let edited = format!("{original}\n// AGENT-FILLED SENTINEL — must survive re-runs\n");
+    std::fs::write(&main_rs, &edited).expect("edit harness");
+
+    // Second run must reuse, not regenerate.
+    let stderr = run();
+    let after = std::fs::read_to_string(&main_rs).expect("re-read harness");
+    assert_eq!(after, edited, "second domain run clobbered the agent edit");
+    assert!(
+        stderr.contains("Reusing existing Crucible harness"),
+        "expected a reuse note on stderr:\n{stderr}"
+    );
+}
+
+/// Extract the trailing `ProbeOutput` JSON object from a live `--fuzz`
+/// run's stdout. Under a real fuzz budget Crucible streams its ASCII banner
+/// and `[FUZZ] …` progress lines to stdout ahead of the final JSON, so a
+/// whole-buffer parse fails — the ProbeOutput is the last `{ "version": …`
+/// object.
+fn extract_probe_output(stdout: &[u8]) -> serde_json::Value {
+    let text = String::from_utf8_lossy(stdout);
+    let start = text
+        .rfind("{\n  \"version\"")
+        .expect("ProbeOutput JSON object in stdout");
+    serde_json::from_str(text[start..].trim_end()).expect("parse ProbeOutput JSON")
+}
+
+/// Opt-in live proof of the fixture's headline claim. Skipped in the ordinary
+/// suite because it requires the Solana SBF and Crucible toolchains. Both
+/// modes run at their DEFAULT harness location under the project root
+/// (`.qed/fuzz/<prog>` for protocol, `fuzz/<prog>` for domain) — the layout
+/// the harness's relative `target/deploy/<prog>.so` path is generated for.
 #[test]
 fn live_domain_boundary_protocol_misses_and_domain_finds() {
     if std::env::var_os("QEDGEN_RUN_LIVE_CRUCIBLE_DOMAIN_BOUNDARY").is_none() {
@@ -492,7 +682,7 @@ fn live_domain_boundary_protocol_misses_and_domain_finds() {
         String::from_utf8_lossy(&build.stderr)
     );
 
-    let protocol_harness = tmp.path().join("protocol/domain_boundary");
+    // Protocol mode: brownfield, no spec. Default harness → .qed/fuzz/<prog>.
     let protocol = Command::new(qedgen_bin())
         .args([
             "probe",
@@ -504,8 +694,6 @@ fn live_domain_boundary_protocol_misses_and_domain_finds() {
             "--root",
         ])
         .arg(&program)
-        .arg("--harness-dir")
-        .arg(&protocol_harness)
         .output()
         .expect("run protocol mode");
     assert!(
@@ -513,11 +701,14 @@ fn live_domain_boundary_protocol_misses_and_domain_finds() {
         "protocol run failed:\n{}",
         String::from_utf8_lossy(&protocol.stderr)
     );
-    let protocol_json: serde_json::Value =
-        serde_json::from_slice(&protocol.stdout).expect("protocol JSON");
-    assert_eq!(protocol_json["findings"], serde_json::json!([]));
+    assert_eq!(
+        extract_probe_output(&protocol.stdout)["findings"],
+        serde_json::json!([]),
+        "protocol mode must stay blind to the domain bug"
+    );
 
-    let domain_harness = tmp.path().join("domain/domain_boundary");
+    // Domain mode: spec + ratified dossier + bound sequence. Default harness
+    // → fuzz/<prog>. Replays `amount = 11` against the ratified max of 10.
     let domain = Command::new(qedgen_bin())
         .args([
             "probe",
@@ -535,8 +726,6 @@ fn live_domain_boundary_protocol_misses_and_domain_finds() {
         .arg(program.join("domain-sequences.json"))
         .arg("--domain-sequence-bindings")
         .arg(program.join("domain-sequence-bindings.json"))
-        .arg("--harness-dir")
-        .arg(&domain_harness)
         .output()
         .expect("run domain mode");
     assert!(
@@ -544,16 +733,23 @@ fn live_domain_boundary_protocol_misses_and_domain_finds() {
         "domain run failed:\n{}",
         String::from_utf8_lossy(&domain.stderr)
     );
-    let domain_json: serde_json::Value =
-        serde_json::from_slice(&domain.stdout).expect("domain JSON");
-    let findings = domain_json["findings"].as_array().expect("findings array");
-    assert!(findings.iter().any(|finding| {
-        finding["handler"] == "accept" && finding["category_tag"] == "invariant_violation"
-    }));
+    let findings = extract_probe_output(&domain.stdout);
+    let findings = findings["findings"].as_array().expect("findings array");
+    assert!(
+        findings.iter().any(|finding| {
+            finding["handler"] == "accept" && finding["category_tag"] == "invariant_violation"
+        }),
+        "domain mode must fire the ratified-limit invariant: {findings:#?}"
+    );
 
+    // Durable replay evidence: the one-action `domain-limit-accept` plan with
+    // all four provenance digests pinned.
     let report: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(domain_harness.join(".qedgen/domain-replay-report.json"))
-            .expect("domain replay report"),
+        &std::fs::read(
+            program
+                .join("fuzz/domain_boundary/.qedgen/domain-replay-report.json"),
+        )
+        .expect("domain replay report"),
     )
     .expect("parse domain replay report");
     assert_eq!(report["records"][0]["plan_id"], "domain-limit-accept");

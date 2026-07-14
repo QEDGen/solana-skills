@@ -823,20 +823,27 @@ pub(super) fn emit_environments_body(out: &mut String, mir: &Mir) {
                 .iter()
                 .enumerate()
                 .map(|(i, c)| {
-                    let mut expr = if !env.external_fields.is_empty() {
-                        env.typed_constraints
-                            .get(i)
-                            .and_then(|constraint| constraint.predicate.0.tree.as_ref())
-                            .map(|tree| {
-                                crate::lean_gen_mir::tree_render::render_lean(
-                                    tree,
-                                    crate::lean_gen_mir::tree_render::LeanCx::ensures(),
-                                )
-                            })
-                            .unwrap_or_else(|| c.0.lean.clone())
-                    } else {
-                        c.0.lean.clone()
-                    };
+                    // Render through the typed tree with the single-state
+                    // (`s.`) binder: the theorem binds `s`, `new_<mutated>`,
+                    // and `pre_/post_<external>` — but never `s'`. State reads
+                    // render as `s.<field>` so the mutates rewrite below maps
+                    // mutated fields to `new_<field>` and leaves the rest as
+                    // `s.<field>`; external reads render as `pre_/post_<…>`
+                    // (binder-independent). The legacy `Ctx::Ensures` string
+                    // (`s'.<field>`) is a last-resort fallback only when the
+                    // tree is absent. (The two-state `ensures()` binder emitted
+                    // an unbound `s'` here.)
+                    let mut expr = env
+                        .typed_constraints
+                        .get(i)
+                        .and_then(|constraint| constraint.predicate.0.tree.as_ref())
+                        .map(|tree| {
+                            crate::lean_gen_mir::tree_render::render_lean(
+                                tree,
+                                crate::lean_gen_mir::tree_render::LeanCx::guard(),
+                            )
+                        })
+                        .unwrap_or_else(|| c.0.lean.clone());
                     for (field, _) in &env.mutates {
                         expr = expr
                             .replace(&format!("s.{}", field), &format!("new_{}", field))

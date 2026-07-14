@@ -185,12 +185,7 @@ impl<'a> TypeEnv<'a> {
     /// by callers: a numeric literal renders as-is, a const name renders as
     /// the Rust `const` the codegen already emits.
     fn fin_bound(&self, binder_ty: &str) -> Option<String> {
-        let resolved = self
-            .aliases
-            .get(binder_ty.trim())
-            .map(String::as_str)
-            .unwrap_or(binder_ty)
-            .trim();
+        let resolved = self.resolve_alias_name(binder_ty);
         let inner = resolved.strip_prefix("Fin[")?.strip_suffix(']')?;
         Some(inner.trim().to_string())
     }

@@ -29,7 +29,7 @@
         "seed_sha256": { "$ref": "#/$defs/sha256" },
         "action_count": { "type": "integer", "minimum": 1 },
         "command": { "type": "array", "minItems": 8, "items": { "type": "string", "minLength": 1 } },
-        "status": { "enum": ["completed_zero_exit", "completed_nonzero_exit", "spawn_failed"] },
+        "status": { "enum": ["completed_zero_exit", "completed_nonzero_exit", "terminated_by_signal", "spawn_failed"] },
         "exit_code": { "type": ["integer", "null"] },
         "error": { "type": ["string", "null"] }
       }

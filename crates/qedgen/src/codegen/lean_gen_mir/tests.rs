@@ -621,6 +621,34 @@ environment clock_advance {
 }
 
 #[test]
+fn render_environment_state_read_with_external_binds_s_not_s_prime() {
+    // Regression: a constraint that reads STATE inside an environment with an
+    // external field must render the state through `s.` (rewritten to
+    // `new_<field>` for mutated fields), never the two-state `s'` — the
+    // theorem binds `s`, `new_*`, and `pre_/post_*`, but no `s'`.
+    let src = r#"spec OracleGuard
+type State = { rate : U64, max_rate : U64 }
+property rate_bounded : state.rate <= state.max_rate preserved_by all
+environment oracle_step {
+  external oracle.price : U64
+  mutates rate : U64
+  constraint state.rate <= oracle.price
+}
+"#;
+    let parsed = crate::chumsky_adapter::parse_str(src).expect("parse");
+    let mir = crate::mir::lower(&parsed);
+    let out = render(&mir);
+    // `state.rate` (mutated) → `new_rate`; `oracle.price` → `post_oracle_price`.
+    assert!(
+        out.contains("h_c0 : new_rate ≤ post_oracle_price"),
+        "state read must resolve to new_rate, external to post_oracle_price:\n{out}"
+    );
+    // No unbound two-state receiver.
+    assert!(!out.contains("s'."), "no s' may appear:\n{out}");
+    assert!(!out.contains("s'.new_rate"), "{out}");
+}
+
+#[test]
 fn render_emits_overflow_theorems() {
     // Lending: `deposit` issues a `+=` effect, which MIR lowers to
     // `CheckedAdd` (checked is the default arithmetic mode); the

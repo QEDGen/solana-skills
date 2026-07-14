@@ -282,9 +282,10 @@ validate_replay_report() {
       (.seed_sha256 | sha256) and
       (.action_count | type == "number" and . >= 1) and
       (.command | type == "array" and length >= 8) and
-      (.status | IN("completed_zero_exit", "completed_nonzero_exit", "spawn_failed")) and
+      (.status | IN("completed_zero_exit", "completed_nonzero_exit", "terminated_by_signal", "spawn_failed")) and
       (if .status == "completed_zero_exit" then .exit_code == 0 and .error == null
        elif .status == "spawn_failed" then .exit_code == null and (.error | type == "string" and length > 0)
+       elif .status == "terminated_by_signal" then .exit_code == null and .error == null
        else (.exit_code | type == "number") and .error == null end)))
   ' "$1" >/dev/null
 }

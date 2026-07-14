@@ -1223,6 +1223,55 @@ environment clock_advance {
     ));
 }
 
+#[test]
+fn cross_environment_external_reference_is_rejected() {
+    // `clock.slot` is declared external in `clock_env`; referencing it from
+    // `oracle_env` (which does not declare it) would lower to an unresolved
+    // identifier in Kani/Lean. The spec checker must reject it up front.
+    let src = format!(
+        "{}{}",
+        CLASSIFY_SPEC_HEAD,
+        r#"
+environment clock_env {
+  external clock.slot : U64
+  constraint clock.slot >= old(clock.slot)
+}
+
+environment oracle_env {
+  external oracle.price : U64
+  constraint oracle.price >= clock.slot
+}
+"#
+    );
+    let err = parse_str(&src).expect_err("cross-env external must be rejected");
+    let msg = format!("{err:#}");
+    assert!(msg.contains("oracle_env"), "{msg}");
+    assert!(msg.contains("clock"), "{msg}");
+    assert!(msg.contains("clock_env"), "{msg}");
+}
+
+#[test]
+fn external_shared_across_environments_is_allowed() {
+    // The same external declared in BOTH environments is fine — each
+    // environment redeclares it, so the reference resolves locally.
+    let src = format!(
+        "{}{}",
+        CLASSIFY_SPEC_HEAD,
+        r#"
+environment a {
+  external clock.slot : U64
+  constraint clock.slot >= 0
+}
+
+environment b {
+  external clock.slot : U64
+  constraint clock.slot >= 0
+}
+"#
+    );
+    parse_str(&src).expect("shared external redeclared in each env parses");
+}
+
 // ========================================================================
 // RustOpts.state_mode + inside_old round-trips
 // ========================================================================
@@ -1442,6 +1491,39 @@ property bad_sum : sum i : U64, state.total >= 0 preserved_by [tick]
         .expect("unsupported sentinel retained for diagnostics");
     assert!(rust.contains("QEDGEN_UNSUPPORTED_SUM"), "{rust}");
     assert!(!rust.contains("sum_over"), "{rust}");
+    // The skip-guard layer must recognize the sum sentinel — otherwise the
+    // bare comment escapes into Kani/proptest/Crucible expression position
+    // as a syntax error and counts as an executable assertion.
+    assert!(crate::check::rust_expr_is_unsupported(rust), "{rust}");
+}
+
+#[test]
+fn sum_binder_resolves_fin_through_alias_chain() {
+    // `Idx -> AccountIdx -> Fin[4]`: fin_bound must resolve transitively,
+    // matching resolve_alias_name, not stop after one hop.
+    let src = r#"
+spec AliasChainSum
+const MAX = 4
+type AccountIdx = Fin[MAX]
+type Idx = AccountIdx
+state { balances : Map[MAX] U64 }
+type Error | E
+handler rebalance { }
+property conservation :
+  sum i : Idx, state.balances[i] >= 0
+  preserved_by [rebalance]
+"#;
+    let typed = crate::chumsky_parser::parse(src).expect("parse alias-chain sum");
+    let spec = adapt(&typed);
+    let rust = spec.properties[0]
+        .rust_expression
+        .as_deref()
+        .expect("alias-chain sum must have Rust lowering");
+    assert!(rust.contains("0..(MAX as usize)"), "{rust}");
+    assert!(
+        !rust.contains(crate::check::QEDGEN_UNSUPPORTED_SUM_MARKER),
+        "{rust}"
+    );
 }
 
 // ========================================================================

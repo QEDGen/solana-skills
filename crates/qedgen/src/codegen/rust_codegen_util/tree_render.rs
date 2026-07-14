@@ -184,7 +184,8 @@ fn render(e: &ExprTree, cx: RustCx, inside_old: bool) -> (String, Prec) {
                     "(0..({bound} as usize)).map(|{binder}| {body}).fold(0, |__sum, __item| __sum + __item)"
                 ),
                 None => format!(
-                    "/* QEDGEN_UNSUPPORTED_SUM: {binder} : {binder_ty} requires a finite Fin[N] domain */"
+                    "/* {}: {binder} : {binder_ty} requires a finite Fin[N] domain */",
+                    crate::check::QEDGEN_UNSUPPORTED_SUM_MARKER
                 ),
             };
             (rendered, Prec::Atom)
