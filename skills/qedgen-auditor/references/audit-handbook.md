@@ -279,7 +279,7 @@ known.
       proof-of-knowledge under generic group model.")
    2. **List the failure modes for that primitive's class.** Generic
       classes are well-studied; the failure modes are standard.
-      `references/trust_surface_primitives.md` documents the
+      `trust_surface_primitives.md` (alongside this file) documents the
       per-class checklist for the classes the corpus has seen so
       far. If the primitive's class isn't covered there, fall back
       to first principles: replay, forgery from observed output,
@@ -528,10 +528,12 @@ known.
         "we thought this might be a bug." Don't add an advisory note.
         Move on. The auditor's job is real bugs; if your repro can't
         demonstrate it, you don't surface it.
-      - `BuildError` → record as inconclusive; the finding stays
-        structural (we have no evidence either way). Note this in the
-        Reproducer subsection so the user knows the verdict isn't
-        confirmed.
+      - `BuildError` → a tool outcome, not an evidence state. Keep the
+        finding `structural` only if the source independently
+        establishes reachability; otherwise downgrade it to
+        `hypothesis` (see [severity and evidence](severity-and-evidence.md)).
+        Either way, note the limitation in the Reproducer subsection
+        so the user knows the verdict isn't confirmed.
 
    c) MEDIUM and below: a repro is **encouraged** but not required.
       Many MEDIUM categories (saturating-by-design, lifecycle hints,
@@ -1806,8 +1808,8 @@ verification claim.
 cluster cards for sites whose intent the four-question ratification
 didn't already classify. Most sites collapse automatically once
 invariants / state machine / authority graph are ratified. See
-[interview examples](interview_examples.md) for the
-primary TUI-based flow.*
+[interview examples](interview_examples.md) for worked interview
+transcripts; neither interaction surface is more authoritative.*
 
 The interview groups probe findings by **cluster kind** — 14 categories
 that map detected site shapes to candidate spec clauses. Each kind has
@@ -1885,17 +1887,9 @@ category label. The levels fix the scale; the **procedure** fixes the
 run the steps in order, every finding — this is the single most important
 part of grading).
 
-**Levels:**
-
-- **CRITICAL** — direct fund loss, total state takeover, unbounded mint, or
-  permanent DoS to all users. Attacker: any user, any tx, repeatable, no
-  special precondition.
-- **HIGH** — conditional fund loss (needs victim action, market state, or
-  timing), griefing of all users, or partial state takeover.
-- **MEDIUM** — exploit bounded by the attacker's own economic stake or a
-  narrow precondition; partial DoS; data leak not immediately fund-loss.
-- **LOW** — surface anomaly that doesn't compose into a real attack;
-  surface as informational.
+**Levels:** the four levels (CRITICAL/HIGH/MEDIUM/LOW) are defined
+canonically in [severity and evidence](severity-and-evidence.md) — this
+section does not restate them; it defines how to *apply* them.
 
 **The procedure — apply to every finding, in order:**
 
@@ -2025,7 +2019,8 @@ no chain identified" explicitly so reviewers know it was checked.>
 
 ### Reproducer (CRIT/HIGH only)
 
-**Status:** fired | inconclusive
+**Status:** fired | inconclusive (`BuildError`/simulator limitation — evidence
+state per the [reproducer contract](reproducer-contract.md))
 **Test:** `target/qedgen-repros/audit/<finding-id>.rs`
 **Run:** `qedgen verify --probe-repros --json | jq '.results[] | select(.finding_id == "<id>")'`
 
@@ -2186,7 +2181,7 @@ written + handoff offered."
 
 For the conversion table — probe category → spec construct shape →
 why it locks the finding in → what the harness asserts on regression
-— see `references/finding_to_spec.md`. Eight families cover the
+— see [`finding_to_spec.md`](finding_to_spec.md). Eight families cover the
 high-yield categories (authorization, arithmetic, lifecycle / PDA,
 data-structure dep invariants, paired validators, intent drift,
 external-state revocation, out-of-band documentation invariants).

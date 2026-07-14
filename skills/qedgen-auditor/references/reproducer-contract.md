@@ -17,13 +17,14 @@ denial of service and the pre-state represents a valid operation that should
 succeed. A test that merely observes rejection does not prove theft, takeover,
 or corruption.
 
-Outcomes:
+Outcomes (`qedgen verify --probe-repros` tool outcome in parentheses):
 
-- Fired security assertion: confirmed.
-- Simulator/build limitation with independently established reachability:
-  structural.
-- Simulator/build limitation without established reachability: hypothesis.
-- Security assertion does not fire: rejected.
+- Fired security assertion (`Fired`): confirmed.
+- Simulator/build limitation (`BuildError`, an inconclusive tool outcome) with
+  independently established reachability: structural.
+- The same limitation without established reachability: hypothesis.
+- Security assertion does not fire (`Silent`): rejected.
+- Ambiguous or partial result: hypothesis, never structural.
 
 Keep reproducers under `target/qedgen-repros/audit/`; do not commit them unless
 the user explicitly converts them into permanent regression tests.

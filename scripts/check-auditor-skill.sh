@@ -61,7 +61,7 @@ while IFS= read -r ref; do
     echo "missing skill reference: $ref" >&2
     fail=1
   fi
-done < <(sed -nE 's/.*\]\((references\/[^)#]+).*/\1/p' "$skill_root/SKILL.md" | sort -u)
+done < <(grep -oE '\]\(references/[^)#]+' "$skill_root/SKILL.md" | cut -c3- | sort -u)
 
 while IFS=: read -r source _ token; do
   ref="${token#']('}"

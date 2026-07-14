@@ -28,6 +28,13 @@ run-until-dry loop.
 
 Read the auditor's `references/model-selection.md` before dispatch.
 
+For Anthropic-backed venues:
+
+- discovery worker: `claude-fable-5`, extended thinking at the highest
+  available budget (fallback: `claude-opus-4-8`, extended thinking);
+- reconciliation judge: `claude-sonnet-5`, structured JSON output;
+- deterministic extraction/normalization: `claude-haiku-4-5`.
+
 For OpenAI-backed venues:
 
 - discovery worker: `gpt-5.6-sol`, `high` reasoning;
@@ -37,7 +44,10 @@ For OpenAI-backed venues:
   reasoning according to complexity.
 
 Pin explicit identifiers in scored runs. Do not use aliases. Preserve older
-models only in an intentionally labeled model-regression comparison.
+models only in an intentionally labeled model-regression comparison. OpenAI
+workers can stop mid-run when audit content triggers the provider's
+cybersecurity policy; classify such runs `policy-interfered`, never as a clean
+pass.
 
 For other providers, select the current frontier reasoning/coding tier for
 discovery and the balanced frontier tier for judging. Record the mapping.
@@ -111,6 +121,13 @@ Normalize reports to:
   "repro_status": "fired|inconclusive|silent|not-required"
 }
 ```
+
+`repro_status` uses the auditor's reproducer-contract tokens: `fired` = the
+assertion fired (confirmed); `silent` = the repro ran but did not fire
+(rejected); `inconclusive` = build/simulator limitation or ambiguous result;
+`not-required` = MEDIUM/LOW structural finding. `info` severity exists only
+to normalize third-party report entries — the auditor never emits it, and
+`info` rows are excluded from severity-agreement scoring.
 
 Generate deterministic match candidates using category, path, handler, and root
 cause. Give the judge only the two normalized reports. The judge may match or

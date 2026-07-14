@@ -182,4 +182,5 @@ not publish third-party HIGH/CRITICAL findings; recommend responsible disclosure
   allowed when the probe operates from the spec without claiming source-level
   assembly coverage.
 - Never claim “clean.” State what was examined, which lanes ran, and remaining
-  coverage limits.
+  coverage limits. Recall is probabilistic: a single empty pass is
+  under-sampling, not evidence of absence.
