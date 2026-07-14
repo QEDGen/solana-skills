@@ -427,6 +427,11 @@ output format in [report-and-grading.md](report-and-grading.md).
      *without* prompting the user — these hypotheses feed Phase 2.
      Long-running probe phases go to background; B continues foreground.
 
+     Producer B is independent of Producer A. Missing/stale QEDGen, a failed or
+     empty probe, an unsupported adapter, or a failed build does not stop the
+     domain dossier, manual review, or Phase 2 ratification. Record the blocked
+     executable lanes and continue from source evidence.
+
    - **Event-driven surface.** The instant any MED+ repro fires:
      surface immediately ("Found <category>: <one-line>. Repro at
      <path>. Continuing."). No batching. No draft report.
@@ -476,6 +481,11 @@ output format in [report-and-grading.md](report-and-grading.md).
    budget exhaustion, or N consecutive units of work without a new
    finding.
 
+   Re-run Crucible in domain mode after merging the ratified invariants. If
+   Crucible is blocked, translate applicable invariants into agent-authored
+   Mollusk tests or manual cross-handler obligations and mark executable
+   verification pending rather than dropping the invariant.
+
    ### High-assurance profile
 
    Use the bounded, venue-neutral profile in `orchestration-profiles.md`. Run
@@ -502,6 +512,9 @@ output format in [report-and-grading.md](report-and-grading.md).
    ### Artifact emission
 
    - Write the full audit report to `.qed/findings/audit-<timestamp>.md`.
+   - Write the source-cited domain dossier to
+     `.qed/audit/<timestamp>/domain-dossier.md`, including rejected and pending
+     candidates and blocked verification lanes.
    - Write `.qed/probe-suppress.toml` for auto-detected false positives.
    - Reproducers live under `target/qedgen-repros/audit/<finding-id>.rs`
      (ephemeral; don't commit).
@@ -515,4 +528,3 @@ output format in [report-and-grading.md](report-and-grading.md).
    for CRIT/HIGH; omit for MED and below) so the user can verify the
    chain reasoning. Footer lists scaffolded artifacts so the user can
    see what was created.
-

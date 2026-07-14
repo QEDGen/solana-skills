@@ -38,6 +38,10 @@ Missing or stale QEDGen reduces the audit to read-only; it does not prevent
 source review. A failed program build prevents fired Mollusk reproducers but
 does not erase source-established evidence.
 
+Record each lane independently: source review, ordinary probe, compilation,
+Mollusk, Miri, and Crucible. Failure or an empty result in one lane must not
+cancel invariant extraction or be reported as evidence that no bugs exist.
+
 ### 2. Select an audit profile
 
 Use `standard` unless the user requested a quick look or high assurance.
@@ -74,6 +78,16 @@ Probe output prioritizes investigation; it is not a verdict. Independently walk
 the program's handlers, authority graph, state transitions, account identities,
 arithmetic, CPIs, and documented invariants.
 
+Always extract a domain dossier from source, tests, comments, documentation,
+and paired operations, even when QEDGen is missing or stale, the ordinary probe
+fails or returns no sites, the runtime adapter is unsupported, or compilation
+fails. Capture asset flows, quantities and units, lifecycle transitions,
+authority capabilities, candidate economic equations, external assumptions,
+source anchors, and confidence. Use the dossier for manual review and intent
+ratification immediately; preserve it for spec drafting and later executable
+verification when blocked lanes recover. Read [domain invariant extraction](references/domain-invariant-extraction.md)
+before interviewing the user or drafting domain properties.
+
 Read only the relevant detailed references:
 
 - [category catalog](references/category-catalog.md): per-category
@@ -88,6 +102,8 @@ Read only the relevant detailed references:
   a small dependency supplies a security-critical primitive.
 - [data-structure dependency invariants](references/data_structure_dep_invariants.md):
   only when a niche collection or zero-copy dependency controls fund movement.
+- [domain invariant extraction](references/domain-invariant-extraction.md): always
+  for spec-less audits and whenever the existing spec is partial or only structural.
 - [probe orchestration](references/probe_orchestration.md): only when using
   Mollusk, Miri, or Crucible repro lanes.
 - [model selection](references/model-selection.md): before dispatching audit,
@@ -96,6 +112,28 @@ Read only the relevant detailed references:
 Framework wrappers are evidence, not syntax to ignore. Confirm what the active
 framework and version enforce before filing missing signer, owner, rent,
 discriminator, initialization, or realloc findings.
+
+### 3a. Ratify intent and schedule fuzzing
+
+Do not ask the user to rediscover facts already visible in code. Present
+source-cited candidates for domain invariants, lifecycle, authority capabilities,
+threats, and intentional exceptions after the first MED+ finding, or after the
+autonomous pass finishes dry or probe-blocked. Keep unratified semantic claims
+as hypotheses.
+
+Crucible has three bounded entry points:
+
+1. Start spec-less protocol mode during Phase 1 as soon as supported runtime
+   metadata is available. Treat it as mechanical state-diff coverage only.
+2. Start skeleton mode during Phase 1 after auto-ratifying only literal,
+   source-anchored high-confidence clauses. Do not wait for a finding.
+3. Re-run domain mode after user ratification against the enriched spec, with
+   cross-handler sequences and domain properties enabled.
+
+If QEDGen, compilation, runtime metadata, or a fuzz harness is unavailable,
+mark that entry point blocked and continue with source review and agent-authored
+tests where possible. Never weaken or reject an invariant because Crucible could
+not run. See [probe orchestration](references/probe_orchestration.md).
 
 ### 4. Classify evidence before severity
 
@@ -178,6 +216,11 @@ Every surfaced finding must include:
 - minimal implementation fix;
 - minimal `.qedspec` regression guard when applicable;
 - repro path and result for HIGH/CRITICAL findings.
+
+When handing findings into specification, author three layers in order:
+structural contracts, ratified domain properties, then finding-derived
+regression guards. An audit is not fully specified merely because every finding
+has a guard. See [finding to spec](references/finding_to_spec.md).
 
 Do not edit the audited program unless the user separately asks for fixes. Do
 not publish third-party HIGH/CRITICAL findings; recommend responsible disclosure.

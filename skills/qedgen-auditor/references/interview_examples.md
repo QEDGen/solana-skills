@@ -9,8 +9,9 @@ for user ratification.
 
 Each transcript shows the same four-batch shape:
 
-1. **Invariants** (multi-select) — 5–7 candidate invariants with code
-   `preview` per option.
+1. **Invariants** (multi-select) — 5–7 structural and domain candidates
+   with code `preview` per option. Domain candidates state units, timing,
+   rounding, or economic relationships rather than generic labels alone.
 2. **State machine shape** (single-select) — archetype with struct +
    handler-signature preview.
 3. **Authority graph** (multi-select) — extracted roles with `Signer`
@@ -62,6 +63,11 @@ planned. Skips mint-match: enforced upstream.)
 probes against the ratified `vault_balance` conservation; every effect
 touching `vault_balance` must preserve it under `amount ≤ balance`.
 Unratified mint-match dropped from spec-candidate emission.
+
+Before emitting the spec, the agent also resolves what `vault_balance` means:
+book value, measured token-account balance, or net assets after accrued fees.
+That semantic choice belongs in the domain layer; the arithmetic guard alone is
+only a regression property.
 
 ### Batch 2 — State machine shape
 
@@ -274,6 +280,11 @@ candidate transition graphs rather than the fixed archetype list.
   { "label": "Other (free text)" }
 ] }
 ```
+
+The agent must normalize units before ratification: whether `collateral` is raw
+atoms or oracle-valued quote units, the scale of `price`, and whether accrued
+interest is included in `debt`. If source does not establish these semantics,
+the preview presents the alternatives rather than silently selecting one.
 
 **User clicks:** all six.
 

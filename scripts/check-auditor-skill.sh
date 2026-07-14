@@ -66,6 +66,30 @@ while IFS= read -r ref; do
   fi
 done < <(grep -oE '\]\(references/[^)#]+' "$skill_root/SKILL.md" | cut -c3- | sort -u)
 
+for required in \
+  'domain-invariant-extraction.md' \
+  'Always extract a domain dossier' \
+  'Start spec-less protocol mode' \
+  'Start skeleton mode' \
+  'Re-run domain mode'; do
+  if ! grep -Fq "$required" "$skill_root/SKILL.md"; then
+    echo "canonical auditor workflow is missing required domain/fuzz guidance: $required" >&2
+    fail=1
+  fi
+done
+
+for required in \
+  'Asset-flow graph' \
+  'Quantity and unit table' \
+  'Authority-capability matrix' \
+  'Economic equations' \
+  'Probe-failure behavior'; do
+  if ! grep -Fq "$required" "$skill_root/references/domain-invariant-extraction.md"; then
+    echo "domain invariant reference is missing required section: $required" >&2
+    fail=1
+  fi
+done
+
 while IFS=: read -r source _ token; do
   ref="${token#']('}"
   ref="${ref%')'}"

@@ -198,6 +198,7 @@ Suppressed (2 + 0 silent-repro): rules in .qed/probe-suppress.toml
 
 Scaffolded:
   vault.qedspec                              (12 handlers, 5 invariants)
+  .qed/audit/20260426-1715/domain-dossier.md (source-cited intent + lane status)
   .qed/findings/audit-20260426-1715.md       (full report)
   .qed/probe-suppress.toml                   (2 false-positives)
   target/qedgen-repros/audit/<id>.rs         (5 repros — ephemeral)
