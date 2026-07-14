@@ -110,11 +110,13 @@ For exact replay, author `domain-sequence-bindings.json` against
 explicit; never infer accounts or argument values. Domain-mode Crucible writes
 `resolved-domain-sequences.json`, validates it against
 `resolved-domain-sequences.schema.json`, replays each byte-exact seed before
-exploratory fuzzing, and feeds the same corpus into the subsequent run. Today
-this is executable for argument-only plans. Because Crucible action seeds do
-not encode account identity, a plan containing account bindings stays blocked
-until those bindings are materialized in the generated fixture; never report
-that plan as replayed merely because its handler arguments were encoded.
+exploratory fuzzing, and feeds the same corpus into the subsequent run. Account
+targets use the explicit `fixture:<account>` namespace. QEDGen verifies them
+against non-PDA, non-default spec accounts, collapses them into
+`account-binding-overlay.json`, rejects conflicts across plans, and compiles
+that overlay into action account literals and signer selection before encoding
+handler arguments. Default-address and PDA accounts remain generator-managed
+and must not appear in the overlay.
 
 ```bash
 <skill-root>/scripts/check-domain-artifacts.sh \
@@ -123,7 +125,8 @@ that plan as replayed merely because its handler arguments were encoded.
   --handoff .qed/audit/<timestamp>/spec-handoff.json \
   --sequences .qed/audit/<timestamp>/domain-sequences.json \
   --bindings .qed/audit/<timestamp>/domain-sequence-bindings.json \
-  --resolved-sequences .qed/audit/<timestamp>/resolved-domain-sequences.json
+  --resolved-sequences .qed/audit/<timestamp>/resolved-domain-sequences.json \
+  --account-overlay .qed/audit/<timestamp>/account-binding-overlay.json
 ```
 
 Read only the relevant detailed references:

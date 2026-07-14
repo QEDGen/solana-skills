@@ -237,8 +237,10 @@ Once bindings are complete, run domain mode with both
 unknown, duplicate, and cross-audit bindings, writes the resolved artifact,
 replays every plan exactly, then uses those seeds as the exploratory corpus.
 Structured seeds encode handler choice and arguments, not fixture account
-identity. If a resolved plan still requires account materialization, stop and
-record that limitation rather than silently discarding the account binding.
+identity. QEDGen therefore compiles `fixture:<account>` bindings into the
+generated harness first and records the deterministic account overlay; only
+then may it omit those compiled bindings from the seed bytes. Conflicting or
+unknown fixture targets stop replay rather than being silently discarded.
 
 ### Step 2 — auto-ratify *high-confidence* clusters
 

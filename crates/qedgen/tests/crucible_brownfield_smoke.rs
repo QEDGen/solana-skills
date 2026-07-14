@@ -142,6 +142,117 @@ fn fuzz_zero_brownfield_emits_protocol_harness() {
     );
 }
 
+#[test]
+fn budget_zero_distinguishes_protocol_and_domain_assertion_surfaces() {
+    ensure_qedgen_built();
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let program = tmp.path().join("program");
+    write_brownfield_anchor(&program, "buggy_anchor");
+
+    let protocol_harness = tmp.path().join("protocol").join("buggy_anchor");
+    let protocol = Command::new(qedgen_bin())
+        .args([
+            "probe",
+            "--fuzz",
+            "0",
+            "--crucible-mode",
+            "protocol",
+            "--root",
+        ])
+        .arg(&program)
+        .arg("--harness-dir")
+        .arg(&protocol_harness)
+        .output()
+        .expect("emit protocol harness");
+    assert!(
+        protocol.status.success(),
+        "protocol emit failed: {}",
+        String::from_utf8_lossy(&protocol.stderr)
+    );
+
+    let spec = tmp.path().join("domain.qedspec");
+    std::fs::write(
+        &spec,
+        r#"spec DomainMode
+program_id "11111111111111111111111111111111"
+
+type State
+  | Active of { count : U64 }
+
+type Error | E
+
+invariant domain_count_bounded :
+  state.count <= 10
+
+handler bump (delta : U64) : State.Active -> State.Active {
+  invariant domain_count_bounded
+  effect { count := count + delta }
+}
+
+"#,
+    )
+    .unwrap();
+    let dossier = tmp.path().join("domain-dossier.json");
+    std::fs::write(
+        &dossier,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "schema_uri": "https://qedgen.dev/schemas/auditor/domain-dossier-v1.schema.json",
+            "asset_flows": [{
+                "id": "domain_count_flow",
+                "metadata": {
+                    "ratification": "user",
+                    "verification_lanes": ["crucible"]
+                }
+            }],
+            "quantities": [],
+            "paired_operations": [],
+            "lifecycle_edges": [],
+            "authority_capabilities": [],
+            "economic_equations": [],
+            "external_assumptions": []
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let domain_harness = tmp.path().join("domain").join("domain_mode");
+    let domain = Command::new(qedgen_bin())
+        .args([
+            "probe",
+            "--fuzz",
+            "0",
+            "--crucible-mode",
+            "domain",
+            "--spec",
+        ])
+        .arg(&spec)
+        .arg("--domain-dossier")
+        .arg(&dossier)
+        .arg("--harness-dir")
+        .arg(&domain_harness)
+        .output()
+        .expect("emit domain harness");
+    assert!(
+        domain.status.success(),
+        "domain emit failed: {}",
+        String::from_utf8_lossy(&domain.stderr)
+    );
+
+    let protocol_body = std::fs::read_to_string(protocol_harness.join("src/main.rs")).unwrap();
+    let domain_body = std::fs::read_to_string(domain_harness.join("src/main.rs")).unwrap();
+    assert!(protocol_body.contains("Mode: PROTOCOL (no spec)"));
+    assert!(protocol_body.contains("fn invariant_test(_fixture:"));
+    assert!(protocol_body.contains("fn assert_no_wallet_inflation"));
+    assert!(!protocol_body.contains("domain_count_bounded"));
+    assert!(domain_body.contains("Mode: SPEC + PROTOCOL"));
+    assert!(domain_body.contains("fn invariant_test(fixture:"));
+    assert!(domain_body.contains("Invariant: domain_count_bounded"));
+    assert!(domain_body.contains("invariant domain_count_bounded violated"));
+    assert!(domain_body.contains("fn assert_no_wallet_inflation"));
+    assert!(String::from_utf8_lossy(&protocol.stdout).contains("\"mode\": \"spec_less\""));
+    assert!(String::from_utf8_lossy(&domain.stdout).contains("\"mode\": \"spec_aware\""));
+}
+
 /// Pins that the committed v2.21 fixture under
 /// `crates/qedgen/tests/fixtures/regressions/v2.21-crucible-crash-first/buggy_anchor/`
 /// drives the brownfield path end-to-end. Catches regressions that

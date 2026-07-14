@@ -9,12 +9,17 @@ use crate::*;
 use anyhow::{Context as _, Result};
 use std::path::{Path, PathBuf};
 
-fn prepare_domain_sequence_replay(
+struct PreparedDomainSequenceReplay {
+    resolved: probe::domain_sequence_binding::ResolvedDomainSequenceDocument,
+    overlay: probe::domain_account_overlay::AccountBindingOverlay,
+    resolved_path: PathBuf,
+}
+
+fn resolve_domain_sequence_replay(
     spec: &check::ParsedSpec,
     sequences_path: &Path,
     bindings_path: &Path,
-    harness: &Path,
-) -> Result<probe::domain_sequence_seed::DomainSeedReport> {
+) -> Result<PreparedDomainSequenceReplay> {
     let sequences: probe::domain_sequence::DomainSequenceDocument = serde_json::from_slice(
         &std::fs::read(sequences_path)
             .with_context(|| format!("reading domain sequences {}", sequences_path.display()))?,
@@ -34,6 +39,7 @@ fn prepare_domain_sequence_replay(
             )
         })?;
     let resolved = probe::domain_sequence_binding::bind_domain_sequences(&sequences, &bindings)?;
+    let overlay = probe::domain_account_overlay::collapse_account_binding_overlay(spec, &resolved)?;
 
     let resolved_path = sequences_path
         .parent()
@@ -44,14 +50,18 @@ fn prepare_domain_sequence_replay(
         .with_context(|| format!("writing {}", tmp_path.display()))?;
     std::fs::rename(&tmp_path, &resolved_path)
         .with_context(|| format!("publishing {}", resolved_path.display()))?;
+    let overlay_path = resolved_path.with_file_name("account-binding-overlay.json");
+    let overlay_tmp = overlay_path.with_extension("json.tmp");
+    std::fs::write(&overlay_tmp, serde_json::to_vec_pretty(&overlay)?)
+        .with_context(|| format!("writing {}", overlay_tmp.display()))?;
+    std::fs::rename(&overlay_tmp, &overlay_path)
+        .with_context(|| format!("publishing {}", overlay_path.display()))?;
 
-    let report = probe::domain_sequence_seed::write_domain_seed_corpus(spec, &resolved, harness)?;
-    eprintln!(
-        "Crucible domain mode: prepared {} deterministic replay seed(s); resolved artifact: {}.",
-        report.seeds.len(),
-        resolved_path.display()
-    );
-    Ok(report)
+    Ok(PreparedDomainSequenceReplay {
+        resolved,
+        overlay,
+        resolved_path,
+    })
 }
 
 /// #182 Shape-1: deliver the `qedgen_kani_prelude` crate beside a just-generated
@@ -533,6 +543,22 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 let harness = harness_dir
                     .clone()
                     .unwrap_or_else(|| harness_parent.join(&prog));
+                let prepared_domain_replay = match (
+                    requested_mode,
+                    domain_sequences.as_deref(),
+                    domain_sequence_bindings.as_deref(),
+                ) {
+                    (Some(CrucibleMode::Domain), Some(sequences), Some(bindings)) => Some(
+                        resolve_domain_sequence_replay(&synthesised_spec, sequences, bindings)?,
+                    ),
+                    (Some(CrucibleMode::Domain), None, None) => None,
+                    (Some(CrucibleMode::Domain), _, _) => {
+                        return Err(anyhow::anyhow!(
+                            "domain sequence replay requires both --domain-sequences and --domain-sequence-bindings"
+                        ));
+                    }
+                    _ => None,
+                };
                 // Brownfield: emit the harness under `.qed/fuzz/<prog>/` if
                 // absent. Spec mode expects a prior `codegen --crucible`;
                 // never auto-regen.
@@ -541,7 +567,14 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                     || matches!(requested_mode, Some(CrucibleMode::Domain));
                 if generate_harness {
                     std::fs::create_dir_all(&harness_parent)?;
-                    crucible_gen::generate(&synthesised_spec, &harness, mode)?;
+                    crucible_gen::generate_with_account_overlay(
+                        &synthesised_spec,
+                        &harness,
+                        mode,
+                        prepared_domain_replay
+                            .as_ref()
+                            .map(|prepared| &prepared.overlay),
+                    )?;
                 }
                 // Brownfield ships its own IDL (no `anchor build` to feed
                 // `discover_idl`): write the synthesised JSON to
@@ -551,27 +584,23 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                     crucible_brownfield::write_synthesized_idl(&harness, &prog, idl_json)
                         .context("writing synthesised IDL")?;
                 }
-                let domain_seed_report = match (
-                    requested_mode,
-                    domain_sequences.as_deref(),
-                    domain_sequence_bindings.as_deref(),
-                ) {
-                    (Some(CrucibleMode::Domain), Some(sequences), Some(bindings)) => {
-                        Some(prepare_domain_sequence_replay(
+                let domain_seed_report = prepared_domain_replay
+                    .as_ref()
+                    .map(|prepared| {
+                        let report = probe::domain_sequence_seed::write_domain_seed_corpus(
                             &synthesised_spec,
-                            sequences,
-                            bindings,
+                            &prepared.resolved,
                             &harness,
-                        )?)
-                    }
-                    (Some(CrucibleMode::Domain), None, None) => None,
-                    (Some(CrucibleMode::Domain), _, _) => {
-                        return Err(anyhow::anyhow!(
-                            "domain sequence replay requires both --domain-sequences and --domain-sequence-bindings"
-                        ));
-                    }
-                    _ => None,
-                };
+                            Some(&prepared.overlay),
+                        )?;
+                        eprintln!(
+                            "Crucible domain mode: prepared {} deterministic replay seed(s); resolved artifact: {}.",
+                            report.seeds.len(),
+                            prepared.resolved_path.display()
+                        );
+                        Ok::<_, anyhow::Error>(report)
+                    })
+                    .transpose()?;
                 // Budget 0 = emit the harness and exit (dry-run preview
                 // without the Crucible build cost).
                 if budget_secs == 0 {

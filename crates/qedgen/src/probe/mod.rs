@@ -21,6 +21,7 @@ pub(crate) mod arithmetic_symbol_probe;
 pub(crate) mod cluster;
 pub(crate) mod crucible_brownfield;
 pub(crate) mod crucible_probe;
+pub(crate) mod domain_account_overlay;
 pub(crate) mod domain_extract;
 pub(crate) mod domain_interview;
 pub(crate) mod domain_sequence;

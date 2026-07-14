@@ -466,7 +466,11 @@ pub(crate) fn emit_overflow_detection_harnesses(
 ///   3. Environment — per `(env, property)` cross: assume the property pre,
 ///      mutate `env.mutates` fields to `kani::any()`, assume the
 ///      constraints, then `assert!(<prop>(&s))`.
-pub(crate) fn emit_file_level_features(out: &mut String, parsed: &ParsedSpec) -> Result<()> {
+pub(crate) fn emit_file_level_features(
+    out: &mut String,
+    mir: &Mir,
+    parsed: &ParsedSpec,
+) -> Result<()> {
     use crate::codegen_shared::map_type;
     use crate::rust_codegen_util as util;
 
@@ -656,11 +660,16 @@ pub(crate) fn emit_file_level_features(out: &mut String, parsed: &ParsedSpec) ->
         );
 
         for env in &parsed.environments {
+            let mir_env = mir
+                .environments
+                .iter()
+                .find(|candidate| candidate.name == env.name);
             for prop in &parsed.properties {
                 if prop.expression.is_none() {
                     continue;
                 }
-                let rust_constraints: &[String] = &env.constraints_rust;
+                let (rust_constraints, has_binary_constraint) =
+                    render_environment_constraints(mir_env, &env.constraints_rust);
 
                 emit_proof_preamble(
                     out,
@@ -678,11 +687,22 @@ pub(crate) fn emit_file_level_features(out: &mut String, parsed: &ParsedSpec) ->
                 );
                 out.push_str(&format!("    kani::assume({}(&s));\n", prop.name));
 
+                // A Binary environment constraint relates the value before
+                // the external mutation (`old(...)`) to the new value. Keep a
+                // full state snapshot so the tree renderer can route those
+                // reads through `pre` / `post` without rewriting strings.
+                if has_binary_constraint {
+                    out.push_str("    let pre = s.clone();\n");
+                }
+
                 for (field, ftype) in &env.mutates {
                     out.push_str(&format!("    s.{} = kani::any();\n", field));
                     let _ = ftype;
                 }
-                for constraint in rust_constraints {
+                if has_binary_constraint {
+                    out.push_str("    let post = &s;\n");
+                }
+                for constraint in &rust_constraints {
                     out.push_str(&format!("    kani::assume({});\n", constraint));
                 }
 
@@ -697,4 +717,47 @@ pub(crate) fn emit_file_level_features(out: &mut String, parsed: &ParsedSpec) ->
     }
 
     Ok(())
+}
+
+/// Render environment constraints from typed MIR when it is complete.
+///
+/// Unary constraints intentionally keep their legacy Rust strings for byte
+/// stability. Binary constraints need the structural tree so `old(state.x)`
+/// and `state.x` route to distinct `pre` / `post` receivers. An incomplete or
+/// legacy MIR carrier falls back wholesale to the parsed string list.
+fn render_environment_constraints(
+    mir_env: Option<&crate::mir::EnvironmentMir>,
+    legacy: &[String],
+) -> (Vec<String>, bool) {
+    use crate::rust_codegen_util::tree_render::{render_rust, Binder, RustCx};
+
+    let Some(mir_env) = mir_env else {
+        return (legacy.to_vec(), false);
+    };
+    if mir_env.typed_constraints.is_empty() || mir_env.typed_constraints.len() != legacy.len() {
+        return (legacy.to_vec(), false);
+    }
+    if mir_env.typed_constraints.iter().any(|constraint| {
+        constraint.class == crate::check::PropertyClass::Binary
+            && constraint.predicate.0.tree.is_none()
+    }) {
+        return (legacy.to_vec(), false);
+    }
+
+    let mut has_binary = false;
+    let constraints = mir_env
+        .typed_constraints
+        .iter()
+        .enumerate()
+        .map(|(index, constraint)| {
+            if constraint.class == crate::check::PropertyClass::Binary {
+                if let Some(tree) = &constraint.predicate.0.tree {
+                    has_binary = true;
+                    return render_rust(tree, RustCx::native().with_binder(Binder::PrePost));
+                }
+            }
+            legacy[index].clone()
+        })
+        .collect();
+    (constraints, has_binary)
 }

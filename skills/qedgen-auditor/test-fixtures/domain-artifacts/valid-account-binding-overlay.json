@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "schema_uri": "https://qedgen.dev/schemas/auditor/account-binding-overlay-v1.schema.json",
+  "source_resolved_sequence_schema_uri": "https://qedgen.dev/schemas/auditor/resolved-domain-sequences-v1.schema.json",
+  "audit_id": "audit_vault",
+  "handlers": {
+    "deposit": {
+      "accounts": {
+        "authority": "fixture:authority",
+        "vault": "fixture:vault"
+      },
+      "provenance": {
+        "authority": [
+          {
+            "plan_id": "sequence:deposit",
+            "action": { "phase": "forward", "index": 0 },
+            "provenance_candidate_ids": ["pair_deposit_withdraw"]
+          }
+        ],
+        "vault": [
+          {
+            "plan_id": "sequence:deposit",
+            "action": { "phase": "forward", "index": 0 },
+            "provenance_candidate_ids": ["pair_deposit_withdraw"]
+          }
+        ]
+      }
+    }
+  }
+}

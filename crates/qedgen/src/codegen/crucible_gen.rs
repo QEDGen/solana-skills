@@ -48,6 +48,15 @@ pub enum InvariantMode {
 /// invariant family asserted after each action; brownfield callers (no
 /// spec) pass `InvariantMode::Protocol`.
 pub fn generate(spec: &ParsedSpec, output_dir: &Path, mode: InvariantMode) -> Result<()> {
+    generate_with_account_overlay(spec, output_dir, mode, None)
+}
+
+pub(crate) fn generate_with_account_overlay(
+    spec: &ParsedSpec,
+    output_dir: &Path,
+    mode: InvariantMode,
+    account_overlay: Option<&crate::probe::domain_account_overlay::AccountBindingOverlay>,
+) -> Result<()> {
     if spec.handlers.is_empty() {
         bail!("No handlers found in spec — nothing to fuzz");
     }
@@ -69,7 +78,7 @@ pub fn generate(spec: &ParsedSpec, output_dir: &Path, mode: InvariantMode) -> Re
     std::fs::write(dir.join("idls").join("README.md"), emit_idls_readme(spec))?;
     crate::codegen_shared::write_generated_file(
         &dir.join("src").join("main.rs"),
-        &emit_harness(spec, mode)?,
+        &emit_harness(spec, mode, account_overlay)?,
     )?;
 
     let assertion_count = match mode {
@@ -272,7 +281,11 @@ invariant_test = []
 // Harness body
 // ============================================================================
 
-fn emit_harness(spec: &ParsedSpec, mode: InvariantMode) -> Result<String> {
+fn emit_harness(
+    spec: &ParsedSpec,
+    mode: InvariantMode,
+    account_overlay: Option<&crate::probe::domain_account_overlay::AccountBindingOverlay>,
+) -> Result<String> {
     let prog = spec_program_name(spec);
     let fixture = fixture_name(spec);
 
@@ -305,9 +318,11 @@ use {prog}::accounts;
         emit_protocol_invariants_helpers(&mut out);
     }
 
-    emit_fixture_struct(&mut out, spec, &fixture, mode);
+    let force_fixture_accounts =
+        account_overlay.is_some_and(|overlay| !overlay.handlers.is_empty());
+    emit_fixture_struct(&mut out, spec, &fixture, mode, force_fixture_accounts);
     out.push('\n');
-    emit_fixture_impl(&mut out, spec, &fixture, mode)?;
+    emit_fixture_impl(&mut out, spec, &fixture, mode, account_overlay)?;
     out.push('\n');
     emit_invariant_fn(&mut out, spec, &fixture, mode);
 
@@ -645,8 +660,12 @@ fn assert_token_balance_conserved(ctx: &TestContext, before: &[AccountSnapshot],
 /// program-owned PDA vault is intentionally absent (it legitimately gains
 /// rent, and `account_tracked_pubkey_exprs` is where the PDA is tracked).
 /// Spec mode has no non-signer keypairs, so this collapses to the signer set.
-fn wallet_tracked_pubkey_exprs(spec: &ParsedSpec, mode: InvariantMode) -> Vec<String> {
-    if uses_brownfield_accounts(spec, mode) {
+fn wallet_tracked_pubkey_exprs(
+    spec: &ParsedSpec,
+    mode: InvariantMode,
+    force_fixture_accounts: bool,
+) -> Vec<String> {
+    if uses_brownfield_accounts(spec, mode, force_fixture_accounts) {
         collect_brownfield_keypair_names(spec)
             .iter()
             .map(|name| format!("self.{}.pubkey()", brownfield_keypair_ident(name)))
@@ -663,9 +682,13 @@ fn wallet_tracked_pubkey_exprs(spec: &ParsedSpec, mode: InvariantMode) -> Vec<St
 /// PDA vault (when setup created one). The `Account`-set guards' tracked set
 /// — broader than signers because owner flips, discriminator changes, and
 /// closures matter on non-signer writables too.
-fn account_tracked_pubkey_exprs(spec: &ParsedSpec, mode: InvariantMode) -> Vec<String> {
+fn account_tracked_pubkey_exprs(
+    spec: &ParsedSpec,
+    mode: InvariantMode,
+    force_fixture_accounts: bool,
+) -> Vec<String> {
     let mut exprs = Vec::new();
-    if uses_brownfield_accounts(spec, mode) {
+    if uses_brownfield_accounts(spec, mode, force_fixture_accounts) {
         for name in collect_brownfield_keypair_names(spec) {
             exprs.push(format!("self.{}.pubkey()", brownfield_keypair_ident(&name)));
         }
@@ -738,7 +761,13 @@ fn fixture_name(spec: &ParsedSpec) -> String {
     format!("{head}Fixture")
 }
 
-fn emit_fixture_struct(out: &mut String, spec: &ParsedSpec, fixture: &str, mode: InvariantMode) {
+fn emit_fixture_struct(
+    out: &mut String,
+    spec: &ParsedSpec,
+    fixture: &str,
+    mode: InvariantMode,
+    force_fixture_accounts: bool,
+) {
     out.push_str("/// Fixture state. Includes Crucible test infrastructure plus shadow\n");
     out.push_str("/// fields mirroring spec state — invariants read from these instead of\n");
     out.push_str("/// from LiteSVM accounts directly so the body translation matches the\n");
@@ -748,7 +777,7 @@ fn emit_fixture_struct(out: &mut String, spec: &ParsedSpec, fixture: &str, mode:
     out.push_str("    ctx: TestContext,\n");
     out.push_str("    program_id: Pubkey,\n");
 
-    if uses_brownfield_accounts(spec, mode) {
+    if uses_brownfield_accounts(spec, mode, force_fixture_accounts) {
         // Brownfield: one Keypair per non-default, non-PDA account (signers
         // AND user-provided writables). Field idents are snake_cased; the
         // IDL's camelCase name stays on `ParsedHandlerAccount` to match the
@@ -803,8 +832,13 @@ fn spec_is_brownfield_with_idl_accounts(spec: &ParsedSpec) -> bool {
 /// gets a keypair (the brownfield collector reads the account list, not
 /// `who`). `Both` keeps the proxy — it carries a real spec whose accounts
 /// block drives account handling.
-fn uses_brownfield_accounts(spec: &ParsedSpec, mode: InvariantMode) -> bool {
-    spec_is_brownfield_with_idl_accounts(spec)
+fn uses_brownfield_accounts(
+    spec: &ParsedSpec,
+    mode: InvariantMode,
+    force_fixture_accounts: bool,
+) -> bool {
+    force_fixture_accounts
+        || spec_is_brownfield_with_idl_accounts(spec)
         || (matches!(mode, InvariantMode::Protocol) && spec_has_account_entries(spec))
 }
 
@@ -888,9 +922,12 @@ fn emit_fixture_impl(
     spec: &ParsedSpec,
     fixture: &str,
     mode: InvariantMode,
+    account_overlay: Option<&crate::probe::domain_account_overlay::AccountBindingOverlay>,
 ) -> Result<()> {
     let prog = spec_program_name(spec);
-    let is_brownfield = uses_brownfield_accounts(spec, mode);
+    let force_fixture_accounts =
+        account_overlay.is_some_and(|overlay| !overlay.handlers.is_empty());
+    let is_brownfield = uses_brownfield_accounts(spec, mode, force_fixture_accounts);
     let signers = collect_signer_idents(spec);
     let brownfield_names = if is_brownfield {
         collect_brownfield_keypair_names(spec)
@@ -978,7 +1015,7 @@ fn emit_fixture_impl(
 
     // ── action_* per handler ─────────────────────────────────────────────
     for h in &spec.handlers {
-        emit_action_fn(out, spec, h, mode)?;
+        emit_action_fn(out, spec, h, mode, account_overlay)?;
         out.push('\n');
     }
 
@@ -991,6 +1028,7 @@ fn emit_action_fn(
     spec: &ParsedSpec,
     op: &ParsedHandler,
     mode: InvariantMode,
+    account_overlay: Option<&crate::probe::domain_account_overlay::AccountBindingOverlay>,
 ) -> Result<()> {
     out.push_str(&format!("    /// {} → action variant.\n", op.name));
     if op.accounts.is_empty() {
@@ -1049,8 +1087,10 @@ fn emit_action_fn(
     // Protocol-invariant suite (Protocol / Both). Snapshot each used tracked
     // set once before .send(); the registry drives which guards assert after.
     let want_protocol = matches!(mode, InvariantMode::Protocol | InvariantMode::Both);
-    let wallet_exprs = wallet_tracked_pubkey_exprs(spec, mode);
-    let account_exprs = account_tracked_pubkey_exprs(spec, mode);
+    let force_fixture_accounts =
+        account_overlay.is_some_and(|overlay| !overlay.handlers.is_empty());
+    let wallet_exprs = wallet_tracked_pubkey_exprs(spec, mode, force_fixture_accounts);
+    let account_exprs = account_tracked_pubkey_exprs(spec, mode, force_fixture_accounts);
     let use_wallet = want_protocol && !wallet_exprs.is_empty();
     let use_account = want_protocol && !account_exprs.is_empty();
     if use_wallet {
@@ -1101,7 +1141,8 @@ fn emit_action_fn(
             let value = if acc.pda_seeds.is_some() {
                 "Pubkey::find_program_address(&[], &self.program_id).0".to_string()
             } else {
-                format!("self.{}.pubkey()", brownfield_keypair_ident(&acc.name))
+                let target = account_overlay_target(account_overlay, &op.name, &acc.name)?;
+                format!("self.{}.pubkey()", brownfield_keypair_ident(target))
             };
             let field = brownfield_keypair_ident(&acc.name);
             out.push_str(&format!("                {field}: {value},\n"));
@@ -1111,12 +1152,12 @@ fn emit_action_fn(
 
     // Signers: prefer IDL per-account `isSigner` flags; fall back to the
     // spec's `auth X` lift.
-    let brownfield_signers: Vec<&str> = op
+    let brownfield_signers: Vec<String> = op
         .accounts
         .iter()
         .filter(|a| a.is_signer && a.default_pubkey.is_none() && a.pda_seeds.is_none())
-        .map(|a| a.name.as_str())
-        .collect();
+        .map(|a| account_overlay_target(account_overlay, &op.name, &a.name).map(str::to_string))
+        .collect::<Result<Vec<_>>>()?;
     if !brownfield_signers.is_empty() {
         let refs: Vec<String> = brownfield_signers
             .iter()
@@ -1169,6 +1210,24 @@ fn emit_action_fn(
     out.push_str("        success\n");
     out.push_str("    }\n");
     Ok(())
+}
+
+fn account_overlay_target<'a>(
+    overlay: Option<&'a crate::probe::domain_account_overlay::AccountBindingOverlay>,
+    handler: &str,
+    account: &'a str,
+) -> Result<&'a str> {
+    let Some(value) = overlay
+        .and_then(|overlay| overlay.handlers.get(handler))
+        .and_then(|handler| handler.accounts.get(account))
+    else {
+        return Ok(account);
+    };
+    value.strip_prefix("fixture:").ok_or_else(|| {
+        anyhow::anyhow!(
+            "account overlay target `{value}` for `{handler}.{account}` is not a fixture identifier"
+        )
+    })
 }
 
 /// `#[range(lo..hi)]` inference — currently none ("" → Crucible defaults
@@ -1389,7 +1448,7 @@ handler withdraw (amount : U64) : State.Active -> State.Active {
         ];
         for (src, mode, label) in cases {
             let spec = parse_str(src).expect("parse spec");
-            let harness = emit_harness(&spec, mode).expect("emit harness");
+            let harness = emit_harness(&spec, mode, None).expect("emit harness");
             if let Err(e) = syn::parse_file(&harness) {
                 panic!("emitted harness ({label}) is not valid Rust: {e}\n---\n{harness}");
             }
@@ -1413,7 +1472,13 @@ handler withdraw (amount : U64) : State.Active -> State.Active {
     fn emits_fixture_with_state_shadow_fields() {
         let spec = parse_str(MINIMAL_SPEC).expect("parse");
         let mut out = String::new();
-        emit_fixture_struct(&mut out, &spec, "CounterFixture", InvariantMode::Spec);
+        emit_fixture_struct(
+            &mut out,
+            &spec,
+            "CounterFixture",
+            InvariantMode::Spec,
+            false,
+        );
         assert!(out.contains("#[derive(Clone)]"));
         assert!(out.contains("struct CounterFixture {"));
         assert!(out.contains("ctx: TestContext,"));
@@ -1425,7 +1490,8 @@ handler withdraw (amount : U64) : State.Active -> State.Active {
     fn emits_action_fn_per_handler() {
         let spec = parse_str(MINIMAL_SPEC).expect("parse");
         let mut out = String::new();
-        emit_fixture_impl(&mut out, &spec, "CounterFixture", InvariantMode::Spec).expect("emit");
+        emit_fixture_impl(&mut out, &spec, "CounterFixture", InvariantMode::Spec, None)
+            .expect("emit");
         assert!(out.contains("#[fuzz_fixture]"));
         assert!(out.contains("impl CounterFixture {"));
         assert!(out.contains("pub fn setup() -> Self"));
@@ -1525,7 +1591,8 @@ handler bump (delta : U64) : State.Active -> State.Active {
 }
 "#;
         let spec = parse_str(src).expect("parse");
-        let harness = emit_harness(&spec, InvariantMode::Protocol).expect("emit protocol harness");
+        let harness =
+            emit_harness(&spec, InvariantMode::Protocol, None).expect("emit protocol harness");
         // Shared snapshot infra emitted once at top.
         assert!(
             harness.contains("fn snapshot_account_state")
@@ -1596,7 +1663,8 @@ handler bump (delta : U64) : State.Active -> State.Active {
             handlers: vec![handler],
             ..Default::default()
         };
-        let harness = emit_harness(&spec, InvariantMode::Protocol).expect("emit protocol harness");
+        let harness =
+            emit_harness(&spec, InvariantMode::Protocol, None).expect("emit protocol harness");
         // The non-signer writable still gets a fixture keypair …
         assert!(
             harness.contains("recipient: Rc<Keypair>,"),
@@ -1617,6 +1685,56 @@ handler bump (delta : U64) : State.Active -> State.Active {
     }
 
     #[test]
+    fn account_overlay_materializes_fixture_identities_in_action_and_signers() {
+        let authority = crate::check::ParsedHandlerAccount {
+            name: "authority".into(),
+            is_signer: true,
+            is_writable: true,
+            ..Default::default()
+        };
+        let recipient = crate::check::ParsedHandlerAccount {
+            name: "recipient".into(),
+            is_writable: true,
+            ..Default::default()
+        };
+        let mut handler = synthetic_handler();
+        handler.name = "drain".into();
+        handler.accounts = vec![authority, recipient];
+        let spec = ParsedSpec {
+            program_name: "vault".into(),
+            handlers: vec![handler],
+            ..Default::default()
+        };
+        let overlay = crate::probe::domain_account_overlay::AccountBindingOverlay {
+            schema_version: 1,
+            schema_uri: crate::probe::domain_account_overlay::ACCOUNT_BINDING_OVERLAY_SCHEMA_URI
+                .into(),
+            source_resolved_sequence_schema_uri: "resolved".into(),
+            audit_id: Some("audit".into()),
+            handlers: [(
+                "drain".to_string(),
+                crate::probe::domain_account_overlay::HandlerAccountOverlay {
+                    accounts: [
+                        ("authority".to_string(), "fixture:recipient".to_string()),
+                        ("recipient".to_string(), "fixture:authority".to_string()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    provenance: Default::default(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+
+        let harness = emit_harness(&spec, InvariantMode::Both, Some(&overlay)).unwrap();
+        assert!(harness.contains("recipient: Rc<Keypair>,"));
+        assert!(harness.contains("authority: self.recipient.pubkey(),"));
+        assert!(harness.contains("recipient: self.authority.pubkey(),"));
+        assert!(harness.contains(".signers(&[&*self.recipient])"));
+    }
+
+    #[test]
     fn spec_mode_does_not_emit_protocol_suite() {
         let src = r#"spec Counter
 program_id "11111111111111111111111111111111"
@@ -1633,7 +1751,7 @@ handler bump (delta : U64) : State.Active -> State.Active {
 }
 "#;
         let spec = parse_str(src).expect("parse");
-        let harness = emit_harness(&spec, InvariantMode::Spec).expect("emit spec harness");
+        let harness = emit_harness(&spec, InvariantMode::Spec, None).expect("emit spec harness");
         assert!(
             !harness.contains("snapshot_account_state")
                 && !harness.contains("assert_no_wallet_inflation")
@@ -1665,7 +1783,7 @@ handler bump (delta : U64) : State.Active -> State.Active {
 }
 "#;
         let spec = parse_str(src).expect("parse");
-        let harness = emit_harness(&spec, InvariantMode::Both).expect("emit both harness");
+        let harness = emit_harness(&spec, InvariantMode::Both, None).expect("emit both harness");
         // Spec invariant flows in.
         assert!(harness.contains("fuzz_assert!"));
         // Plus the protocol-invariant lamport check.

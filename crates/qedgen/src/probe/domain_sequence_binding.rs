@@ -335,11 +335,13 @@ fn validate_value(parameter: &UnresolvedParameter, value: &Value) -> Result<()> 
             if bindings.is_empty()
                 || bindings.iter().any(|(name, value)| {
                     name.trim().is_empty()
-                        || value.as_str().map(str::trim).is_none_or(str::is_empty)
+                        || value
+                            .as_str()
+                            .is_none_or(|value| !valid_fixture_target(value))
                 })
             {
                 bail!(
-                    "account binding `{}` must explicitly map non-empty account names to addresses",
+                    "account binding `{}` must explicitly map non-empty account names to `fixture:<account>` identities",
                     parameter.name
                 );
             }
@@ -357,6 +359,17 @@ fn validate_value(parameter: &UnresolvedParameter, value: &Value) -> Result<()> 
         UnresolvedParameterKind::HandlerArgument => validate_scalar_type(parameter, value)?,
     }
     Ok(())
+}
+
+fn valid_fixture_target(value: &str) -> bool {
+    let Some(name) = value.strip_prefix("fixture:") else {
+        return false;
+    };
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
 }
 
 fn validate_scalar_type(parameter: &UnresolvedParameter, value: &Value) -> Result<()> {
@@ -496,7 +509,7 @@ mod tests {
                 binding(
                     "Deposit",
                     UnresolvedParameterKind::AccountBindings,
-                    json!({"vault": "11111111111111111111111111111111"}),
+                    json!({"vault": "fixture:vault"}),
                 ),
                 binding(
                     "amount",
@@ -572,6 +585,13 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("must be a JSON object"));
+
+        let mut address = complete_bindings();
+        address.bindings[0].value = json!({"vault": "11111111111111111111111111111111"});
+        assert!(bind_domain_sequences(&sequences(), &address)
+            .unwrap_err()
+            .to_string()
+            .contains("fixture:<account>"));
     }
 
     #[test]

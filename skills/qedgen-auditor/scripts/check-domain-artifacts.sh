@@ -16,6 +16,7 @@ for schema in \
   "$schemas/domain-sequences.schema.json" \
   "$schemas/domain-sequence-bindings.schema.json" \
   "$schemas/resolved-domain-sequences.schema.json" \
+  "$schemas/account-binding-overlay.schema.json" \
   "$schemas/spec-handoff.schema.json"; do
   jq -e '
     .["$schema"] == "https://json-schema.org/draft/2020-12/schema" and
@@ -245,6 +246,20 @@ validate_resolved_sequences() {
   ' "$1" >/dev/null
 }
 
+validate_account_overlay() {
+  jq -e '
+    .schema_version == 1 and
+    .schema_uri == "https://qedgen.dev/schemas/auditor/account-binding-overlay-v1.schema.json" and
+    .source_resolved_sequence_schema_uri == "https://qedgen.dev/schemas/auditor/resolved-domain-sequences-v1.schema.json" and
+    (.handlers | type == "object" and all(to_entries[];
+      (.key | length > 0) and
+      (.value.accounts | type == "object" and all(to_entries[];
+        (.key | length > 0) and
+        (.value | test("^fixture:[A-Za-z0-9_][A-Za-z0-9_.-]*$")))) and
+      (.value.provenance | type == "object")))
+  ' "$1" >/dev/null
+}
+
 if [[ $# -gt 0 ]]; then
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -278,8 +293,13 @@ if [[ $# -gt 0 ]]; then
         validate_resolved_sequences "$2"
         shift 2
         ;;
+      --account-overlay)
+        [[ $# -ge 2 ]] || { echo "--account-overlay requires a path" >&2; exit 2; }
+        validate_account_overlay "$2"
+        shift 2
+        ;;
       *)
-        echo "usage: check-auditor-domain-artifacts.sh [--dossier <json>] [--manifest <json>] [--handoff <json>] [--sequences <json>] [--bindings <json>] [--resolved-sequences <json>]" >&2
+        echo "usage: check-auditor-domain-artifacts.sh [--dossier <json>] [--manifest <json>] [--handoff <json>] [--sequences <json>] [--bindings <json>] [--resolved-sequences <json>] [--account-overlay <json>]" >&2
         exit 2
         ;;
     esac
@@ -315,5 +335,6 @@ fi
 
 validate_sequence_bindings "$fixtures/valid-domain-sequence-bindings.json"
 validate_resolved_sequences "$fixtures/valid-resolved-domain-sequences.json"
+validate_account_overlay "$fixtures/valid-account-binding-overlay.json"
 
 echo "auditor domain artifact checks passed"

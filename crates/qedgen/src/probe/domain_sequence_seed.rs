@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use crate::check::ParsedSpec;
 
+use super::domain_account_overlay::AccountBindingOverlay;
 use super::domain_sequence::UnresolvedParameterKind;
 use super::domain_sequence_binding::{ResolvedDomainSequenceDocument, ResolvedSequenceAction};
 
@@ -34,6 +35,7 @@ pub fn write_domain_seed_corpus(
     spec: &ParsedSpec,
     resolved: &ResolvedDomainSequenceDocument,
     harness_dir: &Path,
+    account_overlay: Option<&AccountBindingOverlay>,
 ) -> Result<DomainSeedReport> {
     let canonical = serde_json::to_vec(resolved)?;
     let digest = format!("{:x}", Sha256::digest(&canonical));
@@ -56,7 +58,7 @@ pub fn write_domain_seed_corpus(
         if actions.is_empty() {
             bail!("resolved sequence plan `{}` has no actions", plan.id);
         }
-        let bytes = encode_actions(spec, &actions)
+        let bytes = encode_actions(spec, &actions, account_overlay)
             .with_context(|| format!("encoding domain sequence plan `{}`", plan.id))?;
         let safe_id: String = plan
             .id
@@ -84,21 +86,16 @@ pub fn write_domain_seed_corpus(
     Ok(DomainSeedReport { corpus_dir, seeds })
 }
 
-fn encode_actions(spec: &ParsedSpec, actions: &[&ResolvedSequenceAction]) -> Result<Vec<u8>> {
+fn encode_actions(
+    spec: &ParsedSpec,
+    actions: &[&ResolvedSequenceAction],
+    account_overlay: Option<&AccountBindingOverlay>,
+) -> Result<Vec<u8>> {
     let count = u32::try_from(actions.len()).context("domain sequence has too many actions")?;
     let mut out = Vec::new();
     out.extend_from_slice(&count.to_le_bytes());
     for action in actions {
-        if action
-            .resolved_bindings
-            .iter()
-            .any(|binding| binding.parameter.kind == UnresolvedParameterKind::AccountBindings)
-        {
-            bail!(
-                "handler `{}` has an explicit account binding, but Crucible's structured seed format cannot encode account identity; materialize the binding in the generated fixture before replay",
-                action.handler
-            );
-        }
+        require_materialized_account_bindings(action, account_overlay)?;
         let (variant, handler) = spec
             .handlers
             .iter()
@@ -135,6 +132,51 @@ fn encode_actions(spec: &ParsedSpec, actions: &[&ResolvedSequenceAction]) -> Res
         }
     }
     Ok(out)
+}
+
+fn require_materialized_account_bindings(
+    action: &ResolvedSequenceAction,
+    overlay: Option<&AccountBindingOverlay>,
+) -> Result<()> {
+    let bindings: Vec<_> = action
+        .resolved_bindings
+        .iter()
+        .filter(|binding| binding.parameter.kind == UnresolvedParameterKind::AccountBindings)
+        .collect();
+    if bindings.is_empty() {
+        return Ok(());
+    }
+    let materialized = overlay
+        .and_then(|overlay| overlay.handlers.get(&action.handler))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "handler `{}` has an explicit account binding, but no generated fixture overlay materializes it",
+                action.handler
+            )
+        })?;
+    for binding in bindings {
+        let object = binding.value.as_object().ok_or_else(|| {
+            anyhow::anyhow!(
+                "handler `{}` account binding is not an object",
+                action.handler
+            )
+        })?;
+        for (account, target) in object {
+            let target = target.as_str().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "handler `{}` account target is not a string",
+                    action.handler
+                )
+            })?;
+            if materialized.accounts.get(account).map(String::as_str) != Some(target) {
+                bail!(
+                    "handler `{}` account binding `{account}` was not materialized into the generated fixture",
+                    action.handler
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn encode_field(out: &mut Vec<u8>, name: &str, ty: &str, value: &Value) -> Result<()> {
@@ -223,7 +265,7 @@ mod tests {
         .unwrap();
         let first = action("first", &[("amount", "U64", json!(42))]);
         let second = action("second", &[("flag", "Bool", json!(true))]);
-        let bytes = encode_actions(&spec, &[&second, &first]).unwrap();
+        let bytes = encode_actions(&spec, &[&second, &first], None).unwrap();
         assert_eq!(&bytes[0..4], &2u32.to_le_bytes());
         assert_eq!(&bytes[4..6], &1u16.to_le_bytes());
         assert_eq!(&bytes[6..14], &1u64.to_le_bytes());
@@ -237,7 +279,7 @@ mod tests {
             "spec Replay\n\ntype State\n  | Active of { n : U64 }\n\nhandler first (amount : U64) : State.Active -> State.Active {\n  effect { n := n }\n}\n",
         )
         .unwrap();
-        assert!(encode_actions(&spec, &[&action("first", &[])])
+        assert!(encode_actions(&spec, &[&action("first", &[])], None)
             .unwrap_err()
             .to_string()
             .contains("no explicit resolved binding"));
@@ -267,17 +309,42 @@ mod tests {
                 declared_type: Some("First".to_string()),
                 reason: "test".to_string(),
             },
-            value: json!({"vault": "fixture.vault"}),
+            value: json!({"vault": "fixture:vault"}),
             provenance: BindingProvenance {
                 source: BindingSource::User,
                 plan_id: "plan".to_string(),
                 action: None,
             },
         });
-        assert!(encode_actions(&spec, &[&bound])
+        assert!(encode_actions(&spec, &[&bound], None)
             .unwrap_err()
             .to_string()
-            .contains("cannot encode account identity"));
+            .contains("no generated fixture overlay"));
+
+        let overlay = AccountBindingOverlay {
+            schema_version: 1,
+            schema_uri: super::super::domain_account_overlay::ACCOUNT_BINDING_OVERLAY_SCHEMA_URI
+                .to_string(),
+            source_resolved_sequence_schema_uri: "resolved".to_string(),
+            audit_id: None,
+            handlers: [(
+                "first".to_string(),
+                super::super::domain_account_overlay::HandlerAccountOverlay {
+                    accounts: [("vault".to_string(), "fixture:vault".to_string())]
+                        .into_iter()
+                        .collect(),
+                    provenance: Default::default(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        assert_eq!(
+            encode_actions(&spec, &[&bound], Some(&overlay))
+                .unwrap()
+                .len(),
+            14
+        );
     }
 
     #[test]
@@ -307,7 +374,7 @@ mod tests {
             exclusions: vec![],
         };
         let dir = tempfile::tempdir().unwrap();
-        let report = write_domain_seed_corpus(&spec, &resolved, dir.path()).unwrap();
+        let report = write_domain_seed_corpus(&spec, &resolved, dir.path(), None).unwrap();
         assert_eq!(report.seeds[0].action_count, 1);
         assert!(report.seeds[0].path.ends_with("000-plan_one.seed"));
         assert_eq!(std::fs::read(&report.seeds[0].path).unwrap().len(), 14);
