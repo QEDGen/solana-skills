@@ -658,6 +658,7 @@ pub struct LivenessMir {
 pub struct EnvironmentMir {
     pub name: Symbol,
     pub mutates: Vec<(Symbol, Ty)>,
+    pub external_fields: Vec<(Symbol, Symbol, Ty)>,
     /// Legacy predicate list retained for byte-stable generators.
     pub constraints: Vec<Predicate>,
     /// Typed, temporally classified constraint metadata. Empty for legacy
@@ -1365,6 +1366,13 @@ fn lower_environments(parsed: &ParsedSpec) -> Vec<EnvironmentMir> {
                 .mutates
                 .iter()
                 .map(|(name, ty)| (name.clone(), parse_ty_resolved(ty, parsed)))
+                .collect(),
+            external_fields: env
+                .external_fields
+                .iter()
+                .map(|(object, field, ty)| {
+                    (object.clone(), field.clone(), parse_ty_resolved(ty, parsed))
+                })
                 .collect(),
             constraints: env
                 .constraints

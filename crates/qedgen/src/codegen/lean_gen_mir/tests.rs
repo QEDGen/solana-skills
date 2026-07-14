@@ -598,6 +598,29 @@ fn render_emits_environment_theorems() {
 }
 
 #[test]
+fn render_external_clock_environment_uses_distinct_parameters() {
+    let src = r#"spec ExternalClock
+type State = { rate : U64 }
+property rate_nonnegative : state.rate >= 0 preserved_by all
+environment clock_advance {
+  external clock.slot : U64
+  constraint clock.slot >= old(clock.slot)
+}
+"#;
+    let parsed = crate::chumsky_adapter::parse_str(src).expect("parse");
+    let mir = crate::mir::lower(&parsed);
+    let out = render(&mir);
+    assert!(out.contains("(pre_clock_slot : Nat)"), "{out}");
+    assert!(out.contains("(post_clock_slot : Nat)"), "{out}");
+    assert!(
+        out.contains("h_c0 : post_clock_slot ≥ pre_clock_slot"),
+        "{out}"
+    );
+    assert!(out.contains("rate_nonnegative s := by"), "{out}");
+    assert!(!out.contains("{ s with  }"), "{out}");
+}
+
+#[test]
 fn render_emits_overflow_theorems() {
     // Lending: `deposit` issues a `+=` effect, which MIR lowers to
     // `CheckedAdd` (checked is the default arithmetic mode); the

@@ -257,6 +257,8 @@ pub enum BindingKind {
     /// Account binding from the handler's `accounts { … }` block (or the
     /// `auth` actor).
     Account,
+    /// Field in a declared external namespace (`clock.slot`, `oracle.price`).
+    External,
     /// `abstract <name> : <Type>` existential binder.
     AbstractBinder,
     /// Bound by an enclosing expression-level binder (quantifier, `sum`,
@@ -363,6 +365,7 @@ impl TreePath {
             | BindingKind::Param
             | BindingKind::LetBound
             | BindingKind::Account
+            | BindingKind::External
             | BindingKind::AbstractBinder
             | BindingKind::ExprBinder
             | BindingKind::Unresolved => NumKind::Nat,

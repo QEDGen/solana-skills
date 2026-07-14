@@ -469,6 +469,33 @@ fn render_path(p: &TreePath, cx: LeanCx, inside_old: bool) -> String {
             };
             out.push_str(prefix);
         }
+        BindingKind::External => {
+            out.push_str(if inside_old { "pre_" } else { "post_" });
+            out.push_str(&p.root);
+            if let Some(TreeSeg::Field(first)) = p.segments.first() {
+                out.push('_');
+                out.push_str(first);
+                for seg in &p.segments[1..] {
+                    match seg {
+                        TreeSeg::Field(field) => {
+                            out.push('.');
+                            out.push_str(field);
+                        }
+                        TreeSeg::Index(index) => match cx.subscript {
+                            LeanSubscript::Brackets => {
+                                out.push('[');
+                                out.push_str(index);
+                                out.push(']');
+                            }
+                            LeanSubscript::Application => {
+                                out = format!("({} {})", out, index);
+                            }
+                        },
+                    }
+                }
+                return out;
+            }
+        }
         BindingKind::Param
         | BindingKind::Const(_)
         | BindingKind::LetBound

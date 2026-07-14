@@ -577,7 +577,20 @@ pub(super) fn environment_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a
         .ignore_then(expr())
         .map(EnvClause::Constraint);
 
-    let clause = choice((mutates, constraint)).map_with(|c, e| Node::new(c, e.span().into_range()));
+    let external = kw("external")
+        .ignore_then(non_keyword_ident())
+        .then_ignore(wsc())
+        .then_ignore(just('.'))
+        .then_ignore(wsc())
+        .then(non_keyword_ident())
+        .then_ignore(wsc())
+        .then_ignore(just(':'))
+        .then_ignore(wsc())
+        .then(type_ref())
+        .map(|((object, field), ty)| EnvClause::External { object, field, ty });
+
+    let clause = choice((external, mutates, constraint))
+        .map_with(|c, e| Node::new(c, e.span().into_range()));
 
     kw("environment")
         .ignore_then(non_keyword_ident())

@@ -183,6 +183,7 @@ pub(crate) fn tree_bare_rhs(tree: &crate::mir::ExprTree) -> Option<String> {
                 _ => None,
             },
             BindingKind::Const(value) => p.segments.is_empty().then(|| value.clone()),
+            BindingKind::External => None,
             BindingKind::Param
             | BindingKind::LetBound
             | BindingKind::Account

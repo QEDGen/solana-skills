@@ -81,6 +81,14 @@ parameters; literals adopt the surrounding unit, while incompatible unit
 arithmetic, comparisons, and assignments fail during spec checking. Dimensions
 erase to their declared integer base at generated-code ABI boundaries.
 
+External assumptions are executable without shadowing program state. Declare
+typed scalar fields inside an environment, for example `external clock.slot :
+U64`, then constrain post/pre values with `clock.slot >= old(clock.slot)`.
+Kani receives distinct nondeterministic `pre_clock_slot` / `post_clock_slot`
+values; Lean receives matching theorem parameters. Use the same shape for
+oracle values, CPI return data, owner keys, and executable flags. Composite
+imported contracts still require explicit scalar projections or a manual lane.
+
 ---
 
 ## How each entry reads

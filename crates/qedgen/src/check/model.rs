@@ -168,11 +168,13 @@ pub struct ParsedInvariant {
 pub struct ParsedEnvironment {
     pub name: String,
     pub mutates: Vec<(String, String)>, // (field, type)
+    /// Typed fields in distinct external namespaces: `(object, field, type)`.
+    pub external_fields: Vec<(String, String, String)>,
     /// Legacy target-rendered forms, retained while environment codegen
     /// migrates to [`ParsedEnvironmentConstraint`]. Indices correspond to
     /// `typed_constraints`.
     pub constraints: Vec<String>, // lean form
-    pub constraints_rust: Vec<String>,  // rust form
+    pub constraints_rust: Vec<String>, // rust form
     /// Typed metadata for each constraint. Adapter-produced specs populate
     /// this one-for-one with `constraints`; legacy ingest paths may leave it
     /// empty and continue to use the rendered strings above.

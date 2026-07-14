@@ -128,6 +128,39 @@ environment rate_change {
 }
 
 #[test]
+fn environment_external_clock_uses_distinct_pre_post_values() {
+    let src = format!(
+        "{}{}",
+        ENVIRONMENT_SPEC_HEAD,
+        r#"
+environment clock_advance {
+  external clock.slot : U64
+  constraint clock.slot >= old(clock.slot)
+}
+"#
+    );
+    let (mir, parsed) = lower_inline(&src);
+    let out = render(&mir, &parsed);
+    let harness = out
+        .split("fn verify_rate_positive_under_clock_advance()")
+        .nth(1)
+        .expect("external environment harness");
+    assert!(
+        harness.contains("let pre_clock_slot: u64 = kani::any();"),
+        "{harness}"
+    );
+    assert!(
+        harness.contains("let post_clock_slot: u64 = kani::any();"),
+        "{harness}"
+    );
+    assert!(
+        harness.contains("kani::assume(post_clock_slot >= pre_clock_slot);"),
+        "{harness}"
+    );
+    assert!(!harness.contains("s.slot ="), "{harness}");
+}
+
+#[test]
 fn environment_unary_constraint_keeps_legacy_rendering() {
     let src = format!(
         "{}{}",

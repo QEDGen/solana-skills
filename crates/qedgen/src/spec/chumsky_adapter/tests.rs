@@ -1183,6 +1183,46 @@ environment rate_change {
     );
 }
 
+#[test]
+fn environment_external_fields_use_a_distinct_typed_namespace() {
+    let src = format!(
+        "{}{}",
+        CLASSIFY_SPEC_HEAD,
+        r#"
+environment clock_advance {
+  external clock.slot : U64
+  constraint clock.slot >= old(clock.slot)
+}
+"#
+    );
+    let spec = parse_str(&src).expect("parse external environment");
+    let environment = &spec.environments[0];
+    assert_eq!(
+        environment.external_fields,
+        vec![("clock".into(), "slot".into(), "U64".into())]
+    );
+    let tree = environment.typed_constraints[0]
+        .tree
+        .as_ref()
+        .expect("typed external constraint");
+    let crate::mir::ExprTree::Cmp { lhs, rhs, .. } = tree else {
+        panic!("expected external comparison, got {tree:?}");
+    };
+    let crate::mir::ExprTree::Path(lhs) = lhs.as_ref() else {
+        panic!("expected external path");
+    };
+    assert_eq!(lhs.binding, crate::mir::expr_tree::BindingKind::External);
+    assert_eq!(lhs.ty, Some(crate::mir::Ty::U64));
+    let crate::mir::ExprTree::Old(rhs) = rhs.as_ref() else {
+        panic!("expected old external path");
+    };
+    assert!(matches!(
+        rhs.as_ref(),
+        crate::mir::ExprTree::Path(path)
+            if path.binding == crate::mir::expr_tree::BindingKind::External
+    ));
+}
+
 // ========================================================================
 // RustOpts.state_mode + inside_old round-trips
 // ========================================================================

@@ -668,8 +668,11 @@ pub(crate) fn emit_file_level_features(
                 if prop.expression.is_none() {
                     continue;
                 }
-                let (rust_constraints, has_binary_constraint) =
-                    render_environment_constraints(mir_env, &env.constraints_rust);
+                let (rust_constraints, has_binary_constraint) = render_environment_constraints(
+                    mir_env,
+                    &env.constraints_rust,
+                    !env.external_fields.is_empty(),
+                );
 
                 emit_proof_preamble(
                     out,
@@ -693,6 +696,18 @@ pub(crate) fn emit_file_level_features(
                 // reads through `pre` / `post` without rewriting strings.
                 if has_binary_constraint {
                     out.push_str("    let pre = s.clone();\n");
+                }
+
+                for (object, field, field_type) in &env.external_fields {
+                    let rust_type = crate::codegen_shared::map_type(field_type, parsed)?;
+                    out.push_str(&format!(
+                        "    let pre_{}_{}: {} = kani::any();\n",
+                        object, field, rust_type
+                    ));
+                    out.push_str(&format!(
+                        "    let post_{}_{}: {} = kani::any();\n",
+                        object, field, rust_type
+                    ));
                 }
 
                 for (field, ftype) in &env.mutates {
@@ -728,6 +743,7 @@ pub(crate) fn emit_file_level_features(
 fn render_environment_constraints(
     mir_env: Option<&crate::mir::EnvironmentMir>,
     legacy: &[String],
+    has_external_fields: bool,
 ) -> (Vec<String>, bool) {
     use crate::rust_codegen_util::tree_render::{render_rust, Binder, RustCx};
 
@@ -750,9 +766,9 @@ fn render_environment_constraints(
         .iter()
         .enumerate()
         .map(|(index, constraint)| {
-            if constraint.class == crate::check::PropertyClass::Binary {
+            if constraint.class == crate::check::PropertyClass::Binary || has_external_fields {
                 if let Some(tree) = &constraint.predicate.0.tree {
-                    has_binary = true;
+                    has_binary |= constraint.class == crate::check::PropertyClass::Binary;
                     return render_rust(tree, RustCx::native().with_binder(Binder::PrePost));
                 }
             }

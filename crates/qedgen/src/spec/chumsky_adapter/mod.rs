@@ -92,6 +92,8 @@ struct TypeEnv<'a> {
     state_fields: std::collections::BTreeMap<String, &'a a::TypeRef>,
     records: std::collections::BTreeMap<String, std::collections::BTreeMap<String, &'a a::TypeRef>>,
     params: Vec<(String, &'a a::TypeRef)>,
+    external_fields:
+        std::collections::BTreeMap<String, std::collections::BTreeMap<String, &'a a::TypeRef>>,
     aliases: std::collections::BTreeMap<String, String>,
     /// Sum-type registry: enum name → (variant name → its Rust
     /// [`VariantShape`]). `Struct` (`Approved of { … }` → `Enum::Approved { .. }`),
@@ -159,6 +161,16 @@ impl<'a> TypeEnv<'a> {
                 // includes ghosts.
                 TopItem::Ghost(g) => {
                     env.state_fields.entry(g.name.clone()).or_insert(&g.ty);
+                }
+                TopItem::Environment(environment) => {
+                    for clause in &environment.clauses {
+                        if let a::EnvClause::External { object, field, ty } = &clause.node {
+                            env.external_fields
+                                .entry(object.clone())
+                                .or_default()
+                                .insert(field.clone(), ty);
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -275,6 +287,28 @@ impl<'a> TypeEnv<'a> {
             }
             return current;
         }
+        if let Some(fields) = self.external_fields.get(&p.root) {
+            let mut current: Option<&a::TypeRef> = None;
+            for seg in &p.segments {
+                match seg {
+                    a::PathSeg::Field(field) => {
+                        current = match current {
+                            None => fields.get(field).copied(),
+                            Some(a::TypeRef::Named(record)) => {
+                                self.records.get(record).and_then(|m| m.get(field).copied())
+                            }
+                            _ => None,
+                        };
+                    }
+                    a::PathSeg::Index(_) => {
+                        if let Some(a::TypeRef::Map { inner, .. }) = current {
+                            current = Some(inner.as_ref());
+                        }
+                    }
+                }
+            }
+            return current;
+        }
         // Bare ident — try handler params.
         if p.segments.is_empty() {
             return self
@@ -284,6 +318,10 @@ impl<'a> TypeEnv<'a> {
                 .map(|(_, t)| *t);
         }
         None
+    }
+
+    fn is_external_root(&self, name: &str) -> bool {
+        self.external_fields.contains_key(name)
     }
 
     /// Resolve the kind of a Path. Handles subscripts into Map fields by

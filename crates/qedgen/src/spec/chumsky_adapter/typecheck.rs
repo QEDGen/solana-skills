@@ -161,6 +161,7 @@ pub fn typecheck_spec(spec: &a::Spec, parsed: &ParsedSpec) -> anyhow::Result<()>
     let field_types = collect_field_types(parsed);
     let const_literals = collect_numeric_consts(spec);
     let dimensions = validate_dimensions(parsed)?;
+    validate_external_fields(spec)?;
 
     for Node { node, .. } in &spec.items {
         if let TopItem::Handler(h) = node {
@@ -201,12 +202,33 @@ pub fn typecheck_spec(spec: &a::Spec, parsed: &ParsedSpec) -> anyhow::Result<()>
                     }
                 }
                 TopItem::Environment(env) => {
+                    let mut environment_fields = field_types.clone();
+                    let mut seen_external = std::collections::HashSet::new();
+                    for clause in &env.clauses {
+                        if let a::EnvClause::External { object, field, ty } = &clause.node {
+                            if object == "state" {
+                                anyhow::bail!(
+                                    "environment `{}` external object cannot use reserved namespace `state`",
+                                    env.name
+                                );
+                            }
+                            if !seen_external.insert((object.clone(), field.clone())) {
+                                anyhow::bail!(
+                                    "environment `{}` declares duplicate external field `{}.{}`",
+                                    env.name,
+                                    object,
+                                    field
+                                );
+                            }
+                            environment_fields.insert(field.clone(), type_ref_to_string(ty));
+                        }
+                    }
                     for clause in &env.clauses {
                         if let a::EnvClause::Constraint(expr) = &clause.node {
                             check_expr_dimensions(
                                 &format!("environment `{}` constraint", env.name),
                                 &expr.node,
-                                &field_types,
+                                &environment_fields,
                                 &empty,
                                 &dimensions,
                                 &const_literals,
@@ -239,6 +261,40 @@ pub fn typecheck_spec(spec: &a::Spec, parsed: &ParsedSpec) -> anyhow::Result<()>
     // with a fix-it pointing at structural decomposition.
     check_no_recursive_ref_impls(spec)?;
 
+    Ok(())
+}
+
+fn validate_external_fields(spec: &a::Spec) -> anyhow::Result<()> {
+    let mut declarations = std::collections::HashMap::new();
+    for item in &spec.items {
+        let TopItem::Environment(environment) = &item.node else {
+            continue;
+        };
+        for clause in &environment.clauses {
+            let a::EnvClause::External { object, field, ty } = &clause.node else {
+                continue;
+            };
+            if object == "state" {
+                anyhow::bail!(
+                    "environment `{}` external object cannot use reserved namespace `state`",
+                    environment.name
+                );
+            }
+            let key = (object.clone(), field.clone());
+            let rendered = type_ref_to_string(ty);
+            if let Some(previous) = declarations.insert(key, rendered.clone()) {
+                if previous != rendered {
+                    anyhow::bail!(
+                        "external field `{}.{}` has conflicting types `{}` and `{}`",
+                        object,
+                        field,
+                        previous,
+                        rendered
+                    );
+                }
+            }
+        }
+    }
     Ok(())
 }
 

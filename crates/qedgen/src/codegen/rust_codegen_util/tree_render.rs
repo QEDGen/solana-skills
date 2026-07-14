@@ -490,6 +490,19 @@ fn render_path(p: &TreePath, cx: RustCx, inside_old: bool) -> String {
             }
             out.push_str(&p.root);
         }
+        BindingKind::External => {
+            if matches!(cx.binder, Binder::PrePost) {
+                out.push_str(if inside_old { "pre_" } else { "post_" });
+                out.push_str(&p.root);
+                if let Some(TreeSeg::Field(first)) = p.segments.first() {
+                    out.push('_');
+                    out.push_str(first);
+                    segs = &p.segments[1..];
+                }
+            } else {
+                out.push_str(&p.root);
+            }
+        }
         BindingKind::Param
         | BindingKind::Const(_)
         | BindingKind::LetBound

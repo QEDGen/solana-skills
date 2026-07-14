@@ -1185,6 +1185,13 @@ pub struct EnvironmentDecl {
 pub enum EnvClause {
     /// `mutates field : Type` — field that mutates externally.
     Mutates { field: String, ty: String },
+    /// `external clock.slot : U64` — a typed field in a namespace distinct
+    /// from program state. Constraints relate pre/post values with `old(...)`.
+    External {
+        object: String,
+        field: String,
+        ty: TypeRef,
+    },
     /// `constraint expr` — constraint relating pre/post values.
     Constraint(Node<Expr>),
 }

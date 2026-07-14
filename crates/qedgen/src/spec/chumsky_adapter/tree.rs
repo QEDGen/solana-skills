@@ -26,6 +26,7 @@ pub(super) struct TreeCx<'a, 'env> {
     pub params: std::collections::BTreeSet<String>,
     pub lets: std::collections::BTreeSet<String>,
     pub accounts: std::collections::BTreeSet<String>,
+    pub externals: std::collections::BTreeSet<String>,
     pub abstracts: std::collections::BTreeSet<String>,
 }
 
@@ -56,8 +57,24 @@ impl<'a, 'env> TreeCx<'a, 'env> {
             params: Default::default(),
             lets: Default::default(),
             accounts: Default::default(),
+            externals: Default::default(),
             abstracts: Default::default(),
         }
+    }
+
+    pub(super) fn for_environment(
+        environment: &a::EnvironmentDecl,
+        env: &'a TypeEnv<'env>,
+        consts: ConstTable<'a>,
+        ghosts: std::collections::BTreeSet<String>,
+    ) -> Self {
+        let mut cx = TreeCx::spec_level(env, consts, ghosts);
+        for clause in &environment.clauses {
+            if let a::EnvClause::External { object, .. } = &clause.node {
+                cx.externals.insert(object.clone());
+            }
+        }
+        cx
     }
 
     /// Handler-scoped context. Mirrors `canon_scope_for_handler`'s
@@ -359,6 +376,8 @@ fn build_path(p: &a::Path, cx: &TreeCx, shadow: &[String]) -> TreePath {
         BindingKind::LetBound
     } else if cx.accounts.contains(&p.root) {
         BindingKind::Account
+    } else if cx.externals.contains(&p.root) && cx.env.is_external_root(&p.root) {
+        BindingKind::External
     } else if cx.abstracts.contains(&p.root) {
         BindingKind::AbstractBinder
     } else {

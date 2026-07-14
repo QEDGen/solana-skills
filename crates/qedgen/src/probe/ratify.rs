@@ -423,9 +423,9 @@ fn domain_authoring_guidance(kind: &str, item: &serde_json::Value) -> serde_json
             vec!["Declare nominal units before authoring the equation; finite sums, floor/ceiling arithmetic, and dimensional compatibility are executable."],
         ),
         "external_assumption" => (
-            vec!["environment", "constraint", "old"],
-            "environment <scenario> {\n  mutates <local_shadow> : <Type>\n  constraint <post relation to old(...)>\n}".to_string(),
-            vec!["This models perturbation of program state; distinct oracle, clock, CPI-return, owner, and executable namespaces remain unsupported."],
+            vec!["environment", "external", "constraint", "old"],
+            "environment <scenario> {\n  external <object>.<field> : <Type>\n  constraint <object>.<field> <relation> old(<object>.<field>)\n}".to_string(),
+            vec!["Use typed external fields for clock, oracle, CPI-return, owner, and executable assumptions; each becomes a distinct pre/post symbolic value rather than a program-state mutation."],
         ),
         _ => (vec!["manual"], "<author executable clause>".to_string(), vec![]),
     };
@@ -451,7 +451,7 @@ fn domain_language_gaps(kind: &str, item: &serde_json::Value) -> Vec<&'static st
             }
         }
         "economic_equation" => {}
-        "external_assumption" => gaps.push("external_environment_model"),
+        "external_assumption" => {}
         _ => {}
     }
     gaps
@@ -469,7 +469,7 @@ fn current_language_support(reason: &str) -> &'static str {
             "The language supports exact, floor, and ceiling arithmetic after the intended policy is ratified."
         }
         "external_environment_model" => {
-            "`environment` supports typed pre/post constraints over mutated program-state fields, not distinct external objects."
+            "`environment` supports distinct typed scalar namespaces with `external object.field : Type`; composite imported contracts and direct coupling into handler bodies still require manual modeling."
         }
         _ => "No executable lowering is currently available.",
     }
@@ -1043,6 +1043,14 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("dimension <Unit> = U64"));
+
+        let external = serde_json::json!({ "kind": "clock", "relation": "monotonic" });
+        assert!(domain_language_gaps("external_assumption", &external).is_empty());
+        let external_guidance = domain_authoring_guidance("external_assumption", &external);
+        assert!(external_guidance["template"]
+            .as_str()
+            .unwrap()
+            .contains("external <object>.<field> : <Type>"));
     }
 
     #[test]

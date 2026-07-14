@@ -232,6 +232,9 @@ construct names, a parser-shaped authoring template, and limitations; every
 language gap records what the current language can express so supported floor,
 ceiling, finite-sum, nominal-dimension, lifecycle, and authority patterns are not mislabeled as
 documentary-only.
+Typed external assumptions use `external object.field : Type` inside an
+`environment`; keep them distinct from legacy `mutates`, which intentionally
+perturbs a program-state field.
 It also writes `domain-sequences.json`: paired round trips and lifecycle
 setup/teardown coverage targets. Bind every unresolved account and argument
 before deterministic replay; until then, use the plans to guide stateful

@@ -808,6 +808,12 @@ pub(super) fn emit_environments_body(out: &mut String, mir: &Mir) {
                 .mutates
                 .iter()
                 .map(|(name, ty)| format!(" (new_{} : {})", name, render_ty(ty)))
+                .chain(env.external_fields.iter().flat_map(|(object, field, ty)| {
+                    [
+                        format!(" (pre_{}_{} : {})", object, field, render_ty(ty)),
+                        format!(" (post_{}_{} : {})", object, field, render_ty(ty)),
+                    ]
+                }))
                 .collect();
 
             // Rewrite `s.<field>` / `state.<field>` / bare `<field>` in
@@ -817,7 +823,20 @@ pub(super) fn emit_environments_body(out: &mut String, mir: &Mir) {
                 .iter()
                 .enumerate()
                 .map(|(i, c)| {
-                    let mut expr = c.0.lean.clone();
+                    let mut expr = if !env.external_fields.is_empty() {
+                        env.typed_constraints
+                            .get(i)
+                            .and_then(|constraint| constraint.predicate.0.tree.as_ref())
+                            .map(|tree| {
+                                crate::lean_gen_mir::tree_render::render_lean(
+                                    tree,
+                                    crate::lean_gen_mir::tree_render::LeanCx::ensures(),
+                                )
+                            })
+                            .unwrap_or_else(|| c.0.lean.clone())
+                    } else {
+                        c.0.lean.clone()
+                    };
                     for (field, _) in &env.mutates {
                         expr = expr
                             .replace(&format!("s.{}", field), &format!("new_{}", field))
@@ -842,6 +861,11 @@ pub(super) fn emit_environments_body(out: &mut String, mir: &Mir) {
                 .map(|(name, _)| format!("{} := new_{}", safe_name(name), name))
                 .collect::<Vec<_>>()
                 .join(", ");
+            let post_state = if with_parts.is_empty() {
+                "s".to_string()
+            } else {
+                format!("{{ s with {} }}", with_parts)
+            };
 
             out.push_str(&format!(
                 "theorem {}_under_{} (s : State){}{}\n",
@@ -859,14 +883,11 @@ pub(super) fn emit_environments_body(out: &mut String, mir: &Mir) {
 
             if !mutated_overlap {
                 out.push_str(&format!(
-                    "    {} {{ s with {} }} := by\n  unfold {} at h_inv \u{22A2}; dsimp; exact h_inv\n\n",
-                    prop.name, with_parts, prop.name
+                    "    {} {} := by\n  unfold {} at h_inv \u{22A2}; dsimp; exact h_inv\n\n",
+                    prop.name, post_state, prop.name
                 ));
             } else {
-                out.push_str(&format!(
-                    "    {} {{ s with {} }} := sorry\n\n",
-                    prop.name, with_parts
-                ));
+                out.push_str(&format!("    {} {} := sorry\n\n", prop.name, post_state));
             }
         }
     }
