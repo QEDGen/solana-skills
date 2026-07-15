@@ -1409,11 +1409,12 @@ fn adapt_handler(
                 } else {
                     rust
                 };
-                handler.let_bindings.push((
-                    name.clone(),
-                    expr_to_lean(&value.node, Ctx::Guard, consts, env),
-                    rust,
-                ));
+                handler.let_bindings.push(crate::check::ParsedLetBinding {
+                    name: name.clone(),
+                    lean_expr: expr_to_lean(&value.node, Ctx::Guard, consts, env),
+                    rust_expr: rust,
+                    tree: Some(build_expr_tree(&value, tcx)),
+                });
             }
             a::HandlerClause::Effect(blocks) => {
                 // `effect { … }` may contain a top-level `match` block

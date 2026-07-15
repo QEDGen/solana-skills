@@ -344,7 +344,7 @@ pub(super) fn check_unknown_guard_identifier(spec: &ParsedSpec) -> Vec<Completen
         let mut known: std::collections::BTreeSet<&str> = consts.clone();
         known.extend(h.takes_params.iter().map(|(n, _)| n.as_str()));
         known.extend(h.accounts.iter().map(|a| a.name.as_str()));
-        known.extend(h.let_bindings.iter().map(|(n, _, _)| n.as_str()));
+        known.extend(h.let_bindings.iter().map(|b| b.name.as_str()));
         known.extend(h.abstract_binders.iter().map(|(n, _)| n.as_str()));
         known.extend(h.calls.iter().filter_map(|c| c.result_binding.as_deref()));
         if let Some(who) = &h.who {

@@ -73,6 +73,12 @@ pub(super) fn emit_handler_transition_adt(out: &mut String, mir: &Mir, h: &crate
         }
     }
 
+    // Handler-level `let` bindings — bound inside the pre-variant arm so
+    // guards and effect parts can reference them (#156).
+    for (name, rhs) in &h.lets {
+        pre_let_lines.push(format!("    let {} := {}", safe_name(name), rhs.lean));
+    }
+
     // User-declared requires (`pre` + `requires_or_abort`, combined so the
     // original spec ordering survives). Clauses mentioning a handler-account
     // `.pubkey` / `.key()` projection are filtered: those identifiers have
@@ -485,6 +491,14 @@ pub(super) fn emit_handler_transition(out: &mut String, mir: &Mir, h: &crate::mi
         if !who_is_state_field {
             out.push_str(&format!("  let {} := signer\n", safe_name(&who)));
         }
+    }
+
+    // Handler-level `let` bindings — bound before the guard so both the
+    // require conjunction and the effect parts can reference them.
+    // Without these the transition references the names free and the
+    // module doesn't elaborate (#156 fixture `let-bindings-fee-split`).
+    for (name, rhs) in &h.lets {
+        out.push_str(&format!("  let {} := {}\n", safe_name(name), rhs.lean));
     }
 
     // Lifecycle promotion + ghost updates apply on every exit path

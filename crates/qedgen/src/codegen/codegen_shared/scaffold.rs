@@ -282,9 +282,9 @@ pub(crate) fn render_handler_scaffold(
     // RHSs reference them). The RHS carries the spec's `s.<field>`
     // shorthand, unbound here — rewrite through the same accessor logic
     // the CPI-arg path uses.
-    for (binding_name, _lean_expr, rust_expr) in &handler.let_bindings {
-        let rewritten = rewrite_state_refs_for_self(rust_expr, handler, spec);
-        out.push_str(&format!("        let {} = {};\n", binding_name, rewritten));
+    for b in &handler.let_bindings {
+        let rewritten = rewrite_state_refs_for_self(&b.rust_expr, handler, spec);
+        out.push_str(&format!("        let {} = {};\n", b.name, rewritten));
     }
 
     // `let X = call …` bindings must be in scope for subsequent effects

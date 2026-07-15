@@ -206,17 +206,29 @@ pub(super) fn overflow_proof_script(
         }
     };
 
+    // Handler-level `let` bindings leave the unfolded hypothesis wrapped
+    // in `have`/`let` binders; zeta-reduce so `split`/`cases` find the
+    // `if` / record form (#156 fixture `let-bindings-fee-split`).
+    let zeta = if h.lets.is_empty() {
+        ""
+    } else {
+        " dsimp only at h;"
+    };
+
     let mut proof = String::new();
     if has_cond {
         proof.push_str(&format!(
-            " := by\n  unfold {} at h; split at h\n",
-            trans_name
+            " := by\n  unfold {} at h;{} split at h\n",
+            trans_name, zeta
         ));
         proof.push_str("  · next hg =>\n    cases h\n");
         emit_body(&mut proof, "    ");
         proof.push_str("  · contradiction\n\n");
     } else {
-        proof.push_str(&format!(" := by\n  unfold {} at h; cases h\n", trans_name));
+        proof.push_str(&format!(
+            " := by\n  unfold {} at h;{} cases h\n",
+            trans_name, zeta
+        ));
         emit_body(&mut proof, "  ");
         proof.push('\n');
     }

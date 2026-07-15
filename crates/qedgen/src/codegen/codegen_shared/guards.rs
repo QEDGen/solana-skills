@@ -24,7 +24,7 @@ pub(crate) fn guards_use_math_helpers(spec: &ParsedSpec) -> bool {
         // Without this, specs that compute fee math via a `let` (a common
         // pattern for splitting amounts before the effect block) wouldn't
         // pick up the math.rs import / inline helpers.
-        if h.let_bindings.iter().any(|(_, _, r)| probe(r)) {
+        if h.let_bindings.iter().any(|b| probe(&b.rust_expr)) {
             any = true;
         }
         // Effect RHS can call the helpers directly (`fee := mul_div_floor(…)`)
@@ -242,13 +242,13 @@ pub(crate) fn generate_guards(
         // tripping `cannot find value 'lp_out' in this scope`. Each
         // RHS goes through `bind_state` so `s.<field>` reads route
         // through `ctx.<state>.<field>` (the guards binder).
-        for (binding_name, _lean_expr, rust_expr) in &handler.let_bindings {
-            let rewritten = bind_state_expr(rust_expr, handler, state_acct, spec, &surface);
+        for b in &handler.let_bindings {
+            let rewritten = bind_state_expr(&b.rust_expr, handler, state_acct, spec, &surface);
             out.push_str(&format!(
                 "    // let-binding from spec: {} = {}\n",
-                binding_name, rust_expr
+                b.name, b.rust_expr
             ));
-            out.push_str(&format!("    let {} = {};\n", binding_name, rewritten));
+            out.push_str(&format!("    let {} = {};\n", b.name, rewritten));
         }
 
         emit_requires_guards(

@@ -125,10 +125,7 @@ pub fn spec_uses_kani_bps_mul_div_helper(spec: &ParsedSpec) -> bool {
                 .ensures
                 .iter()
                 .any(|ensures| uses_helper(&ensures.rust_expr_binary))
-            || op
-                .let_bindings
-                .iter()
-                .any(|(_, _, rust_expr)| uses_helper(rust_expr))
+            || op.let_bindings.iter().any(|b| uses_helper(&b.rust_expr))
     }) || spec
         .properties
         .iter()

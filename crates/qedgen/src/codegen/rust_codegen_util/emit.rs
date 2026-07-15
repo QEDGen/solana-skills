@@ -451,8 +451,8 @@ pub fn emit_transition_fn_inner(
 
     // Spec-level `let` bindings emit BEFORE the effect block so effect
     // RHSs can reference them.
-    for (binding_name, _lean_expr, rust_expr) in &op.let_bindings {
-        out.push_str(&format!("    let {} = {};\n", binding_name, rust_expr));
+    for b in &op.let_bindings {
+        out.push_str(&format!("    let {} = {};\n", b.name, b.rust_expr));
     }
 
     // Apply effects. Per-effect arithmetic semantics: `+=` → checked_add

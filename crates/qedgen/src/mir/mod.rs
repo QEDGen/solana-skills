@@ -300,6 +300,11 @@ pub struct HandlerMir {
     /// `Stmt::RequireOrAbort` rather than `pre`. Populated during
     /// parser→MIR; empty after the Phase 3 pass synthesizes them into `body`.
     pub requires_or_abort: Vec<RequireOrAbortClause>,
+    /// Handler-level `let name = expr` bindings, in declaration order
+    /// (later bindings may reference earlier ones). The Lean transition
+    /// binds them before the guard; theorem statements inline them via
+    /// [`HandlerMir::inline_let_bindings`].
+    pub lets: Vec<(Symbol, Expr)>,
     pub body: Block,
     /// Post-conditions (`ensures`).
     pub post: Vec<Predicate>,
@@ -320,6 +325,33 @@ pub struct HandlerMir {
     /// `aborts_total` — abort branches are exhaustive; codegen emits a ↔
     /// theorem instead of per-abort.
     pub aborts_total: bool,
+}
+
+impl HandlerMir {
+    /// A predicate tree with this handler's `let`-bound names inlined,
+    /// transitively (`net = total - fee` inlines `fee` first). Emission
+    /// positions outside the transition def — theorem statements — can't
+    /// reference the def-level `let` bindings, so they substitute the RHS
+    /// trees instead. Bindings without a tree (hand-built fixtures) and
+    /// projected reads (`binding.field`) keep the bare name.
+    pub fn inline_let_bindings(&self, tree: &ExprTree) -> ExprTree {
+        let mut inlined: std::collections::HashMap<&str, ExprTree> =
+            std::collections::HashMap::new();
+        for (name, rhs) in &self.lets {
+            let Some(rhs_tree) = &rhs.tree else { continue };
+            let rhs_inlined = expr_tree::map_paths(rhs_tree, &mut |p, _| {
+                (matches!(p.binding, expr_tree::BindingKind::LetBound) && p.segments.is_empty())
+                    .then(|| inlined.get(p.root.as_str()).cloned())
+                    .flatten()
+            });
+            inlined.insert(name.as_str(), rhs_inlined);
+        }
+        expr_tree::map_paths(tree, &mut |p, _| {
+            (matches!(p.binding, expr_tree::BindingKind::LetBound) && p.segments.is_empty())
+                .then(|| inlined.get(p.root.as_str()).cloned())
+                .flatten()
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1432,6 +1464,17 @@ fn lower_handler(h: &crate::check::ParsedHandler, parsed: &ParsedSpec) -> Handle
         pre,
         requires_in_order,
         requires_or_abort,
+        lets: h
+            .let_bindings
+            .iter()
+            .map(|b| {
+                (
+                    b.name.clone(),
+                    Expr::from_lean_rust_pod(&b.lean_expr, &b.rust_expr, &b.rust_expr)
+                        .with_tree(b.tree.clone()),
+                )
+            })
+            .collect(),
         body: lower_body(h),
         post: h
             .ensures

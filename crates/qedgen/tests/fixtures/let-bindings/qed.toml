@@ -1,0 +1,4 @@
+# QEDGen manifest for the let-bindings coverage fixture (#156). No external
+# interface imports; present so fixture staging matches the example layout.
+
+[dependencies]

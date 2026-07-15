@@ -66,6 +66,17 @@ pub struct ParsedVariant {
     pub fields: Vec<(String, String)>,
 }
 
+/// Handler-level `let name = expr` binding. `rust_expr` carries the
+/// adapter's binding-site rendering (including the `as u64` narrowing for
+/// `mul_div_*` RHSs); `tree` is the typed RHS (#156).
+#[derive(Debug, Clone)]
+pub struct ParsedLetBinding {
+    pub name: String,
+    pub lean_expr: String,
+    pub rust_expr: String,
+    pub tree: Option<crate::mir::ExprTree>,
+}
+
 /// Parsed requires clause. When `error_name` is Some, generates both a guard
 /// (positive form in transition) and an abort theorem (negated form).
 #[derive(Debug, Clone, Default)]
@@ -488,8 +499,9 @@ pub struct ParsedHandler {
     pub ensures: Vec<ParsedEnsures>,
     /// Frame condition: fields that may be modified. All others must stay unchanged.
     pub modifies: Option<Vec<String>>,
-    /// Handler-level let bindings: (name, lean_expr, rust_expr).
-    pub let_bindings: Vec<(String, String, String)>,
+    /// Handler-level `let name = expr` bindings, in declaration order
+    /// (later bindings may reference earlier ones).
+    pub let_bindings: Vec<ParsedLetBinding>,
     /// All abort conditions are exhaustive — generates ↔ theorem instead of per-abort.
     pub aborts_total: bool,
     /// Deliberately permissionless — no `auth` required. Mutually exclusive

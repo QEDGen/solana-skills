@@ -26,7 +26,7 @@
 //!   marks pre-state — so no `s'.`-needle text rewriting is involved.
 
 use crate::check::{ParsedCall, ParsedStateBinder};
-use crate::mir::expr_tree::{BindingKind, ExprTree, TreeMatchArm, TreePath, TreeSeg};
+use crate::mir::expr_tree::{BindingKind, ExprTree, TreePath, TreeSeg};
 
 /// Substitute call-site data into a callee `ensures` tree. See module docs
 /// for the three substitution rules. Callee params the caller didn't bind
@@ -45,7 +45,7 @@ pub fn substitute_callee_ensures_tree(
         call,
         result_binder: callee_result_binder.unwrap_or("result"),
     };
-    subst(ensures, &cx, false)
+    crate::mir::expr_tree::map_paths(ensures, &mut |p, in_old| Some(subst_path(p, &cx, in_old)))
 }
 
 /// Abstract State-field projections read by a callee `ensures` tree
@@ -118,152 +118,6 @@ fn verbatim_path(root: &str, segments: Vec<TreeSeg>) -> ExprTree {
         segments,
         ty: None,
     })
-}
-
-fn subst(t: &ExprTree, cx: &SubstCx<'_>, in_old: bool) -> ExprTree {
-    match t {
-        ExprTree::Int(_) | ExprTree::Bool(_) | ExprTree::Ctor { payload: None, .. } => t.clone(),
-        ExprTree::Path(p) => subst_path(p, cx, in_old),
-        ExprTree::Old(inner) => ExprTree::Old(Box::new(subst(inner, cx, true))),
-        ExprTree::Sum {
-            binder,
-            binder_ty,
-            fin_bound,
-            body,
-        } => ExprTree::Sum {
-            binder: binder.clone(),
-            binder_ty: binder_ty.clone(),
-            fin_bound: fin_bound.clone(),
-            body: Box::new(subst(body, cx, in_old)),
-        },
-        ExprTree::Quant {
-            kind,
-            binder,
-            binder_ty,
-            fin_bound,
-            body,
-        } => ExprTree::Quant {
-            kind: *kind,
-            binder: binder.clone(),
-            binder_ty: binder_ty.clone(),
-            fin_bound: fin_bound.clone(),
-            body: Box::new(subst(body, cx, in_old)),
-        },
-        ExprTree::QuantIn {
-            kind,
-            binder,
-            coll,
-            body,
-        } => ExprTree::QuantIn {
-            kind: *kind,
-            binder: binder.clone(),
-            coll: Box::new(subst(coll, cx, in_old)),
-            body: Box::new(subst(body, cx, in_old)),
-        },
-        ExprTree::BoolOp { op, lhs, rhs } => ExprTree::BoolOp {
-            op: *op,
-            lhs: Box::new(subst(lhs, cx, in_old)),
-            rhs: Box::new(subst(rhs, cx, in_old)),
-        },
-        ExprTree::Not(inner) => ExprTree::Not(Box::new(subst(inner, cx, in_old))),
-        ExprTree::Cmp { op, lhs, rhs } => ExprTree::Cmp {
-            op: *op,
-            lhs: Box::new(subst(lhs, cx, in_old)),
-            rhs: Box::new(subst(rhs, cx, in_old)),
-        },
-        ExprTree::Arith { op, lhs, rhs } => ExprTree::Arith {
-            op: *op,
-            lhs: Box::new(subst(lhs, cx, in_old)),
-            rhs: Box::new(subst(rhs, cx, in_old)),
-        },
-        ExprTree::MulDivFloor { a, b, d } => ExprTree::MulDivFloor {
-            a: Box::new(subst(a, cx, in_old)),
-            b: Box::new(subst(b, cx, in_old)),
-            d: Box::new(subst(d, cx, in_old)),
-        },
-        ExprTree::MulDivCeil { a, b, d } => ExprTree::MulDivCeil {
-            a: Box::new(subst(a, cx, in_old)),
-            b: Box::new(subst(b, cx, in_old)),
-            d: Box::new(subst(d, cx, in_old)),
-        },
-        ExprTree::MulDivRoundHalfUp { a, b, d } => ExprTree::MulDivRoundHalfUp {
-            a: Box::new(subst(a, cx, in_old)),
-            b: Box::new(subst(b, cx, in_old)),
-            d: Box::new(subst(d, cx, in_old)),
-        },
-        ExprTree::Contains { coll, elem } => ExprTree::Contains {
-            coll: Box::new(subst(coll, cx, in_old)),
-            elem: Box::new(subst(elem, cx, in_old)),
-        },
-        ExprTree::Len(inner) => ExprTree::Len(Box::new(subst(inner, cx, in_old))),
-        ExprTree::Match {
-            scrutinee,
-            arms,
-            enum_ty,
-        } => ExprTree::Match {
-            scrutinee: Box::new(subst(scrutinee, cx, in_old)),
-            arms: arms
-                .iter()
-                .map(|arm| TreeMatchArm {
-                    variant: arm.variant.clone(),
-                    binder: arm.binder.clone(),
-                    body: Box::new(subst(&arm.body, cx, in_old)),
-                    shape: arm.shape,
-                })
-                .collect(),
-            enum_ty: enum_ty.clone(),
-        },
-        ExprTree::Ctor { variant, payload } => ExprTree::Ctor {
-            variant: variant.clone(),
-            payload: payload.as_ref().map(|p| Box::new(subst(p, cx, in_old))),
-        },
-        ExprTree::RecordLit(fields) => ExprTree::RecordLit(
-            fields
-                .iter()
-                .map(|(n, v)| (n.clone(), subst(v, cx, in_old)))
-                .collect(),
-        ),
-        ExprTree::RecordUpdate { base, updates } => ExprTree::RecordUpdate {
-            base: Box::new(subst(base, cx, in_old)),
-            updates: updates
-                .iter()
-                .map(|(n, v)| (n.clone(), subst(v, cx, in_old)))
-                .collect(),
-        },
-        ExprTree::IsVariant {
-            scrutinee,
-            variant,
-            enum_ty,
-            shape,
-        } => ExprTree::IsVariant {
-            scrutinee: Box::new(subst(scrutinee, cx, in_old)),
-            variant: variant.clone(),
-            enum_ty: enum_ty.clone(),
-            shape: *shape,
-        },
-        ExprTree::App { func, args } => ExprTree::App {
-            func: func.clone(),
-            args: args.iter().map(|a| subst(a, cx, in_old)).collect(),
-        },
-        ExprTree::Field { base, field } => ExprTree::Field {
-            base: Box::new(subst(base, cx, in_old)),
-            field: field.clone(),
-        },
-        ExprTree::Let { name, value, body } => ExprTree::Let {
-            name: name.clone(),
-            value: Box::new(subst(value, cx, in_old)),
-            body: Box::new(subst(body, cx, in_old)),
-        },
-        ExprTree::IfThenElse {
-            cond,
-            then_branch,
-            else_branch,
-        } => ExprTree::IfThenElse {
-            cond: Box::new(subst(cond, cx, in_old)),
-            then_branch: Box::new(subst(then_branch, cx, in_old)),
-            else_branch: Box::new(subst(else_branch, cx, in_old)),
-        },
-    }
 }
 
 fn subst_path(p: &TreePath, cx: &SubstCx<'_>, in_old: bool) -> ExprTree {

@@ -176,19 +176,19 @@ pub fn pick_kani_solver_for_effect(
     // Fixed-point taint propagation: a binding is "arith-tainted" when its
     // (transitive) RHS contains `*` or `/`. Bounded by the binding count.
     let mut tainted: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    for (name, _, bound_rhs) in &op.let_bindings {
-        if bound_rhs.contains('*') || bound_rhs.contains('/') {
-            tainted.insert(name.as_str());
+    for b in &op.let_bindings {
+        if b.rust_expr.contains('*') || b.rust_expr.contains('/') {
+            tainted.insert(b.name.as_str());
         }
     }
     for _ in 0..op.let_bindings.len() {
         let mut changed = false;
-        for (name, _, bound_rhs) in &op.let_bindings {
-            if tainted.contains(name.as_str()) {
+        for b in &op.let_bindings {
+            if tainted.contains(b.name.as_str()) {
                 continue;
             }
-            if tainted.iter().any(|t| contains_whole_word(bound_rhs, t)) {
-                tainted.insert(name.as_str());
+            if tainted.iter().any(|t| contains_whole_word(&b.rust_expr, t)) {
+                tainted.insert(b.name.as_str());
                 changed = true;
             }
         }

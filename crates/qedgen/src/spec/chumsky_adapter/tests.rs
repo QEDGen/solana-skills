@@ -1775,11 +1775,12 @@ handler accept (total : U64) (fee_bps : U64) : State.Active -> State.Active {
         .expect("accept handler");
 
     // Find the `fee` binding's rendered RHS.
-    let (_, _, fee_rhs) = h
+    let fee_rhs = &h
         .let_bindings
         .iter()
-        .find(|(name, _, _)| name == "fee")
-        .expect("fee binding");
+        .find(|b| b.name == "fee")
+        .expect("fee binding")
+        .rust_expr;
 
     assert!(
         fee_rhs.contains("mul_div_floor_u128"),
@@ -1818,11 +1819,12 @@ handler accept (total : U64) (fee_bps : U64) : State.Active -> State.Active {
         .iter()
         .find(|h| h.name == "accept")
         .expect("accept handler");
-    let (_, _, fee_rhs) = h
+    let fee_rhs = &h
         .let_bindings
         .iter()
-        .find(|(name, _, _)| name == "fee")
-        .expect("fee binding");
+        .find(|b| b.name == "fee")
+        .expect("fee binding")
+        .rust_expr;
     assert!(
         fee_rhs.contains("mul_div_ceil_u128") && fee_rhs.contains("as u64"),
         "ceil variant must narrow too; got: {fee_rhs}"
@@ -1842,11 +1844,12 @@ handler accept (total : U64) (rate : U64) : State -> State {
 }
 "#;
     let spec = parse_str(src).expect("parse");
-    let (_, lean_rhs, rust_rhs) = spec.handlers[0]
+    let binding = spec.handlers[0]
         .let_bindings
         .iter()
-        .find(|(name, _, _)| name == "rounded")
+        .find(|b| b.name == "rounded")
         .expect("rounded binding");
+    let (lean_rhs, rust_rhs) = (&binding.lean_expr, &binding.rust_expr);
     assert!(
         rust_rhs.contains("mul_div_round_half_up_u128") && rust_rhs.contains("as u64"),
         "half-up variant must use the helper and narrow; got: {rust_rhs}"
@@ -1888,11 +1891,12 @@ handler accept (total : U64) (fee_bps : U64) : State.Active -> State.Active {
         .iter()
         .find(|h| h.name == "accept")
         .expect("accept handler");
-    let (_, _, fee_rhs) = h
+    let fee_rhs = &h
         .let_bindings
         .iter()
-        .find(|(name, _, _)| name == "fee")
-        .expect("fee binding");
+        .find(|b| b.name == "fee")
+        .expect("fee binding")
+        .rust_expr;
     assert!(
         fee_rhs.contains("mul_div_floor_u128") && fee_rhs.contains("as u64"),
         "parenthesised mul_div RHS must still narrow; got: {fee_rhs}"
