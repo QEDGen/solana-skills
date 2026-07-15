@@ -50,7 +50,9 @@ pub(super) fn strip_variant_prefix(path: &crate::mir::Path, mir: &Mir) -> String
 pub(super) fn expr_lean(e: &crate::mir::Expr, cx: super::tree_render::LeanCx) -> String {
     match &e.tree {
         Some(t) => super::tree_render::render_lean(t, cx),
-        None => e.lean.clone(),
+        // Tree-less Exprs are `from_raw`-built (every form carries the
+        // same string) or `Expr::default()` — `rust` is the Lean text.
+        None => e.rust.clone(),
     }
 }
 
@@ -61,7 +63,7 @@ pub(super) fn expr_lean_app(e: &crate::mir::Expr) -> String {
     use super::tree_render::{render_lean, LeanCx};
     match &e.tree {
         Some(t) => render_lean(t, LeanCx::guard().with_application_subscripts()),
-        None => rewrite_subscripts_lean(&e.lean),
+        None => rewrite_subscripts_lean(&e.rust),
     }
 }
 
@@ -76,7 +78,7 @@ pub(super) fn effect_rhs_lean(
     use super::tree_render::{render_lean, LeanCx};
     match &expr.tree {
         Some(tree) => render_lean(tree, LeanCx::guard().with_application_subscripts()),
-        None => effect_value_to_lean_mir(&expr.lean, params),
+        None => effect_value_to_lean_mir(&expr.rust, params),
     }
 }
 

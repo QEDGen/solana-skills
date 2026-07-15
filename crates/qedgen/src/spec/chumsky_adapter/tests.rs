@@ -1166,7 +1166,6 @@ environment rate_change {
     assert_eq!(environment.constraints_rust.len(), 2);
     assert_eq!(environment.typed_constraints.len(), 2);
     for (index, typed) in environment.typed_constraints.iter().enumerate() {
-        assert_eq!(typed.lean_expr, environment.constraints[index]);
         assert_eq!(typed.rust_expr, environment.constraints_rust[index]);
         assert!(
             typed.tree.is_some(),
@@ -1426,10 +1425,15 @@ property p : state.total == state.balance preserved_by all
         "update value_rust should read the ghost + param; got {}",
         g.updates[0].value_rust
     );
+    // The folded tree reads the ghost's pre-value: `s.total + (amount)`
+    // structurally (Lean renders from this tree).
     assert!(
-        g.updates[0].value_lean.contains("s.total"),
-        "update value_lean should read the ghost; got {}",
-        g.updates[0].value_lean
+        matches!(
+            &g.updates[0].value_tree,
+            Some(crate::mir::ExprTree::Arith { .. })
+        ),
+        "update value_tree should carry the folded add; got {:?}",
+        g.updates[0].value_tree
     );
     // The property references the ghost as a state field.
     let prop = spec.properties.iter().find(|p| p.name == "p").unwrap();
@@ -1849,14 +1853,20 @@ handler accept (total : U64) (rate : U64) : State -> State {
         .iter()
         .find(|b| b.name == "rounded")
         .expect("rounded binding");
-    let (lean_rhs, rust_rhs) = (&binding.lean_expr, &binding.rust_expr);
+    let rust_rhs = &binding.rust_expr;
     assert!(
         rust_rhs.contains("mul_div_round_half_up_u128") && rust_rhs.contains("as u64"),
         "half-up variant must use the helper and narrow; got: {rust_rhs}"
     );
+    // The Lean half-up bias (`(a * b + d / 2) / d`) renders from the tree;
+    // the binding must carry the structural helper node.
     assert!(
-        lean_rhs.contains("/ 2"),
-        "Lean rendering must encode the half-up bias: {lean_rhs}"
+        matches!(
+            &binding.tree,
+            Some(crate::mir::ExprTree::MulDivRoundHalfUp { .. })
+        ),
+        "half-up binding must carry the MulDivRoundHalfUp tree; got {:?}",
+        binding.tree
     );
 }
 

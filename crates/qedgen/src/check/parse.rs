@@ -1265,9 +1265,10 @@ handler h : State.A -> State.A { effect { x := 1 } }
         assert_eq!(c.args.len(), 3);
         assert_eq!(c.args[0].name, "from");
         assert_eq!(c.args[2].name, "amount");
-        // Args carry both renderings so backends can pick the form they want.
+        // Args carry the Rust rendering + typed tree (Lean renders from
+        // the tree).
         assert!(!c.args[0].rust_expr.is_empty());
-        assert!(!c.args[0].lean_expr.is_empty());
+        assert!(c.args[0].tree.is_some());
     }
 
     // ──────────────────────────────────────────────────────────────────────

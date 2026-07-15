@@ -72,7 +72,6 @@ pub struct ParsedVariant {
 #[derive(Debug, Clone)]
 pub struct ParsedLetBinding {
     pub name: String,
-    pub lean_expr: String,
     pub rust_expr: String,
     pub tree: Option<crate::mir::ExprTree>,
 }
@@ -126,7 +125,10 @@ pub struct ParsedEnsures {
 pub struct ParsedCover {
     pub name: String,
     pub traces: Vec<Vec<String>>,
-    pub reachable: Vec<(String, Option<String>)>, // (op, when_lean_expr)
+    /// `(op, when_lean_expr, when_tree)` — the typed tree rides with the
+    /// pre-rendered Lean form (#156).
+    #[allow(clippy::type_complexity)]
+    pub reachable: Vec<(String, Option<String>, Option<crate::mir::ExprTree>)>,
 }
 
 /// Parsed liveness block (leads-to).
@@ -189,7 +191,6 @@ pub struct ParsedEnvironment {
 /// without parsing target code.
 #[derive(Debug, Clone)]
 pub struct ParsedEnvironmentConstraint {
-    pub lean_expr: String,
     pub rust_expr: String,
     pub tree: Option<crate::mir::ExprTree>,
     pub class: PropertyClass,
@@ -598,7 +599,6 @@ pub struct ParsedCall {
 #[derive(Debug, Default, Clone)]
 pub struct ParsedCallArg {
     pub name: String,
-    pub lean_expr: String,
     pub rust_expr: String,
     pub rust_expr_pod: String,
     /// Typed argument tree (#151 Slice 0).
@@ -861,8 +861,7 @@ pub struct ParsedGhost {
     pub doc: Option<String>,
     /// DSL type string (`U64`, `I128`, `Bool`, …). Scalar only.
     pub ty: String,
-    /// Initial value, rendered for each backend.
-    pub init_lean: String,
+    /// Initial value, rendered for Rust; Lean renders from `init_tree`.
     pub init_rust: String,
     /// Typed initial-value tree (#156).
     pub init_tree: Option<crate::mir::ExprTree>,
@@ -876,7 +875,6 @@ pub struct ParsedGhost {
 #[derive(Debug, Clone)]
 pub struct ParsedGhostUpdate {
     pub handler: String,
-    pub value_lean: String,
     pub value_rust: String,
     /// Typed complete-new-value tree (#156; op already folded in).
     pub value_tree: Option<crate::mir::ExprTree>,
@@ -900,9 +898,6 @@ pub enum ParsedHookKind {
 /// One `assert <expr>` in a hook body, rendered per backend.
 #[derive(Debug, Clone)]
 pub struct ParsedHookAssert {
-    /// Lean rendering, retained for the deferred Lean enforcement path
-    /// (qedsvm). Not consumed today — Lean ignores hooks.
-    pub lean: String,
     pub rust: String,
     /// Typed assert tree (#156).
     pub tree: Option<crate::mir::ExprTree>,

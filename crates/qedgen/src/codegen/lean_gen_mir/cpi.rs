@@ -385,7 +385,6 @@ pub(super) fn synthesize_parsed_call(
             .iter()
             .map(|a| crate::check::ParsedCallArg {
                 name: a.name.clone(),
-                lean_expr: a.value.lean.clone(),
                 rust_expr: a.value.rust.clone(),
                 rust_expr_pod: a.value.rust_pod.clone(),
                 tree: a.value.tree.clone(),

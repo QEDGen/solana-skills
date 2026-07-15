@@ -431,6 +431,7 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                                 op.clone(),
                                 when.as_ref()
                                     .map(|e| expr_to_lean(&e.node, Ctx::Guard, consts, &env)),
+                                when.as_ref().map(|e| build_expr_tree(e, &spec_tcx)),
                             )
                         })
                         .collect(),
@@ -548,10 +549,9 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                             let lean_expr = expr_to_lean(&e.node, Ctx::Ensures, consts, &env);
                             let rust_expr =
                                 expr_to_rust(&e.node, Ctx::Ensures, consts, opts_native(&env));
-                            constraints_lean.push(lean_expr.clone());
+                            constraints_lean.push(lean_expr);
                             constraints_rust.push(rust_expr.clone());
                             typed_constraints.push(crate::check::ParsedEnvironmentConstraint {
-                                lean_expr,
                                 rust_expr,
                                 tree: Some(build_expr_tree(e, &environment_tcx)),
                                 class: classify_property_body(e),
@@ -641,7 +641,6 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
             }
             TopItem::Ghost(g) => {
                 // Init value — a constant expression in single-state context.
-                let init_lean = expr_to_lean(&g.init.node, Ctx::Guard, consts, &env);
                 let init_rust = expr_to_rust(&g.init.node, Ctx::Guard, consts, opts_native(&env));
                 let init_tree = build_expr_tree(&g.init, &spec_tcx);
                 let mut updates = Vec::new();
@@ -657,7 +656,6 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                         })
                         .unwrap_or(&[]);
                     let uenv = env.clone().with_params(handler_params);
-                    let rhs_lean = expr_to_lean(&u.stmt.rhs.node, Ctx::Guard, consts, &uenv);
                     let rhs_rust =
                         expr_to_rust(&u.stmt.rhs.node, Ctx::Guard, consts, opts_native(&uenv));
                     let mut utcx = TreeCx::spec_level(&env, consts, ghosts.clone());
@@ -677,17 +675,16 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                             rhs: Box::new(rhs_tree.clone()),
                         };
                     // Fold the assignment operator into a complete new-value
-                    // expression so each backend just emits `<ghost> := value`.
-                    let (value_lean, value_rust) = match u.stmt.op {
-                        a::EffectOp::Set => (rhs_lean, rhs_rust),
-                        a::EffectOp::Add | a::EffectOp::AddSat | a::EffectOp::AddWrap => (
-                            format!("s.{} + ({})", g.name, rhs_lean),
-                            format!("s.{} + ({})", g.name, rhs_rust),
-                        ),
-                        a::EffectOp::Sub | a::EffectOp::SubSat | a::EffectOp::SubWrap => (
-                            format!("s.{} - ({})", g.name, rhs_lean),
-                            format!("s.{} - ({})", g.name, rhs_rust),
-                        ),
+                    // expression so each backend just emits `<ghost> := value`
+                    // (the Lean form renders from `value_tree`).
+                    let value_rust = match u.stmt.op {
+                        a::EffectOp::Set => rhs_rust,
+                        a::EffectOp::Add | a::EffectOp::AddSat | a::EffectOp::AddWrap => {
+                            format!("s.{} + ({})", g.name, rhs_rust)
+                        }
+                        a::EffectOp::Sub | a::EffectOp::SubSat | a::EffectOp::SubWrap => {
+                            format!("s.{} - ({})", g.name, rhs_rust)
+                        }
                     };
                     let value_tree = match u.stmt.op {
                         a::EffectOp::Set => rhs_tree.clone(),
@@ -700,7 +697,6 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                     };
                     updates.push(crate::check::ParsedGhostUpdate {
                         handler: u.handler.clone(),
-                        value_lean,
                         value_rust,
                         value_tree: Some(value_tree),
                     });
@@ -709,7 +705,6 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                     name: g.name.clone(),
                     doc: g.doc.clone(),
                     ty: type_ref_to_string(&g.ty),
-                    init_lean,
                     init_rust,
                     init_tree: Some(init_tree),
                     updates,
@@ -728,7 +723,6 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                     .asserts
                     .iter()
                     .map(|e| crate::check::ParsedHookAssert {
-                        lean: expr_to_lean(&e.node, Ctx::Guard, consts, &env),
                         rust: expr_to_rust(&e.node, Ctx::Guard, consts, opts_native(&env)),
                         tree: Some(build_expr_tree(e, &spec_tcx)),
                     })
@@ -1155,7 +1149,6 @@ fn lower_call(c: &a::CallExpr, consts: ConstTable, env: &TypeEnv, tcx: &TreeCx) 
         .iter()
         .map(|arg| ParsedCallArg {
             name: arg.name.clone(),
-            lean_expr: expr_to_lean(&arg.value.node, Ctx::Guard, consts, env),
             rust_expr: expr_to_rust(&arg.value.node, Ctx::Guard, consts, opts_native(env)),
             rust_expr_pod: expr_to_rust(&arg.value.node, Ctx::Guard, consts, opts_pod(env)),
             tree: Some(build_expr_tree(&arg.value, tcx)),
@@ -1440,7 +1433,6 @@ fn adapt_handler(
                 };
                 handler.let_bindings.push(crate::check::ParsedLetBinding {
                     name: name.clone(),
-                    lean_expr: expr_to_lean(&value.node, Ctx::Guard, consts, env),
                     rust_expr: rust,
                     tree: Some(build_expr_tree(&value, tcx)),
                 });

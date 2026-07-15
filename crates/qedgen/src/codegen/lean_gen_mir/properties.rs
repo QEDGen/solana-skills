@@ -28,7 +28,7 @@ pub(super) fn emit_properties(out: &mut String, mir: &Mir) {
             // Strip a leading `∀ s : State,` binder (only when the binder
             // ident is exactly `s`) — the surrounding def already
             // introduces `(s : State)`.
-            let body = strip_state_forall(&expr.lean);
+            let body = strip_state_forall(&expr_lean(expr, property_cx(prop)));
             out.push_str(&format!(
                 "def {} (s : State) : Prop := {}\n\n",
                 safe_name(&prop.name),
