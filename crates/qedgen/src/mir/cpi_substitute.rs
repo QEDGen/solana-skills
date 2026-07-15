@@ -1,4 +1,5 @@
-//! Param substitution for CPI ensures discharge / propagation.
+//! Param substitution for CPI ensures discharge / propagation — tree-native
+//! (#156; replaces the word-boundary regex lanes).
 //!
 //! When a handler does `call Iface.foo(args)` and `Iface.foo` declares
 //! `ensures`, two backends propagate the contract into the caller:
@@ -8,156 +9,72 @@
 //! 2. **Kani** ensures-preservation harness — `kani::assume(<substituted>)`
 //!    after the transition call, before the caller's own `assert!`s.
 //!
-//! Both share the same shape: map callee param name → caller expression,
-//! then word-boundary replace. Lean uses `ParsedCallArg.lean_expr`; Kani uses
-//! `ParsedCallArg.rust_expr` (the binary `pre`/`post` split happens upstream
-//! in `ParsedEnsures.rust_expr_binary`).
+//! Both operate on the callee's `ensures` **tree** (adapter-populated for
+//! every production interface, inline or imported):
+//!
+//! * `Param` leaves naming a callee formal → the caller's argument tree,
+//!   spliced structurally. The old regex lane pasted raw text, so a
+//!   compound caller arg (`a + b`) inside `amount * 2` produced the
+//!   mis-parenthesized `a + b * 2`; tree splicing renders with correct
+//!   precedence by construction.
+//! * The callee's result binder (declared `-> <ident> : T`, defaulting to
+//!   the literal `result`) → the caller's `let X = call …` binding.
+//! * `StateField` paths (the callee's abstract state) → the caller's
+//!   `state_binders` projection, encoded as verbatim `pre.<field>` /
+//!   `post.<field>` paths (`BindingKind::Unresolved` renders the spelling
+//!   as-is in both backends). The pre/post split is structural — `Old(…)`
+//!   marks pre-state — so no `s'.`-needle text rewriting is involved.
 
-use std::collections::HashMap;
+use crate::check::{ParsedCall, ParsedStateBinder};
+use crate::mir::expr_tree::{BindingKind, ExprTree, TreeMatchArm, TreePath, TreeSeg};
 
-use crate::check::{ParsedCall, ParsedCallArg, ParsedStateBinder};
-
-/// Word-boundary regex substitution of formal params for caller expressions —
-/// `\b<param>\b` so `amount` can't clobber `amount_squared` / `taker_amount`.
-pub fn substitute_word_boundary(expr: &str, subst: &HashMap<&str, &str>) -> String {
-    let mut out = expr.to_string();
-    for (param, replacement) in subst {
-        let pattern = format!(r"\b{}\b", regex::escape(param));
-        let re = regex::Regex::new(&pattern).expect("regex compiles for word-boundary param name");
-        out = re
-            .replace_all(&out, regex::NoExpand(replacement))
-            .into_owned();
-    }
-    out
-}
-
-/// Param-name → caller-Lean-expr table. Params the caller didn't bind fall
-/// through unchanged (Lean surfaces them as free variables — spec author's bug).
-pub fn lean_subst_table(call: &ParsedCall) -> HashMap<&str, &str> {
-    call.args
-        .iter()
-        .map(|a: &ParsedCallArg| (a.name.as_str(), a.lean_expr.as_str()))
-        .collect()
-}
-
-/// Param-name → caller-Rust-expr table (Kani / proptest). Uses `rust_expr`,
-/// not `rust_expr_pod`: the Kani spec-model harness renders with the same
-/// primitive widths as the transition functions.
-pub fn rust_subst_table(call: &ParsedCall) -> HashMap<&str, &str> {
-    call.args
-        .iter()
-        .map(|a: &ParsedCallArg| (a.name.as_str(), a.rust_expr.as_str()))
-        .collect()
-}
-
-/// Substitute call-site Lean args into a callee's Lean `ensures` — the form
-/// the caller proves at the call site. Unmatched params keep their formal
-/// name (Lean free variable; the lint catches it).
+/// Substitute call-site data into a callee `ensures` tree. See module docs
+/// for the three substitution rules. Callee params the caller didn't bind
+/// keep their formal name (Lean surfaces them as free variables — the lint
+/// catches it; Rust as compile errors).
 ///
 /// `callee_result_binder` is the identifier the callee's `ensures` uses for
-/// its return value (`handler foo (…) -> <ident> : Type`); when the caller
-/// binds via `let X = call …` it rewrites to `X`. `None` falls back to the
-/// conventional `"result"` literal for specs without a declared binder.
-pub fn substitute_callee_ensures_lean(
-    callee_ensures_lean: &str,
+/// its return value; `None` falls back to the conventional `"result"`
+/// literal for specs without a declared binder.
+pub fn substitute_callee_ensures_tree(
+    ensures: &ExprTree,
     call: &ParsedCall,
-    callee_params: &[(String, String)],
     callee_result_binder: Option<&str>,
-) -> String {
-    let mut subst: HashMap<&str, &str> = lean_subst_table(call);
-    // Defensive: every callee param gets an entry (defaulting to its formal
-    // name) even when the caller omitted a non-positional arg.
-    for (pn, _) in callee_params {
-        subst.entry(pn.as_str()).or_insert(pn.as_str());
-    }
-    // `let X = call ...` — a callee `ensures` referencing the return-value
-    // binder resolves to the caller's binder.
-    if let Some(ref result_name) = call.result_binding {
-        let binder = callee_result_binder.unwrap_or("result");
-        subst.entry(binder).or_insert(result_name.as_str());
-    }
-    let after_params = substitute_word_boundary(callee_ensures_lean, &subst);
-    // State-binder substitution. The Lean axiom signature keeps
-    // `<callee_field> : State → Nat` accessor params; `render_cpi_theorems`
-    // applies it with `(·.<caller_field>)`, so β-reduction matches the
-    // text-level substitution produced here (the caller's theorem statement).
-    substitute_state_binders_lean(&after_params, &call.state_binders)
+) -> ExprTree {
+    let cx = SubstCx {
+        call,
+        result_binder: callee_result_binder.unwrap_or("result"),
+    };
+    subst(ensures, &cx, false)
 }
 
-/// Lean state-binder substitution. The callee's lean_expr lowers `state.X`
-/// to `s'.X` (post) and `old(state.X)` to `s.X` (pre); each binder rewrites
-///   `s'.<callee_field>` → `post.<caller_field>`
-///   `s.<callee_field>`  → `pre.<caller_field>`
-/// matching the `(pre post : State)` binders on the caller's theorem.
-fn substitute_state_binders_lean(expr: &str, binders: &[ParsedStateBinder]) -> String {
-    let mut out = expr.to_string();
-    for b in binders {
-        // `s'.` is unambiguous in the Lean ensures lowering (only
-        // `Ctx::Ensures` produces it), so a literal needle is safe.
-        let post_needle = format!("s'.{}", b.callee_field);
-        let post_replacement = format!("post.{}", b.caller_field);
-        out = replace_word(&out, &post_needle, &post_replacement);
-        let pre_needle = format!("s.{}", b.callee_field);
-        let pre_replacement = format!("pre.{}", b.caller_field);
-        out = replace_word(&out, &pre_needle, &pre_replacement);
-    }
+/// Abstract State-field projections read by a callee `ensures` tree
+/// (`state.X` / `old(state.X)` in the callee's frame), in first-occurrence
+/// order. Backends use this with [`missing_state_binders`] to avoid
+/// importing callee ensures into a caller frame that cannot name the
+/// callee's abstract state.
+pub fn scan_abstract_state_fields(ensures: &ExprTree) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    crate::rust_codegen_util::tree_render::for_each_path(ensures, &mut |p| {
+        let is_state_read = matches!(p.binding, BindingKind::StateField | BindingKind::Ghost)
+            // Explicitly-spelled snapshot reads (`post.X` / `pre.X`)
+            // resolve `Unresolved` in the interface-handler scope.
+            || (matches!(p.binding, BindingKind::Unresolved)
+                && (p.root == "pre" || p.root == "post"));
+        if is_state_read {
+            if let Some(TreeSeg::Field(f)) = p.segments.first() {
+                if seen.insert(f.clone()) {
+                    out.push(f.clone());
+                }
+            }
+        }
+    });
     out
-}
-
-/// Replace `needle` only at word boundaries so a longer callee field
-/// (`from_balance_total`) can't match its prefix (`from_balance`).
-fn replace_word(haystack: &str, needle: &str, replacement: &str) -> String {
-    let pattern = format!(r"{}\b", regex::escape(needle));
-    let re = regex::Regex::new(&pattern).expect("regex compiles for word-boundary state replace");
-    re.replace_all(haystack, regex::NoExpand(replacement))
-        .into_owned()
-}
-
-/// Substitute call-site Rust args into a callee's `rust_expr_binary`
-/// `ensures`; the ensures-preservation Kani harness propagates the result as
-/// `kani::assume` facts.
-///
-/// `rust_expr_binary` already renders `state.x` as `post.x` and `old(state.x)`
-/// as `pre.x`; those pass through unchanged and bind to the caller's own
-/// pre/post snapshots at the assume site. `callee_result_binder` as in
-/// [`substitute_callee_ensures_lean`].
-pub fn substitute_callee_ensures_rust_binary(
-    callee_ensures_rust_binary: &str,
-    call: &ParsedCall,
-    callee_params: &[(String, String)],
-    callee_result_binder: Option<&str>,
-) -> String {
-    let mut subst: HashMap<&str, &str> = rust_subst_table(call);
-    for (pn, _) in callee_params {
-        subst.entry(pn.as_str()).or_insert(pn.as_str());
-    }
-    if let Some(ref result_name) = call.result_binding {
-        let binder = callee_result_binder.unwrap_or("result");
-        subst.entry(binder).or_insert(result_name.as_str());
-    }
-    let after_params = substitute_word_boundary(callee_ensures_rust_binary, &subst);
-    // Rewrite `pre.<callee_field>` / `post.<callee_field>` to the caller's
-    // field names so the result composes with `rewrite_pre_post_paths`
-    // (kani_impl.rs), which flattens to `pre_<field>` / `post_<field>`.
-    substitute_state_binders_rust_binary(&after_params, &call.state_binders)
-}
-
-/// Scan a Rust binary-form `ensures` expression for abstract State-field
-/// projections (`pre.X` / `post.X`), returning field names in first occurrence
-/// order.
-pub fn scan_rust_abstract_fields(expr: &str) -> Vec<String> {
-    scan_prefixed_fields(expr, r"\b(?:pre|post)\.([A-Za-z_][A-Za-z0-9_]*)")
-}
-
-/// Scan a Lean-form `ensures` expression for abstract State-field projections
-/// (`s.X` / `s'.X`), returning field names in first occurrence order.
-pub fn scan_lean_abstract_fields(expr: &str) -> Vec<String> {
-    scan_prefixed_fields(expr, r"\bs'?\.([A-Za-z_][A-Za-z0-9_]*)")
 }
 
 /// Return the abstract fields from `fields` that are not covered by a
-/// `state_binders` entry. Backends use this to avoid importing callee ensures
-/// into a caller frame that cannot name the callee's abstract state.
+/// `state_binders` entry.
 pub fn missing_state_binders(fields: &[String], binders: &[ParsedStateBinder]) -> Vec<String> {
     fields
         .iter()
@@ -166,34 +83,278 @@ pub fn missing_state_binders(fields: &[String], binders: &[ParsedStateBinder]) -
         .collect()
 }
 
-fn scan_prefixed_fields(expr: &str, pattern: &str) -> Vec<String> {
-    let re = regex::Regex::new(pattern).expect("regex compiles for abstract-field scan");
-    let mut seen = std::collections::BTreeSet::new();
-    let mut out = Vec::new();
-    for cap in re.captures_iter(expr) {
-        let field = cap.get(1).unwrap().as_str().to_string();
-        if seen.insert(field.clone()) {
-            out.push(field);
-        }
-    }
-    out
+struct SubstCx<'a> {
+    call: &'a ParsedCall,
+    result_binder: &'a str,
 }
 
-/// Rust binary state-binder substitution: `pre.<callee_field>` →
-/// `pre.<caller_field>` (and `post.`). The caller (kani_impl.rs
-/// `rewrite_pre_post_paths`) then flattens to harness-local `pre_X` / `post_X`.
-fn substitute_state_binders_rust_binary(expr: &str, binders: &[ParsedStateBinder]) -> String {
-    let mut out = expr.to_string();
-    for b in binders {
-        for state_kw in ["pre", "post"] {
-            // Anchor the `<state>.` prefix so `nested.from_balance` can't fire.
-            let pattern = format!(r"\b{}\.{}\b", state_kw, regex::escape(&b.callee_field));
-            let re = regex::Regex::new(&pattern)
-                .expect("regex compiles for Rust state-binder substitution");
-            let replacement = format!("{}.{}", state_kw, b.caller_field);
-            out = re
-                .replace_all(&out, regex::NoExpand(replacement.as_str()))
-                .into_owned();
+impl SubstCx<'_> {
+    /// The caller's argument tree bound to a callee formal, if any. Post-#151
+    /// every production call arg carries a tree; a `None` is a hand-built
+    /// fixture that must be fixed, not worked around.
+    fn arg_tree(&self, param: &str) -> Option<&ExprTree> {
+        self.call.args.iter().find(|a| a.name == param).map(|a| {
+            a.tree
+                .as_ref()
+                .expect("ParsedCallArg.tree is always populated by the chumsky adapter (#151/#156)")
+        })
+    }
+
+    fn caller_binder_for(&self, callee_field: &str) -> Option<&str> {
+        self.call
+            .state_binders
+            .iter()
+            .find(|b| b.callee_field == callee_field)
+            .map(|b| b.caller_field.as_str())
+    }
+}
+
+/// Verbatim-spelling path (`BindingKind::Unresolved` renders the root and
+/// segments as written in both backends).
+fn verbatim_path(root: &str, segments: Vec<TreeSeg>) -> ExprTree {
+    ExprTree::Path(TreePath {
+        root: root.to_string(),
+        binding: BindingKind::Unresolved,
+        segments,
+        ty: None,
+    })
+}
+
+fn subst(t: &ExprTree, cx: &SubstCx<'_>, in_old: bool) -> ExprTree {
+    match t {
+        ExprTree::Int(_) | ExprTree::Bool(_) | ExprTree::Ctor { payload: None, .. } => t.clone(),
+        ExprTree::Path(p) => subst_path(p, cx, in_old),
+        ExprTree::Old(inner) => ExprTree::Old(Box::new(subst(inner, cx, true))),
+        ExprTree::Sum {
+            binder,
+            binder_ty,
+            fin_bound,
+            body,
+        } => ExprTree::Sum {
+            binder: binder.clone(),
+            binder_ty: binder_ty.clone(),
+            fin_bound: fin_bound.clone(),
+            body: Box::new(subst(body, cx, in_old)),
+        },
+        ExprTree::Quant {
+            kind,
+            binder,
+            binder_ty,
+            fin_bound,
+            body,
+        } => ExprTree::Quant {
+            kind: *kind,
+            binder: binder.clone(),
+            binder_ty: binder_ty.clone(),
+            fin_bound: fin_bound.clone(),
+            body: Box::new(subst(body, cx, in_old)),
+        },
+        ExprTree::QuantIn {
+            kind,
+            binder,
+            coll,
+            body,
+        } => ExprTree::QuantIn {
+            kind: *kind,
+            binder: binder.clone(),
+            coll: Box::new(subst(coll, cx, in_old)),
+            body: Box::new(subst(body, cx, in_old)),
+        },
+        ExprTree::BoolOp { op, lhs, rhs } => ExprTree::BoolOp {
+            op: *op,
+            lhs: Box::new(subst(lhs, cx, in_old)),
+            rhs: Box::new(subst(rhs, cx, in_old)),
+        },
+        ExprTree::Not(inner) => ExprTree::Not(Box::new(subst(inner, cx, in_old))),
+        ExprTree::Cmp { op, lhs, rhs } => ExprTree::Cmp {
+            op: *op,
+            lhs: Box::new(subst(lhs, cx, in_old)),
+            rhs: Box::new(subst(rhs, cx, in_old)),
+        },
+        ExprTree::Arith { op, lhs, rhs } => ExprTree::Arith {
+            op: *op,
+            lhs: Box::new(subst(lhs, cx, in_old)),
+            rhs: Box::new(subst(rhs, cx, in_old)),
+        },
+        ExprTree::MulDivFloor { a, b, d } => ExprTree::MulDivFloor {
+            a: Box::new(subst(a, cx, in_old)),
+            b: Box::new(subst(b, cx, in_old)),
+            d: Box::new(subst(d, cx, in_old)),
+        },
+        ExprTree::MulDivCeil { a, b, d } => ExprTree::MulDivCeil {
+            a: Box::new(subst(a, cx, in_old)),
+            b: Box::new(subst(b, cx, in_old)),
+            d: Box::new(subst(d, cx, in_old)),
+        },
+        ExprTree::MulDivRoundHalfUp { a, b, d } => ExprTree::MulDivRoundHalfUp {
+            a: Box::new(subst(a, cx, in_old)),
+            b: Box::new(subst(b, cx, in_old)),
+            d: Box::new(subst(d, cx, in_old)),
+        },
+        ExprTree::Contains { coll, elem } => ExprTree::Contains {
+            coll: Box::new(subst(coll, cx, in_old)),
+            elem: Box::new(subst(elem, cx, in_old)),
+        },
+        ExprTree::Len(inner) => ExprTree::Len(Box::new(subst(inner, cx, in_old))),
+        ExprTree::Match {
+            scrutinee,
+            arms,
+            enum_ty,
+        } => ExprTree::Match {
+            scrutinee: Box::new(subst(scrutinee, cx, in_old)),
+            arms: arms
+                .iter()
+                .map(|arm| TreeMatchArm {
+                    variant: arm.variant.clone(),
+                    binder: arm.binder.clone(),
+                    body: Box::new(subst(&arm.body, cx, in_old)),
+                    shape: arm.shape,
+                })
+                .collect(),
+            enum_ty: enum_ty.clone(),
+        },
+        ExprTree::Ctor { variant, payload } => ExprTree::Ctor {
+            variant: variant.clone(),
+            payload: payload.as_ref().map(|p| Box::new(subst(p, cx, in_old))),
+        },
+        ExprTree::RecordLit(fields) => ExprTree::RecordLit(
+            fields
+                .iter()
+                .map(|(n, v)| (n.clone(), subst(v, cx, in_old)))
+                .collect(),
+        ),
+        ExprTree::RecordUpdate { base, updates } => ExprTree::RecordUpdate {
+            base: Box::new(subst(base, cx, in_old)),
+            updates: updates
+                .iter()
+                .map(|(n, v)| (n.clone(), subst(v, cx, in_old)))
+                .collect(),
+        },
+        ExprTree::IsVariant {
+            scrutinee,
+            variant,
+            enum_ty,
+            shape,
+        } => ExprTree::IsVariant {
+            scrutinee: Box::new(subst(scrutinee, cx, in_old)),
+            variant: variant.clone(),
+            enum_ty: enum_ty.clone(),
+            shape: *shape,
+        },
+        ExprTree::App { func, args } => ExprTree::App {
+            func: func.clone(),
+            args: args.iter().map(|a| subst(a, cx, in_old)).collect(),
+        },
+        ExprTree::Field { base, field } => ExprTree::Field {
+            base: Box::new(subst(base, cx, in_old)),
+            field: field.clone(),
+        },
+        ExprTree::Let { name, value, body } => ExprTree::Let {
+            name: name.clone(),
+            value: Box::new(subst(value, cx, in_old)),
+            body: Box::new(subst(body, cx, in_old)),
+        },
+        ExprTree::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => ExprTree::IfThenElse {
+            cond: Box::new(subst(cond, cx, in_old)),
+            then_branch: Box::new(subst(then_branch, cx, in_old)),
+            else_branch: Box::new(subst(else_branch, cx, in_old)),
+        },
+    }
+}
+
+fn subst_path(p: &TreePath, cx: &SubstCx<'_>, in_old: bool) -> ExprTree {
+    match &p.binding {
+        // Callee abstract state read → caller State projection per
+        // `state_binders`. Post-state reads bind `post.`; reads under
+        // `old(…)` bind `pre.` (matching the `(pre post : State)` /
+        // pre-post snapshot binders on the caller side). Unmapped fields
+        // keep the callee's field name — they bind to a caller snapshot
+        // field of the same name when one exists (the Lean lane and the
+        // preservation harness gate on `missing_state_binders` first, so
+        // pass-through only reaches the ungated kani-impl lane).
+        BindingKind::StateField | BindingKind::Ghost => {
+            let Some(TreeSeg::Field(callee_field)) = p.segments.first() else {
+                return ExprTree::Path(p.clone());
+            };
+            let caller_field = cx.caller_binder_for(callee_field).unwrap_or(callee_field);
+            let mut segments = vec![TreeSeg::Field(caller_field.to_string())];
+            segments.extend(p.segments[1..].iter().cloned());
+            verbatim_path(if in_old { "pre" } else { "post" }, segments)
+        }
+        // Callee formals: the result binder rewrites to the caller's
+        // `let X = call …` binding; other params rewrite to the caller's
+        // argument tree (already resolved in the CALLER's scope). A
+        // *declared* binder (`-> price : U64`) resolves as `Param`
+        // (`TreeCx::for_interface_handler` inserts it); the conventional
+        // `result` literal of binder-less callees resolves `Unresolved` —
+        // both spell the return value, so both arms rename it.
+        BindingKind::Param | BindingKind::Unresolved => {
+            // Interface ensures may spell snapshots explicitly
+            // (`post.from_balance`) instead of `state.X` / `old(state.X)`;
+            // those resolve `Unresolved` with a `pre`/`post` root. Map the
+            // projected field through `state_binders`, same as the
+            // state-rooted form.
+            if p.root == "pre" || p.root == "post" {
+                if let Some(TreeSeg::Field(callee_field)) = p.segments.first() {
+                    if let Some(caller_field) = cx.caller_binder_for(callee_field) {
+                        let mut segments = vec![TreeSeg::Field(caller_field.to_string())];
+                        segments.extend(p.segments[1..].iter().cloned());
+                        return verbatim_path(&p.root, segments);
+                    }
+                }
+                return ExprTree::Path(p.clone());
+            }
+            if p.root == cx.result_binder {
+                if let Some(binding) = &cx.call.result_binding {
+                    return verbatim_path(binding, p.segments.clone());
+                }
+            }
+            match cx.arg_tree(&p.root) {
+                Some(arg) => splice_segments(arg, p),
+                None => ExprTree::Path(p.clone()),
+            }
+        }
+        // Everything else is already in some resolved frame; the
+        // substitution has nothing to rewrite.
+        BindingKind::Const(_)
+        | BindingKind::LetBound
+        | BindingKind::Account
+        | BindingKind::External
+        | BindingKind::AbstractBinder
+        | BindingKind::ExprBinder => ExprTree::Path(p.clone()),
+    }
+}
+
+/// Substitute an argument tree for a param path, re-applying the path's
+/// trailing segments. Bare params (the overwhelmingly common case) clone
+/// the arg tree; a projected param (`param.field`) splices onto a Path arg
+/// or wraps a compound arg in `Field` nodes. An `Index` segment on a
+/// non-path arg has no tree shape — keep the formal path (lint territory,
+/// same as an unbound param).
+fn splice_segments(arg: &ExprTree, formal: &TreePath) -> ExprTree {
+    if formal.segments.is_empty() {
+        return arg.clone();
+    }
+    if let ExprTree::Path(ap) = arg {
+        let mut p = ap.clone();
+        p.segments.extend(formal.segments.iter().cloned());
+        p.ty = formal.ty.clone();
+        return ExprTree::Path(p);
+    }
+    let mut out = arg.clone();
+    for seg in &formal.segments {
+        match seg {
+            TreeSeg::Field(f) => {
+                out = ExprTree::Field {
+                    base: Box::new(out),
+                    field: f.clone(),
+                };
+            }
+            TreeSeg::Index(_) => return ExprTree::Path(formal.clone()),
         }
     }
     out
@@ -202,19 +363,52 @@ fn substitute_state_binders_rust_binary(expr: &str, binders: &[ParsedStateBinder
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::check::ParsedCallArg;
+    use crate::mir::expr_tree::{TreeArithOp, TreeBoolOp, TreeCmpOp};
 
-    fn mk_call(target_iface: &str, target_handler: &str, args: &[(&str, &str)]) -> ParsedCall {
+    fn param(name: &str) -> ExprTree {
+        ExprTree::Path(TreePath {
+            root: name.to_string(),
+            binding: BindingKind::Param,
+            segments: vec![],
+            ty: None,
+        })
+    }
+
+    fn state_field(name: &str) -> ExprTree {
+        ExprTree::Path(TreePath {
+            root: "state".to_string(),
+            binding: BindingKind::StateField,
+            segments: vec![TreeSeg::Field(name.to_string())],
+            ty: None,
+        })
+    }
+
+    fn caller_state_arg(name: &str) -> ExprTree {
+        // An arg tree resolved in the CALLER's scope — a state-field read.
+        state_field(name)
+    }
+
+    fn gt_zero(lhs: ExprTree) -> ExprTree {
+        ExprTree::Cmp {
+            op: TreeCmpOp::Gt,
+            lhs: Box::new(lhs),
+            rhs: Box::new(ExprTree::Int(0)),
+        }
+    }
+
+    fn mk_call(args: &[(&str, ExprTree)]) -> ParsedCall {
         ParsedCall {
-            target_interface: target_iface.to_string(),
-            target_handler: target_handler.to_string(),
+            target_interface: "Token".to_string(),
+            target_handler: "transfer".to_string(),
             args: args
                 .iter()
-                .map(|(n, expr)| ParsedCallArg {
+                .map(|(n, tree)| ParsedCallArg {
                     name: n.to_string(),
-                    lean_expr: expr.to_string(),
-                    rust_expr: expr.to_string(),
-                    rust_expr_pod: expr.to_string(),
-                    tree: None,
+                    lean_expr: String::new(),
+                    rust_expr: String::new(),
+                    rust_expr_pod: String::new(),
+                    tree: Some(tree.clone()),
                 })
                 .collect(),
             result_binding: None,
@@ -223,239 +417,155 @@ mod tests {
     }
 
     #[test]
-    fn word_boundary_does_not_substring_match() {
-        let mut subst = HashMap::new();
-        subst.insert("amount", "x");
-        // `amount_squared` must NOT be touched
-        let out = substitute_word_boundary("amount + amount_squared", &subst);
-        assert_eq!(out, "x + amount_squared");
+    fn param_swaps_for_caller_arg_tree() {
+        let call = mk_call(&[("amount", caller_state_arg("taker_amount"))]);
+        let out = substitute_callee_ensures_tree(&gt_zero(param("amount")), &call, None);
+        assert_eq!(out, gt_zero(caller_state_arg("taker_amount")));
     }
 
     #[test]
-    fn substitute_lean_swaps_param_for_caller_expr() {
-        let call = mk_call(
-            "Token",
-            "transfer",
-            &[("amount", "s.taker_amount"), ("from", "taker_ta")],
+    fn unbound_param_keeps_formal_name() {
+        let call = mk_call(&[("amount", param("amount"))]);
+        let ensures = ExprTree::BoolOp {
+            op: TreeBoolOp::And,
+            lhs: Box::new(gt_zero(param("amount"))),
+            rhs: Box::new(gt_zero(param("recipient"))),
+        };
+        let out = substitute_callee_ensures_tree(&ensures, &call, None);
+        assert_eq!(
+            out,
+            ExprTree::BoolOp {
+                op: TreeBoolOp::And,
+                lhs: Box::new(gt_zero(param("amount"))),
+                rhs: Box::new(gt_zero(param("recipient"))),
+            }
         );
-        let params = vec![("amount".to_string(), "U64".to_string())];
-        let out = substitute_callee_ensures_lean("amount > 0", &call, &params, None);
-        assert_eq!(out, "s.taker_amount > 0");
     }
 
     #[test]
-    fn substitute_rust_swaps_param_for_caller_expr() {
-        let call = mk_call(
-            "Token",
-            "transfer",
-            &[("amount", "amount"), ("from", "taker_ta")],
+    fn compound_arg_stays_structural() {
+        // Regex lane pasted `a + b` into `amount * 2` → `a + b * 2`
+        // (wrong precedence). Tree splice keeps the arg a subtree, so
+        // rendering parenthesizes correctly.
+        let sum = ExprTree::Arith {
+            op: TreeArithOp::Add,
+            lhs: Box::new(param("a")),
+            rhs: Box::new(param("b")),
+        };
+        let call = mk_call(&[("amount", sum.clone())]);
+        let ensures = ExprTree::Arith {
+            op: TreeArithOp::Mul,
+            lhs: Box::new(param("amount")),
+            rhs: Box::new(ExprTree::Int(2)),
+        };
+        let out = substitute_callee_ensures_tree(&ensures, &call, None);
+        assert_eq!(
+            out,
+            ExprTree::Arith {
+                op: TreeArithOp::Mul,
+                lhs: Box::new(sum),
+                rhs: Box::new(ExprTree::Int(2)),
+            }
         );
-        let params = vec![("amount".to_string(), "U64".to_string())];
-        let out = substitute_callee_ensures_rust_binary("amount > 0", &call, &params, None);
-        assert_eq!(out, "amount > 0");
     }
 
     #[test]
-    fn substitute_rust_preserves_post_state_refs() {
-        // Even if a future SPL ensures references state, the `post.x`
-        // form passes through unchanged.
-        let call = mk_call("Foo", "bar", &[("amount", "amount")]);
-        let params = vec![("amount".to_string(), "U64".to_string())];
-        let out = substitute_callee_ensures_rust_binary(
-            "post.balance == pre.balance + amount",
-            &call,
-            &params,
-            None,
-        );
-        assert_eq!(out, "post.balance == pre.balance + amount");
-    }
-
-    #[test]
-    fn substitute_rust_let_binding_result() {
-        // `let x = call Foo.bar(...)` — the caller's binder participates
-        // in the substituted ensures via the conventional `result` name.
-        let mut call = mk_call("Foo", "bar", &[("amount", "amount")]);
+    fn result_binder_rewrites_to_caller_binding() {
+        let mut call = mk_call(&[("amount", param("amount"))]);
         call.result_binding = Some("delta".to_string());
-        let params = vec![("amount".to_string(), "U64".to_string())];
-        let out =
-            substitute_callee_ensures_rust_binary("result == amount * 2", &call, &params, None);
-        assert_eq!(out, "delta == amount * 2");
+        // Default literal `result`.
+        let out = substitute_callee_ensures_tree(&gt_zero(param("result")), &call, None);
+        assert_eq!(out, gt_zero(verbatim_path("delta", vec![])));
+        // Declared binder name takes precedence over the literal.
+        let out = substitute_callee_ensures_tree(&gt_zero(param("price")), &call, Some("price"));
+        assert_eq!(out, gt_zero(verbatim_path("delta", vec![])));
     }
 
     #[test]
-    fn substitute_rust_defaults_to_result_when_unspecified() {
-        // `None` for `callee_result_binder` falls back to the literal "result".
-        let mut call = mk_call("Foo", "bar", &[("amount", "amount")]);
-        call.result_binding = Some("out".to_string());
-        let params = vec![("amount".to_string(), "U64".to_string())];
-        let out = substitute_callee_ensures_rust_binary(
-            "result <= amount",
-            &call,
-            &params,
-            None, // no declared binder ⇒ default to literal "result"
-        );
-        assert_eq!(out, "out <= amount");
-    }
-
-    #[test]
-    fn substitute_rust_uses_declared_binder_name() {
-        // Callee declared `-> price : U64`: the caller's `let X = call …`
-        // binder substitutes for `price`, NOT the literal `result`.
-        let mut call = mk_call("Oracle", "quote", &[("base", "base"), ("quote", "qmint")]);
-        call.result_binding = Some("p".to_string());
-        let params = vec![
-            ("base".to_string(), "Pubkey".to_string()),
-            ("quote".to_string(), "Pubkey".to_string()),
-        ];
-        // Callee's ensures refers to its return as `price`.
-        let out = substitute_callee_ensures_rust_binary(
-            "price > 0 && price < u64::MAX",
-            &call,
-            &params,
-            Some("price"),
-        );
-        // `price` rewrites to `p` (caller's binder), not to `result`.
-        assert_eq!(out, "p > 0 && p < u64::MAX");
-    }
-
-    #[test]
-    fn substitute_lean_uses_declared_binder_name() {
-        // Lean counterpart of `substitute_rust_uses_declared_binder_name`.
-        let mut call = mk_call("Oracle", "quote", &[("base", "s.base_mint")]);
-        call.result_binding = Some("p".to_string());
-        let params = vec![("base".to_string(), "Pubkey".to_string())];
-        let out = substitute_callee_ensures_lean("price > 0", &call, &params, Some("price"));
-        assert_eq!(out, "p > 0");
-    }
-
-    #[test]
-    fn substitute_lean_with_state_binders() {
-        let mut call = mk_call("Token", "transfer", &[("amount", "amount")]);
-        call.state_binders = vec![
-            ParsedStateBinder {
-                callee_field: "from_balance".to_string(),
-                caller_field: "pool_balance".to_string(),
-            },
-            ParsedStateBinder {
-                callee_field: "to_balance".to_string(),
-                caller_field: "user_balance".to_string(),
-            },
-        ];
-        let params = vec![("amount".to_string(), "U64".to_string())];
-        // Lean lowering: `state.X` → `s'.X`, `old(state.X)` → `s.X`; binders
-        // rewrite those to the caller's State field projections.
-        let out = substitute_callee_ensures_lean(
-            "s'.from_balance + amount = s.from_balance \u{2227} s'.to_balance = s.to_balance + amount",
-            &call,
-            &params,
-            None,
-        );
+    fn state_binders_map_post_and_pre_reads() {
+        let mut call = mk_call(&[("amount", param("amount"))]);
+        call.state_binders = vec![ParsedStateBinder {
+            callee_field: "from_balance".to_string(),
+            caller_field: "pool_balance".to_string(),
+        }];
+        // `state.from_balance = old(state.from_balance) + amount`
+        let ensures = ExprTree::Cmp {
+            op: TreeCmpOp::Eq,
+            lhs: Box::new(state_field("from_balance")),
+            rhs: Box::new(ExprTree::Arith {
+                op: TreeArithOp::Add,
+                lhs: Box::new(ExprTree::Old(Box::new(state_field("from_balance")))),
+                rhs: Box::new(param("amount")),
+            }),
+        };
+        let out = substitute_callee_ensures_tree(&ensures, &call, None);
         assert_eq!(
             out,
-            "post.pool_balance + amount = pre.pool_balance \u{2227} post.user_balance = pre.user_balance + amount"
+            ExprTree::Cmp {
+                op: TreeCmpOp::Eq,
+                lhs: Box::new(verbatim_path(
+                    "post",
+                    vec![TreeSeg::Field("pool_balance".to_string())]
+                )),
+                rhs: Box::new(ExprTree::Arith {
+                    op: TreeArithOp::Add,
+                    lhs: Box::new(ExprTree::Old(Box::new(verbatim_path(
+                        "pre",
+                        vec![TreeSeg::Field("pool_balance".to_string())]
+                    )))),
+                    rhs: Box::new(param("amount")),
+                }),
+            }
         );
     }
 
     #[test]
-    fn substitute_rust_binary_with_state_binders() {
-        let mut call = mk_call("Token", "transfer", &[("amount", "amount")]);
-        call.state_binders = vec![
-            ParsedStateBinder {
-                callee_field: "from_balance".to_string(),
-                caller_field: "pool_balance".to_string(),
-            },
-            ParsedStateBinder {
-                callee_field: "to_balance".to_string(),
-                caller_field: "user_balance".to_string(),
-            },
-        ];
-        let params = vec![("amount".to_string(), "U64".to_string())];
-        let out = substitute_callee_ensures_rust_binary(
-            "post.from_balance + amount == pre.from_balance && post.to_balance == pre.to_balance + amount",
-            &call,
-            &params,
-            None,
-        );
+    fn unmapped_state_field_keeps_callee_name_in_caller_frame() {
+        // No binder for `to_balance` — the read still lands in the
+        // caller's snapshot frame under the callee's own field name
+        // (pass-through-by-name; gated lanes skip emission first).
+        let call = mk_call(&[("amount", param("amount"))]);
+        let ensures = gt_zero(state_field("to_balance"));
+        let out = substitute_callee_ensures_tree(&ensures, &call, None);
         assert_eq!(
             out,
-            "post.pool_balance + amount == pre.pool_balance && post.user_balance == pre.user_balance + amount"
+            gt_zero(verbatim_path(
+                "post",
+                vec![TreeSeg::Field("to_balance".to_string())]
+            ))
         );
+    }
+
+    #[test]
+    fn scan_collects_state_fields_in_first_occurrence_order() {
+        let ensures = ExprTree::BoolOp {
+            op: TreeBoolOp::And,
+            lhs: Box::new(gt_zero(state_field("from_balance"))),
+            rhs: Box::new(ExprTree::Cmp {
+                op: TreeCmpOp::Eq,
+                lhs: Box::new(ExprTree::Old(Box::new(state_field("to_balance")))),
+                rhs: Box::new(state_field("from_balance")),
+            }),
+        };
+        assert_eq!(
+            scan_abstract_state_fields(&ensures),
+            vec!["from_balance", "to_balance"]
+        );
+        // Param-only ensures scan empty.
+        assert!(scan_abstract_state_fields(&gt_zero(param("amount"))).is_empty());
     }
 
     #[test]
     fn scans_and_reports_missing_state_binders() {
-        let fields = scan_rust_abstract_fields(
-            "post.from_balance + amount == pre.from_balance && post.to_balance == pre.to_balance + amount",
-        );
-        assert_eq!(fields, vec!["from_balance", "to_balance"]);
-
-        let missing_all = missing_state_binders(&fields, &[]);
-        assert_eq!(missing_all, fields);
-
-        let missing_partial = missing_state_binders(
+        let fields = vec!["from_balance".to_string(), "to_balance".to_string()];
+        assert_eq!(missing_state_binders(&fields, &[]), fields);
+        let missing = missing_state_binders(
             &fields,
             &[ParsedStateBinder {
                 callee_field: "from_balance".into(),
                 caller_field: "pool_balance".into(),
             }],
         );
-        assert_eq!(missing_partial, vec!["to_balance"]);
-    }
-
-    #[test]
-    fn scans_lean_abstract_fields() {
-        let fields = scan_lean_abstract_fields(
-            "s'.from_balance + amount = s.from_balance \u{2227} s'.to_balance = s.to_balance + amount",
-        );
-        assert_eq!(fields, vec!["from_balance", "to_balance"]);
-    }
-
-    #[test]
-    fn binders_do_not_affect_param_only_ensures() {
-        // A param-only ensures (no abstract State fields, e.g. bundled SPL
-        // Token's `amount > 0`) passes through unchanged despite binders.
-        let mut call = mk_call("Token", "transfer", &[("amount", "amount")]);
-        call.state_binders = vec![ParsedStateBinder {
-            callee_field: "from_balance".to_string(),
-            caller_field: "pool_balance".to_string(),
-        }];
-        let params = vec![("amount".to_string(), "U64".to_string())];
-        let out_lean = substitute_callee_ensures_lean("amount > 0", &call, &params, None);
-        let out_rust = substitute_callee_ensures_rust_binary("amount > 0", &call, &params, None);
-        assert_eq!(out_lean, "amount > 0");
-        assert_eq!(out_rust, "amount > 0");
-    }
-
-    #[test]
-    fn empty_binders_match_v226_behaviour() {
-        // Empty state_binders must be a no-op.
-        let call = mk_call("Token", "transfer", &[("amount", "amount")]);
-        let params = vec![("amount".to_string(), "U64".to_string())];
-        let with_binders_lean = substitute_callee_ensures_lean("amount > 0", &call, &params, None);
-        let with_binders_rust =
-            substitute_callee_ensures_rust_binary("amount > 0", &call, &params, None);
-        assert_eq!(with_binders_lean, "amount > 0");
-        assert_eq!(with_binders_rust, "amount > 0");
-    }
-
-    #[test]
-    fn substitute_keeps_unmatched_params_as_formal_names() {
-        // A caller that omits a callee param keeps the formal-param name
-        // in the substituted form (rendered as a free variable by Lean /
-        // a compile error by Rust — that's the lint's job to surface).
-        let call = mk_call("Foo", "bar", &[("amount", "amount")]);
-        // Callee declared an extra `recipient` param the caller didn't bind
-        let params = vec![
-            ("amount".to_string(), "U64".to_string()),
-            ("recipient".to_string(), "Pubkey".to_string()),
-        ];
-        let out = substitute_callee_ensures_rust_binary(
-            "amount > 0 && recipient != Pubkey::default()",
-            &call,
-            &params,
-            None,
-        );
-        // Both params present; only `amount` was bound to a caller arg
-        assert_eq!(out, "amount > 0 && recipient != Pubkey::default()");
+        assert_eq!(missing, vec!["to_balance"]);
     }
 }

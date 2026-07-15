@@ -872,10 +872,10 @@ fn emit_effect_call_binding(
 /// (empty ensures) emit nothing — same fallback as the spec-model harness
 /// in `kani.rs` and `lean_gen.rs::render_cpi_theorems`'s `:= by sorry`.
 ///
-/// Substitution reuses `crate::cpi_substitute::substitute_callee_ensures_rust_binary`
+/// Substitution reuses `crate::cpi_substitute::substitute_callee_ensures_tree`
 /// — the same helper the spec-model harness uses, so the two backends
-/// agree on the `let X = call ...` `result` convention and word-boundary
-/// param matching. After substitution we apply `rewrite_pre_post_paths`
+/// agree on the `let X = call ...` `result` convention and structural
+/// param splicing. After rendering we apply `rewrite_pre_post_paths`
 /// (same transformation step the caller's own `assert!` emission uses)
 /// to flatten `pre.X` / `post.X` paths to the harness-local
 /// `pre_X` / `post_X` snapshots.
@@ -924,13 +924,18 @@ fn emit_cpi_ensures_as_assume(out: &mut String, handler: &ParsedHandler, spec: &
             call.target_interface, call.target_handler,
         ));
         for callee_ens in &callee.ensures {
-            let substituted = crate::cpi_substitute::substitute_callee_ensures_rust_binary(
-                &callee_ens.rust_expr_binary,
-                call,
-                &callee.params,
-                // v2.26 Track K — propagate the declared return-binder
-                // name. `None` keeps the literal "result" convention.
-                callee.result_binder.as_deref(),
+            let ensures_tree = callee_ens.tree.as_ref().expect(
+                "interface ensures tree is always populated by the chumsky adapter (#151/#156)",
+            );
+            let substituted = crate::rust_codegen_util::tree_render::render_rust(
+                &crate::cpi_substitute::substitute_callee_ensures_tree(
+                    ensures_tree,
+                    call,
+                    // v2.26 Track K — propagate the declared return-binder
+                    // name. `None` keeps the literal "result" convention.
+                    callee.result_binder.as_deref(),
+                ),
+                crate::rust_codegen_util::tree_render::RustCx::native(),
             );
             let lowered = rewrite_pre_post_paths(&substituted);
             out.push_str(&format!("        kani::assume({});\n", lowered));

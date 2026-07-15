@@ -14,9 +14,10 @@ use super::*;
 ///    `<Iface>.<method>.ensures_axiom_<idx>`; Tier-0 callees keep `:= by
 ///    sorry` — the `cpi_no_callee_ensures` lint surfaces them at check time.
 ///
-/// Substitution flows through `cpi_substitute::substitute_callee_ensures_lean`
-/// via a synthetic `ParsedCall` (a MIR→MIR substitute pass would retire
-/// that bridge).
+/// Substitution flows through `cpi_substitute::substitute_callee_ensures_tree`
+/// via a synthetic `ParsedCall`; the substituted tree renders under the
+/// guard context, so caller args keep their `s.` receivers and mapped
+/// callee state fields carry verbatim `pre.` / `post.` spellings.
 ///
 /// Returns the pinned interface names referenced by call sites — the
 /// caller decides which sibling `<Iface>.lean` modules to write and which
@@ -26,13 +27,6 @@ pub(super) fn emit_cpi_theorems(out: &mut String, mir: &Mir) -> std::collections
 
     let mut pinned_interfaces: std::collections::BTreeSet<String> =
         std::collections::BTreeSet::new();
-
-    let state_field_set: std::collections::HashSet<String> = mir
-        .state
-        .variants
-        .first()
-        .map(|v| v.fields.iter().map(|f| f.name.clone()).collect())
-        .unwrap_or_default();
 
     for h in &mir.handlers {
         let has_any_cpi = h
@@ -175,27 +169,24 @@ pub(super) fn emit_cpi_theorems(out: &mut String, mir: &Mir) -> std::collections
             let synthetic_call =
                 synthesize_parsed_call(target, method, args, state_binders, result_binding);
 
-            // Only callee param names matter to the substitution helper;
-            // the type slot renders empty.
-            let callee_param_names: Vec<(String, String)> = callee
-                .params
-                .iter()
-                .map(|(n, _)| (n.clone(), String::new()))
-                .collect();
-
             let handler_params = param_sig_str(&h.params);
 
             for (ens_idx, ensures) in callee.ensures.iter().enumerate() {
-                let substituted = crate::cpi_substitute::substitute_callee_ensures_lean(
-                    &ensures.0.lean,
-                    &synthetic_call,
-                    &callee_param_names,
-                    callee.result_binder.as_deref(),
+                let ensures_tree = ensures.0.tree.as_ref().expect(
+                    "interface ensures Expr.tree is always populated by the chumsky adapter (#151/#156)",
+                );
+                let substituted = tree_render::render_lean(
+                    &crate::cpi_substitute::substitute_callee_ensures_tree(
+                        ensures_tree,
+                        &synthetic_call,
+                        callee.result_binder.as_deref(),
+                    ),
+                    tree_render::LeanCx::guard(),
                 );
 
                 // Skip when state_binders are missing for abstract fields.
                 let abstract_fields =
-                    crate::cpi_substitute::scan_lean_abstract_fields(&ensures.0.lean);
+                    crate::cpi_substitute::scan_abstract_state_fields(ensures_tree);
                 if !abstract_fields.is_empty() {
                     let missing = crate::cpi_substitute::missing_state_binders(
                         &abstract_fields,
@@ -230,11 +221,7 @@ pub(super) fn emit_cpi_theorems(out: &mut String, mir: &Mir) -> std::collections
                         continue;
                     }
                 }
-                let prefixed = if abstract_fields.is_empty() {
-                    prefix_state_fields(&substituted, &state_field_set)
-                } else {
-                    substituted
-                };
+                let prefixed = substituted;
                 let theorem_name = safe_name(&format!(
                     "{}_{}_{}_call_{}_post_{}",
                     h.name, target.0, method.0, call_idx, ens_idx,
@@ -253,21 +240,27 @@ pub(super) fn emit_cpi_theorems(out: &mut String, mir: &Mir) -> std::collections
                         apply_args.push("pre".to_string());
                         apply_args.push("post".to_string());
                     }
-                    // Per callee param: prefer the caller's substituted
-                    // argument, else the formal name. Parens around
-                    // compound forms.
-                    let subst: std::collections::HashMap<&str, &str> = args
+                    // Per callee param: prefer the caller's argument
+                    // (tree-rendered under the guard context), else the
+                    // formal name. Parens around compound forms.
+                    let subst: std::collections::HashMap<&str, String> = args
                         .iter()
-                        .map(|a| (a.name.as_str(), a.value.lean.as_str()))
+                        .map(|a| {
+                            let tree = a.value.tree.as_ref().expect(
+                                "CallArg Expr.tree is always populated by the chumsky adapter (#151/#156)",
+                            );
+                            (
+                                a.name.as_str(),
+                                tree_render::render_lean(tree, tree_render::LeanCx::guard()),
+                            )
+                        })
                         .collect();
                     for (pn, _) in &callee.params {
-                        let raw = subst
+                        let rendered_arg = subst
                             .get(pn.as_str())
-                            .copied()
-                            .unwrap_or(pn.as_str())
-                            .to_string();
-                        let prefixed_arg = prefix_state_fields(&raw, &state_field_set);
-                        let needs_parens = prefixed_arg.chars().any(|c| {
+                            .cloned()
+                            .unwrap_or_else(|| pn.clone());
+                        let needs_parens = rendered_arg.chars().any(|c| {
                             c.is_whitespace()
                                 || c == '+'
                                 || c == '-'
@@ -277,9 +270,9 @@ pub(super) fn emit_cpi_theorems(out: &mut String, mir: &Mir) -> std::collections
                                 || c == '>'
                         });
                         if needs_parens {
-                            apply_args.push(format!("({})", prefixed_arg));
+                            apply_args.push(format!("({})", rendered_arg));
                         } else {
-                            apply_args.push(prefixed_arg);
+                            apply_args.push(rendered_arg);
                         }
                     }
                     if track_a {

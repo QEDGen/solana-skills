@@ -194,27 +194,6 @@ pub(super) fn strip_state_forall(expr: &str) -> String {
     trimmed.to_string()
 }
 
-/// Prefix every state-field identifier in `expr` with `s.`. Word-boundary
-/// regex avoids touching substrings of other identifiers (e.g., `amount`
-/// shouldn't become `s.amount` inside `taker_amount`). Skips fields
-/// already prefixed.
-pub(super) fn prefix_state_fields(
-    expr: &str,
-    fields: &std::collections::HashSet<String>,
-) -> String {
-    let mut out = expr.to_string();
-    for field in fields {
-        let pattern = format!(r"\b{}\b", regex::escape(field));
-        let re = regex::Regex::new(&pattern).expect("regex compiles for state-field name");
-        let replacement = format!("s.{}", field);
-        // Re-passes can't double-prefix: `\b` doesn't match after `.`.
-        out = re
-            .replace_all(&out, regex::NoExpand(&replacement))
-            .into_owned();
-    }
-    out
-}
-
 /// Count top-level `∧` conjuncts in a Lean expression, respecting
 /// parenthesis nesting (`(a ∧ b) ∧ c` returns 2, not 3).
 pub(super) fn count_top_level_conjuncts(expr: &str) -> usize {

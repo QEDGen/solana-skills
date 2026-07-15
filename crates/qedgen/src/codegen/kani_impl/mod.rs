@@ -10,9 +10,9 @@
 //! lists fields absent from its effect LHS (the agent-fill signal; the
 //! file header names the triggering handlers).
 //!
-//! CPI ensures-as-fact: callee `ensures` are substituted with call-site
-//! expressions (`cpi_substitute::substitute_callee_ensures_rust_binary`)
-//! and spliced as `kani::assume(...)` between `if result.is_ok()` and the
+//! CPI ensures-as-fact: callee `ensures` trees are substituted with
+//! call-site trees (`cpi_substitute::substitute_callee_ensures_tree`)
+//! and rendered as `kani::assume(...)` between `if result.is_ok()` and the
 //! first caller `assert!`; Tier-0 callees (no ensures) emit nothing — the
 //! `cpi_no_callee_ensures` lint surfaces the gap at check time.
 //!

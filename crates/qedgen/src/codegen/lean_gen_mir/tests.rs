@@ -493,24 +493,6 @@ fn render_emits_invariant_theorems() {
 }
 
 #[test]
-fn prefix_state_fields_word_boundary() {
-    let mut fields = std::collections::HashSet::new();
-    fields.insert("amount".to_string());
-    fields.insert("taker".to_string());
-
-    // Bare field references get prefixed.
-    let out = prefix_state_fields("amount > 0", &fields);
-    assert_eq!(out, "s.amount > 0");
-
-    // Substrings inside longer identifiers are NOT prefixed
-    // (word-boundary regex). Tricky: `taker_amount` contains both
-    // `taker` and `amount` as substrings but neither as a whole
-    // word.
-    let out = prefix_state_fields("taker_amount > 0", &fields);
-    assert_eq!(out, "taker_amount > 0");
-}
-
-#[test]
 fn render_emits_cover_theorems() {
     // Lending's two cover traces span both accounts → skip-comments,
     // with the section header still written. Single-account

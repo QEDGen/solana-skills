@@ -243,19 +243,12 @@ pub(super) fn emit_invariants(out: &mut String, mir: &Mir) {
         return;
     }
 
-    // Collect all state-field names across every variant for the
-    // `prefix_state_fields` regex pass.
-    let field_set: std::collections::HashSet<String> = mir
-        .state
-        .variants
-        .iter()
-        .flat_map(|v| v.fields.iter().map(|f| f.name.clone()))
-        .collect();
-
     for inv in &mir.invariants {
         match &inv.body {
             Some(pred) => {
-                let prefixed = prefix_state_fields(&pred.0.lean, &field_set);
+                // Post-#139 canonicalization the adapter's Lean form is
+                // always `s.`-rooted for state reads — no prefix pass.
+                let prefixed = &pred.0.lean;
                 out.push_str(&format!(
                     "/-- Invariant: {}{} -/\n",
                     inv.name,

@@ -59,11 +59,16 @@ pub(crate) fn multi_cpi_shared_fields(
             };
             let mut fields = std::collections::BTreeSet::new();
             for ens in &callee.ensures {
-                let substituted = crate::cpi_substitute::substitute_callee_ensures_rust_binary(
-                    &ens.rust_expr_binary,
-                    call,
-                    &callee.params,
-                    callee.result_binder.as_deref(),
+                let ensures_tree = ens.tree.as_ref().expect(
+                    "interface ensures tree is always populated by the chumsky adapter (#151/#156)",
+                );
+                let substituted = crate::rust_codegen_util::tree_render::render_rust(
+                    &crate::cpi_substitute::substitute_callee_ensures_tree(
+                        ensures_tree,
+                        call,
+                        callee.result_binder.as_deref(),
+                    ),
+                    crate::rust_codegen_util::tree_render::RustCx::native(),
                 );
                 fields.extend(extract_pre_post_field_refs(&substituted));
             }
