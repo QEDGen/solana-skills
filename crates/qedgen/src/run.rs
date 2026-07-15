@@ -285,6 +285,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             stateful,
             emit_spec_candidates,
             audit_dir,
+            execute_repros,
         } => {
             // --program routes through the Pinocchio site enumerator; the
             // envelope's `findings` are the site catalogue mapped 1:1. The
@@ -726,7 +727,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 let spec = spec.ok_or_else(|| {
                     anyhow::anyhow!("provide --spec <path> for spec-aware mode, or --bootstrap --root <path> for spec-less")
                 })?;
-                probe::run_probe(&spec)?
+                probe::run_probe(&spec, execute_repros)?
             };
             let rendered = serde_json::to_string_pretty(&output)?;
             println!("{}", rendered);

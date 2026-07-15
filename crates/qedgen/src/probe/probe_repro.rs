@@ -11,16 +11,20 @@
 //! preserved. Artifacts live under `target/qedgen-repros/<finding.id>/` —
 //! ephemeral, never committed.
 //!
-//! All constructors are currently stubs (`NotImplemented`), so today every
-//! predicate hit surfaces as a candidate. The reproducer vertical slice
-//! (#228) lands real constructors category by category; the auditor SKILL
-//! writes Mollusk repros directly in the meantime.
+//! The reproducer vertical slice (#228) lands real reproducers category by
+//! category. The first is `ArithmeticOverflowWrapping`, handled by
+//! [`build_arith_overflow_harness`] (a generated boundary program, run only
+//! under `--execute-repros`) rather than [`construct_reproducer`], whose
+//! per-category constructors are still stubs (`NotImplemented`) — those
+//! categories surface as candidates until their reproducer lands. The auditor
+//! SKILL writes Mollusk repros directly in the meantime.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::check::ParsedSpec;
-use crate::probe::{Category, Finding, Reproducer};
+use crate::check::{ParsedEffect, ParsedSpec};
+use crate::probe::{Category, Finding, ReproHarness, Reproducer};
+use crate::repro_gen;
 
 /// Per-finding symbolic-execution budget: caps a typical 10-20-finding
 /// run at ~10-20 min wall clock — thorough enough for Kani, fast enough
@@ -238,6 +242,194 @@ fn construct_stored_field_never_written(
     Err(ConstructFailure::NotImplemented)
 }
 
+// ---------------------------------------------------------------------------
+// ArithmeticOverflowWrapping — the first category with a real, executable
+// reproducer (#228). Generation is mechanical (codegen::repro_gen);
+// execution is opt-in.
+// ---------------------------------------------------------------------------
+
+/// A generated boundary reproducer for a wrapping arithmetic effect: source,
+/// where it lives, and how to build + run it.
+pub struct ArithHarness {
+    /// Path relative to the project root (goes into the JSON envelope).
+    pub rel_path: String,
+    /// Absolute path where the source is written.
+    pub abs_path: PathBuf,
+    /// The generated Rust source.
+    pub source: String,
+    /// Exact build-and-run command; exits 0 iff the wrap reproduces.
+    pub invocation: String,
+    /// The concrete boundary input the harness drives.
+    pub failing_input: String,
+}
+
+impl ArithHarness {
+    /// The candidate-facing pointer (default path — harness generated, not run).
+    pub fn as_repro_harness(&self) -> ReproHarness {
+        ReproHarness {
+            path: self.rel_path.clone(),
+            invocation: self.invocation.clone(),
+            kind: "boundary_value".to_string(),
+            failing_input: self.failing_input.clone(),
+        }
+    }
+
+    /// The confirmed-finding reproducer (after a successful `--execute-repros`).
+    pub fn as_reproducer(&self) -> Reproducer {
+        Reproducer::BoundaryValue {
+            harness_path: self.rel_path.clone(),
+            invocation: self.invocation.clone(),
+            failing_input: self.failing_input.clone(),
+        }
+    }
+}
+
+/// Outcome of building + running a reproducer harness under `--execute-repros`.
+pub enum ExecOutcome {
+    /// Harness exited 0 — the violation reproduces. Promote to a finding.
+    Reproduced,
+    /// Harness ran but did not reproduce (exit non-zero from an assert).
+    /// Keep as a candidate — we could not confirm.
+    NotReproduced,
+    /// Could not build or spawn (rustc missing, compile error, timeout).
+    /// Not the user's problem; keep as a candidate + engine note.
+    BuildError(String),
+}
+
+/// Locate the wrapping effect that produced an `ArithmeticOverflowWrapping`
+/// finding, by re-deriving the predicate's stable id. Robust — no parsing of
+/// human-readable finding text. Returns the effect and its integer type; only
+/// wrapping ops (`add_wrap` / `sub_wrap`) are harnessable here (saturating
+/// clamps rather than silently overflowing, so it stays an un-harnessed
+/// candidate).
+fn wrapping_effect_for_finding<'a>(
+    spec: &'a ParsedSpec,
+    finding: &Finding,
+) -> Option<(&'a ParsedEffect, &'static str)> {
+    let handler = spec.handlers.iter().find(|h| h.name == finding.handler)?;
+    let tag = Category::ArithmeticOverflowWrapping.tag();
+    for eff in &handler.effects {
+        if !matches!(eff.op.as_str(), "add_wrap" | "sub_wrap") {
+            continue;
+        }
+        let id = crate::probe::spec_predicates::stable_id(
+            &format!("{}::{}::{}", handler.name, eff.field, eff.op),
+            tag,
+        );
+        if id == finding.id {
+            let rust_ty = repro_gen::rust_int_type(&resolve_field_dsl_type(spec, &eff.field))
+                // Amount fields are integer by construction; default to u64
+                // when the declared type can't be resolved from the spec.
+                .unwrap_or("u64");
+            return Some((eff, rust_ty));
+        }
+    }
+    None
+}
+
+/// Resolve a field path's DSL type (`U64`, …) from the spec's account/state
+/// field declarations. Strips `Variant.` prefixes and `[i]` subscripts to the
+/// base identifier. Returns `"U64"` when unresolved (the dominant amount type).
+fn resolve_field_dsl_type(spec: &ParsedSpec, field_path: &str) -> String {
+    let base = field_path
+        .rsplit('.')
+        .next()
+        .unwrap_or(field_path)
+        .split('[')
+        .next()
+        .unwrap_or(field_path)
+        .trim();
+    for at in &spec.account_types {
+        for (name, ty) in &at.fields {
+            if name == base {
+                return ty.clone();
+            }
+        }
+    }
+    "U64".to_string()
+}
+
+/// Build (but do not write) the boundary reproducer for a wrapping-arithmetic
+/// finding. `None` when the finding isn't a harnessable wrapping op.
+pub fn build_arith_overflow_harness(
+    spec: &ParsedSpec,
+    finding: &Finding,
+    ctx: &ReproducerContext,
+) -> Option<ArithHarness> {
+    let (eff, rust_ty) = wrapping_effect_for_finding(spec, finding)?;
+    let operand_desc = if eff.value.is_empty() {
+        "operand".to_string()
+    } else {
+        eff.value.clone()
+    };
+    let generated = repro_gen::arith_overflow_boundary(
+        &finding.handler,
+        &eff.field,
+        &eff.op,
+        &operand_desc,
+        rust_ty,
+    )?;
+
+    let rel_dir = format!(
+        "target/qedgen-repros/{}/{}",
+        Category::ArithmeticOverflowWrapping.tag(),
+        finding.handler
+    );
+    let abs_dir = ctx.project_root.join(&rel_dir);
+    let rel_path = format!("{rel_dir}/repro.rs");
+    let abs_path = abs_dir.join("repro.rs");
+    let bin_rel = format!("{rel_dir}/repro");
+    let invocation = format!("rustc -O --edition 2021 {rel_path} -o {bin_rel} && ./{bin_rel}");
+
+    Some(ArithHarness {
+        rel_path,
+        abs_path,
+        source: generated.source,
+        invocation,
+        failing_input: generated.failing_input,
+    })
+}
+
+/// Write the harness source to disk (creating parent dirs).
+pub fn write_harness(harness: &ArithHarness) -> Result<(), ConstructFailure> {
+    if let Some(parent) = harness.abs_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| ConstructFailure::Io(e.to_string()))?;
+    }
+    std::fs::write(&harness.abs_path, &harness.source)
+        .map_err(|e| ConstructFailure::Io(e.to_string()))
+}
+
+/// Build + run the harness with `rustc`, under a wall-clock budget. Exit 0 ⇒
+/// reproduced. `rustc` is a soft dependency (like rustfmt); its absence
+/// surfaces as `BuildError`, never a panic.
+pub fn execute_harness(harness: &ArithHarness, _budget: Duration) -> ExecOutcome {
+    use std::process::Command;
+    let bin_path = harness.abs_path.with_file_name("repro");
+    let compile = Command::new("rustc")
+        .arg("-O")
+        .arg("--edition")
+        .arg("2021")
+        .arg(&harness.abs_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .output();
+    match compile {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => {
+            return ExecOutcome::BuildError(format!(
+                "rustc failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        Err(e) => return ExecOutcome::BuildError(format!("could not run rustc: {e}")),
+    }
+    match Command::new(&bin_path).output() {
+        Ok(out) if out.status.success() => ExecOutcome::Reproduced,
+        Ok(_) => ExecOutcome::NotReproduced,
+        Err(e) => ExecOutcome::BuildError(format!("could not run harness: {e}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,18 +452,16 @@ mod tests {
 
     /// Categories whose constructors are still stubbed report
     /// `NotImplemented` — the caller demotes them to candidates rather than
-    /// dropping them. As #228 lands real constructors, entries move OUT of
+    /// dropping them. As #228 lands real reproducers, entries move OUT of
     /// this list (and gain their own positive/negative tests); the list
-    /// shrinking is the retrofit's progress bar.
+    /// shrinking is the retrofit's progress bar. `ArithmeticOverflowWrapping`
+    /// has left the list — it is handled by `build_arith_overflow_harness`
+    /// (tested below and in `tests/probe_cli.rs`), not `construct_reproducer`.
     #[test]
     fn stubbed_constructors_report_not_implemented() {
         let categories = [
             (Category::MissingSigner, "missing_signer"),
             (Category::ArbitraryCpi, "arbitrary_cpi"),
-            (
-                Category::ArithmeticOverflowWrapping,
-                "arithmetic_overflow_wrapping",
-            ),
             (
                 Category::LifecycleOneShotViolation,
                 "lifecycle_one_shot_violation",
@@ -329,5 +519,34 @@ mod tests {
         let ctx = ReproducerContext::from_spec_path(&spec, spec_path);
         let dir = ctx.repro_dir("abc12345");
         assert_eq!(dir, PathBuf::from("/tmp/foo/target/qedgen-repros/abc12345"));
+    }
+
+    fn spec_with_field(field: &str, ty: &str) -> ParsedSpec {
+        use crate::check::ParsedAccountType;
+        ParsedSpec {
+            account_types: vec![ParsedAccountType {
+                name: "State".to_string(),
+                fields: vec![(field.to_string(), ty.to_string())],
+                lifecycle: Vec::new(),
+                pda_ref: None,
+                variants: Vec::new(),
+            }],
+            ..ParsedSpec::default()
+        }
+    }
+
+    #[test]
+    fn resolve_field_type_reads_account_declaration() {
+        let spec = spec_with_field("balance", "U128");
+        assert_eq!(resolve_field_dsl_type(&spec, "balance"), "U128");
+        // Strips `Variant.` prefix and `[i]` subscripts to the base ident.
+        assert_eq!(resolve_field_dsl_type(&spec, "Active.balance"), "U128");
+        assert_eq!(resolve_field_dsl_type(&spec, "accounts[i].balance"), "U128");
+    }
+
+    #[test]
+    fn resolve_field_type_defaults_to_u64_when_unknown() {
+        let spec = spec_with_field("balance", "U64");
+        assert_eq!(resolve_field_dsl_type(&spec, "not_a_field"), "U64");
     }
 }

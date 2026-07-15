@@ -350,6 +350,16 @@ pub(crate) enum Commands {
         /// `.qed/audit/<timestamp>/`.
         #[arg(long, requires = "emit_spec_candidates")]
         audit_dir: Option<PathBuf>,
+
+        /// Build and run generated reproducer harnesses (#228), promoting a
+        /// candidate to a finding only when its harness actually reproduces.
+        /// Off by default: the default path only *generates* harnesses under
+        /// `target/qedgen-repros/` and leaves the candidate carrying a
+        /// `repro_harness` pointer for the agent/CI to run — so a plain
+        /// `probe --spec` performs no builds and no execution. Requires
+        /// `rustc` on PATH (soft dependency).
+        #[arg(long)]
+        execute_repros: bool,
     },
 
     /// Ratify a scaffold-to-spec interview into a `.qedspec` + side-files.

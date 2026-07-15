@@ -187,3 +187,159 @@ handler withdraw (amount : U64) : State.Active -> State.Active {
     );
     assert!(json["coverage"]["handlers_discovered"].as_u64().unwrap() >= 1);
 }
+
+// ---- #228: ArithmeticOverflowWrapping reproducer slice ----
+
+/// Copy a fixture spec into a fresh tempdir so the generated
+/// `target/qedgen-repros/` lands there, not in the source tree.
+fn staged_spec(tmp: &std::path::Path, fixture_rel: &str, name: &str) -> PathBuf {
+    let dst = tmp.join(name);
+    std::fs::copy(fixture(fixture_rel), &dst).unwrap();
+    dst
+}
+
+fn arith_hit<'a>(json: &'a serde_json::Value, key: &str) -> Vec<&'a serde_json::Value> {
+    json[key]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter(|x| x["category_tag"] == "arithmetic_overflow_wrapping")
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Default path (`probe --spec`): the wrapping hit is a CANDIDATE carrying a
+/// generated `repro_harness` pointer — the harness source is written, but
+/// nothing is built or run (no compiled binary on disk) and no finding is
+/// emitted. This is the agent-authored-repros default.
+#[test]
+fn arith_overflow_default_generates_harness_without_executing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let spec = staged_spec(
+        tmp.path(),
+        "repro-228/vulnerable.qedspec",
+        "vulnerable.qedspec",
+    );
+
+    let out = qedgen(&["probe", "--spec", spec.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+
+    // No finding (nothing was executed to confirm); the hit is a candidate.
+    assert!(
+        arith_hit(&json, "findings").is_empty(),
+        "default must not emit a finding"
+    );
+    let candidates = arith_hit(&json, "candidates");
+    assert_eq!(candidates.len(), 1, "wrapping hit must be a candidate");
+    let harness = &candidates[0]["repro_harness"];
+    assert_eq!(harness["kind"], "boundary_value");
+    assert!(harness["path"].as_str().unwrap().ends_with("repro.rs"));
+    assert!(harness["invocation"].as_str().unwrap().contains("rustc"));
+
+    // The harness source was written; the compiled binary was NOT (no exec).
+    let harness_rs = tmp.path().join(harness["path"].as_str().unwrap());
+    assert!(harness_rs.exists(), "harness source must be generated");
+    assert!(
+        !harness_rs.with_file_name("repro").exists(),
+        "default path must not build the harness"
+    );
+
+    // The reproducers engine reports it generated but did not run.
+    let repro_engine = json["engine_runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["engine"] == "reproducers")
+        .expect("reproducers engine run present");
+    assert_eq!(repro_engine["status"], "blocked");
+}
+
+/// `--execute-repros`: the CLI builds + runs the generated harness with
+/// `rustc`; because the wrap reproduces (exit 0), the candidate is promoted to
+/// a finding carrying a `BoundaryValue` reproducer.
+#[test]
+fn arith_overflow_execute_promotes_to_finding() {
+    let tmp = tempfile::tempdir().unwrap();
+    let spec = staged_spec(
+        tmp.path(),
+        "repro-228/vulnerable.qedspec",
+        "vulnerable.qedspec",
+    );
+
+    let out = qedgen(&[
+        "probe",
+        "--spec",
+        spec.to_str().unwrap(),
+        "--execute-repros",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+
+    let findings = arith_hit(&json, "findings");
+    assert_eq!(
+        findings.len(),
+        1,
+        "execution must promote the wrap to a finding"
+    );
+    let repro = &findings[0]["reproducer"];
+    assert_eq!(repro["kind"], "boundary_value");
+    assert!(repro["failing_input"]
+        .as_str()
+        .unwrap()
+        .contains("u64::MAX"));
+    // No arith candidate remains (it was promoted).
+    assert!(arith_hit(&json, "candidates").is_empty());
+
+    let repro_engine = json["engine_runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["engine"] == "reproducers")
+        .unwrap();
+    assert_eq!(repro_engine["status"], "passed");
+    assert!(repro_engine["detail"]
+        .as_str()
+        .unwrap()
+        .contains("1 reproduced"));
+}
+
+/// The safe fixture uses the CHECKED operator (`+=`), so the wrapping
+/// predicate never fires — no arith candidate and no finding, whether or not
+/// execution is requested.
+#[test]
+fn arith_overflow_safe_fixture_produces_no_hit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let spec = staged_spec(tmp.path(), "repro-228/safe.qedspec", "safe.qedspec");
+
+    let out = qedgen(&[
+        "probe",
+        "--spec",
+        spec.to_str().unwrap(),
+        "--execute-repros",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+
+    assert!(
+        arith_hit(&json, "findings").is_empty(),
+        "safe spec must emit no finding"
+    );
+    assert!(
+        arith_hit(&json, "candidates").is_empty(),
+        "safe spec must emit no candidate"
+    );
+}

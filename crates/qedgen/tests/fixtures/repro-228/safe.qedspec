@@ -1,0 +1,14 @@
+// #228 safe fixture: `balance += amount` uses the CHECKED default operator
+// (`+=`). Overflow aborts, so the ArithmeticOverflowWrapping predicate does
+// NOT fire — no candidate, no reproducer.
+
+spec VaultChecked
+
+type State
+  | Active of {
+      balance : U64,
+    }
+
+handler deposit (amount : U64) : State.Active -> State.Active {
+  effect { balance += amount }
+}
