@@ -286,34 +286,22 @@ pub(crate) fn emit_one_conformance_harness(
     // locals taken before the transition call. Tree-native (#151 Slice 4):
     // the legacy `resolve_value` path only rebound BARE field names, so a
     // compound or indexed RHS leaked unbound (`accounts[i].capital`) or
-    // post-state (`s.x`) reads into the assert. Tree-less values (IDL
-    // ingest, probes) keep the legacy resolution.
-    let resolved = match &value.tree {
-        Some(tree) => {
-            use crate::rust_codegen_util::tree_render::{ArithMode, Binder, RustCx};
-            crate::rust_codegen_util::tree_render::render_rust(
-                tree,
-                RustCx::native()
-                    .with_binder(Binder::PreLocal)
-                    .with_arith(ArithMode::Checked)
-                    .with_acct_env(util::handler_needs_account_env(op).then_some("accounts")),
-            )
-        }
-        None => util::resolve_value_with_account_env(
-            &value.rust,
-            op,
-            parsed,
-            Some("pre_"),
-            util::handler_needs_account_env(op).then_some("accounts"),
-        ),
+    // post-state (`s.x`) reads into the assert.
+    let tree = util::mir_expr_tree(value);
+    let resolved = {
+        use crate::rust_codegen_util::tree_render::{ArithMode, Binder, RustCx};
+        crate::rust_codegen_util::tree_render::render_rust(
+            tree,
+            RustCx::native()
+                .with_binder(Binder::PreLocal)
+                .with_arith(ArithMode::Checked)
+                .with_acct_env(util::handler_needs_account_env(op).then_some("accounts")),
+        )
     };
     // Checked-expression RHS carries `?` ops (see `RustOpts::checked_arith`):
     // compare inside an `Option` context — the harness only reaches this
     // assert when the transition returned true, so the RHS must be `Some`.
-    let has_try = match &value.tree {
-        Some(tree) => crate::rust_codegen_util::tree_render::contains_fallible_arith(tree),
-        None => resolved.contains('?'),
-    };
+    let has_try = crate::rust_codegen_util::tree_render::contains_fallible_arith(tree);
     let expected_eq = |expected: &str| -> String {
         if has_try {
             format!("Some(s.{field}) == (|| Some({expected}))()")

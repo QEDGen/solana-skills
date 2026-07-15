@@ -9,10 +9,6 @@ pub fn handler_needs_account_env(op: &ParsedHandler) -> bool {
         .iter()
         .any(|r| mentions_handler_account_pubkey(&r.rust_expr, &op.accounts))
         || op
-            .guard_str
-            .as_ref()
-            .is_some_and(|g| mentions_handler_account_pubkey(g, &op.accounts))
-        || op
             .effects
             .iter()
             .any(|e| is_account_pubkey_ref(e.value.trim(), &op.accounts))
@@ -42,58 +38,14 @@ pub fn handler_account_env_struct_name(op_name: &str) -> String {
     }
 }
 
-/// Resolve an effect value to a Rust expression: handler param name,
-/// declared constant, `let … = call` binding, state field (rebound to
-/// `<state_binder>X` when provided), or pass-through literal.
-///
-/// State fields need a binder because upstream effect-RHS rendering already
-/// stripped the `state.` prefix (chumsky_adapter::render_effect) and each
-/// target binds state differently (proptest `s`, Anchor `self.<acct>`, …);
-/// a bare field name would be E0425 at compile time. Pass `None` for
-/// pass-through (bare identifier).
-pub fn resolve_value(
-    value: &str,
-    op: &ParsedHandler,
-    spec: &ParsedSpec,
-    state_binder: Option<&str>,
-) -> String {
-    if op.takes_params.iter().any(|(n, _)| n == value) {
-        value.to_string()
-    } else if let Some((_, const_val)) = spec.constants.iter().find(|(n, _)| n == value) {
-        const_val.clone()
-    } else if op
-        .calls
-        .iter()
-        .any(|c| c.result_binding.as_deref() == Some(value))
-    {
-        // `let <name> = call …` binding is in scope for subsequent
-        // effects / requires; render as the bare let-bound local.
-        value.to_string()
-    } else if let Some(binder) = state_binder {
-        if is_state_field(value, spec) {
-            format!("{}{}", binder, value)
-        } else {
-            value.to_string()
-        }
-    } else {
-        value.to_string()
-    }
-}
-
-pub fn resolve_value_with_account_env(
-    value: &str,
-    op: &ParsedHandler,
-    spec: &ParsedSpec,
-    state_binder: Option<&str>,
-    account_binder: Option<&str>,
-) -> String {
-    if let Some(binder) = account_binder {
-        let rewritten = rewrite_account_pubkey_refs(value, &op.accounts, binder);
-        if rewritten != value {
-            return rewritten;
-        }
-    }
-    resolve_value(value, op, spec, state_binder)
+/// The typed tree of a MIR expression. Post-#151 every production effect
+/// RHS carries a tree copied from the adapter-built `ParsedEffect.tree`;
+/// a `None` here is a hand-built fixture that must be fixed, not worked
+/// around.
+pub fn mir_expr_tree(e: &crate::mir::Expr) -> &crate::mir::ExprTree {
+    e.tree
+        .as_ref()
+        .expect("effect-RHS Expr.tree is always populated by the chumsky adapter (#151/#156)")
 }
 
 /// Rust scalar type of a flat state field, for annotating the checked-RHS
@@ -119,20 +71,6 @@ fn field_rust_scalar_ty(spec: &ParsedSpec, field: &str) -> Option<&'static str> 
         "I128" => Some("i128"),
         _ => None,
     }
-}
-
-/// True when the bare identifier names a state field in the flat
-/// `state_fields` list or any `account_types[*].fields` (multi-account).
-fn is_state_field(name: &str, spec: &ParsedSpec) -> bool {
-    if spec.state_fields.iter().any(|(n, _)| n == name) {
-        return true;
-    }
-    for acct in &spec.account_types {
-        if acct.fields.iter().any(|(n, _)| n == name) {
-            return true;
-        }
-    }
-    false
 }
 
 // ============================================================================
@@ -224,9 +162,6 @@ pub fn stmt_effect_triple(
         // Branch arms are rendered by the per-arm match path; walking
         // them here would double-emit.
         Stmt::Branch { .. } => None,
-        // Abort clauses are harnessed from the `aborts_if` predicate
-        // surface; in the body they carry no state mutation.
-        Stmt::Abort(_) => None,
         // Events: auxiliary, no state mutation in the pure model.
         Stmt::Emit { .. } => None,
     }
@@ -279,7 +214,6 @@ pub fn block_effect_triples_deep(
 #[allow(clippy::too_many_arguments)]
 pub fn emit_one_effect(
     out: &mut String,
-    op: &ParsedHandler,
     spec: &ParsedSpec,
     wrapping: bool,
     field: &str,
@@ -287,13 +221,12 @@ pub fn emit_one_effect(
     value: &crate::mir::Expr,
     indent: &str,
 ) {
-    emit_one_effect_inner(out, op, spec, wrapping, field, op_kind, value, indent, None);
+    emit_one_effect_inner(out, spec, wrapping, field, op_kind, value, indent, None);
 }
 
 #[allow(clippy::too_many_arguments)]
 fn emit_one_effect_inner(
     out: &mut String,
-    op: &ParsedHandler,
     spec: &ParsedSpec,
     wrapping: bool,
     field: &str,
@@ -312,26 +245,16 @@ fn emit_one_effect_inner(
     // Tree-native RHS (#151 Slice 1): one render call replaces the
     // adapter's pre-rendered string + `resolve_value`'s binder surgery +
     // the account-pubkey substring rewrite. Fallibility is structural,
-    // not a `contains('?')` scan. Legacy string path stays for
-    // ParsedHandlers without trees (IDL ingest, probes).
-    let (rust_value, fallible) = match &value.tree {
-        Some(tree) => {
-            let cx = RustCx::native()
-                .with_arith(ArithMode::Checked)
-                .with_acct_env(account_binder.map(|b| b.trim_end_matches('.')));
-            (
-                tree_render::render_rust(tree, cx),
-                tree_render::contains_fallible_arith(tree),
-            )
-        }
-        None => {
-            // Body binds state as `s` — pass that binder so a bare
-            // state-field RHS renders as `s.<field>`.
-            let resolved =
-                resolve_value_with_account_env(&value.rust, op, spec, Some("s."), account_binder);
-            let fallible = resolved.contains('?');
-            (resolved, fallible)
-        }
+    // not a `contains('?')` scan.
+    let (rust_value, fallible) = {
+        let tree = mir_expr_tree(value);
+        let cx = RustCx::native()
+            .with_arith(ArithMode::Checked)
+            .with_acct_env(account_binder.map(|b| b.trim_end_matches('.')));
+        (
+            tree_render::render_rust(tree, cx),
+            tree_render::contains_fallible_arith(tree),
+        )
     };
     // Checked-expression RHS (bare arithmetic lowered to `checked_*` + `?`):
     // give the `?` ops an `Option` context via an immediately-invoked
@@ -416,7 +339,6 @@ fn emit_one_effect_inner(
 #[allow(clippy::too_many_arguments)]
 pub fn emit_one_effect_with_account_env(
     out: &mut String,
-    op: &ParsedHandler,
     spec: &ParsedSpec,
     wrapping: bool,
     field: &str,
@@ -427,7 +349,6 @@ pub fn emit_one_effect_with_account_env(
 ) {
     emit_one_effect_inner(
         out,
-        op,
         spec,
         wrapping,
         field,

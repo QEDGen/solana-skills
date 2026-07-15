@@ -1319,7 +1319,6 @@ fn mir_needs_spl(mir: &Mir) -> bool {
                 | Stmt::SatAdd { .. }
                 | Stmt::SatSub { .. }
                 | Stmt::Branch { .. }
-                | Stmt::Abort(_)
                 | Stmt::Emit { .. } => {}
             }
         }

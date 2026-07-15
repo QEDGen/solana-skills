@@ -320,7 +320,6 @@ pub(super) fn infer_idx_promotions_mir(
             | Stmt::TokenTransfer { .. }
             | Stmt::VariantPromote { .. }
             | Stmt::Branch { .. }
-            | Stmt::Abort(_)
             | Stmt::Cpi { .. }
             | Stmt::Emit { .. } => continue,
         };
@@ -496,7 +495,6 @@ pub(super) fn emit_indexed_transition(
             | Stmt::TokenTransfer { .. }
             | Stmt::VariantPromote { .. }
             | Stmt::Branch { .. }
-            | Stmt::Abort(_)
             | Stmt::Cpi { .. }
             | Stmt::Emit { .. } => continue,
         };

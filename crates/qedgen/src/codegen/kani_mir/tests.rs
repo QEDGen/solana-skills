@@ -451,19 +451,6 @@ fn render_emits_property_preservation_harnesses() {
 }
 
 #[test]
-fn render_emits_no_abort_section_when_no_aborts_if() {
-    // The section only fires for the direct `aborts_if Pred Error`
-    // DSL form. Escrow uses `requires X else Err`, which lowers to a
-    // different field (`requires_or_abort`), so the header doesn't emit.
-    let (mir, parsed) = lower_fixture("examples/rust/escrow/escrow.qedspec");
-    let out = render(&mir, &parsed);
-    assert!(
-        !out.contains("// Abort conditions —"),
-        "expected no abort-conditions section for pilots without `aborts_if`"
-    );
-}
-
-#[test]
 fn render_emits_guard_enforcement_harnesses() {
     // Escrow's `initialize` has `requires deposit_amount > 0 &&
     // receive_amount > 0`, so the rejects_invalid harness emits.

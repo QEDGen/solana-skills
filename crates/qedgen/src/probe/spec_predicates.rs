@@ -386,7 +386,7 @@ pub(crate) fn predicate_init_without_pda(
 }
 
 /// Spec-aware predicate: state field read somewhere in the spec (`auth`,
-/// `requires` / `aborts_if`, effect RHS, property expression) but never
+/// `requires`, effect RHS, property expression) but never
 /// written by any handler `effect` — downstream codegen sees only the
 /// type's default. Two recurring CRIT shapes:
 /// - `auth <pubkey-field>` lowers to `has_one = <field>`; an unset Pubkey
@@ -442,23 +442,6 @@ pub(crate) fn predicate_stored_field_never_written(spec: &ParsedSpec) -> Vec<Fin
                 if !is_reader {
                     for r in &h.requires {
                         if needles.iter().any(|n| r.lean_expr.contains(n.as_str())) {
-                            is_reader = true;
-                            break;
-                        }
-                    }
-                }
-
-                // legacy guard string + aborts_if (pre-requires DSL).
-                if !is_reader {
-                    if let Some(g) = &h.guard_str {
-                        if needles.iter().any(|n| g.contains(n.as_str())) {
-                            is_reader = true;
-                        }
-                    }
-                }
-                if !is_reader {
-                    for a in &h.aborts_if {
-                        if needles.iter().any(|n| a.lean_expr.contains(n.as_str())) {
                             is_reader = true;
                             break;
                         }

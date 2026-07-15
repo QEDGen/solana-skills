@@ -5,25 +5,6 @@
 
 use super::*;
 
-/// Rewrite handler-account pubkey references into a generated account
-/// environment. `foo.pubkey` becomes `<binder>.foo.pubkey`; `foo.key()` is
-/// normalized to the same pubkey field.
-pub fn rewrite_account_pubkey_refs(
-    expr: &str,
-    accounts: &[crate::check::ParsedHandlerAccount],
-    binder: &str,
-) -> String {
-    let mut out = expr.to_string();
-    for account in accounts {
-        let key_call = format!("{}.key()", account.name);
-        let pubkey_ref = format!("{}.pubkey", account.name);
-        let replacement = format!("{}.{}.pubkey", binder, account.name);
-        out = out.replace(&key_call, &replacement);
-        out = out.replace(&pubkey_ref, &replacement);
-    }
-    out
-}
-
 pub fn emit_kani_pubkey_helpers(out: &mut String) {
     out.push_str("#[allow(dead_code)]\n");
     out.push_str("fn pubkey_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {\n");
@@ -139,15 +120,7 @@ pub fn rewrite_kani_checked_add_equality(expr: &str) -> String {
 pub fn spec_uses_kani_bps_mul_div_helper(spec: &ParsedSpec) -> bool {
     let uses_helper = |expr: &str| rewrite_kani_bps_mul_div(expr) != expr;
     spec.handlers.iter().any(|op| {
-        op.guard_str
-            .as_deref()
-            .map(|guard| uses_helper(&translate_guard_to_rust(guard, false)))
-            .unwrap_or(false)
-            || op.requires.iter().any(|req| uses_helper(&req.rust_expr))
-            || op
-                .aborts_if
-                .iter()
-                .any(|abort| uses_helper(&abort.rust_expr))
+        op.requires.iter().any(|req| uses_helper(&req.rust_expr))
             || op
                 .ensures
                 .iter()

@@ -526,7 +526,7 @@ fn emit_account_section(
         .collect();
     let owned_props_for_predicates: Vec<ParsedProperty> =
         properties.iter().map(|p| (*p).clone()).collect();
-    rust_codegen_util::emit_property_predicates_with(out, &owned_props_for_predicates, true, |t| {
+    rust_codegen_util::emit_property_predicates_with(out, &owned_props_for_predicates, |t| {
         map_type(t, spec)
     });
 

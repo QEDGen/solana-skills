@@ -300,10 +300,6 @@ pub struct HandlerMir {
     /// `Stmt::RequireOrAbort` rather than `pre`. Populated during
     /// parser→MIR; empty after the Phase 3 pass synthesizes them into `body`.
     pub requires_or_abort: Vec<RequireOrAbortClause>,
-    /// Legacy `aborts_if <pred> Error` clauses — the predicate IS the abort
-    /// condition (not negated). Predicate kept alongside the error for
-    /// theorem emission (`theorem h_aborts_if_Err (s) (h : <pred>) : … = none`).
-    pub aborts_if: Vec<AbortClause>,
     pub body: Block,
     /// Post-conditions (`ensures`).
     pub post: Vec<Predicate>,
@@ -328,15 +324,6 @@ pub struct HandlerMir {
 
 #[derive(Debug, Clone)]
 pub struct RequireOrAbortClause {
-    pub pred: Predicate,
-    pub err: ErrorRef,
-}
-
-/// Legacy `aborts_if <pred> Error` clause — inverse of
-/// `RequireOrAbortClause`: the predicate IS the abort condition. Distinct so
-/// the emitted Lean theorem hypothesis matches the source shape.
-#[derive(Debug, Clone)]
-pub struct AbortClause {
     pub pred: Predicate,
     pub err: ErrorRef,
 }
@@ -434,10 +421,6 @@ pub enum Stmt {
         arms: Vec<BranchArm>,
         default: Option<Block>,
     },
-
-    /// Terminal abort. Used as the canonical post-`Branch` exit for
-    /// fail paths and standalone abort clauses.
-    Abort(ErrorRef),
 
     // ---- Escape hatches ----
     /// Generic CPI to a non-Token interface.
@@ -932,7 +915,7 @@ impl Expr {
         }
     }
 
-    /// Lean + native-Rust + pod-Rust renderings (hooks, aborts_if, CPI
+    /// Lean + native-Rust + pod-Rust renderings (hooks, CPI
     /// args, branch patterns/scrutinees).
     pub fn from_lean_rust_pod(
         lean: impl Into<String>,
@@ -1432,19 +1415,6 @@ fn lower_handler(h: &crate::check::ParsedHandler, parsed: &ParsedSpec) -> Handle
         .iter()
         .map(|r| Predicate(Expr::from_requires(r)))
         .collect();
-    let aborts_if: Vec<AbortClause> = h
-        .aborts_if
-        .iter()
-        .map(|a| AbortClause {
-            pred: Predicate(Expr::from_lean_rust_pod(
-                &a.lean_expr,
-                &a.rust_expr,
-                &a.rust_expr_pod,
-            )),
-            err: a.error_name.clone(),
-        })
-        .collect();
-
     HandlerMir {
         name: h.name.clone(),
         doc: h.doc.clone(),
@@ -1462,7 +1432,6 @@ fn lower_handler(h: &crate::check::ParsedHandler, parsed: &ParsedSpec) -> Handle
         pre,
         requires_in_order,
         requires_or_abort,
-        aborts_if,
         body: lower_body(h),
         post: h
             .ensures
@@ -1554,12 +1523,7 @@ fn lower_body(h: &crate::check::ParsedHandler) -> Block {
         }
     }
 
-    // 2. Aborts-if (legacy form, still appears in some specs).
-    for ab in &h.aborts_if {
-        stmts.push(Stmt::Abort(ab.error_name.clone()));
-    }
-
-    // 3. Effects → typed Stmt kinds per op_kind. Suppressed under
+    // 2. Effects → typed Stmt kinds per op_kind. Suppressed under
     //    `effect { match … }`: `h.effects` then carries the *union* of all
     //    arms (parser back-compat view) and the real statements live on the
     //    step-7 `Stmt::Branch` — lowering both would double-emit.
@@ -1854,7 +1818,7 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
             default.stmts
         );
 
-        // No flat union effects and no stub Abort alongside the Branch.
+        // No flat union effects alongside the Branch.
         assert!(
             !body.stmts.iter().any(|s| matches!(
                 s,
@@ -1865,9 +1829,8 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
                     | Stmt::WrapSub { .. }
                     | Stmt::SatAdd { .. }
                     | Stmt::SatSub { .. }
-                    | Stmt::Abort(_)
             )),
-            "flat union effects / stub Abort must be suppressed: {body:?}"
+            "flat union effects must be suppressed: {body:?}"
         );
     }
 
@@ -1932,7 +1895,6 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
             delta: Expr::default(),
             err: "Overflow".to_string(),
         };
-        let _ = Stmt::Abort("InvalidState".to_string());
         let _ = Stmt::Branch {
             scrutinee: BranchScrutinee::Predicate(Predicate(Expr::default())),
             arms: vec![],
@@ -2347,7 +2309,6 @@ environment rate_change {
                         Stmt::TokenTransfer { .. }
                         | Stmt::VariantPromote { .. }
                         | Stmt::Branch { .. }
-                        | Stmt::Abort(_)
                         | Stmt::Cpi { .. }
                         | Stmt::Emit { .. } => None,
                     };

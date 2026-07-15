@@ -1503,7 +1503,10 @@ handler initialize : State.Uninitialized -> State.Active {
     fn test_no_properties_fires() {
         let mut h = make_handler("deposit");
         h.effects = vec![ParsedEffect::from_triple("balance", "add", "amount")];
-        h.guard_str = Some("amount > 0".to_string());
+        h.requires.push(crate::check::ParsedRequires {
+            lean_expr: "amount > 0".to_string(),
+            ..Default::default()
+        });
         let spec = ParsedSpec {
             handlers: vec![h],
             state_fields: vec![("balance".to_string(), "U64".to_string())],
@@ -1522,7 +1525,10 @@ handler initialize : State.Uninitialized -> State.Active {
     fn test_no_properties_skips_with_property() {
         let mut h = make_handler("deposit");
         h.effects = vec![ParsedEffect::from_triple("balance", "add", "amount")];
-        h.guard_str = Some("amount > 0".to_string());
+        h.requires.push(crate::check::ParsedRequires {
+            lean_expr: "amount > 0".to_string(),
+            ..Default::default()
+        });
         let spec = ParsedSpec {
             handlers: vec![h],
             state_fields: vec![("balance".to_string(), "U64".to_string())],
@@ -1552,7 +1558,10 @@ handler initialize : State.Uninitialized -> State.Active {
     #[test]
     fn test_no_errors_block_fires() {
         let mut h = make_handler("deposit");
-        h.guard_str = Some("amount > 0".to_string());
+        h.requires.push(crate::check::ParsedRequires {
+            lean_expr: "amount > 0".to_string(),
+            ..Default::default()
+        });
         let spec = ParsedSpec {
             handlers: vec![h],
             lifecycle_states: vec!["Active".to_string()],

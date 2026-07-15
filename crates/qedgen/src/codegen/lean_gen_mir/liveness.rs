@@ -90,7 +90,6 @@ impl WitnessState {
                 | Stmt::TokenTransfer { .. }
                 | Stmt::VariantPromote { .. }
                 | Stmt::Branch { .. }
-                | Stmt::Abort(_)
                 | Stmt::Cpi { .. }
                 | Stmt::Emit { .. } => {}
             }

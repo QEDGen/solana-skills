@@ -156,7 +156,6 @@ pub(super) fn overflow_proof_script(
             | Stmt::SatAdd { .. }
             | Stmt::SatSub { .. }
             | Stmt::Branch { .. }
-            | Stmt::Abort(_)
             | Stmt::Cpi { .. }
             | Stmt::Emit { .. } => false,
         })

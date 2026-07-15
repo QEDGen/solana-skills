@@ -552,7 +552,7 @@ fn finding_from_crash(
         spec_silent_on: format!(
             "fuzz-discovered path triggers `{tag}`. The spec is silent on this case."
         ),
-        suppression_hint: "add a `requires` / `aborts_if` clause covering this input, \
+        suppression_hint: "add a `requires` clause covering this input, \
                            or refine the invariant if the violation is real."
             .to_string(),
         investigation_hint: format!(

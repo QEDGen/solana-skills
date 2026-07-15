@@ -66,20 +66,9 @@ pub struct ParsedVariant {
     pub fields: Vec<(String, String)>,
 }
 
-/// Parsed aborts_if clause: condition → error name.
-#[derive(Debug, Clone)]
-pub struct ParsedAbort {
-    pub lean_expr: String,
-    pub rust_expr: String,
-    /// Pod-aware Rust expression for Quasar (`.get()` postfix, `as i128` casts);
-    /// codegen picks between this and `rust_expr` by `Target`.
-    pub rust_expr_pod: String,
-    pub error_name: String,
-}
-
 /// Parsed requires clause. When `error_name` is Some, generates both a guard
 /// (positive form in transition) and an abort theorem (negated form).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ParsedRequires {
     pub lean_expr: String,
     pub rust_expr: String,
@@ -492,10 +481,6 @@ pub struct ParsedHandler {
     /// Post-state lifecycle transition.
     pub post_status: Option<String>,
     pub takes_params: Vec<(String, String)>,
-    /// Legacy guard expression (Lean form). Deprecated: use `requires` instead.
-    pub guard_str: Option<String>,
-    /// Legacy abort conditions. Deprecated: use `requires ... else` instead.
-    pub aborts_if: Vec<ParsedAbort>,
     /// Requires clauses: guard + optional abort. When error_name is Some,
     /// generates both transition guard and abort theorem.
     pub requires: Vec<ParsedRequires>,
@@ -624,7 +609,7 @@ pub struct ParsedStateBinder {
 
 impl ParsedHandler {
     pub fn has_guard(&self) -> bool {
-        self.guard_str.is_some() || !self.requires.is_empty()
+        !self.requires.is_empty()
     }
     pub fn has_effect(&self) -> bool {
         !self.effects.is_empty()

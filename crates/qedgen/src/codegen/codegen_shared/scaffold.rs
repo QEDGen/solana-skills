@@ -349,8 +349,7 @@ pub(crate) fn render_handler_scaffold(
         }
     } else {
         for effect in &handler.effects {
-            let mechanized =
-                state_acct.and_then(|sa| mechanize_effect(effect, sa, handler, spec, target));
+            let mechanized = state_acct.and_then(|sa| mechanize_effect(effect, sa, spec, target));
             match mechanized {
                 Some(line) => out.push_str(&line),
                 None => {

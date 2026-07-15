@@ -43,7 +43,7 @@ pub(super) fn render_multi_account(mir: &Mir) -> String {
 
     emit_properties_multi(&mut out, mir);
 
-    // Pass 2 — per-account: aborts_if, ensures, frame, overflow.
+    // Pass 2 — per-account: abort theorems, ensures, frame, overflow.
     // Overflow needs each account's properties on the scoped Mir so the
     // `h_inv_<prop>` hypothesis threads correctly.
     let prop_groups = group_properties_by_account(mir);

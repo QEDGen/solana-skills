@@ -186,14 +186,14 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
         out.push_str("}\n\n");
     }
 
-    // Helper: guard predicates
+    // Helper: guard predicates. Handlers whose requires are all
+    // account-suppressed get no guard fn (and no guard tests below) — a
+    // `true` predicate would make the rejects-test assert `!true`.
     for op in &spec.handlers {
-        if !op.has_guard() {
+        let Some(guard_rust) = guard_predicate_rust(op) else {
             continue;
-        }
+        };
         let (op_state_name, _) = resolve_state_for_op(op, &spec, is_multi);
-        let guard = op.guard_str.as_deref().unwrap_or("true");
-        let guard_rust = translate_guard(guard, "state");
         let params: Vec<String> = op
             .takes_params
             .iter()
@@ -239,11 +239,11 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     out.push_str("    // ====================================================================\n\n");
 
     for op in &spec.handlers {
-        if !op.has_guard() {
+        let Some(guard_rust) = guard_predicate_rust(op) else {
             continue;
-        }
+        };
         let (sn, fields) = resolve_state_for_op(op, &spec, is_multi);
-        generate_guard_tests(&mut out, op, fields, &sn, &spec)?;
+        generate_guard_tests(&mut out, op, &guard_rust, fields, &sn, &spec)?;
     }
 
     if !spec.properties.is_empty() {
@@ -327,7 +327,12 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
 
     // Count tests
     let effect_count = spec.handlers.iter().filter(|o| o.has_effect()).count();
-    let guard_count = spec.handlers.iter().filter(|o| o.has_guard()).count() * 2; // pass + fail
+    let guard_count = spec
+        .handlers
+        .iter()
+        .filter(|o| guard_predicate_rust(o).is_some())
+        .count()
+        * 2; // pass + fail
     let prop_count: usize = spec
         .properties
         .iter()
@@ -462,14 +467,44 @@ fn resolve_state_for_property<'a>(
     )
 }
 
-/// Translate a Lean guard/property expression to Rust, binding state
-/// references to `state_var`. Routed through the shared
-/// `translate_guard_to_rust` (F7) so unit tests get the same Lean `=` →
-/// Rust `==` fix and `and`/`or` word-connective handling as every other
-/// backend; the private copy this replaces let those leak through.
-fn translate_guard(guard: &str, state_var: &str) -> String {
-    crate::rust_codegen_util::translate_guard_to_rust(guard, /*wrapping=*/ false)
-        .replace("s.", &format!("{}.", state_var))
+/// The handler's `requires` clauses as one Rust predicate bound to
+/// `state` — tree-native render (#156; replaces the legacy `guard_str`
+/// read that left requires-only handlers with a vacuous `true` guard fn
+/// and an always-failing rejects-test). Requires touching handler-account
+/// pubkeys are suppressed: the unit-test state struct carries no
+/// accounts, matching the shared harness projection. `None` when nothing
+/// is expressible — the caller skips the guard fn and its tests.
+fn guard_predicate_rust(op: &ParsedHandler) -> Option<String> {
+    let parts: Vec<String> = op
+        .requires
+        .iter()
+        .map(requires_tree)
+        .filter(|t| !crate::rust_codegen_util::tree_render::tree_mentions_account_pubkey(t))
+        .map(|t| format!("({})", render_for_state(t)))
+        .collect();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" && "))
+    }
+}
+
+/// Render a typed expression tree against the unit-test `state` binder.
+fn render_for_state(tree: &crate::mir::ExprTree) -> String {
+    use crate::rust_codegen_util::tree_render::{render_rust, Binder, RustCx};
+    render_rust(
+        tree,
+        RustCx::native().with_binder(Binder::SelfAcct("state")),
+    )
+}
+
+/// The typed tree of a requires clause. Post-#151 every production
+/// `ParsedRequires` is adapter-built with `tree: Some(...)`; a `None`
+/// here is a hand-built fixture that must be fixed, not worked around.
+fn requires_tree(req: &crate::check::ParsedRequires) -> &crate::mir::ExprTree {
+    req.tree
+        .as_ref()
+        .expect("ParsedRequires.tree is always populated by the chumsky adapter (#151/#156)")
 }
 
 /// Effect triples for a handler, projected from the lowered MIR body via
@@ -645,13 +680,11 @@ fn generate_effect_test(
 fn generate_guard_tests(
     out: &mut String,
     op: &ParsedHandler,
+    guard_rust: &str,
     fields: &[(String, String)],
     state_name: &str,
     spec: &ParsedSpec,
 ) -> Result<()> {
-    let guard_str = op.guard_str.as_deref().unwrap_or("true");
-    let guard_rust = translate_guard(guard_str, "state");
-
     // --- Test: guard PASSES with valid inputs ---
     out.push_str("    #[test]\n");
     out.push_str(&format!(
@@ -683,7 +716,7 @@ fn generate_guard_tests(
     ));
 
     // Try to derive a violating input from the guard
-    let (state_overrides, param_overrides) = derive_guard_violation(&guard_rust, op, fields);
+    let (state_overrides, param_overrides) = derive_guard_violation(guard_rust, op, fields);
 
     emit_state_literal_with(out, state_name, fields, op, &[], &state_overrides, false);
     for (pname, ptype) in &op.takes_params {
@@ -730,10 +763,7 @@ fn generate_property_test(
 
     // Set up state that satisfies the property: seed values consider the
     // property body alongside the operation's own guards.
-    let prop_rust = prop
-        .expression
-        .as_deref()
-        .map(|e| translate_guard(e, "state"));
+    let prop_rust = prop.tree.as_ref().map(render_for_state);
     let extra: Vec<&str> = prop_rust.as_deref().into_iter().collect();
     emit_state_literal(out, state_name, fields, op, &extra, true);
 
@@ -759,8 +789,7 @@ fn generate_property_test(
         prop_name_upper, op.name
     ));
 
-    if let Some(ref expr) = prop.expression {
-        let rust_expr = translate_guard(expr, "state");
+    if let Some(rust_expr) = &prop_rust {
         out.push_str(&format!(
             "        assert!({}, \"{} must hold after {}\");\n",
             rust_expr, prop.name, op.name
@@ -986,14 +1015,11 @@ fn seed_state_values(
         vals.insert(fname.clone(), base);
     }
 
-    // Guard conjunction: legacy guard + requires clauses + extras
-    // (property bodies), all normalized through the shared translator.
+    // Guard conjunction: requires clauses + extras (property bodies),
+    // all rendered from the typed trees against the `state` binder.
     let mut texts: Vec<String> = Vec::new();
-    if let Some(g) = &op.guard_str {
-        texts.push(translate_guard(g, "state"));
-    }
     for req in &op.requires {
-        texts.push(translate_guard(&req.lean_expr, "state"));
+        texts.push(render_for_state(requires_tree(req)));
     }
     for t in extra_texts {
         texts.push((*t).to_string());
@@ -1265,5 +1291,57 @@ fn flip_cmp(cmp: &'static str) -> &'static str {
         ">" => "<",
         ">=" => "<=",
         other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #156 regression: the guard predicate renders from the requires
+    /// trees. The legacy path read only the deleted `guard_str`, so every
+    /// requires-only handler got `fn guard_x { true }` plus a rejects-test
+    /// asserting `!true` — a generated test that always failed. Handlers
+    /// whose requires are all account-suppressed must get no guard fn and
+    /// no guard tests at all (same failure shape, `!(true)`).
+    #[test]
+    fn guard_predicates_render_requires_and_skip_suppressed_handlers() {
+        let src = r#"spec T
+type State | Active of { admin_key : Pubkey, pool : U64 }
+type Error | Unauthorized | InvalidAmount
+handler swap (amount : U64) (min_out : U64) : State.Active -> State.Active {
+  accounts { admin : signer, state : writable }
+  requires amount >= min_out and min_out > 0 else InvalidAmount
+  effect { pool += amount }
+}
+handler close : State.Active -> State.Active {
+  accounts { admin : signer, state : writable }
+  requires admin.pubkey == state.admin_key else Unauthorized
+  effect { pool := 0 }
+}
+"#;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spec_path = dir.path().join("t.qedspec");
+        std::fs::write(&spec_path, src).expect("write spec");
+        let out_path = dir.path().join("tests.rs");
+        generate(&spec_path, &out_path).expect("generate unit tests");
+        let out = std::fs::read_to_string(&out_path).expect("read output");
+
+        // Requires-derived guard body, not the vacuous `true`.
+        assert!(out.contains("fn guard_swap"), "guard fn emitted:\n{out}");
+        assert!(
+            out.contains("amount >= min_out") && out.contains("min_out > 0"),
+            "guard body renders the requires conjunction:\n{out}"
+        );
+        // Account-suppressed handler: no guard fn, no failing rejects-test.
+        assert!(
+            !out.contains("fn guard_close") && !out.contains("test_close_guard_rejects_invalid"),
+            "suppressed handler must not emit guard fn or tests:\n{out}"
+        );
+        // No vacuous `true` guard body anywhere.
+        assert!(
+            !out.contains("-> bool {\n    true\n}"),
+            "no guard predicate may degrade to `true`:\n{out}"
+        );
     }
 }

@@ -454,8 +454,7 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                 let parsed = match &i.body {
                     a::InvariantBody::Expr(e) => {
                         let lean = expr_to_lean(&e.node, Ctx::Guard, consts, &env);
-                        let rust =
-                            crate::rust_codegen_util::translate_property_to_rust(&lean, false);
+                        let rust = expr_to_rust(&e.node, Ctx::Guard, consts, opts_native(&env));
                         crate::check::ParsedInvariant {
                             name: i.name.clone(),
                             doc: String::new(),
@@ -843,10 +842,6 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                     .requires
                     .iter()
                     .any(|r| mentions_state(&r.lean_expr))
-                || handler
-                    .aborts_if
-                    .iter()
-                    .any(|a| mentions_state(&a.lean_expr))
                 || handler.ensures.iter().any(|e| mentions_state(&e.lean_expr));
             if !touches_state {
                 continue;

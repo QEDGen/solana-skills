@@ -3,8 +3,6 @@
 //! `Map[N] T` / subscript validation.
 
 use super::*;
-use regex::Regex;
-use std::sync::LazyLock;
 
 /// Rule 3: add effect without explicit overflow bound (type-aware),
 /// per-field. Sub effects get auto-guarded for underflow by codegen,
@@ -14,7 +12,7 @@ pub(super) fn check_unguarded_arithmetic(spec: &ParsedSpec) -> Vec<CompletenessW
     for op in &spec.handlers {
         // Collect all guard text for substring matching
         let all_guards: String = {
-            let mut g = op.guard_str.clone().unwrap_or_default();
+            let mut g = String::new();
             for req in &op.requires {
                 g.push(' ');
                 g.push_str(&req.lean_expr);
@@ -124,74 +122,6 @@ pub(super) fn check_missing_guard_from_takes(
                 .fix("Add input validation for takes parameters")
                 .example(format!("  handler {}\n    guard {}", op.name, guard_expr)),
             );
-        }
-    }
-    warnings
-}
-
-/// Rule 14: dead_guard — a guard conjunct subsumed by another on the same
-/// operation.
-pub(super) fn check_dead_guard(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
-    let mut warnings = Vec::new();
-    static CMP_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"^(?:s\.|state\.)?(\w+)\s*(>=|<=|>|<|=)\s*(\d+)$").unwrap());
-    let cmp_re = &*CMP_RE;
-    for op in &spec.handlers {
-        if let Some(ref guard) = op.guard_str {
-            // Split on ∧ and "and" to get individual conjuncts
-            let conjuncts: Vec<&str> = guard
-                .split('\u{2227}')
-                .flat_map(|s| s.split(" and "))
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty())
-                .collect();
-
-            let parsed: Vec<(usize, &str, &str, i64)> = conjuncts
-                .iter()
-                .enumerate()
-                .filter_map(|(i, c)| {
-                    cmp_re.captures(c).and_then(|caps| {
-                        let field = caps.get(1)?.as_str();
-                        let cmp = caps.get(2)?.as_str();
-                        let val: i64 = caps.get(3)?.as_str().parse().ok()?;
-                        Some((i, field, cmp, val))
-                    })
-                })
-                .collect();
-
-            for &(i, field_a, cmp_a, val_a) in &parsed {
-                for &(j, field_b, cmp_b, val_b) in &parsed {
-                    if i == j || field_a != field_b {
-                        continue;
-                    }
-                    // Check if conjunct j implies conjunct i (making i redundant)
-                    let subsumed = match (cmp_a, cmp_b) {
-                        (">=", ">=") => val_b >= val_a, // x >= 5 implies x >= 3
-                        (">", ">") => val_b >= val_a,   // x > 5 implies x > 3
-                        (">=", ">") => val_b >= val_a,  // x > 5 implies x >= 5
-                        ("<=", "<=") => val_b <= val_a, // x <= 3 implies x <= 5
-                        ("<", "<") => val_b <= val_a,
-                        ("<=", "<") => val_b <= val_a,
-                        _ => false,
-                    };
-                    if subsumed && i != j {
-                        warnings.push(
-                            warn(
-                                "dead_guard",
-                                Severity::Info,
-                                4,
-                                format!(
-                                    "guard conjunct '{}' on operation '{}' is subsumed by '{}'",
-                                    conjuncts[i], op.name, conjuncts[j]
-                                ),
-                            )
-                            .subject(op.name.clone())
-                            .fix(format!("Remove the redundant conjunct '{}'", conjuncts[i])),
-                        );
-                        break; // Only report once per subsumed conjunct
-                    }
-                }
-            }
         }
     }
     warnings
@@ -793,7 +723,10 @@ mod tests {
     fn test_missing_guard_from_takes_skips_when_guard_exists() {
         let mut h = make_handler("deposit");
         h.takes_params = vec![("amount".to_string(), "U64".to_string())];
-        h.guard_str = Some("amount > 0".to_string());
+        h.requires.push(crate::check::ParsedRequires {
+            lean_expr: "amount > 0".to_string(),
+            ..Default::default()
+        });
         let spec = ParsedSpec {
             handlers: vec![h],
             lifecycle_states: vec!["Active".to_string()],

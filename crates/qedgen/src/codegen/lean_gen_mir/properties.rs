@@ -394,16 +394,15 @@ pub(super) fn emit_frame_conditions(out: &mut String, mir: &Mir) {
     }
 }
 
-/// Emit abort theorems — per (handler, abort clause):
+/// Emit abort theorems — per (handler, `requires X else Err` clause):
 ///
 /// ```text
 /// theorem <h>_aborts_if_<Err> (s : State) (signer : Pubkey) <params>
-///     (h : <pred>) : <h>Transition s signer <args> = none := sorry
+///     (h : ¬(<requires-expr>)) : <h>Transition s signer <args> = none := sorry
 /// ```
 ///
-/// For `requires X else Err` the hypothesis is the negated form
-/// `¬(<requires-expr>)`. `aborts_total` instead emits a single
-/// `<h>_aborts_iff` theorem with the disjunction of every abort condition.
+/// `aborts_total` instead emits a single `<h>_aborts_iff` theorem with the
+/// disjunction of every abort condition.
 pub(super) fn emit_aborts_if(out: &mut String, mir: &Mir) {
     emit_aborts_if_with_sorry(out, mir, "sorry");
 }
@@ -451,10 +450,7 @@ pub(super) fn emit_aborts_if_adt(out: &mut String, mir: &Mir) {
 }
 
 pub(super) fn emit_aborts_if_with_sorry(out: &mut String, mir: &Mir, sorry_form: &str) {
-    let has_aborts = mir
-        .handlers
-        .iter()
-        .any(|h| !h.aborts_if.is_empty() || !h.requires_or_abort.is_empty());
+    let has_aborts = mir.handlers.iter().any(|h| !h.requires_or_abort.is_empty());
     if !has_aborts {
         return;
     }
@@ -468,7 +464,7 @@ pub(super) fn emit_aborts_if_with_sorry(out: &mut String, mir: &Mir, sorry_form:
     );
 
     for h in &mir.handlers {
-        if h.aborts_if.is_empty() && h.requires_or_abort.is_empty() {
+        if h.requires_or_abort.is_empty() {
             continue;
         }
         let trans_name = safe_name(&format!("{}Transition", h.name));
@@ -477,14 +473,9 @@ pub(super) fn emit_aborts_if_with_sorry(out: &mut String, mir: &Mir, sorry_form:
 
         // `aborts_total` collapses all abort conditions into one iff theorem.
         let all_abort_lean: Vec<String> = h
-            .aborts_if
+            .requires_or_abort
             .iter()
-            .map(|a| a.pred.0.lean.clone())
-            .chain(
-                h.requires_or_abort
-                    .iter()
-                    .map(|r| format!("\u{00AC}({})", r.pred.0.lean)),
-            )
+            .map(|r| format!("\u{00AC}({})", r.pred.0.lean))
             .collect();
 
         if h.aborts_total && !all_abort_lean.is_empty() {
@@ -506,9 +497,6 @@ pub(super) fn emit_aborts_if_with_sorry(out: &mut String, mir: &Mir, sorry_form:
         // appears multiple times on a single handler.
         let mut error_total: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
-        for a in &h.aborts_if {
-            *error_total.entry(a.err.clone()).or_insert(0) += 1;
-        }
         for r in &h.requires_or_abort {
             *error_total.entry(r.err.clone()).or_insert(0) += 1;
         }
@@ -529,19 +517,6 @@ pub(super) fn emit_aborts_if_with_sorry(out: &mut String, mir: &Mir, sorry_form:
                     safe_name(&format!("{}_aborts_if_{}", h.name, err))
                 }
             };
-
-        // Legacy aborts_if clauses: hypothesis IS the predicate.
-        for a in &h.aborts_if {
-            let theorem_name = theorem_name_for(&a.err, &mut error_seen);
-            out.push_str(&format!(
-                "theorem {} (s : State) (signer : Pubkey){}\n",
-                theorem_name, param_sig
-            ));
-            out.push_str(&format!(
-                "    (h : {}) : {} s signer{} = none := {}\n\n",
-                a.pred.0.lean, trans_name, param_args, sorry_form
-            ));
-        }
 
         // requires-else clauses: hypothesis is ¬(predicate). Clauses
         // referencing a handler account's `.pubkey` / `.key()` are skipped

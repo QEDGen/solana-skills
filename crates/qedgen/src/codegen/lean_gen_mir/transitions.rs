@@ -233,7 +233,6 @@ pub(super) fn adt_bound_conds(
             | Stmt::TokenTransfer { .. }
             | Stmt::VariantPromote { .. }
             | Stmt::Branch { .. }
-            | Stmt::Abort(_)
             | Stmt::Cpi { .. }
             | Stmt::Emit { .. } => {}
         }
@@ -273,7 +272,6 @@ pub(super) fn adt_effect_map(
             | Stmt::TokenTransfer { .. }
             | Stmt::VariantPromote { .. }
             | Stmt::Branch { .. }
-            | Stmt::Abort(_)
             | Stmt::Cpi { .. }
             | Stmt::Emit { .. } => {}
         }
@@ -658,7 +656,6 @@ pub(super) fn flat_effect_with_parts(
             | Stmt::TokenTransfer { .. }
             | Stmt::VariantPromote { .. }
             | Stmt::Branch { .. }
-            | Stmt::Abort(_)
             | Stmt::Cpi { .. }
             | Stmt::Emit { .. } => {}
         }
@@ -692,7 +689,6 @@ pub(super) fn sub_underflow_conds(
             | Stmt::WrapAdd { .. }
             | Stmt::SatAdd { .. }
             | Stmt::Branch { .. }
-            | Stmt::Abort(_)
             | Stmt::Cpi { .. }
             | Stmt::Emit { .. } => continue,
         };
@@ -740,7 +736,6 @@ pub(super) fn add_overflow_conds(
             | Stmt::WrapSub { .. }
             | Stmt::SatSub { .. }
             | Stmt::Branch { .. }
-            | Stmt::Abort(_)
             | Stmt::Cpi { .. }
             | Stmt::Emit { .. } => continue,
         };
@@ -932,7 +927,6 @@ pub(super) fn effect_tree_bound_conds(
             | Stmt::TokenTransfer { .. }
             | Stmt::VariantPromote { .. }
             | Stmt::Branch { .. }
-            | Stmt::Abort(_)
             | Stmt::Cpi { .. }
             | Stmt::Emit { .. } => continue,
         };

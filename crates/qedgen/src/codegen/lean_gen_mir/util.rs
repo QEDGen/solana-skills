@@ -149,7 +149,6 @@ pub(super) fn handler_touches_fields(stmts: &[crate::mir::Stmt], prop_fields: &[
         | Stmt::TokenTransfer { .. }
         | Stmt::VariantPromote { .. }
         | Stmt::Branch { .. }
-        | Stmt::Abort(_)
         | Stmt::Cpi { .. }
         | Stmt::Emit { .. } => false,
     })

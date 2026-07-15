@@ -1564,8 +1564,7 @@ handler bump (n : U64) : State.Active -> State.Active {
     let handler = spec.handlers.iter().find(|h| h.name == "bump").unwrap();
     let state_acct = find_state_account(handler).expect("state account");
     let effect = handler.effects.first().unwrap();
-    let rendered =
-        mechanize_effect(effect, state_acct, handler, &spec, Target::Anchor).expect("mechanized");
+    let rendered = mechanize_effect(effect, state_acct, &spec, Target::Anchor).expect("mechanized");
     // Pre-F8 this said `ErrorCode::MathOverflow` (a non-existent enum).
     // F8: it now says `<ProgramName>Error::MathOverflow`, matching the
     // user's declared Error sum.
@@ -1590,7 +1589,7 @@ fn mechanize_first_effect(src: &str, handler_name: &str) -> String {
         .expect("handler not found");
     let state_acct = find_state_account(handler).expect("state account");
     let effect = handler.effects.first().expect("at least one effect");
-    mechanize_effect(effect, state_acct, handler, &spec, Target::Anchor).expect("mechanized")
+    mechanize_effect(effect, state_acct, &spec, Target::Anchor).expect("mechanized")
 }
 
 #[test]
@@ -2289,8 +2288,7 @@ handler set_bid : State.Active -> State.Active {
         effect.tree.is_some(),
         "adapter must carry a tree for this RHS"
     );
-    let rendered =
-        mechanize_effect(effect, state_acct, handler, &spec, Target::Anchor).expect("mechanized");
+    let rendered = mechanize_effect(effect, state_acct, &spec, Target::Anchor).expect("mechanized");
     assert_eq!(
         rendered,
         "        self.state.bid_buyer = self.state.rfp_buyer;\n"

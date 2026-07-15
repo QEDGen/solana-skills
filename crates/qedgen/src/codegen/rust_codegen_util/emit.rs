@@ -239,7 +239,6 @@ pub fn emit_invariant_predicates(out: &mut String, invariants: &[&crate::check::
 pub fn emit_property_predicates_with(
     out: &mut String,
     properties: &[ParsedProperty],
-    wrapping: bool,
     map_type_fn: impl Fn(&str) -> anyhow::Result<String>,
 ) {
     for prop in properties {
@@ -247,7 +246,7 @@ pub fn emit_property_predicates_with(
         // evaluating the predicate can't overflow-panic — issue #146);
         // string fallbacks for tree-less properties (see
         // `property_predicate_rust`).
-        let Some(rust_expr) = property_predicate_rust(prop, wrapping) else {
+        let Some(rust_expr) = property_predicate_rust(prop) else {
             continue;
         };
         let doc = prop.expression.as_deref().unwrap_or("");
@@ -405,14 +404,10 @@ pub fn emit_transition_fn_inner(
         op.name, params
     ));
 
-    // Guard check (merges guard_str + requires clauses)
+    // Guard check (requires clauses)
     if let Some(guard_expr) =
         collect_full_guard_with_account_env(op, wrapping, account_env_struct.map(|_| "accounts"))
     {
-        if let Some(ref raw) = op.guard_str {
-            out.push_str(&format!("    // guard: {}\n", raw));
-        }
-
         let guard_terms = collect_guard_terms_with_account_env(
             op,
             wrapping,
@@ -420,7 +415,7 @@ pub fn emit_transition_fn_inner(
         );
         if rewrite_pubkey_comparisons && guard_terms.len() > 8 {
             for term in guard_terms {
-                let term_expr = rewrite_kani_pubkey_comparisons(&term.rust_expr, op, spec);
+                let term_expr = rewrite_kani_pubkey_comparisons(&term, op, spec);
                 if let Some(negated) = negate_simple_top_level_comparison(&term_expr) {
                     out.push_str(&format!("    if {} {{\n", negated));
                 } else {
@@ -497,7 +492,6 @@ pub fn emit_transition_fn_inner(
                 if account_env_struct.is_some() {
                     emit_one_effect_with_account_env(
                         out,
-                        op,
                         spec,
                         wrapping,
                         field,
@@ -507,16 +501,7 @@ pub fn emit_transition_fn_inner(
                         "accounts",
                     );
                 } else {
-                    emit_one_effect(
-                        out,
-                        op,
-                        spec,
-                        wrapping,
-                        field,
-                        op_kind,
-                        value,
-                        "            ",
-                    );
+                    emit_one_effect(out, spec, wrapping, field, op_kind, value, "            ");
                 }
                 emit_after_store_hooks(out, &mir.hooks, field, "            ");
             }
@@ -551,10 +536,10 @@ pub fn emit_transition_fn_inner(
             }
             if account_env_struct.is_some() {
                 emit_one_effect_with_account_env(
-                    out, op, spec, wrapping, field, op_kind, value, "    ", "accounts",
+                    out, spec, wrapping, field, op_kind, value, "    ", "accounts",
                 );
             } else {
-                emit_one_effect(out, op, spec, wrapping, field, op_kind, value, "    ");
+                emit_one_effect(out, spec, wrapping, field, op_kind, value, "    ");
             }
             emit_after_store_hooks(out, &mir.hooks, field, "    ");
         }

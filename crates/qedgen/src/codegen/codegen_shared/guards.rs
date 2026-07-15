@@ -16,9 +16,6 @@ pub(crate) fn guards_use_math_helpers(spec: &ParsedSpec) -> bool {
         if h.requires.iter().any(|r| probe(&r.rust_expr)) {
             any = true;
         }
-        if h.aborts_if.iter().any(|a| probe(&a.rust_expr)) {
-            any = true;
-        }
         if h.ensures.iter().any(|e| probe(&e.rust_expr)) {
             any = true;
         }
@@ -211,7 +208,6 @@ pub(crate) fn generate_guards(
         emit_r27_authority_checks(&mut out, handler, spec, &surface, &err_enum);
 
         if handler.requires.is_empty()
-            && handler.aborts_if.is_empty()
             && lifecycle_pre_check.is_empty()
             && lifecycle_post_write.is_empty()
         {
@@ -257,10 +253,6 @@ pub(crate) fn generate_guards(
 
         emit_requires_guards(
             &mut out, handler, hm, spec, &surface, target, state_acct, pod_target, &err_enum,
-        );
-
-        emit_aborts_guards(
-            &mut out, handler, spec, &surface, state_acct, pod_target, &err_enum,
         );
 
         // R26: lifecycle post-status write — runs after all guards have
@@ -726,31 +718,6 @@ fn emit_requires_guards(
     }
 }
 
-/// Emit the `aborts_if` clause checks for one handler.
-fn emit_aborts_guards(
-    out: &mut String,
-    handler: &ParsedHandler,
-    spec: &ParsedSpec,
-    surface: &FrameworkSurface,
-    state_acct: Option<&crate::check::ParsedHandlerAccount>,
-    pod_target: bool,
-    err_enum: &str,
-) {
-    for ab in &handler.aborts_if {
-        let raw = if pod_target {
-            ab.rust_expr_pod.trim()
-        } else {
-            ab.rust_expr.trim()
-        };
-        let rust = bind_state_expr(raw, handler, state_acct, spec, surface);
-        out.push_str(&format!(
-            "    if ({}) {{ return Err({}); }}\n",
-            rust,
-            surface.error_expr(err_enum, &ab.error_name),
-        ));
-    }
-}
-
 /// True when `expr` references the spec's state binder `s` (a word-bounded
 /// `s` immediately followed by `.`), i.e. it reads a state field.
 pub(crate) fn references_pinocchio_state(expr: &str) -> bool {
@@ -869,7 +836,7 @@ pub(crate) fn bind_pinocchio_expr(
 
 /// Emit `src/guards.rs` for the Pinocchio target (slice 6 4b). Per-handler
 /// guard fns take `ctx: &<Pascal>` + params and return `ProgramResult`.
-/// Handles signer-`auth` (`is_signer`) and `requires` / `aborts_if` (param
+/// Handles signer-`auth` (`is_signer`) and `requires` (param
 /// clauses directly; scalar state clauses via a one-time zeropod decode of
 /// the state account, reusing `rust_expr_pod` since zeropod shares
 /// quasar-pod's `.get()` API). Lifecycle pre-checks + PDA verification, and
@@ -944,11 +911,7 @@ pub(crate) fn emit_pinocchio_guards(
         let needs_state = handler
             .requires
             .iter()
-            .any(|r| references_pinocchio_state(&r.rust_expr))
-            || handler
-                .aborts_if
-                .iter()
-                .any(|a| references_pinocchio_state(&a.rust_expr));
+            .any(|r| references_pinocchio_state(&r.rust_expr));
         let decoded = if needs_state && single_state {
             match resolve_handler_state_account(handler, spec) {
                 Some(acct) => {
@@ -980,22 +943,6 @@ pub(crate) fn emit_pinocchio_guards(
                 None => "ProgramError::Custom(0xFF)".to_string(),
             };
             out.push_str(&format!("    if !({}) {{ return Err({}); }}\n", rust, err));
-        }
-
-        for ab in &handler.aborts_if {
-            let raw = ab.rust_expr.trim();
-            if references_pinocchio_state(raw) && !decoded {
-                out.push_str(&format!(
-                    "    // TODO(slice 6 4b-cont): state-referencing abort — not enforced yet: {}\n",
-                    ab.lean_expr.trim()
-                ));
-                continue;
-            }
-            let rust = bind_pinocchio_expr(raw, handler, "__state", "ctx", spec);
-            out.push_str(&format!(
-                "    if ({}) {{ return Err(ProgramError::from({}::{})); }}\n",
-                rust, err_enum, ab.error_name
-            ));
         }
 
         out.push_str("    Ok(())\n}\n\n");
