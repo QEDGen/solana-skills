@@ -551,7 +551,7 @@ pub(crate) fn crucible_backend_report(
     ctx.stateful = stateful;
 
     let findings = match crucible_probe::run_fuzz_probe(&ctx) {
-        Ok(f) => f,
+        Ok(r) => r.findings,
         Err(e) => {
             return verify::BackendReport {
                 name: "crucible",
