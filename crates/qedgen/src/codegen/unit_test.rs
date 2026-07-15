@@ -474,20 +474,44 @@ fn resolve_state_for_property<'a>(
 /// pubkeys are suppressed: the unit-test state struct carries no
 /// accounts at all, so any account-touching clause (bare `approver`
 /// comparisons included, not just `.pubkey` reads) is unexpressible
-/// here. `None` when nothing is expressible — the caller skips the
-/// guard fn and its tests.
+/// here. Top-level conjunctions are projected term-by-term so an
+/// account-only term does not erase adjacent state/param constraints.
+/// Other boolean shapes stay atomic: pruning below `or`/`not` would
+/// change their meaning. `None` when nothing is expressible — the caller
+/// skips the guard fn and its tests.
 fn guard_predicate_rust(op: &ParsedHandler) -> Option<String> {
     let parts: Vec<String> = op
         .requires
         .iter()
         .map(requires_tree)
-        .filter(|t| !crate::rust_codegen_util::tree_render::tree_mentions_account(t))
+        .flat_map(account_free_conjuncts)
         .map(|t| format!("({})", render_for_state(t)))
         .collect();
     if parts.is_empty() {
         None
     } else {
         Some(parts.join(" && "))
+    }
+}
+
+/// Flatten `and` nodes and retain the conjuncts expressible against the
+/// account-free unit-test state model. Account reads nested under any
+/// other expression shape make that whole conjunct unexpressible.
+fn account_free_conjuncts(tree: &crate::mir::ExprTree) -> Vec<&crate::mir::ExprTree> {
+    use crate::mir::expr_tree::{ExprTree, TreeBoolOp};
+
+    match tree {
+        ExprTree::BoolOp {
+            op: TreeBoolOp::And,
+            lhs,
+            rhs,
+        } => {
+            let mut out = account_free_conjuncts(lhs);
+            out.extend(account_free_conjuncts(rhs));
+            out
+        }
+        _ if crate::rust_codegen_util::tree_render::tree_mentions_account(tree) => Vec::new(),
+        _ => vec![tree],
     }
 }
 
@@ -1321,6 +1345,11 @@ handler close : State.Active -> State.Active {
   requires admin.pubkey == state.admin_key else Unauthorized
   effect { pool := 0 }
 }
+handler mixed (amount : U64) : State.Active -> State.Active {
+  accounts { admin : signer, state : writable }
+  requires amount > 0 and admin.pubkey == state.admin_key else Unauthorized
+  effect { pool += amount }
+}
 "#;
         let dir = tempfile::tempdir().expect("tempdir");
         let spec_path = dir.path().join("t.qedspec");
@@ -1339,6 +1368,21 @@ handler close : State.Active -> State.Active {
         assert!(
             !out.contains("fn guard_close") && !out.contains("test_close_guard_rejects_invalid"),
             "suppressed handler must not emit guard fn or tests:\n{out}"
+        );
+        // Mixed conjunction: retain the account-free term instead of
+        // dropping the entire requires clause.
+        assert!(
+            out.contains("fn guard_mixed"),
+            "mixed guard fn emitted:\n{out}"
+        );
+        let mixed = out
+            .split("fn guard_mixed")
+            .nth(1)
+            .and_then(|tail| tail.split('}').next())
+            .expect("mixed guard body");
+        assert!(
+            mixed.contains("amount > 0") && !mixed.contains("admin"),
+            "mixed guard keeps only account-free conjuncts:\n{mixed}"
         );
         // No vacuous `true` guard body anywhere.
         assert!(

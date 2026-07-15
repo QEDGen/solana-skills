@@ -1471,15 +1471,18 @@ fn lower_body(h: &crate::check::ParsedHandler) -> Block {
 
     // 4. Transfers — desugar each into a TokenTransfer Stmt.
     for tr in &h.transfers {
-        stmts.push(Stmt::TokenTransfer {
-            from: AccountRef::ByBinding(tr.from.clone()),
-            to: AccountRef::ByBinding(tr.to.clone()),
-            amount: tr
+        let amount = match &tr.amount_tree {
+            Some(tree) => Expr::default().with_tree(Some(tree.clone())),
+            None => tr
                 .amount
                 .as_ref()
                 .map(|a| Expr::from_raw(a.clone()))
-                .unwrap_or_default()
-                .with_tree(tr.amount_tree.clone()),
+                .unwrap_or_default(),
+        };
+        stmts.push(Stmt::TokenTransfer {
+            from: AccountRef::ByBinding(tr.from.clone()),
+            to: AccountRef::ByBinding(tr.to.clone()),
+            amount,
             authority: tr
                 .authority
                 .as_ref()
@@ -1568,13 +1571,13 @@ fn lower_effects(effects: &[crate::check::ParsedEffect]) -> Vec<Stmt> {
         // adapter rendering when present (empty for ParsedHandlers built
         // outside the chumsky adapter — IDL ingest, probes — where the
         // single string is all we have).
-        let rhs = if eff.value_rust.is_empty() {
-            Expr {
-                tree,
-                ..Expr::from_raw(value.clone())
-            }
-        } else {
-            Expr::default().with_tree(tree)
+        let rhs = match tree {
+            Some(tree) => Expr::default().with_tree(Some(tree)),
+            None => Expr::from_raw(if eff.value_rust.is_empty() {
+                value.clone()
+            } else {
+                eff.value_rust.clone()
+            }),
         };
         let stmt = match eff.op.as_str() {
             "set" => Stmt::Assign { path, rhs },
@@ -1879,6 +1882,44 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
         let parsed = crate::check::parse_spec_file(&spec_path)
             .unwrap_or_else(|e| panic!("parse {}: {e}", spec_path.display()));
         lower(&parsed)
+    }
+
+    #[test]
+    fn lower_preserves_tree_less_raw_effect_and_transfer_values() {
+        let mut handler = crate::check::ParsedHandler::default();
+        handler
+            .effects
+            .push(crate::check::ParsedEffect::from_triple(
+                "balance", "set", "amount",
+            ));
+        handler.transfers.push(crate::check::ParsedTransfer {
+            from: "source".into(),
+            to: "destination".into(),
+            amount: Some("amount".into()),
+            amount_tree: None,
+            authority: None,
+        });
+
+        let body = lower_body(&handler);
+        assert_eq!(body.stmts.len(), 2);
+
+        let Stmt::Assign { rhs, .. } = &body.stmts[0] else {
+            panic!("expected tree-less effect to lower to Assign");
+        };
+        assert_eq!(
+            crate::rust_codegen_util::mir_expr_rust(rhs),
+            "amount",
+            "raw effect RHS must survive without an adapter tree"
+        );
+
+        let Stmt::TokenTransfer { amount, .. } = &body.stmts[1] else {
+            panic!("expected tree-less transfer to lower to TokenTransfer");
+        };
+        assert_eq!(
+            crate::rust_codegen_util::mir_expr_rust(amount),
+            "amount",
+            "raw transfer amount must survive without an adapter tree"
+        );
     }
 
     #[test]
