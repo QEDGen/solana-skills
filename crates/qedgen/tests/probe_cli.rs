@@ -157,8 +157,14 @@ handler withdraw (amount : U64) : State.Active -> State.Active {
     );
     // Contract: candidates carry NO severity and NO reproducer.
     for c in candidates {
-        assert!(c.get("severity").is_none(), "candidate must not carry severity");
-        assert!(c.get("reproducer").is_none(), "candidate must not carry a reproducer");
+        assert!(
+            c.get("severity").is_none(),
+            "candidate must not carry severity"
+        );
+        assert!(
+            c.get("reproducer").is_none(),
+            "candidate must not carry a reproducer"
+        );
         assert!(
             c["reason"].as_str().is_some_and(|r| !r.is_empty()),
             "candidate must explain why it isn't a finding"

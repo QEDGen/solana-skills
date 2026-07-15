@@ -61,7 +61,10 @@ pub fn describe_failure(failure: &ConstructFailure) -> String {
             "no reproducer constructor implemented for this category yet".to_string()
         }
         ConstructFailure::KaniTimeout { budget } => {
-            format!("Kani exhausted its {}s budget without a counterexample", budget.as_secs())
+            format!(
+                "Kani exhausted its {}s budget without a counterexample",
+                budget.as_secs()
+            )
         }
         ConstructFailure::KaniNoCounterexample => {
             "Kani found no counterexample within its search depth".to_string()
@@ -311,7 +314,11 @@ mod tests {
             describe_failure(&ConstructFailure::BuildError("boom".into())),
         ];
         let unique: std::collections::HashSet<_> = reasons.iter().collect();
-        assert_eq!(unique.len(), reasons.len(), "reasons must be distinguishable");
+        assert_eq!(
+            unique.len(),
+            reasons.len(),
+            "reasons must be distinguishable"
+        );
         assert!(reasons[3].contains("boom"), "build error must carry detail");
     }
 

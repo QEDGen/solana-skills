@@ -788,12 +788,7 @@ pub(crate) fn source_scan_engine_run(prog_root: &Path) -> probe::EngineRun {
     let mut skipped: Vec<String> = files
         .iter()
         .filter(|f| std::fs::read_to_string(f).is_err())
-        .map(|f| {
-            f.strip_prefix(prog_root)
-                .unwrap_or(f)
-                .display()
-                .to_string()
-        })
+        .map(|f| f.strip_prefix(prog_root).unwrap_or(f).display().to_string())
         .collect();
     skipped.sort();
     if skipped.is_empty() {
