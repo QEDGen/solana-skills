@@ -775,6 +775,57 @@ pub(crate) fn runtime_agnostic_findings(prog_root: &Path) -> Result<Vec<probe::F
     Ok(findings)
 }
 
+/// v3 (#227): report the source-walk engine's status for a `--program`
+/// envelope. The regex scanners silently `continue` past any `.rs` file
+/// they can't read; this re-walks the same file set and surfaces the
+/// unreadable ones as a `partial` engine run so a zero-finding result
+/// can't hide half-skipped source. Returns a single `EngineRun` named
+/// `source_scan` (the arithmetic-symbol / paired-validator / lifecycle
+/// scanners share one file walk, so one status covers them).
+pub(crate) fn source_scan_engine_run(prog_root: &Path) -> probe::EngineRun {
+    let src_dir = prog_root.join("src");
+    let files = crate::fs_walk::collect_rs_files(&src_dir, crate::fs_walk::DEFAULT_SKIP_DIRS);
+    let mut skipped: Vec<String> = files
+        .iter()
+        .filter(|f| std::fs::read_to_string(f).is_err())
+        .map(|f| {
+            f.strip_prefix(prog_root)
+                .unwrap_or(f)
+                .display()
+                .to_string()
+        })
+        .collect();
+    skipped.sort();
+    if skipped.is_empty() {
+        probe::EngineRun {
+            engine: "source_scan".to_string(),
+            status: probe::EngineStatus::Passed,
+            detail: None,
+            candidates_dropped: 0,
+            skipped_files: Vec::new(),
+        }
+    } else {
+        probe::EngineRun {
+            engine: "source_scan".to_string(),
+            status: probe::EngineStatus::Partial,
+            detail: Some(format!("{} source file(s) unreadable", skipped.len())),
+            candidates_dropped: 0,
+            skipped_files: skipped,
+        }
+    }
+}
+
+/// Outcome for a `--program` source-walk envelope: a `partial` engine run
+/// downgrades an empty result to low-coverage; otherwise the scan is a
+/// real (scanner-scoped) pass.
+pub(crate) fn source_scan_outcome(engine: &probe::EngineRun) -> probe::ProbeOutcome {
+    if engine.status == probe::EngineStatus::Partial {
+        probe::ProbeOutcome::NoFindingsLowCoverage
+    } else {
+        probe::ProbeOutcome::PassedWithCoverage
+    }
+}
+
 /// Anchor (and Quasar) probe path used by `qedgen probe --program <root>`.
 /// Mirrors the Pinocchio branch's shape: runs the runtime-specific
 /// extractor, clusters proto-clauses, optionally materializes the audit
@@ -817,12 +868,16 @@ pub(crate) fn run_anchor_probe(
         )?;
     }
 
+    let engine_run = source_scan_engine_run(prog_root);
+    let outcome = source_scan_outcome(&engine_run);
     let output = probe::ProbeOutput {
         project_root: Some(prog_root.display().to_string()),
         runtime: Some(runtime_final),
         handlers: handlers_opt,
         applicable_categories: Some(applicable),
         findings: runtime_agnostic_findings(prog_root)?,
+        engine_runs: vec![engine_run],
+        outcome,
         clusters,
         ..probe::ProbeOutput::envelope(probe::Mode::SpecLess)
     };
@@ -890,12 +945,16 @@ pub(crate) fn run_native_probe(
         None => (None, None),
     };
 
+    let engine_run = source_scan_engine_run(prog_root);
+    let outcome = source_scan_outcome(&engine_run);
     let output = probe::ProbeOutput {
         project_root: Some(prog_root.display().to_string()),
         runtime: Some(runtime_final),
         handlers,
         applicable_categories: Some(applicable),
         findings: runtime_agnostic_findings(prog_root)?,
+        engine_runs: vec![engine_run],
+        outcome,
         clusters,
         dispatcher_kind,
         ..probe::ProbeOutput::envelope(probe::Mode::SpecLess)

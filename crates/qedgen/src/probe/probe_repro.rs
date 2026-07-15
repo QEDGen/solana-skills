@@ -1,18 +1,20 @@
 //! `qedgen probe` reproducer construction pipeline.
 //!
 //! Every emitted `Finding` must carry a concrete `Reproducer` (Kani trace,
-//! proptest seed, or sandbox tx); candidates whose reproducer can't be
-//! constructed are **silently dropped** — no advisory tier. A finding
-//! without a reproducer is auditor-grade noise and can't defend against
-//! "we don't think that's reachable"; silent is more honest than
-//! "possibly vulnerable." Artifacts live under
-//! `target/qedgen-repros/<finding.id>/` — ephemeral, never committed.
+//! proptest seed, or sandbox tx) — the reproducer-only contract on
+//! `findings[]` still holds. What changed in v3 (#227): a predicate hit
+//! whose reproducer can't be constructed is no longer *silently dropped* —
+//! `run_probe` demotes it to an investigation `Candidate` (carrying
+//! [`describe_failure`]'s reason), so a spec with live predicate hits is
+//! never indistinguishable from a clean one. Candidates make no
+//! exploitability claim, so the "no advisory tier" rule on `findings[]` is
+//! preserved. Artifacts live under `target/qedgen-repros/<finding.id>/` —
+//! ephemeral, never committed.
 //!
-//! All constructors are currently stubs (`NotImplemented`), so every probe
-//! finding is dropped — correct under the reproducible-only contract. v3
-//! replaces them with agent-authored repros via structured prompts; today
-//! the auditor SKILL writes Mollusk repros directly, bypassing this
-//! dispatcher.
+//! All constructors are currently stubs (`NotImplemented`), so today every
+//! predicate hit surfaces as a candidate. The reproducer vertical slice
+//! (#228) lands real constructors category by category; the auditor SKILL
+//! writes Mollusk repros directly in the meantime.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -48,6 +50,28 @@ pub enum ConstructFailure {
     /// I/O writing artifacts — drop rather than emit half-written
     /// artifacts.
     Io(String),
+}
+
+/// Human-readable `reason` for a candidate demoted from a finding — the
+/// text that travels in `Candidate.reason` so a consumer can tell "no
+/// constructor yet" from "Kani found nothing" from "the build broke".
+pub fn describe_failure(failure: &ConstructFailure) -> String {
+    match failure {
+        ConstructFailure::NotImplemented => {
+            "no reproducer constructor implemented for this category yet".to_string()
+        }
+        ConstructFailure::KaniTimeout { budget } => {
+            format!("Kani exhausted its {}s budget without a counterexample", budget.as_secs())
+        }
+        ConstructFailure::KaniNoCounterexample => {
+            "Kani found no counterexample within its search depth".to_string()
+        }
+        ConstructFailure::ProptestNoFailure => {
+            "no proptest seed reproduced the predicate".to_string()
+        }
+        ConstructFailure::BuildError(e) => format!("reproducer build failed: {e}"),
+        ConstructFailure::Io(e) => format!("reproducer I/O error: {e}"),
+    }
 }
 
 /// Inputs every category constructor needs. Paths are absolute.
@@ -231,11 +255,13 @@ mod tests {
         }
     }
 
-    /// Pins the contract: every constructor returns `NotImplemented`, so
-    /// the probe emits zero findings. Update when a category gains a real
-    /// constructor.
+    /// Categories whose constructors are still stubbed report
+    /// `NotImplemented` — the caller demotes them to candidates rather than
+    /// dropping them. As #228 lands real constructors, entries move OUT of
+    /// this list (and gain their own positive/negative tests); the list
+    /// shrinking is the retrofit's progress bar.
     #[test]
-    fn all_constructors_stub_during_retrofit() {
+    fn stubbed_constructors_report_not_implemented() {
         let categories = [
             (Category::MissingSigner, "missing_signer"),
             (Category::ArbitraryCpi, "arbitrary_cpi"),
@@ -271,6 +297,22 @@ mod tests {
                 result
             );
         }
+    }
+
+    /// `describe_failure` renders a distinct, human reason per variant so a
+    /// candidate's `reason` tells "not built yet" apart from "proved
+    /// nothing" apart from "build broke".
+    #[test]
+    fn describe_failure_is_distinct_per_variant() {
+        let reasons = [
+            describe_failure(&ConstructFailure::NotImplemented),
+            describe_failure(&ConstructFailure::KaniNoCounterexample),
+            describe_failure(&ConstructFailure::ProptestNoFailure),
+            describe_failure(&ConstructFailure::BuildError("boom".into())),
+        ];
+        let unique: std::collections::HashSet<_> = reasons.iter().collect();
+        assert_eq!(unique.len(), reasons.len(), "reasons must be distinguishable");
+        assert!(reasons[3].contains("boom"), "build error must carry detail");
     }
 
     #[test]
