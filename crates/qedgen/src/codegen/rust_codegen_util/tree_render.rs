@@ -1834,7 +1834,10 @@ mod tests {
     fn pinocchio_key_styles_deref_the_account_key() {
         let cx_ctx = RustCx::native().with_acct_key(Some(AcctKeyStyle::PinocchioCtx));
         let cx_self = RustCx::native().with_acct_key(Some(AcctKeyStyle::PinocchioSelf));
-        assert_eq!(render_rust(&acct_pubkey("owner"), cx_ctx), "*ctx.owner.key()");
+        assert_eq!(
+            render_rust(&acct_pubkey("owner"), cx_ctx),
+            "*ctx.owner.key()"
+        );
         assert_eq!(render_rust(&acct_bare("owner"), cx_ctx), "*ctx.owner.key()");
         assert_eq!(
             render_rust(&acct_pubkey("owner"), cx_self),
@@ -1866,10 +1869,7 @@ mod tests {
         let nested = ExprTree::Path(TreePath {
             root: "state".into(),
             binding: BindingKind::StateField,
-            segments: vec![
-                TreeSeg::Field("pool".into()),
-                TreeSeg::Field("fee".into()),
-            ],
+            segments: vec![TreeSeg::Field("pool".into()), TreeSeg::Field("fee".into())],
             ty: Some(Ty::U64),
         });
         assert_eq!(render_rust(&nested, cx), "__state.pool.fee");
