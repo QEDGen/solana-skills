@@ -1,0 +1,21 @@
+// Foreign registry program for the imported-guards fixture (#223).
+// Deliberately MULTI-variant so the consumer's `registry_cfg.operator`
+// guard read routes through the v2.29 Slice H mirror's inner-enum
+// accessor (`(*ctx.registry_cfg.inner.operator())`) rather than the
+// flat-struct direct read the cross-program-vault example exercises.
+
+spec Registry
+
+program_id "11111111111111111111111111111111"
+
+type State
+  | Draft of {
+      operator : Pubkey,
+    }
+  | Live of {
+      operator : Pubkey,
+      epoch    : U64,
+    }
+
+type Error
+  | NotLive

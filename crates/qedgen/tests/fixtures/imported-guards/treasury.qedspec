@@ -1,0 +1,62 @@
+// Guards-lane coverage fixture for #223: the requires emitter's two
+// non-key-style lanes that previously fell back to the
+// `bind_state_expr` string rewriter —
+//   1. multi-variant ADT state reads in `requires`
+//      (`state.spend_limit` → `(*ctx.treasury.inner.spend_limit())`), and
+//   2. imported-namespace account field reads (v2.29 Slice G.4 mirror
+//      routing: `registry_cfg.operator` on the MULTI-variant imported
+//      `Registry.State` → `(*ctx.registry_cfg.inner.operator())`).
+// The bundled cross-program-vault example covers the flat single-variant
+// imported read; this fixture pins the two remaining shapes.
+
+spec Treasury
+
+pragma state_repr = adt
+
+program_id "11111111111111111111111111111111"
+
+import Registry from "registry"
+
+type State
+  | Uninitialized
+  | Active of {
+      balance     : U64,
+      spend_limit : U64,
+    }
+
+type Error
+  | WrongState
+  | Unauthorized
+  | LimitExceeded
+  | InvalidAmount
+  | MathOverflow
+  | MathUnderflow
+
+handler initialize (limit : U64) : State.Uninitialized -> State.Active {
+  accounts {
+    payer    : signer, writable
+    treasury : writable, pda ["treasury", payer]
+  }
+  effect {
+    state := .Active { balance := 0, spend_limit := limit }
+  }
+}
+
+// Spend gate reads BOTH lanes: the imported registry's operator field
+// (auth sugar desugars to `requires registry_cfg.operator ==
+// operator.pubkey else Unauthorized`) and the consumer's own ADT state
+// field (`state.spend_limit`).
+handler spend (amount : U64) : State.Active -> State.Active {
+  auth registry_cfg.operator
+  accounts {
+    operator     : signer
+    treasury     : writable
+    registry_cfg : type Registry.State
+  }
+  requires amount > 0 else InvalidAmount
+  requires amount <= state.spend_limit else LimitExceeded
+  modifies [balance]
+  effect {
+    balance -= amount
+  }
+}
