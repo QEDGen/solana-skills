@@ -1,0 +1,6 @@
+# QEDGen manifest for the imported-guards fixture (#223). The `registry`
+# dep lives inside the fixture so the path survives the snapshot
+# harness's tempdir rsync.
+
+[dependencies.registry]
+path = "imports/registry"

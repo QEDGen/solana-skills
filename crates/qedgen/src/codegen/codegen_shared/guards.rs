@@ -1,5 +1,6 @@
 use super::*;
 use crate::mir::Mir;
+use crate::rust_codegen_util::tree_render::tree_mentions_state;
 
 /// True if any rendered Rust expression in the spec references one of the
 /// fixed-point helpers in `src/math.rs`. Used to gate the `use crate::math::*;`
@@ -264,7 +265,7 @@ pub(crate) fn generate_guards(
         }
 
         emit_requires_guards(
-            &mut out, handler, hm, spec, &surface, target, state_acct, pod_target, &err_enum,
+            &mut out, handler, spec, &surface, target, state_acct, pod_target, &err_enum,
         );
 
         // R26: lifecycle post-status write — runs after all guards have
@@ -423,11 +424,6 @@ fn emit_r27_authority_checks(
     }
 }
 
-/// Rewrite a spec-rendered guard expression for the guards.rs body: bare
-/// handler-account idents (and `<acct>.pubkey`) become runtime address
-/// loads, then the state binder `s.` is rebound to `ctx.<state_acct>.`
-/// (flat state) or the ADT accessor (`(*ctx.<state>.inner.<field>())`).
-/// Free-function sibling of [`bind_pinocchio_expr`]; formerly a 180-line
 /// Render a `let`-binding RHS for a scaffold position — tree-native
 /// (#156 tail): state reads bind through `receiver` (multi-variant ADT
 /// fields through the generated accessor), account reads through the
@@ -453,13 +449,11 @@ pub(crate) fn render_let_binding_rust(
         // hand-edit (same R12 contract as the requires lane).
         None => Binder::S,
     };
-    let cx = RustCx {
-        pod: pod_target,
-        ..RustCx::native()
-    }
-    .with_binder(binder)
-    .with_acct_key(acct_key)
-    .with_adt_accessors((!accessors.is_empty()).then_some(&accessors));
+    let cx = RustCx::native()
+        .with_pod(pod_target.then_some(crate::rust_codegen_util::tree_render::PodStyle::Quasar))
+        .with_binder(binder)
+        .with_acct_key(acct_key)
+        .with_adt_accessors((!accessors.is_empty()).then_some(&accessors));
     let rendered = render_rust(tree, cx);
     if tree.is_mul_div() {
         format!("({}) as u64", rendered)
@@ -468,196 +462,23 @@ pub(crate) fn render_let_binding_rust(
     }
 }
 
-/// closure inside `generate_guards`.
-fn bind_state_expr(
-    expr: &str,
-    handler: &ParsedHandler,
-    state_acct: Option<&crate::check::ParsedHandlerAccount>,
-    spec: &ParsedSpec,
-    surface: &FrameworkSurface,
-) -> String {
-    // Bare handler-account idents in spec expressions (e.g. the
-    // `approver` in `state.members[i] == approver`) need to be
-    // lowered to the runtime pubkey load `*ctx.<name>.to_account_view().address()`.
-    // Without this, the spec's signer-binding compiles to `... ==
-    // approver` where `approver` resolves to nothing in scope.
-    let handler_account_names: Vec<String> =
-        handler.accounts.iter().map(|a| a.name.clone()).collect();
-    // v2.29 Slice G.4 — index handler accounts by name so the
-    // `<acct>.<field>` rewriting can dispatch on
-    // `imported_namespace` and route through the local mirror.
-    let handler_accounts_by_name: std::collections::HashMap<
-        &str,
-        &crate::check::ParsedHandlerAccount,
-    > = handler
-        .accounts
-        .iter()
-        .map(|a| (a.name.as_str(), a))
-        .collect();
-    // Step 1: rewrite handler-account idents to address loads.
-    let mut after_accounts = String::with_capacity(expr.len() + 32);
-    let bytes = expr.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        let prev_ok = i == 0 || !is_ident_char(bytes[i - 1]);
-        let mut matched = false;
-        if prev_ok {
-            for name in &handler_account_names {
-                let nbytes = name.as_bytes();
-                if i + nbytes.len() <= bytes.len() && &bytes[i..i + nbytes.len()] == nbytes {
-                    // Boundary check on the trailing edge: don't
-                    // match `approver_x` when looking for `approver`.
-                    let after = i + nbytes.len();
-                    if after >= bytes.len() || !is_ident_char(bytes[after]) {
-                        // `<acct>.pubkey` is the spec-author's
-                        // way of saying "this account's address"
-                        // — lower to the same address-load form
-                        // we use for bare `<acct>` so a
-                        // `requires acct.pubkey == state.field`
-                        // clause compiles.
-                        let pubkey_marker = b".pubkey";
-                        let after_dot_end = after + pubkey_marker.len();
-                        if after_dot_end <= bytes.len()
-                            && &bytes[after..after_dot_end] == pubkey_marker
-                            && (after_dot_end == bytes.len()
-                                || !is_ident_char(bytes[after_dot_end]))
-                        {
-                            after_accounts.push_str(&surface.account_key_expr(name));
-                            i = after_dot_end;
-                            matched = true;
-                            break;
-                        }
-                        // v2.29 Slice G.4 — `<imported_acct>.<field>`
-                        // routes through the local mirror at
-                        // `crate::imported::<ns>::<Type>`. Multi-
-                        // variant ADT goes through the accessor
-                        // (`(*ctx.<name>.inner.<field>())`); flat
-                        // structs read directly off the wrapper's
-                        // auto-deref (`ctx.<name>.<field>`).
-                        if after < bytes.len() && bytes[after] == b'.' {
-                            if let Some(acct_meta) = handler_accounts_by_name.get(name.as_str()) {
-                                if let (Some(ns), Some(ty)) =
-                                    (&acct_meta.imported_namespace, &acct_meta.account_type)
-                                {
-                                    // Extract the field ident.
-                                    let mut j = after + 1;
-                                    while j < bytes.len() && is_ident_char(bytes[j]) {
-                                        j += 1;
-                                    }
-                                    let field = &expr[after + 1..j];
-                                    if !field.is_empty() {
-                                        let imported_ns = spec.imported_namespaces.get(ns.as_str());
-                                        let imported_ty = imported_ns.and_then(|ins| {
-                                            ins.account_types.iter().find(|a| &a.name == ty)
-                                        });
-                                        let is_multi_variant = imported_ty
-                                            .map(|a| a.variants.len() > 1)
-                                            .unwrap_or(false);
-                                        if is_multi_variant {
-                                            after_accounts.push_str(&format!(
-                                                "(*ctx.{}.inner.{}())",
-                                                name, field
-                                            ));
-                                        } else {
-                                            after_accounts
-                                                .push_str(&format!("ctx.{}.{}", name, field));
-                                        }
-                                        i = j;
-                                        matched = true;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        // Don't rewrite `name.` (field access on
-                        // the handler-account is a different
-                        // expression — keep the `.` access path).
-                        if after >= bytes.len() || bytes[after] != b'.' {
-                            after_accounts.push_str(&surface.account_key_expr(name));
-                            i = after;
-                            matched = true;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        if !matched {
-            after_accounts.push(bytes[i] as char);
-            i += 1;
-        }
-    }
-
-    // Step 2: rewrite `s.` to `ctx.<state>.` if we have a state
-    // account. Word-bounded so `accounts[i].fee_credits.get()`
-    // doesn't get corrupted to `fee_creditctx.vault.get()`.
-    let Some(sa) = state_acct else {
-        return after_accounts;
-    };
-    // v2.29 Slice B (#12 deep) — when the state is a multi-
-    // variant ADT, fields that live on variant payloads can't
-    // be reached through `ctx.<state>.<field>` directly
-    // (the wrapper only carries `inner`). Route through the
-    // accessor method emitted in generate_state. We look
-    // ahead after each `s.` match to grab the identifier and
-    // dispatch: known variant-payload field → accessor call,
-    // otherwise → the bare `ctx.<state>.<field>` rewrite for
-    // flat-state compatibility.
-    let accessor_fields = adt_accessor_field_names(spec);
-    let bare_target = format!("ctx.{}.", sa.name);
-    let bytes = after_accounts.as_bytes();
-    let mut out = String::with_capacity(after_accounts.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        let prev_ok = i == 0 || !is_ident_char(bytes[i - 1]);
-        if prev_ok && i + 1 < bytes.len() && bytes[i] == b's' && bytes[i + 1] == b'.' {
-            // Look ahead to extract the field identifier.
-            let mut j = i + 2;
-            while j < bytes.len() && is_ident_char(bytes[j]) {
-                j += 1;
-            }
-            let field = &after_accounts[i + 2..j];
-            if !field.is_empty() && accessor_fields.contains(field) {
-                // v2.29 Slice B accessor call. Wrap in
-                // parens + deref so subsequent ops (e.g.
-                // `!*paused`, `state.lp_supply.bits`) parse
-                // against the accessor return value.
-                out.push_str(&format!("(*ctx.{}.inner.{}())", sa.name, field));
-                i = j;
-            } else {
-                out.push_str(&bare_target);
-                i += 2;
-            }
-        } else {
-            out.push(bytes[i] as char);
-            i += 1;
-        }
-    }
-    out
-}
-
 /// Emit the `requires` clause checks for one handler.
 ///
-/// #151 Slice 3 — tree-native requires rendering. One render under
-/// `Binder::SelfAcct("ctx.<state>")` (state receiver) +
-/// `AcctKeyStyle` (account key loads) replaces `bind_state`'s
-/// two-pass string rewrite. The tree path fires only where it
-/// reproduces the legacy receivers exactly:
-///   - flat state (multi-variant ADT fields route through the
-///     `.inner.<field>()` accessor — a spec-indexed rewrite the
-///     Copy render context can't carry), and
-///   - key-style account reads only (imported-account field reads
-///     need the `crate::imported` mirror dispatch).
-///
-/// Everything else — and tree-less clauses (IDL ingest, probes) —
-/// keeps the legacy string path.
+/// Tree-native (#151 Slice 3; the last string lanes went structural in
+/// #223): one render under `Binder::SelfAcct("ctx.<state>")` (state
+/// receiver) + `AcctKeyStyle` (account key loads) + `adt_accessors`
+/// (multi-variant ADT fields → `(*ctx.<state>.inner.<field>())`) +
+/// `acct_mirror` (imported-account field reads → the `crate::imported`
+/// mirror) covers every clause shape. Non-imported account field
+/// projections render as the bare `<acct>.<field>` path for the caller
+/// to hand-edit — the same R12 contract the retired `bind_state_expr`
+/// string rewriter carried.
 // Internal seam of the generate_guards split; the params are the loop-local
 // context, not an API — a carrier struct would just rename them.
 #[allow(clippy::too_many_arguments)]
 fn emit_requires_guards(
     out: &mut String,
     handler: &ParsedHandler,
-    hm: &crate::mir::HandlerMir,
     spec: &ParsedSpec,
     surface: &FrameworkSurface,
     target: Target,
@@ -665,55 +486,53 @@ fn emit_requires_guards(
     pod_target: bool,
     err_enum: &str,
 ) {
-    // v2.29 Slice B — collect abstract-binder names. Requires that
-    // reference an abstract binder can't run in the guard fn (the
-    // binder is computed AFTER the guard fires in the handler
-    // scaffold). Defer to the handler body and document the skip.
-    let abstract_binder_names: Vec<&str> = hm
-        .abstract_binders
-        .iter()
-        .map(|(n, _)| n.as_str())
-        .collect();
+    use crate::rust_codegen_util::tree_render::{
+        render_rust, tree_references_abstract_binder, AcctKeyStyle, Binder, PodStyle, RustCx,
+    };
 
     let acct_key_style = match target {
-        Target::Anchor => crate::rust_codegen_util::tree_render::AcctKeyStyle::AnchorCtx,
+        Target::Anchor => AcctKeyStyle::AnchorCtx,
         Target::Quasar | Target::Pinocchio => {
             // Pinocchio never reaches here (dedicated emitter above).
-            crate::rust_codegen_util::tree_render::AcctKeyStyle::QuasarCtx
+            AcctKeyStyle::QuasarCtx
         }
     };
     let guard_receiver = state_acct.map(|sa| format!("ctx.{}", sa.name));
-    let spec_is_adt = is_multi_variant_adt_state(spec);
+    // v2.29 Slice B — multi-variant ADT fields route through the
+    // generated inner-enum accessor.
+    let accessors = adt_accessor_field_names(spec);
+    // v2.29 Slice G.4 — imported accounts route `<acct>.<field>` reads
+    // through the local mirror; the map value carries the imported
+    // type's shape (multi-variant → accessor, flat → auto-deref). An
+    // unresolvable namespace/type still routes (flat form), matching
+    // the retired string rewriter.
+    let mirror_map: std::collections::HashMap<String, bool> = handler
+        .accounts
+        .iter()
+        .filter_map(|a| {
+            let ns = a.imported_namespace.as_ref()?;
+            let ty = a.account_type.as_ref()?;
+            let multi = spec
+                .imported_namespaces
+                .get(ns)
+                .and_then(|ins| ins.account_types.iter().find(|t| &t.name == ty))
+                .map(|t| t.variants.len() > 1)
+                .unwrap_or(false);
+            Some((a.name.clone(), multi))
+        })
+        .collect();
 
     for req in &handler.requires {
-        use crate::rust_codegen_util::tree_render::{
-            account_reads_are_key_style, render_rust, tree_references_abstract_binder, Binder,
-            RustCx,
-        };
         // Emit as a comment for human readers + an executable check.
         out.push_str(&format!("    // requires: {}\n", req.lean_expr.trim()));
-        let raw = if pod_target {
-            req.rust_expr_pod.trim()
-        } else {
-            req.rust_expr.trim()
-        };
+        let tree = requires_tree(req);
 
         // v2.29 Slice B — abstract-binder defer. The guard runs
         // before the user's handler body computes the binder; the
         // verifier still enforces this clause via the binder's
         // symbolic value. The user should re-assert it in their
-        // handler body after the binder is computed. Structural on
-        // the tree; word-boundary substring scan for legacy strings.
-        let references_abstract = match &req.tree {
-            Some(tree) => tree_references_abstract_binder(tree),
-            None => {
-                !abstract_binder_names.is_empty()
-                    && abstract_binder_names
-                        .iter()
-                        .any(|name| contains_word_boundary(raw, name))
-            }
-        };
-        if references_abstract {
+        // handler body after the binder is computed.
+        if tree_references_abstract_binder(tree) {
             out.push_str("    //   DEFERRED — references an `abstract` binder; verifier still\n");
             out.push_str(
                 "    //   enforces the clause symbolically. Re-assert in the handler body\n",
@@ -724,27 +543,19 @@ fn emit_requires_guards(
             continue;
         }
 
-        let rust = match &req.tree {
-            Some(tree) if !spec_is_adt && account_reads_are_key_style(tree) => {
-                let binder = match &guard_receiver {
-                    Some(receiver) => Binder::SelfAcct(receiver),
-                    // No resolvable state account: the legacy path
-                    // leaves `s.` unbound for the caller to hand-edit
-                    // (R12); `Binder::S` renders the same form.
-                    None => Binder::S,
-                };
-                let cx = RustCx::native()
-                    .with_binder(binder)
-                    .with_acct_key(Some(acct_key_style));
-                let cx = if pod_target {
-                    RustCx { pod: true, ..cx }
-                } else {
-                    cx
-                };
-                render_rust(tree, cx)
-            }
-            Some(_) | None => bind_state_expr(raw, handler, state_acct, spec, surface),
+        let binder = match &guard_receiver {
+            Some(receiver) => Binder::SelfAcct(receiver),
+            // No resolvable state account: leave `s.` unbound for the
+            // caller to hand-edit (R12); `Binder::S` renders that form.
+            None => Binder::S,
         };
+        let cx = RustCx::native()
+            .with_binder(binder)
+            .with_acct_key(Some(acct_key_style))
+            .with_pod(pod_target.then_some(PodStyle::Quasar))
+            .with_adt_accessors((!accessors.is_empty()).then_some(&accessors))
+            .with_acct_mirror((!mirror_map.is_empty()).then_some(&mirror_map));
+        let rust = render_rust(tree, cx);
         if let Some(err) = &req.error_name {
             out.push_str(&format!(
                 "    if !({}) {{ return Err({}); }}\n",
@@ -770,22 +581,6 @@ fn emit_requires_guards(
     }
 }
 
-/// True when `expr` references the spec's state binder `s` (a word-bounded
-/// `s` immediately followed by `.`), i.e. it reads a state field.
-pub(crate) fn references_pinocchio_state(expr: &str) -> bool {
-    let bytes = expr.as_bytes();
-    for i in 0..bytes.len() {
-        if bytes[i] == b's'
-            && (i == 0 || !is_ident_char(bytes[i - 1]))
-            && i + 1 < bytes.len()
-            && bytes[i + 1] == b'.'
-        {
-            return true;
-        }
-    }
-    false
-}
-
 /// `true` iff state field `field` is declared `Pubkey` in any account
 /// variant. Pubkey fields lower to a raw `[u8; 32]` in the zeropod struct
 /// (not a Pod scalar wrapper), so they are read by value — no `.get()` —
@@ -798,101 +593,43 @@ pub(crate) fn state_field_is_pubkey(spec: &ParsedSpec, field: &str) -> bool {
     })
 }
 
-/// Rewrite a spec-rendered Pod expression (`rust_expr_pod`) for the
-/// Pinocchio guard / handler context: the state binder `s` → `state_var`
-/// (the decoded zeropod `&Zc` view), and bare handler-account idents (or
-/// `<acct>.pubkey`) → `*<acct_prefix>.<acct>.key()` (a `[u8; 32]` value).
-/// `acct_prefix` is `"ctx"` in the per-handler guard fn (its param is
-/// `ctx: &<Pascal>`) and `"self"` in the handler method's effect body
-/// (where the accounts struct is `self`).
-///
-/// Scalar zeropod fields read through `.get()`; `Pubkey` fields are raw
-/// `[u8; 32]` (no Pod wrapper) so they read by value with neither `.get()`
-/// nor `&`, matching the deref'd `key()` form on the other side.
-pub(crate) fn bind_pinocchio_expr(
-    expr: &str,
-    handler: &ParsedHandler,
-    state_var: &str,
-    acct_prefix: &str,
-    spec: &ParsedSpec,
+/// The typed tree of a requires clause. Post-#151 every production
+/// `ParsedRequires` is adapter-built with `tree: Some(...)`; a `None`
+/// here is a hand-built fixture that must be fixed, not worked around.
+fn requires_tree(req: &crate::check::ParsedRequires) -> &crate::mir::ExprTree {
+    req.tree
+        .as_ref()
+        .expect("ParsedRequires.tree is always populated by the chumsky adapter (#151/#156)")
+}
+
+/// Render a spec expression for a Pinocchio position — tree-native
+/// (#223, was the `bind_pinocchio_expr` string rewriter): state reads
+/// bind through the decoded zeropod view (`__state.<field>.get()` on
+/// scalar Pod fields; `Pubkey` fields are raw `[u8; 32]` and read by
+/// value), and bare `<acct>` / `<acct>.pubkey` reads lower to the
+/// deref'd runtime key load. `acct_key` picks the receiver:
+/// [`AcctKeyStyle::PinocchioCtx`] in the per-handler guard fn (its
+/// param is `ctx: &<Pascal>`), [`AcctKeyStyle::PinocchioSelf`] in the
+/// handler method's effect body (where the accounts struct is `self`).
+pub(crate) fn render_pinocchio_expr(
+    tree: &crate::mir::ExprTree,
+    acct_key: crate::rust_codegen_util::tree_render::AcctKeyStyle,
 ) -> String {
-    let account_names: std::collections::HashSet<&str> =
-        handler.accounts.iter().map(|a| a.name.as_str()).collect();
-    let bytes = expr.as_bytes();
-    let mut out = String::with_capacity(expr.len() + 16);
-    let mut i = 0;
-    while i < bytes.len() {
-        let prev_ok = i == 0 || !is_ident_char(bytes[i - 1]);
-        if prev_ok && is_ident_char(bytes[i]) {
-            let start = i;
-            let mut j = i;
-            while j < bytes.len() && is_ident_char(bytes[j]) {
-                j += 1;
-            }
-            let ident = &expr[start..j];
-            if ident == "s" {
-                // `s.<field>` → `<state_var>.<field>.get()` for a scalar
-                // read (zeropod Pod fields need an explicit `.get()` to
-                // produce the native integer). `Pubkey` fields are raw
-                // `[u8; 32]` (no Pod wrapper) so they read by value with
-                // no `.get()`. Complex paths (`s.x.y` / `s.x[i]`) emit the
-                // path head without `.get()` — those nested/array reads
-                // are a follow-on.
-                if j < bytes.len() && bytes[j] == b'.' {
-                    let fstart = j + 1;
-                    let mut k = fstart;
-                    while k < bytes.len() && is_ident_char(bytes[k]) {
-                        k += 1;
-                    }
-                    let field = &expr[fstart..k];
-                    let complex = k < bytes.len() && (bytes[k] == b'.' || bytes[k] == b'[');
-                    if !field.is_empty() && !complex && !state_field_is_pubkey(spec, field) {
-                        out.push_str(&format!("{}.{}.get()", state_var, field));
-                    } else {
-                        out.push_str(&format!("{}.{}", state_var, field));
-                    }
-                    i = k;
-                    continue;
-                }
-                out.push_str(state_var);
-                i = j;
-                continue;
-            }
-            if account_names.contains(ident) {
-                // `<acct>.pubkey` (spec's "this account's address") and a
-                // bare `<acct>` both lower to the runtime key load,
-                // deref'd to a `[u8; 32]` value so it compares against /
-                // assigns into a raw-`[u8; 32]` Pubkey state field.
-                let pubkey = b".pubkey";
-                if j + pubkey.len() <= bytes.len()
-                    && &bytes[j..j + pubkey.len()] == pubkey
-                    && (j + pubkey.len() == bytes.len() || !is_ident_char(bytes[j + pubkey.len()]))
-                {
-                    out.push_str(&format!("*{}.{}.key()", acct_prefix, ident));
-                    i = j + pubkey.len();
-                    continue;
-                }
-                out.push_str(&format!("*{}.{}.key()", acct_prefix, ident));
-                i = j;
-                continue;
-            }
-            out.push_str(ident);
-            i = j;
-            continue;
-        }
-        out.push(bytes[i] as char);
-        i += 1;
-    }
-    out
+    use crate::rust_codegen_util::tree_render::{render_rust, Binder, PodStyle, RustCx};
+    let cx = RustCx::native()
+        .with_binder(Binder::SelfAcct("__state"))
+        .with_pod(Some(PodStyle::Zeropod))
+        .with_acct_key(Some(acct_key));
+    render_rust(tree, cx)
 }
 
 /// Emit `src/guards.rs` for the Pinocchio target (slice 6 4b). Per-handler
 /// guard fns take `ctx: &<Pascal>` + params and return `ProgramResult`.
-/// Handles signer-`auth` (`is_signer`) and `requires` (param
-/// clauses directly; scalar state clauses via a one-time zeropod decode of
-/// the state account, reusing `rust_expr_pod` since zeropod shares
-/// quasar-pod's `.get()` API). Lifecycle pre-checks + PDA verification, and
-/// state clauses on multi-account specs, are deferred (documented skip).
+/// Handles signer-`auth` (`is_signer`) and `requires` (param clauses
+/// directly; scalar state clauses via a one-time zeropod decode of the
+/// state account, rendered tree-native under [`PodStyle::Zeropod`]).
+/// Lifecycle pre-checks + PDA verification, and state clauses on
+/// multi-account specs, are deferred (documented skip).
 pub(crate) fn emit_pinocchio_guards(
     spec: &ParsedSpec,
     fp: &SpecFingerprint,
@@ -963,7 +700,7 @@ pub(crate) fn emit_pinocchio_guards(
         let needs_state = handler
             .requires
             .iter()
-            .any(|r| references_pinocchio_state(&r.rust_expr));
+            .any(|r| tree_mentions_state(requires_tree(r)));
         let decoded = if needs_state && single_state {
             match resolve_handler_state_account(handler, spec) {
                 Some(acct) => {
@@ -980,8 +717,8 @@ pub(crate) fn emit_pinocchio_guards(
         };
 
         for req in &handler.requires {
-            let raw = req.rust_expr.trim();
-            if references_pinocchio_state(raw) && !decoded {
+            let tree = requires_tree(req);
+            if tree_mentions_state(tree) && !decoded {
                 out.push_str(&format!(
                     "    // TODO(slice 6 4b-cont): state-referencing requires (multi-account /\n    //   unresolved state account) — not enforced yet: {}\n",
                     req.lean_expr.trim()
@@ -989,7 +726,10 @@ pub(crate) fn emit_pinocchio_guards(
                 continue;
             }
             out.push_str(&format!("    // requires: {}\n", req.lean_expr.trim()));
-            let rust = bind_pinocchio_expr(raw, handler, "__state", "ctx", spec);
+            let rust = render_pinocchio_expr(
+                tree,
+                crate::rust_codegen_util::tree_render::AcctKeyStyle::PinocchioCtx,
+            );
             let err = match &req.error_name {
                 Some(e) => format!("ProgramError::from({}::{})", err_enum, e),
                 None => "ProgramError::Custom(0xFF)".to_string(),

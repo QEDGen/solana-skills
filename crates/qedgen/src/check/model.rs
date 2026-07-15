@@ -830,6 +830,11 @@ pub struct ParsedSpec {
 /// Adapted form of `ast::RefImplDecl`; carries both Lean and Rust renderings
 /// so the body lowers into Spec.lean (`def`) and the impl-targeted Kani
 /// harness (inlined at the assertion site).
+///
+/// Deliberately NOT a tree carrier (#223 decision): the bodies are whole
+/// function bodies rendered once at adapt time and emitted verbatim —
+/// never re-targeted across binders/receivers — so the string lane is the
+/// design, not a #156 port gap. See `mir::RefImpl` for the full rationale.
 #[derive(Debug, Clone)]
 pub struct ParsedRefImpl {
     pub name: String,

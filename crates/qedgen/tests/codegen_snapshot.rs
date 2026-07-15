@@ -104,10 +104,43 @@ fn collect_files(dir: &Path, acc: &mut Vec<PathBuf>) {
     }
 }
 
+/// Pinocchio-target variant of [`render_mir_codegen`]: the fixtures under
+/// `tests/fixtures/pinocchio-fixtures/` carry no `.qed/` project dir (the
+/// codegen-smoke compile gates create one ad hoc), so stage the fixture,
+/// create `.qed/`, and pass `--target pinocchio` explicitly.
+fn render_pinocchio_codegen(fixture_dir: &str, spec_arg: &str) -> String {
+    common::ensure_qedgen_built();
+    let tmp = common::stage_fixture(fixture_dir);
+    fs::create_dir_all(tmp.path().join(".qed")).expect("create .qed");
+
+    let status = Command::new(common::qedgen_bin())
+        .arg("codegen")
+        .arg("--spec")
+        .arg(spec_arg)
+        .arg("--target")
+        .arg("pinocchio")
+        .current_dir(tmp.path())
+        .status()
+        .expect("spawn qedgen codegen");
+    assert!(
+        status.success(),
+        "qedgen codegen --target pinocchio failed for {}",
+        fixture_dir
+    );
+
+    dump_programs_tree(&tmp.path().join("programs"))
+}
+
 const HARNESS: SnapshotHarness = SnapshotHarness {
     suffix: ".codegen.txt",
     kind: "MIR codegen",
     render: render_mir_codegen,
+};
+
+const PINOCCHIO_HARNESS: SnapshotHarness = SnapshotHarness {
+    suffix: ".codegen.txt",
+    kind: "MIR codegen (Pinocchio)",
+    render: render_pinocchio_codegen,
 };
 
 fn assert_or_update_snapshot(fixture: &str, fixture_dir: &str, spec_arg: &str) {
@@ -154,14 +187,51 @@ fn snapshot_escrow_split() {
     assert_or_update_snapshot("escrow-split", "examples/rust/escrow-split", ".");
 }
 
-// `cross-program-vault` is intentionally omitted from this set. It
-// has a sibling `[dependencies.admin_config] path =
-// "../../imports/cross-program-vault-admin"` that doesn't survive
-// the tempdir rsync (the resolver looks for the import relative to
-// the spec file's parent, which the tempdir doesn't have).
-// `mir_snapshot` (Lean) and `kani_snapshot` (Kani) handle their
-// equivalents through different mechanisms; the manual Phase 4
-// byte-equivalence sweep covers this fixture's `programs/` tree
-// end-to-end. Wiring it into this snapshot harness needs a
-// special-case import-path setup — a future cleanup, not blocking
-// the Phase 4i dispatch flip.
+// Historically omitted because its import path didn't survive the
+// tempdir rsync; the manifest has since moved the dep inside the
+// fixture (`[dependencies.admin_config] path =
+// "imports/cross-program-vault-admin"`), so staging works and this
+// locks the ADT + imported-mirror guard emission end-to-end (#223).
+#[test]
+fn snapshot_cross_program_vault() {
+    assert_or_update_snapshot(
+        "cross-program-vault",
+        "examples/rust/cross-program-vault",
+        "vault.qedspec",
+    );
+}
+
+// #223 guards-lane coverage: multi-variant ADT state reads in
+// `requires` + imported-namespace mirror routing on a MULTI-variant
+// imported type (`(*ctx.registry_cfg.inner.operator())`) — the two
+// shapes the retired `bind_state_expr` string rewriter handled.
+#[test]
+fn snapshot_imported_guards() {
+    assert_or_update_snapshot(
+        "imported-guards",
+        "crates/qedgen/tests/fixtures/imported-guards",
+        "treasury.qedspec",
+    );
+}
+
+// #223 Pinocchio binder coverage: these two fixtures previously had
+// compile gates only (`codegen_smoke`); the byte snapshots pin the
+// zeropod `.get()` / raw-Pubkey / `*ctx|self.<acct>.key()` forms the
+// retired `bind_pinocchio_expr` string rewriter produced.
+#[test]
+fn snapshot_pinocchio_config_pubkey() {
+    PINOCCHIO_HARNESS.assert_or_update(
+        "pinocchio-config-pubkey",
+        "crates/qedgen/tests/fixtures/pinocchio-fixtures/config-pubkey",
+        "config.qedspec",
+    );
+}
+
+#[test]
+fn snapshot_pinocchio_vault_greenfield() {
+    PINOCCHIO_HARNESS.assert_or_update(
+        "pinocchio-vault-greenfield",
+        "crates/qedgen/tests/fixtures/pinocchio-fixtures/vault-greenfield",
+        "vault.qedspec",
+    );
+}

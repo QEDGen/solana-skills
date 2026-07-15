@@ -68,7 +68,8 @@ pub enum ArithMode {
 
 /// How handler-account reads lower in scaffold guard positions (#151
 /// Slice 3): bare `<acct>` and `<acct>.pubkey` both mean "this account's
-/// runtime address", loaded off the guard fn's `ctx` param. Tree-native
+/// runtime address", loaded off the guard fn's `ctx` param (or the
+/// handler method's `self` on Pinocchio effect bodies). Tree-native
 /// replacement for `bind_state`'s account-ident string rewrite; the
 /// rendered forms MUST stay in sync with
 /// `FrameworkSurface::account_key_expr`.
@@ -78,6 +79,13 @@ pub enum AcctKeyStyle {
     AnchorCtx,
     /// Quasar: `(*ctx.<name>.to_account_view().address())`.
     QuasarCtx,
+    /// Pinocchio guard fn (`ctx: &<Pascal>`): `*ctx.<name>.key()` — the
+    /// deref makes a `[u8; 32]` value that compares against / assigns
+    /// into a raw-`[u8; 32]` Pubkey state field (#223, was
+    /// `bind_pinocchio_expr`).
+    PinocchioCtx,
+    /// Pinocchio handler method (effect body): `*self.<name>.key()`.
+    PinocchioSelf,
 }
 
 impl AcctKeyStyle {
@@ -85,8 +93,25 @@ impl AcctKeyStyle {
         match self {
             AcctKeyStyle::AnchorCtx => format!("ctx.{}.key()", name),
             AcctKeyStyle::QuasarCtx => format!("(*ctx.{}.to_account_view().address())", name),
+            AcctKeyStyle::PinocchioCtx => format!("*ctx.{}.key()", name),
+            AcctKeyStyle::PinocchioSelf => format!("*self.{}.key()", name),
         }
     }
+}
+
+/// Which Pod-wrapper access convention state-field reads follow (#223 —
+/// generalizes the former `pod: bool`, which only knew Quasar's rule).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PodStyle {
+    /// Quasar Pod companions: state/record integer fields of width ≥ 16
+    /// read through `.get()` (`u8`/`i8` stay native — alignment 1).
+    Quasar,
+    /// Pinocchio zeropod: every scalar state field reads through
+    /// `.get()` regardless of width; `Pubkey` fields are raw `[u8; 32]`
+    /// (no Pod wrapper) and read by value. Nested / indexed paths
+    /// (`s.x.y`, `s.x[i]`) keep the raw form — those reads are a
+    /// documented slice 6 4b-cont deferral.
+    Zeropod,
 }
 
 /// Render context — the Slice 1 collapse of the six string forms.
@@ -94,9 +119,9 @@ impl AcctKeyStyle {
 pub struct RustCx<'a> {
     pub binder: Binder<'a>,
     pub arith: ArithMode,
-    /// Quasar Pod access: state/record integer fields (width ≥ 16) read
-    /// through `.get()`.
-    pub pod: bool,
+    /// Pod-wrapper access convention for state-field reads; `None` for
+    /// plain (Anchor/native) structs. See [`PodStyle`].
+    pub pod: Option<PodStyle>,
     /// Account-environment binder: `Some("accounts")` renders handler
     /// account pubkey reads (`owner.pubkey`) through the generated env
     /// struct (`accounts.owner.pubkey`). Tree-native replacement for
@@ -112,6 +137,16 @@ pub struct RustCx<'a> {
     /// — `state.x` under `Binder::SelfAcct(recv)` renders
     /// `(*recv.inner.x())` instead of `recv.x`. `None` for flat state.
     pub adt_accessors: Option<&'a std::collections::HashSet<String>>,
+    /// Imported-namespace mirror routing (v2.29 Slice G.4, tree-native
+    /// since #223): handler accounts whose type comes from an imported
+    /// spec, mapped to whether that type is a multi-variant ADT. A
+    /// `<acct>.<field>` read on an account in this map routes through
+    /// the local mirror off the guard fn's `ctx` — multi-variant via the
+    /// mirror's inner-enum accessor (`(*ctx.<acct>.inner.<field>())`),
+    /// flat via the wrapper's auto-deref (`ctx.<acct>.<field>`). Guards
+    /// positions only (the `ctx` receiver is baked in, like
+    /// [`AcctKeyStyle`]); `None` elsewhere.
+    pub acct_mirror: Option<&'a std::collections::HashMap<String, bool>>,
 }
 
 impl<'a> RustCx<'a> {
@@ -119,10 +154,11 @@ impl<'a> RustCx<'a> {
         RustCx {
             binder: Binder::S,
             arith: ArithMode::Native,
-            pod: false,
+            pod: None,
             acct_env: None,
             acct_key: None,
             adt_accessors: None,
+            acct_mirror: None,
         }
     }
     /// Test-only convenience (corpus parity + mode tests); non-test
@@ -130,7 +166,7 @@ impl<'a> RustCx<'a> {
     #[cfg(test)]
     pub fn pod() -> Self {
         RustCx {
-            pod: true,
+            pod: Some(PodStyle::Quasar),
             ..RustCx::native()
         }
     }
@@ -154,6 +190,18 @@ impl<'a> RustCx<'a> {
     }
     pub fn with_acct_key(self, acct_key: Option<AcctKeyStyle>) -> Self {
         RustCx { acct_key, ..self }
+    }
+    pub fn with_pod(self, pod: Option<PodStyle>) -> Self {
+        RustCx { pod, ..self }
+    }
+    pub fn with_acct_mirror(
+        self,
+        acct_mirror: Option<&'a std::collections::HashMap<String, bool>>,
+    ) -> Self {
+        RustCx {
+            acct_mirror,
+            ..self
+        }
     }
 }
 
@@ -520,6 +568,34 @@ fn render_path(p: &TreePath, cx: RustCx, inside_old: bool) -> String {
                     return style.render(&p.root);
                 }
             }
+            // Imported-account field reads route through the local mirror
+            // (v2.29 Slice G.4): the first field segment dispatches on the
+            // imported type's shape, trailing projections append. No Pod
+            // suffix — the mirror types aren't in the consumer's Pod
+            // universe (matches the retired string rewriter).
+            if let (Some(mirror), Some(TreeSeg::Field(first))) =
+                (cx.acct_mirror, p.segments.first())
+            {
+                if let Some(&multi_variant) = mirror.get(&p.root) {
+                    let mut out = if multi_variant {
+                        format!("(*ctx.{}.inner.{}())", p.root, first)
+                    } else {
+                        format!("ctx.{}.{}", p.root, first)
+                    };
+                    for seg in &p.segments[1..] {
+                        match seg {
+                            TreeSeg::Field(f) => {
+                                out.push('.');
+                                out.push_str(f);
+                            }
+                            TreeSeg::Index(i) => {
+                                out.push_str(&format!("[({}) as usize]", i));
+                            }
+                        }
+                    }
+                    return out;
+                }
+            }
             // Pubkey reads route through the generated account env when
             // one is bound (`owner.pubkey` → `accounts.owner.pubkey`) —
             // scoped to the exact `.pubkey` shape the legacy string
@@ -565,28 +641,41 @@ fn render_path(p: &TreePath, cx: RustCx, inside_old: bool) -> String {
             }
         }
     }
-    if cx.pod && path_is_pod_field(p) {
+    if cx.pod.is_some_and(|style| path_is_pod_field(style, p)) {
         out.push_str(".get()");
     }
     out
 }
 
-/// Pod companion gate: state-rooted reads whose leaf type lowers to a
-/// Quasar Pod type (`u8`/`i8` stay native — alignment 1 already).
-/// Tree-native replacement for `TypeEnv::path_is_pod_field`.
-fn path_is_pod_field(p: &TreePath) -> bool {
+/// Pod companion gate, per [`PodStyle`]. Tree-native replacement for
+/// `TypeEnv::path_is_pod_field` (Quasar) and `bind_pinocchio_expr`'s
+/// `.get()` dispatch (Zeropod).
+fn path_is_pod_field(style: PodStyle, p: &TreePath) -> bool {
     let state_rooted = matches!(p.binding, BindingKind::StateField | BindingKind::Ghost);
     if !state_rooted {
         return false;
     }
-    match &p.ty {
-        Some(Ty::U16 | Ty::U32 | Ty::U64 | Ty::U128 | Ty::I64 | Ty::I128 | Ty::Bool) => true,
-        // `I8` arrives as `Custom` (like `I16`/`I32` — `mir::Ty` doesn't
-        // model the narrow signed widths natively) but stays native:
-        // alignment 1 already, no Pod companion.
-        Some(Ty::Custom(name)) => matches!(name.as_str(), "I16" | "I32"),
-        Some(Ty::U8 | Ty::Pubkey | Ty::Bytes32 | Ty::Bytes64 | Ty::Map { .. }) => false,
-        None => false,
+    match style {
+        // Quasar: leaf-type width ≥ 16 (`u8`/`i8` stay native —
+        // alignment 1 already, no Pod companion).
+        PodStyle::Quasar => match &p.ty {
+            Some(Ty::U16 | Ty::U32 | Ty::U64 | Ty::U128 | Ty::I64 | Ty::I128 | Ty::Bool) => true,
+            // `I8` arrives as `Custom` (like `I16`/`I32` — `mir::Ty`
+            // doesn't model the narrow signed widths natively) but stays
+            // native: alignment 1 already, no Pod companion.
+            Some(Ty::Custom(name)) => matches!(name.as_str(), "I16" | "I32"),
+            Some(Ty::U8 | Ty::Pubkey | Ty::Bytes32 | Ty::Bytes64 | Ty::Map { .. }) => false,
+            None => false,
+        },
+        // Zeropod: every simple scalar field reads `.get()` except raw
+        // `[u8; 32]` Pubkeys; nested / indexed paths keep the raw form
+        // (documented slice 6 4b-cont deferral — matches the retired
+        // `bind_pinocchio_expr`, which also `.get()`-ed fields it
+        // couldn't type-resolve).
+        PodStyle::Zeropod => {
+            matches!(p.segments.as_slice(), [TreeSeg::Field(_)])
+                && !matches!(p.ty, Some(Ty::Pubkey))
+        }
     }
 }
 
@@ -1068,6 +1157,20 @@ pub fn tree_mentions_account(e: &ExprTree) -> bool {
     found
 }
 
+/// Does the tree read any state field (`state.<field>` / ghost)?
+/// Structural replacement for `references_pinocchio_state`'s
+/// word-bounded `s.` scan — gates the one-time zeropod state decode in
+/// the Pinocchio guard emitter (#223).
+pub fn tree_mentions_state(e: &ExprTree) -> bool {
+    let mut found = false;
+    for_each_path(e, &mut |p| {
+        if matches!(p.binding, BindingKind::StateField | BindingKind::Ghost) {
+            found = true;
+        }
+    });
+    found
+}
+
 pub fn tree_mentions_account_pubkey(e: &ExprTree) -> bool {
     let mut found = false;
     for_each_path(e, &mut |p| {
@@ -1156,25 +1259,6 @@ pub fn for_each_path(e: &ExprTree, f: &mut impl FnMut(&TreePath)) {
             for_each_path(else_branch, f);
         }
     }
-}
-
-/// Every handler-account read in `e` is key-style — bare `<acct>` or
-/// `<acct>.pubkey` — i.e. a shape [`AcctKeyStyle`] can lower. Gate for the
-/// scaffold-guards tree path: other account projections (imported-account
-/// field reads like `<acct>.<field>`) still need the legacy mirror rewrite
-/// in `bind_state`, so those clauses fall back to the string path.
-pub fn account_reads_are_key_style(e: &ExprTree) -> bool {
-    let mut ok = true;
-    for_each_path(e, &mut |p| {
-        if matches!(p.binding, BindingKind::Account) {
-            let key_style = p.segments.is_empty()
-                || matches!(p.segments.as_slice(), [TreeSeg::Field(f)] if f == "pubkey");
-            if !key_style {
-                ok = false;
-            }
-        }
-    });
-    ok
 }
 
 /// Does `e` read an `abstract <name> : <Type>` existential binder?
@@ -1398,7 +1482,10 @@ mod tests {
                     check(&mut mismatches, &at, t, cx_p, rust);
                 }
                 if let Some(pod) = &p.rust_expression_pod {
-                    let cx_p_pod = RustCx { pod: true, ..cx_p };
+                    let cx_p_pod = RustCx {
+                        pod: Some(PodStyle::Quasar),
+                        ..cx_p
+                    };
                     check(&mut mismatches, &at, t, cx_p_pod, pod);
                 }
                 if let Some(math) = &p.rust_expression_math {
@@ -1707,25 +1794,85 @@ mod tests {
     }
 
     #[test]
-    fn account_reads_are_key_style_gates_field_projections() {
-        assert!(account_reads_are_key_style(&acct_pubkey("buyer")));
-        assert!(account_reads_are_key_style(&acct_bare("buyer")));
-        assert!(account_reads_are_key_style(&state_field("pool", Ty::U64)));
-        // Imported-account field read (`config.fee`) needs the legacy
-        // mirror rewrite — the gate must reject it.
+    fn acct_mirror_routes_imported_field_reads() {
+        // Imported-account field read (`config.fee`) routes through the
+        // local mirror (#223, was `bind_state_expr`'s Slice G.4 lane):
+        // multi-variant imported type → inner-enum accessor, flat →
+        // wrapper auto-deref. Accounts not in the map keep the plain
+        // path (the R12 hand-edit contract).
         let field_read = ExprTree::Path(TreePath {
             root: "config".into(),
             binding: BindingKind::Account,
             segments: vec![TreeSeg::Field("fee".into())],
             ty: None,
         });
-        assert!(!account_reads_are_key_style(&field_read));
-        let nested = ExprTree::Cmp {
-            op: TreeCmpOp::Gt,
-            lhs: Box::new(field_read),
-            rhs: Box::new(ExprTree::Int(0)),
-        };
-        assert!(!account_reads_are_key_style(&nested));
+        let mut mirror = std::collections::HashMap::new();
+        mirror.insert("config".to_string(), false);
+        let cx = RustCx::native()
+            .with_acct_key(Some(AcctKeyStyle::AnchorCtx))
+            .with_acct_mirror(Some(&mirror));
+        assert_eq!(render_rust(&field_read, cx), "ctx.config.fee");
+        mirror.insert("config".to_string(), true);
+        let cx = RustCx::native()
+            .with_acct_key(Some(AcctKeyStyle::AnchorCtx))
+            .with_acct_mirror(Some(&mirror));
+        assert_eq!(render_rust(&field_read, cx), "(*ctx.config.inner.fee())");
+        // `.pubkey` still means "this account's address" — the key
+        // load wins over the mirror route.
+        assert_eq!(render_rust(&acct_pubkey("config"), cx), "ctx.config.key()");
+        // Unmapped accounts keep the plain path.
+        let other = ExprTree::Path(TreePath {
+            root: "vault_ta".into(),
+            binding: BindingKind::Account,
+            segments: vec![TreeSeg::Field("amount".into())],
+            ty: None,
+        });
+        assert_eq!(render_rust(&other, cx), "vault_ta.amount");
+    }
+
+    #[test]
+    fn pinocchio_key_styles_deref_the_account_key() {
+        let cx_ctx = RustCx::native().with_acct_key(Some(AcctKeyStyle::PinocchioCtx));
+        let cx_self = RustCx::native().with_acct_key(Some(AcctKeyStyle::PinocchioSelf));
+        assert_eq!(
+            render_rust(&acct_pubkey("owner"), cx_ctx),
+            "*ctx.owner.key()"
+        );
+        assert_eq!(render_rust(&acct_bare("owner"), cx_ctx), "*ctx.owner.key()");
+        assert_eq!(
+            render_rust(&acct_pubkey("owner"), cx_self),
+            "*self.owner.key()"
+        );
+    }
+
+    #[test]
+    fn zeropod_pod_style_gets_all_scalars_except_pubkey() {
+        let cx = RustCx::native()
+            .with_binder(Binder::SelfAcct("__state"))
+            .with_pod(Some(PodStyle::Zeropod));
+        // Scalars — including u8, which Quasar leaves native — read
+        // through `.get()`.
+        assert_eq!(
+            render_rust(&state_field("balance", Ty::U64), cx),
+            "__state.balance.get()"
+        );
+        assert_eq!(
+            render_rust(&state_field("flag", Ty::U8), cx),
+            "__state.flag.get()"
+        );
+        // Pubkey fields are raw `[u8; 32]` — read by value.
+        assert_eq!(
+            render_rust(&state_field("admin", Ty::Pubkey), cx),
+            "__state.admin"
+        );
+        // Nested / indexed paths keep the raw form (slice 6 4b-cont).
+        let nested = ExprTree::Path(TreePath {
+            root: "state".into(),
+            binding: BindingKind::StateField,
+            segments: vec![TreeSeg::Field("pool".into()), TreeSeg::Field("fee".into())],
+            ty: Some(Ty::U64),
+        });
+        assert_eq!(render_rust(&nested, cx), "__state.pool.fee");
     }
 
     #[test]
