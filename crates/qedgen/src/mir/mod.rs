@@ -673,6 +673,15 @@ pub struct EnvironmentConstraintMir {
 
 /// `ref_impl <name> (params) : <return_type> = <expr>` declaration; carries
 /// pre-rendered per-backend body strings (opaque-string discipline).
+///
+/// Deliberately NOT a tree carrier (#223 decision, closing the #156 tail):
+/// these are whole *function bodies*, rendered once at adapt time under a
+/// fixed context (param scope; `Ctx::Guard`) and emitted verbatim as
+/// standalone `def`/`fn` bodies. No backend ever re-targets them across
+/// binders or receivers — the one transformation trees exist to make safe
+/// — so a structural carrier would add a second source of truth with no
+/// consumer. If inlining or verification ever needs to look *inside* a
+/// body, add a tree alongside these strings; do not scan or rewrite them.
 #[derive(Debug, Clone)]
 pub struct RefImpl {
     pub name: Symbol,
