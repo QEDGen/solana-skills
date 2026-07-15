@@ -215,9 +215,10 @@ pub struct AccountTable {
 #[derive(Debug, Clone)]
 pub struct PdaDeclaration {
     pub name: Symbol,
-    /// Seeds (literals, account refs, or param refs) as pre-rendered target
-    /// strings — same opaque-string discipline as `Expr`.
-    pub seeds: Vec<Expr>,
+    /// Seeds — string literals (quoted), account refs, or param refs, as
+    /// written in the spec. Not expressions: `ExprTree` has no string
+    /// literal, and no backend renders seeds as code (#156).
+    pub seeds: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1034,7 +1035,10 @@ pub fn lower(parsed: &ParsedSpec) -> Mir {
                 asserts: h
                     .asserts
                     .iter()
-                    .map(|a| Expr::from_lean_rust_pod(&a.lean, &a.rust, &a.rust))
+                    .map(|a| {
+                        Expr::from_lean_rust_pod(&a.lean, &a.rust, &a.rust)
+                            .with_tree(a.tree.clone())
+                    })
                     .collect(),
             })
             .collect(),
@@ -1180,11 +1184,7 @@ fn lower_account_table(parsed: &ParsedSpec) -> AccountTable {
             pda.name.clone(),
             PdaDeclaration {
                 name: pda.name.clone(),
-                seeds: pda
-                    .seeds
-                    .iter()
-                    .map(|s| Expr::from_raw(s.clone()))
-                    .collect(),
+                seeds: pda.seeds.clone(),
             },
         );
     }
@@ -1360,14 +1360,15 @@ fn lower_ghosts(parsed: &ParsedSpec) -> Vec<GhostMir> {
             name: g.name.clone(),
             doc: g.doc.clone(),
             ty: parse_ty_resolved(&g.ty, parsed),
-            init: Expr::from_lean_rust(&g.init_lean, &g.init_rust),
+            init: Expr::from_lean_rust(&g.init_lean, &g.init_rust).with_tree(g.init_tree.clone()),
             updates: g
                 .updates
                 .iter()
                 .map(|u| {
                     (
                         u.handler.clone(),
-                        Expr::from_lean_rust(&u.value_lean, &u.value_rust),
+                        Expr::from_lean_rust(&u.value_lean, &u.value_rust)
+                            .with_tree(u.value_tree.clone()),
                     )
                 })
                 .collect(),
@@ -1587,7 +1588,8 @@ fn lower_body(h: &crate::check::ParsedHandler) -> Block {
                 .amount
                 .as_ref()
                 .map(|a| Expr::from_raw(a.clone()))
-                .unwrap_or_default(),
+                .unwrap_or_default()
+                .with_tree(tr.amount_tree.clone()),
             authority: tr
                 .authority
                 .as_ref()
@@ -1650,11 +1652,14 @@ fn lower_body(h: &crate::check::ParsedHandler) -> Block {
                 default = Some(block);
             } else {
                 arms.push(BranchArm {
-                    pattern: Some(Expr::from_lean_rust_pod(
-                        &arm.pattern_lean,
-                        &arm.pattern_rust,
-                        &arm.pattern_rust,
-                    )),
+                    pattern: Some(
+                        Expr::from_lean_rust_pod(
+                            &arm.pattern_lean,
+                            &arm.pattern_rust,
+                            &arm.pattern_rust,
+                        )
+                        .with_tree(arm.pattern_tree.clone()),
+                    ),
                     block,
                 });
             }

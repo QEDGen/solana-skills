@@ -643,6 +643,7 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                 // Init value — a constant expression in single-state context.
                 let init_lean = expr_to_lean(&g.init.node, Ctx::Guard, consts, &env);
                 let init_rust = expr_to_rust(&g.init.node, Ctx::Guard, consts, opts_native(&env));
+                let init_tree = build_expr_tree(&g.init, &spec_tcx);
                 let mut updates = Vec::new();
                 for u in &g.updates {
                     // Resolve the named handler's params so the update RHS can
@@ -659,6 +660,22 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                     let rhs_lean = expr_to_lean(&u.stmt.rhs.node, Ctx::Guard, consts, &uenv);
                     let rhs_rust =
                         expr_to_rust(&u.stmt.rhs.node, Ctx::Guard, consts, opts_native(&uenv));
+                    let mut utcx = TreeCx::spec_level(&env, consts, ghosts.clone());
+                    utcx.params
+                        .extend(handler_params.iter().map(|p| p.name.clone()));
+                    let rhs_tree = build_expr_tree(&u.stmt.rhs, &utcx);
+                    let ghost_read = crate::mir::ExprTree::Path(crate::mir::expr_tree::TreePath {
+                        root: "state".to_string(),
+                        binding: crate::mir::expr_tree::BindingKind::Ghost,
+                        segments: vec![crate::mir::expr_tree::TreeSeg::Field(g.name.clone())],
+                        ty: None,
+                    });
+                    let fold =
+                        |op: crate::mir::expr_tree::TreeArithOp| crate::mir::ExprTree::Arith {
+                            op,
+                            lhs: Box::new(ghost_read.clone()),
+                            rhs: Box::new(rhs_tree.clone()),
+                        };
                     // Fold the assignment operator into a complete new-value
                     // expression so each backend just emits `<ghost> := value`.
                     let (value_lean, value_rust) = match u.stmt.op {
@@ -672,10 +689,20 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                             format!("s.{} - ({})", g.name, rhs_rust),
                         ),
                     };
+                    let value_tree = match u.stmt.op {
+                        a::EffectOp::Set => rhs_tree.clone(),
+                        a::EffectOp::Add | a::EffectOp::AddSat | a::EffectOp::AddWrap => {
+                            fold(crate::mir::expr_tree::TreeArithOp::Add)
+                        }
+                        a::EffectOp::Sub | a::EffectOp::SubSat | a::EffectOp::SubWrap => {
+                            fold(crate::mir::expr_tree::TreeArithOp::Sub)
+                        }
+                    };
                     updates.push(crate::check::ParsedGhostUpdate {
                         handler: u.handler.clone(),
                         value_lean,
                         value_rust,
+                        value_tree: Some(value_tree),
                     });
                 }
                 out.ghosts.push(crate::check::ParsedGhost {
@@ -684,6 +711,7 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                     ty: type_ref_to_string(&g.ty),
                     init_lean,
                     init_rust,
+                    init_tree: Some(init_tree),
                     updates,
                 });
             }
@@ -702,6 +730,7 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                     .map(|e| crate::check::ParsedHookAssert {
                         lean: expr_to_lean(&e.node, Ctx::Guard, consts, &env),
                         rust: expr_to_rust(&e.node, Ctx::Guard, consts, opts_native(&env)),
+                        tree: Some(build_expr_tree(e, &spec_tcx)),
                     })
                     .collect();
                 out.hooks.push(crate::check::ParsedHook { kind, asserts });
@@ -1453,17 +1482,22 @@ fn adapt_handler(
                                         }
                                     }
                                 }
-                                let (pattern_rust, pattern_lean, is_wildcard) = match &arm.pattern {
-                                    a::EffectPattern::Literal(v) => {
-                                        (v.to_string(), v.to_string(), false)
-                                    }
-                                    a::EffectPattern::Wildcard => {
-                                        ("_".to_string(), "_".to_string(), true)
-                                    }
-                                };
+                                let (pattern_rust, pattern_lean, pattern_tree, is_wildcard) =
+                                    match &arm.pattern {
+                                        a::EffectPattern::Literal(v) => (
+                                            v.to_string(),
+                                            v.to_string(),
+                                            Some(crate::mir::ExprTree::Int(*v)),
+                                            false,
+                                        ),
+                                        a::EffectPattern::Wildcard => {
+                                            ("_".to_string(), "_".to_string(), None, true)
+                                        }
+                                    };
                                 parsed_arms.push(crate::check::ParsedEffectArm {
                                     pattern_rust,
                                     pattern_lean,
+                                    pattern_tree,
                                     is_wildcard,
                                     effects: arm_effects,
                                 });
@@ -1517,10 +1551,17 @@ fn adapt_handler(
                             p.to_source_string()
                         }
                     });
+                    let amount_tree = tc.amount.as_ref().map(|a| match a {
+                        crate::ast::TransferAmount::Literal(v) => crate::mir::ExprTree::Int(*v),
+                        crate::ast::TransferAmount::Path(p) => {
+                            build_expr_tree_raw(&a::Expr::Path(p.clone()), tcx)
+                        }
+                    });
                     handler.transfers.push(crate::check::ParsedTransfer {
                         from: tc.from.clone(),
                         to: tc.to.clone(),
                         amount,
+                        amount_tree,
                         authority: tc.authority.clone(),
                     });
                 }

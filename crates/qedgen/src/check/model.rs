@@ -564,6 +564,8 @@ pub struct ParsedEffectBranches {
 pub struct ParsedEffectArm {
     pub pattern_rust: String,
     pub pattern_lean: String,
+    /// Typed pattern tree (#156); `None` for wildcard arms.
+    pub pattern_tree: Option<crate::mir::ExprTree>,
     /// `true` for a wildcard arm.
     pub is_wildcard: bool,
     /// Per-arm effects, one self-contained `ParsedEffect` per site (#151
@@ -695,6 +697,8 @@ pub struct ParsedTransfer {
     pub from: String,
     pub to: String,
     pub amount: Option<String>,
+    /// Typed amount tree (#156); `None` when no amount declared.
+    pub amount_tree: Option<crate::mir::ExprTree>,
     pub authority: Option<String>,
 }
 
@@ -860,6 +864,8 @@ pub struct ParsedGhost {
     /// Initial value, rendered for each backend.
     pub init_lean: String,
     pub init_rust: String,
+    /// Typed initial-value tree (#156).
+    pub init_tree: Option<crate::mir::ExprTree>,
     pub updates: Vec<ParsedGhostUpdate>,
 }
 
@@ -872,6 +878,8 @@ pub struct ParsedGhostUpdate {
     pub handler: String,
     pub value_lean: String,
     pub value_rust: String,
+    /// Typed complete-new-value tree (#156; op already folded in).
+    pub value_tree: Option<crate::mir::ExprTree>,
 }
 
 /// Lowered `hook` declaration, pre-rendered per backend.
@@ -896,6 +904,8 @@ pub struct ParsedHookAssert {
     /// (qedsvm). Not consumed today — Lean ignores hooks.
     pub lean: String,
     pub rust: String,
+    /// Typed assert tree (#156).
+    pub tree: Option<crate::mir::ExprTree>,
 }
 
 impl ParsedSpec {

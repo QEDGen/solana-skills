@@ -60,6 +60,7 @@ struct State {
     pool: u64,
     fees: u64,
     fee_bps: u64,
+    lifetime_collected: u64,
 }
 
 /// Proptest strategy for generating arbitrary State values.
@@ -68,11 +69,13 @@ prop_compose! {
         pool in 0u64..=u64::MAX,
         fees in 0u64..=u64::MAX,
         fee_bps in 0u64..=u64::MAX,
+        lifetime_collected in 0u64..=u64::MAX,
     ) -> State {
         State {
             pool,
             fees,
             fee_bps,
+            lifetime_collected,
         }
     }
 }
@@ -83,11 +86,13 @@ prop_compose! {
         pool in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX],
         fees in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX],
         fee_bps in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX],
+        lifetime_collected in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX],
     ) -> State {
         State {
             pool,
             fees,
             fee_bps,
+            lifetime_collected,
         }
     }
 }
@@ -101,6 +106,7 @@ fn collect(s: &mut State, total: u64) -> bool {
     let net = total - fee;
     s.pool = s.pool.wrapping_add(net);
     s.fees = s.fees.wrapping_add(fee);
+    s.lifetime_collected = s.lifetime_collected + (total);
     true
 }
 

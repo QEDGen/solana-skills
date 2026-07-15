@@ -24,6 +24,13 @@ type Error
 
 const BPS_DENOM = 10000
 
+// Ghost coverage (#156 Layer 2): spec-only running total, updated by the
+// handler — exercises the ghost-update tree render in the Lean transition.
+ghost lifetime_collected : U64 {
+  init { 0 }
+  on collect { lifetime_collected += total }
+}
+
 /// Split `total` into pool liquidity and protocol fees.
 handler collect (total : U64) {
   permissionless

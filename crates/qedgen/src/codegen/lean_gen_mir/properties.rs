@@ -109,7 +109,10 @@ pub(super) fn preservation_proof_script(
 ) -> String {
     let trans_name = safe_name(&format!("{}Transition", h.name));
 
-    let body_lean = prop.expression.as_ref().map(|e| expr_lean(e, property_cx(prop)));
+    let body_lean = prop
+        .expression
+        .as_ref()
+        .map(|e| expr_lean(e, property_cx(prop)));
     let has_quantifier = body_lean
         .as_deref()
         .map(|e| e.contains('\u{2200}') || e.contains('\u{2203}'))
@@ -188,7 +191,10 @@ pub(super) fn preservation_proof_script(
 pub(super) fn master_inductive_proof_script(mir: &Mir, prop: &crate::mir::PropertyMir) -> String {
     let mut proof = String::from(" := by\n  cases op with\n");
 
-    let body_lean = prop.expression.as_ref().map(|e| expr_lean(e, property_cx(prop)));
+    let body_lean = prop
+        .expression
+        .as_ref()
+        .map(|e| expr_lean(e, property_cx(prop)));
     let prop_fields: Vec<String> = body_lean
         .as_deref()
         .map(fields_referenced_in_expr_owned)
@@ -475,10 +481,9 @@ pub(super) fn emit_aborts_if_adt(out: &mut String, mir: &Mir) {
 /// adapter's pre-rendered string (byte parity with existing snapshots).
 fn abort_pred_lean(h: &crate::mir::HandlerMir, pred: &crate::mir::Predicate) -> String {
     match &pred.0.tree {
-        Some(tree) if !h.lets.is_empty() => tree_render::render_lean(
-            &h.inline_let_bindings(tree),
-            tree_render::LeanCx::guard(),
-        ),
+        Some(tree) if !h.lets.is_empty() => {
+            tree_render::render_lean(&h.inline_let_bindings(tree), tree_render::LeanCx::guard())
+        }
         _ => expr_lean(&pred.0, tree_render::LeanCx::guard()),
     }
 }

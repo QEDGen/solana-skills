@@ -332,11 +332,17 @@ pub(super) fn infer_idx_promotions_mir(
     // etc. The expression carrier is opaque; scan raw Lean form for
     // `<path>[<idx>]` patterns.
     for pred in &h.pre {
-        scan_indexed_in_expr(&expr_lean(&pred.0, tree_render::LeanCx::guard()), &mut record);
+        scan_indexed_in_expr(
+            &expr_lean(&pred.0, tree_render::LeanCx::guard()),
+            &mut record,
+        );
     }
     for stmt in &h.body.stmts {
         if let Stmt::RequireOrAbort { pred, .. } = stmt {
-            scan_indexed_in_expr(&expr_lean(&pred.0, tree_render::LeanCx::guard()), &mut record);
+            scan_indexed_in_expr(
+                &expr_lean(&pred.0, tree_render::LeanCx::guard()),
+                &mut record,
+            );
         }
     }
 
@@ -501,7 +507,8 @@ pub(super) fn emit_indexed_transition(
         };
         // Drop `<field> := <account_binding>.pubkey` — no Lean scope
         // for account-binding pubkey refs.
-        if op_kind == "set" && is_account_pubkey_ref(&expr_lean(val, tree_render::LeanCx::guard())) {
+        if op_kind == "set" && is_account_pubkey_ref(&expr_lean(val, tree_render::LeanCx::guard()))
+        {
             continue;
         }
         // Reconstruct the full dotted LHS: an indexed-record-field write

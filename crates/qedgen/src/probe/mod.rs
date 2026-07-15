@@ -995,6 +995,7 @@ mod tests {
             from: "src".into(),
             to: "dst".into(),
             amount: Some("amount".into()),
+            amount_tree: None,
             authority: Some("user".into()),
         });
         assert!(predicate_arbitrary_cpi(&h).is_none());

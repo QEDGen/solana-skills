@@ -13,13 +13,14 @@ structure State where
   pool : Nat
   fees : Nat
   fee_bps : Nat
+  lifetime_collected : Nat
   deriving Repr, DecidableEq, BEq, Inhabited
 
 def collectTransition (s : State) (signer : Pubkey) (total : Nat) : Option State :=
   let fee := (((total) * (s.fee_bps)) / (10000))
   let net := total - fee
   if total > 0 ∧ net > 0 ∧ s.pool + net ≤ 18446744073709551615 ∧ s.fees + fee ≤ 18446744073709551615 then
-    some { s with pool := s.pool + net, fees := s.fees + fee }
+    some { s with pool := s.pool + net, fees := s.fees + fee, lifetime_collected := s.lifetime_collected + total }
   else none
 
 inductive Operation where
