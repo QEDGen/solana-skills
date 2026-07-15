@@ -361,10 +361,10 @@ spec-less emits `runtime`, `handlers`, `applicable_categories`.
 v2.16 schema bumps to `version: 2` with the addition of an optional
 `reproducer` field on findings (drop-on-fail pipeline; findings
 without a confirmed reproducer are silently dropped — see
-`feedback_probes_reproducible_only.md`). v2.19 schema bumps to
-`version: 3` when `--emit-spec-candidates` is set, adding a
-`clusters[]` array that the auditor subagent surfaces through the
-scaffold-to-spec interview. v2.20 extends the bootstrap envelope
+`feedback_probes_reproducible_only.md`). v2.19 adds an optional
+`clusters[]` array under `--emit-spec-candidates` (additive — the
+schema stays `version: 2`) that the auditor subagent surfaces
+through the scaffold-to-spec interview. v2.20 extends the bootstrap envelope
 with `dispatcher_kind: "shank_central_match"` for native programs
 where `qedgen probe --bootstrap` detects a central-match dispatcher
 in `lib.rs` (S2.1 Shank adapter), and each `handlers[]` entry now
@@ -429,11 +429,11 @@ $QEDGEN probe --fuzz 300 --crucible-mode domain \
 | `--spec` | Path | optional | Path to `.qedspec` (spec-aware mode) — conflicts with `--bootstrap` and `--program` |
 | `--bootstrap` | bool | false | Spec-less mode — walk a project root and emit the auditor work list. Requires `--root`. |
 | `--root` | Path | optional | Project root for spec-less mode (the program crate dir). v2.21 also paired with `--fuzz` (no `--spec`) for brownfield protocol-mode Crucible — emits a harness at `<root>/.qed/fuzz/<prog>/` whose `invariant_test()` body is empty so only intrinsic crashes (panic / unwrap-on-None / `BorrowMutError` / arithmetic overflow) fire. v2.22 lifts the runtime gate for Pinocchio when a Codama / Anchor 0.30 IDL is on disk (canonical paths: `idl.json`, `program/idl.json`, `idl/*.json`, `target/idl/*.json`); native + sBPF still bail with a deferral message targeting v2.24+ (v2.23 shipped the pre/post property lowering trust fix + brownfield first-contact onboarding flow instead of touching this gate). |
-| `--program` | Path | optional | v2.19 user-facing alias for `--bootstrap --root <path>` (the Pinocchio-shape probe entry point; auto-routes via `Cargo.toml` detection so the same flag works for Anchor / native crates too, falling back to the generic spec-less envelope when not Pinocchio) |
-| `--runtime` | enum | auto | Override runtime detection. Values: `pinocchio`, `anchor`, `quasar`, `native`, `sbpf`. Only `pinocchio` has dedicated probe output today; the others fall back to the generic bootstrap envelope. |
+| `--program` | Path | optional | Program audit mode entry point. Auto-routes via `Cargo.toml` detection to the runtime's dedicated extractor: Pinocchio → site catalogue + SAFETY metadata (v2.19), Anchor/Quasar → anchor extractor (scaffold-to-spec interview), native/qedgen-codegen → native extractor; runtimes without an extractor fall back to the generic bootstrap envelope. Static engine only: conflicts with `--spec`, `--bootstrap`, `--root`, and `--fuzz` (fuzz brownfield targets via `--fuzz <budget> --root <path>`; merge the two JSON outputs to combine engines). |
+| `--runtime` | enum | auto | Override runtime detection. Values: `pinocchio`, `anchor`, `quasar`, `native`, `sbpf`. Pinocchio, Anchor/Quasar, and native each have a dedicated extractor under `--program`; runtimes without one (e.g. `sbpf`) fall back to the generic bootstrap envelope. |
 | `--emit-spec-candidates` | bool | false | v2.19 — lift findings into candidate spec clauses (clusters) the auditor subagent surfaces through the scaffold-to-spec interview. Schema bumps to v3 with a `clusters[]` field. v2-shape consumers see no change when the flag is off. |
 | `--audit-dir` | Path | optional | v2.19 — when paired with `--emit-spec-candidates`, write the full audit working set (`interview.md`, `clusters.json`, `skeleton.qedspec`) to this directory. Companion `qedgen ratify --audit-dir <path>` consumes the three files to produce the final spec. Conventionally `.qed/audit/<timestamp>/`. |
-| `--fuzz` | u64 | none | Wall-clock seconds. Runs the coverage-guided fuzz engine alongside (or instead of) the pattern-match predicates. v2.21+: requires `--spec <path>` (spec-driven invariants) OR `--root <project-path>` (brownfield protocol-mode); passing both layers spec invariants on top of protocol crash detection. Findings come back in the same `findings[]` with `category: crucible_fuzz_crash` and a `Reproducer::Crucible`. Budget `0` emits the harness scaffold (brownfield only) and exits without building / running the fuzzer — handy for previewing what the agent needs to fill before paying the Crucible build cost. |
+| `--fuzz` | u64 | none | Wall-clock seconds. Runs the coverage-guided fuzz engine INSTEAD of the pattern-match predicates for that invocation (run `probe --spec` separately and merge the JSON to combine engines). v2.21+: requires `--spec <path>` (spec-driven invariants) OR `--root <project-path>` (brownfield protocol-mode); passing both layers spec invariants on top of protocol crash detection. Findings come back in the same `findings[]` with `category: crucible_fuzz_crash` and a `Reproducer::Crucible`. Budget `0` emits the harness scaffold (brownfield only) and exits without building / running the fuzzer — handy for previewing what the agent needs to fill before paying the Crucible build cost. |
 | `--harness-dir` | Path | `./fuzz/<prog>/` | Crucible harness directory. Matches `codegen --crucible` output. An existing harness is reused, never regenerated (agent-filled `todo!()` account literals survive re-runs); delete it to pick up spec or binding changes. When the directory leaf differs from the program name it is treated as a parent and the `<prog>` leaf is appended. |
 | `--no-smoke` | bool | false | Skip the 30s smoke pre-flight that stops early on high-rate duplicate findings. |
 | `--stateful` | bool | false | Stateful action-chain mode. Higher throughput, longer crash chains. |

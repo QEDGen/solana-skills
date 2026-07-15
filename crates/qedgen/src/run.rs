@@ -382,18 +382,14 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                     )?;
                 }
                 let output = probe::ProbeOutput {
-                    version: probe::schema_version(),
-                    mode: probe::Mode::SpecLess,
-                    spec_path: None,
                     project_root: Some(prog_root.display().to_string()),
                     runtime: Some(probe::Runtime::Pinocchio),
-                    handlers: None,
                     applicable_categories: Some(probe::applicable_categories_public(
                         &probe::Runtime::Pinocchio,
                     )),
                     findings,
                     clusters,
-                    dispatcher_kind: None,
+                    ..probe::ProbeOutput::envelope(probe::Mode::SpecLess)
                 };
                 // Include the raw catalogue so the subagent has both
                 // `findings[]` and the full site list to cross-reference.
@@ -629,24 +625,18 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                         Ok::<_, anyhow::Error>(report)
                     })
                     .transpose()?;
+                let probe_mode = if matches!(mode, crucible_gen::InvariantMode::Protocol) {
+                    probe::Mode::SpecLess
+                } else {
+                    probe::Mode::SpecAware
+                };
                 // Budget 0 = emit the harness and exit (dry-run preview
                 // without the Crucible build cost).
                 if budget_secs == 0 {
                     let output = probe::ProbeOutput {
-                        version: 1,
-                        mode: if matches!(mode, crucible_gen::InvariantMode::Protocol) {
-                            probe::Mode::SpecLess
-                        } else {
-                            probe::Mode::SpecAware
-                        },
                         spec_path: spec.as_ref().map(|p| p.display().to_string()),
                         project_root: root.as_ref().map(|p| p.display().to_string()),
-                        runtime: None,
-                        handlers: None,
-                        applicable_categories: None,
-                        findings: Vec::new(),
-                        clusters: None,
-                        dispatcher_kind: None,
+                        ..probe::ProbeOutput::envelope(probe_mode)
                     };
                     eprintln!(
                         "Budget = 0: harness ready at {}; skipping build + fuzz run.",
@@ -671,20 +661,10 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 }
                 let findings = crucible_probe::run_fuzz_probe(&ctx)?;
                 let output = probe::ProbeOutput {
-                    version: 1,
-                    mode: if matches!(mode, crucible_gen::InvariantMode::Protocol) {
-                        probe::Mode::SpecLess
-                    } else {
-                        probe::Mode::SpecAware
-                    },
                     spec_path: spec.as_ref().map(|p| p.display().to_string()),
                     project_root: root.as_ref().map(|p| p.display().to_string()),
-                    runtime: None,
-                    handlers: None,
-                    applicable_categories: None,
                     findings,
-                    clusters: None,
-                    dispatcher_kind: None,
+                    ..probe::ProbeOutput::envelope(probe_mode)
                 };
                 println!("{}", serde_json::to_string_pretty(&output)?);
                 return Ok(());
