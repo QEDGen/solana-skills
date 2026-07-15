@@ -2185,15 +2185,16 @@ handler read_via_writable_decoy (amt : U64) : State.Active -> State.Active {
         find_state_account(handler).is_none(),
         "pre-condition: this fixture must surface the canonical-fallback path"
     );
-    // The canonical fallback picks `pool_config` (writable in
-    // `init`) and the rewriter routes `s.balance` through
-    // `self.pool_config.balance`.
-    let rewritten = rewrite_state_refs_for_self("s.balance + 1", handler, &spec);
+    // The canonical fallback picks `pool_config` (writable in `init`) —
+    // the receiver the scaffold let-binding render binds state reads
+    // through (#156: the string rewriter this asserted on is retired;
+    // the resolution seam is what v2.29.2 fixed).
+    let receiver = resolve_handler_state_account(handler, &spec).map(|sa| sa.name.as_str());
     assert_eq!(
-        rewritten, "self.pool_config.balance + 1",
-        "v2.29.2 canonical-fallback rewrite must produce \
-             `self.pool_config.balance` even when pool_config is \
-             readonly in this handler; got: `{rewritten}`"
+        receiver,
+        Some("pool_config"),
+        "v2.29.2 canonical fallback must resolve pool_config even when \
+             it is readonly in this handler; got: {receiver:?}"
     );
 }
 

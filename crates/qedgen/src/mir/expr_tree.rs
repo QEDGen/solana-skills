@@ -539,6 +539,21 @@ fn map_paths_inner(
 }
 
 impl ExprTree {
+    /// True when the expression's spine is a `mul_div_*` helper call
+    /// (peeling `old(…)`; grouping is structural, so there is no paren
+    /// wrapper to peel). Binding-site consumers narrow such RHSs back to
+    /// `u64` — the spec-level operation is U64 → U64, the u128 helper is
+    /// intermediate-width only.
+    pub fn is_mul_div(&self) -> bool {
+        match self {
+            ExprTree::MulDivFloor { .. }
+            | ExprTree::MulDivCeil { .. }
+            | ExprTree::MulDivRoundHalfUp { .. } => true,
+            ExprTree::Old(inner) => inner.is_mul_div(),
+            _ => false,
+        }
+    }
+
     /// Kind inference over the resolved tree — the drop-in replacement for
     /// `TypeEnv::infer` (renderers stop needing the type environment).
     /// `Int` dominates `Nat` in arithmetic joins; unknowns stay `Nat`.

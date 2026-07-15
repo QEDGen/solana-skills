@@ -107,6 +107,11 @@ pub struct RustCx<'a> {
     /// Mutually exclusive with `acct_env` by construction (guards vs
     /// harness positions).
     pub acct_key: Option<AcctKeyStyle>,
+    /// Multi-variant ADT accessor routing (scaffold positions): state
+    /// fields in this set read through the generated inner-enum accessor
+    /// — `state.x` under `Binder::SelfAcct(recv)` renders
+    /// `(*recv.inner.x())` instead of `recv.x`. `None` for flat state.
+    pub adt_accessors: Option<&'a std::collections::HashSet<String>>,
 }
 
 impl<'a> RustCx<'a> {
@@ -117,6 +122,7 @@ impl<'a> RustCx<'a> {
             pod: false,
             acct_env: None,
             acct_key: None,
+            adt_accessors: None,
         }
     }
     /// Test-only convenience (corpus parity + mode tests); non-test
@@ -136,6 +142,15 @@ impl<'a> RustCx<'a> {
     }
     pub fn with_acct_env(self, acct_env: Option<&'a str>) -> Self {
         RustCx { acct_env, ..self }
+    }
+    pub fn with_adt_accessors(
+        self,
+        adt_accessors: Option<&'a std::collections::HashSet<String>>,
+    ) -> Self {
+        RustCx {
+            adt_accessors,
+            ..self
+        }
     }
     pub fn with_acct_key(self, acct_key: Option<AcctKeyStyle>) -> Self {
         RustCx { acct_key, ..self }
@@ -453,7 +468,33 @@ fn render_path(p: &TreePath, cx: RustCx, inside_old: bool) -> String {
     match &p.binding {
         BindingKind::StateField | BindingKind::Ghost => match (cx.binder, inside_old) {
             (Binder::S, _) => out.push('s'),
-            (Binder::SelfAcct(name), _) => out.push_str(name),
+            (Binder::SelfAcct(name), _) => {
+                // Multi-variant ADT wrapper: consistent variant fields
+                // read through the generated accessor.
+                if let (Some(accessors), Some(TreeSeg::Field(first))) =
+                    (cx.adt_accessors, p.segments.first())
+                {
+                    if accessors.contains(first.as_str()) {
+                        out.push_str(&format!("(*{}.inner.{}())", name, first));
+                        segs = &p.segments[1..];
+                        // Fall through to the shared segment loop for any
+                        // trailing projections.
+                        for seg in segs {
+                            match seg {
+                                TreeSeg::Field(f) => {
+                                    out.push('.');
+                                    out.push_str(f);
+                                }
+                                TreeSeg::Index(i) => {
+                                    out.push_str(&format!("[({}) as usize]", i));
+                                }
+                            }
+                        }
+                        return out;
+                    }
+                }
+                out.push_str(name)
+            }
             (Binder::PrePost, true) => out.push_str("pre"),
             (Binder::PrePost, false) => out.push_str("post"),
             (Binder::PreLocal, _) => {

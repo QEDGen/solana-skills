@@ -242,8 +242,20 @@ pub(crate) fn generate_guards(
         // tripping `cannot find value 'lp_out' in this scope`. Each
         // RHS goes through `bind_state` so `s.<field>` reads route
         // through `ctx.<state>.<field>` (the guards binder).
+        let let_acct_key = match target {
+            Target::Quasar => crate::rust_codegen_util::tree_render::AcctKeyStyle::QuasarCtx,
+            Target::Anchor | Target::Pinocchio => {
+                crate::rust_codegen_util::tree_render::AcctKeyStyle::AnchorCtx
+            }
+        };
         for b in &handler.let_bindings {
-            let rewritten = bind_state_expr(&b.rust_expr, handler, state_acct, spec, &surface);
+            let rewritten = render_let_binding_rust(
+                b,
+                state_acct.map(|sa| format!("ctx.{}", sa.name)),
+                pod_target,
+                Some(let_acct_key),
+                spec,
+            );
             out.push_str(&format!(
                 "    // let-binding from spec: {} = {}\n",
                 b.name, b.rust_expr
@@ -416,6 +428,46 @@ fn emit_r27_authority_checks(
 /// loads, then the state binder `s.` is rebound to `ctx.<state_acct>.`
 /// (flat state) or the ADT accessor (`(*ctx.<state>.inner.<field>())`).
 /// Free-function sibling of [`bind_pinocchio_expr`]; formerly a 180-line
+/// Render a `let`-binding RHS for a scaffold position — tree-native
+/// (#156 tail): state reads bind through `receiver` (multi-variant ADT
+/// fields through the generated accessor), account reads through the
+/// target's key-load style when given, and a `mul_div_*` spine narrows
+/// back to `u64` at the binding site — the structural twin of the
+/// adapter's `is_mul_div_let_rhs` gate on the retired string carrier.
+pub(crate) fn render_let_binding_rust(
+    b: &crate::check::ParsedLetBinding,
+    receiver: Option<String>,
+    pod_target: bool,
+    acct_key: Option<crate::rust_codegen_util::tree_render::AcctKeyStyle>,
+    spec: &ParsedSpec,
+) -> String {
+    use crate::rust_codegen_util::tree_render::{render_rust, Binder, RustCx};
+    let tree = b
+        .tree
+        .as_ref()
+        .expect("ParsedLetBinding.tree is always populated by the chumsky adapter (#151/#156)");
+    let accessors = adt_accessor_field_names(spec);
+    let binder = match &receiver {
+        Some(r) => Binder::SelfAcct(r),
+        // No resolvable state account — leave `s.` for the caller to
+        // hand-edit (same R12 contract as the requires lane).
+        None => Binder::S,
+    };
+    let cx = RustCx {
+        pod: pod_target,
+        ..RustCx::native()
+    }
+    .with_binder(binder)
+    .with_acct_key(acct_key)
+    .with_adt_accessors((!accessors.is_empty()).then_some(&accessors));
+    let rendered = render_rust(tree, cx);
+    if tree.is_mul_div() {
+        format!("({}) as u64", rendered)
+    } else {
+        rendered
+    }
+}
+
 /// closure inside `generate_guards`.
 fn bind_state_expr(
     expr: &str,

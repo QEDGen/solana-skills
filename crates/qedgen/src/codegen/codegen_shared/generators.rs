@@ -572,7 +572,7 @@ pub(crate) fn variant_field_index(
 /// declared type: field name → (type, carrying variants), name-sorted.
 /// This is the single source of truth for which fields get a wrapper
 /// accessor — emission (`render_adt_inner_enum`) and consumption
-/// (`generate_guards` / `rewrite_state_refs_for_self`) must agree, or a
+/// (`generate_guards` / `render_let_binding_rust`) must agree, or a
 /// guard would call an accessor that was never emitted.
 pub(crate) fn consistent_variant_fields(
     acct: &crate::check::ParsedAccountType,

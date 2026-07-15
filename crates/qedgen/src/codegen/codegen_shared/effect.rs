@@ -54,53 +54,6 @@ pub(crate) fn find_canonical_state_account_name(spec: &ParsedSpec) -> Option<Str
         .map(|(name, _)| name)
 }
 
-/// Rewrite `s.<field>` patterns in a pre-rendered Rust expression so it
-/// compiles inside the user-owned handler `impl` block (state binder is
-/// `self`, not `ctx`) — mirrors `generate_guards::bind_state` with
-/// `self.<state_acct>` as the prefix. Multi-variant ADT fields route
-/// through the accessor (`(*self.<state>.inner.<field>())`); flat-state
-/// fields take `self.<state>.<field>`. Word-bounded so identifiers like
-/// `accounts[i].fee_credits` aren't corrupted. Covers in-`impl` sites
-/// (e.g. `let X = ref_impl(state.f, …)`) that
-/// `resolve_call_arg_for_amount` doesn't reach — otherwise `s.<field>`
-/// stays unbound and rustc rejects with `cannot find value 's'`.
-pub(crate) fn rewrite_state_refs_for_self(
-    expr: &str,
-    handler: &ParsedHandler,
-    spec: &ParsedSpec,
-) -> String {
-    let Some(sa) = resolve_handler_state_account(handler, spec) else {
-        return expr.to_string();
-    };
-    let accessor_fields = adt_accessor_field_names(spec);
-    let bare_target = format!("self.{}.", sa.name);
-    let bytes = expr.as_bytes();
-    let mut out = String::with_capacity(expr.len() + 16);
-    let mut i = 0;
-    while i < bytes.len() {
-        let prev_ok = i == 0 || !is_ident_char(bytes[i - 1]);
-        if prev_ok && i + 1 < bytes.len() && bytes[i] == b's' && bytes[i + 1] == b'.' {
-            let mut j = i + 2;
-            while j < bytes.len() && is_ident_char(bytes[j]) {
-                j += 1;
-            }
-            let field = &expr[i + 2..j];
-            if !field.is_empty() && accessor_fields.contains(field) {
-                out.push_str(&format!("(*self.{}.inner.{}())", sa.name, field));
-                i = j;
-                continue;
-            } else if !field.is_empty() {
-                out.push_str(&bare_target);
-                i += 2;
-                continue;
-            }
-        }
-        out.push(bytes[i] as char);
-        i += 1;
-    }
-    out
-}
-
 /// Resolve a numeric / value argument's rust_expr to a form in scope
 /// inside the handler `impl` block. Bare identifiers matching a state
 /// field get the `self.<state_acct>.` prefix; handler params and

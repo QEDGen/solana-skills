@@ -283,7 +283,13 @@ pub(crate) fn render_handler_scaffold(
     // shorthand, unbound here — rewrite through the same accessor logic
     // the CPI-arg path uses.
     for b in &handler.let_bindings {
-        let rewritten = rewrite_state_refs_for_self(&b.rust_expr, handler, spec);
+        let rewritten = render_let_binding_rust(
+            b,
+            resolve_handler_state_account(handler, spec).map(|sa| format!("self.{}", sa.name)),
+            /*pod_target=*/ false,
+            /*acct_key=*/ None,
+            spec,
+        );
         out.push_str(&format!("        let {} = {};\n", b.name, rewritten));
     }
 
