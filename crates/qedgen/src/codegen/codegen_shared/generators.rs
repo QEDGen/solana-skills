@@ -411,7 +411,8 @@ pub(crate) fn render_pinocchio_handler_scaffold(
 /// Emit the `.handler()` effect body for a Pinocchio handler. Mechanical
 /// SCALAR state effects lower to a one-time mutable zeropod decode plus
 /// per-field `.get()` arithmetic (native int op, then `.into()` back to
-/// the Pod field); RHS expressions route through `bind_pinocchio_expr`.
+/// the Pod field); RHS expressions render tree-native (#223) under the
+/// zeropod Pod style with `self`-prefixed account key loads.
 /// SPL Token CPIs lower via `try_emit_cpi` — the handler struct's
 /// `&'a AccountInfo` fields match `pinocchio_token`'s CPI struct fields
 /// directly. Deferred surfaces (non-scalar effects, events, `transfers`
@@ -439,7 +440,7 @@ pub(crate) fn emit_pinocchio_effect_body(
 
     // Classify scalar state effects (lhs is a simple field after stripping
     // any `Variant.` prefix — no `.` / `[` remaining).
-    let scalar: Vec<(String, &str, &str)> = handler
+    let scalar: Vec<(String, &crate::check::ParsedEffect)> = handler
         .effects
         .iter()
         .filter_map(|e| {
@@ -447,7 +448,7 @@ pub(crate) fn emit_pinocchio_effect_body(
             if field.contains('.') || field.contains('[') {
                 None
             } else {
-                Some((field, e.op.as_str(), e.value.as_str()))
+                Some((field, e))
             }
         })
         .collect();
@@ -460,11 +461,14 @@ pub(crate) fn emit_pinocchio_effect_body(
                 "        let __state = {}Account::from_bytes_mut(unsafe {{ self.{}.borrow_mut_data_unchecked() }})\n            .map_err(|_| ProgramError::InvalidAccountData)?;\n",
                 prog, acct.name
             ));
-            for (field, op, rhs) in &scalar {
+            for (field, eff) in &scalar {
                 // Effect body lives in the handler method, so account refs
                 // bind through `self` (not the guard fn's `ctx`).
-                let r = bind_pinocchio_expr(rhs, handler, "__state", "self", spec);
-                let line = match *op {
+                let r = render_pinocchio_expr(
+                    crate::codegen_shared::effect_tree(eff),
+                    crate::rust_codegen_util::tree_render::AcctKeyStyle::PinocchioSelf,
+                );
+                let line = match eff.op.as_str() {
                     // Pubkey fields are raw `[u8; 32]` (no Pod wrapper), so
                     // assign the deref'd value directly — `.into()` is for
                     // the native-int → Pod-scalar conversion only.
