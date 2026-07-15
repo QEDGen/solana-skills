@@ -87,7 +87,7 @@ fn apply_remove_member(state: &mut MultisigState) {
 
 /// Guard predicate for `create_vault`.
 fn guard_create_vault(_state: &MultisigState, threshold: u8, member_count: u8) -> bool {
-    ((threshold > 0) && (threshold <= member_count)) && (member_count <= 32)
+    (threshold > 0) && (threshold <= member_count) && (member_count <= 32)
 }
 
 /// Guard predicate for `approve`.
@@ -118,7 +118,8 @@ fn guard_add_member(state: &MultisigState, member_index: u8, member_pubkey: [u8;
 /// Guard predicate for `remove_member`.
 fn guard_remove_member(state: &MultisigState) -> bool {
     (state.member_count > state.threshold)
-        && ((state.approval_count == 0) && (state.rejection_count == 0))
+        && (state.approval_count == 0)
+        && (state.rejection_count == 0)
 }
 
 #[cfg(test)]
@@ -298,8 +299,8 @@ mod tests {
             approval_count: 0,
             rejection_count: 0,
         };
-        let threshold: u8 = 1;
-        let member_count: u8 = 33;
+        let threshold: u8 = 0;
+        let member_count: u8 = 1;
         assert!(!guard_create_vault(&state, threshold, member_count));
     }
 
@@ -475,7 +476,7 @@ mod tests {
             member_count: 2,
             members: Default::default(),
             voted: Default::default(),
-            approval_count: 0,
+            approval_count: 1,
             rejection_count: 0,
         };
         assert!(!guard_remove_member(&state));

@@ -98,7 +98,7 @@ fn guard_deposit(_state: &PoolState, amount: u64) -> bool {
 
 /// Guard predicate for `borrow`.
 fn guard_borrow(_state: &LoanState, amount: u64, collateral: u64) -> bool {
-    ((amount > 0) && (collateral > 0))
+    (amount > 0) && (collateral > 0)
 }
 
 /// Guard predicate for `liquidate`.
@@ -257,7 +257,7 @@ mod tests {
             collateral: 0,
         };
         let amount: u64 = 0;
-        let collateral: u64 = 0;
+        let collateral: u64 = 1;
         assert!(!guard_borrow(&state, amount, collateral));
     }
 
