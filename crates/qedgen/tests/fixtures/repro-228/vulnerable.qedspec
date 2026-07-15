@@ -1,0 +1,15 @@
+// #228 vulnerable fixture: `balance +=? amount` uses the WRAPPING operator
+// (`+=?`) on an amount field. An unbounded `amount` at u64::MAX silently
+// overflows instead of aborting — the ArithmeticOverflowWrapping predicate
+// fires and generates an executable boundary reproducer.
+
+spec VaultWrap
+
+type State
+  | Active of {
+      balance : U64,
+    }
+
+handler deposit (amount : U64) : State.Active -> State.Active {
+  effect { balance +=? amount }
+}
