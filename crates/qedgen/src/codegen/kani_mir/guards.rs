@@ -1,7 +1,6 @@
 //! Guard-enforcement and abort-condition harnesses: monolithic-or-split
 //! `rejects_invalid` proofs (with the `GuardRejectionHarness` carrier, the
-//! `mul_bps_floor_u128` call-binding rewrite, and the term slug helper) plus
-//! the per-`aborts_if` rejection proofs.
+//! `mul_bps_floor_u128` call-binding rewrite, and the term slug helper).
 
 use super::*;
 
@@ -79,12 +78,10 @@ pub(crate) fn emit_guard_enforcement_harnesses(
             )?;
         } else {
             for (idx, term) in guard_terms.iter().enumerate() {
-                let term_expr = util::rewrite_kani_pubkey_comparisons(&term.rust_expr, op, parsed);
+                let term_expr = util::rewrite_kani_pubkey_comparisons(term, op, parsed);
                 let prefix_terms = guard_terms[..idx]
                     .iter()
-                    .map(|prefix| {
-                        util::rewrite_kani_pubkey_comparisons(&prefix.rust_expr, op, parsed)
-                    })
+                    .map(|prefix| util::rewrite_kani_pubkey_comparisons(prefix, op, parsed))
                     .collect::<Vec<_>>();
                 let slug = guard_term_slug(&term_expr);
                 let harness_name =
@@ -253,74 +250,4 @@ pub(crate) fn guard_term_slug(expr: &str) -> String {
     } else {
         slug
     }
-}
-
-/// Emit `#[kani::proof] fn verify_<handler>_aborts_if_<error>()` per
-/// (handler, abort clause): symbolic state + pre-status assume + symbolic
-/// params + (double-emit) abstract binders, `kani::assume(<abort.rust_expr>)`
-/// (the condition that should trigger abortion), then
-/// `assert!(!<handler>(...))` — handler must reject.
-pub(crate) fn emit_abort_condition_harnesses(out: &mut String, parsed: &ParsedSpec) -> Result<()> {
-    use crate::rust_codegen_util as util;
-
-    let (state_fields, lifecycle) = resolve_account_view(parsed);
-    let mutable = util::field_refs(state_fields);
-
-    let abort_ops: Vec<&crate::check::ParsedHandler> = parsed
-        .handlers
-        .iter()
-        .filter(|op| !op.aborts_if.is_empty())
-        .collect();
-
-    if abort_ops.is_empty() {
-        return Ok(());
-    }
-
-    out.push_str(
-        "// ============================================================================\n",
-    );
-    out.push_str("// Abort conditions — operations must reject under specified conditions\n");
-    out.push_str(
-        "// ============================================================================\n\n",
-    );
-
-    for op in &abort_ops {
-        for abort in &op.aborts_if {
-            emit_proof_preamble(
-                out,
-                parsed,
-                Some(op),
-                &mutable,
-                lifecycle,
-                PreambleOpts {
-                    harness_name: &format!("verify_{}_aborts_if_{}", op.name, abort.error_name),
-                    unwind: 2,
-                    solver: "cadical",
-                    zeroed_init: false,
-                    pre_status_assume: true,
-                },
-            );
-            // binder_emits: 2 — see guard-enforcement double-emit comment.
-            emit_symbolic_params(out, parsed, op, 2)?;
-
-            emit_kani_account_env_binding(out, op, "accounts", "    ");
-            let abort_expr =
-                util::rewrite_account_pubkey_refs(&abort.rust_expr, &op.accounts, "accounts");
-            let abort_expr = util::rewrite_kani_pubkey_comparisons(&abort_expr, op, parsed);
-            out.push_str(&format!("    kani::assume({});\n", abort_expr));
-
-            let args = transition_call_args(
-                op,
-                util::handler_needs_account_env(op).then_some("accounts"),
-            );
-            out.push_str(&format!("    assert!(!{}(&mut s{}),\n", op.name, args));
-            out.push_str(&format!(
-                "        \"{} must abort with {}\");\n",
-                op.name, abort.error_name
-            ));
-            out.push_str("}\n\n");
-        }
-    }
-
-    Ok(())
 }

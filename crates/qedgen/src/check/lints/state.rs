@@ -707,9 +707,9 @@ pub(super) fn check_missing_effect(spec: &ParsedSpec) -> Vec<CompletenessWarning
         if op.name.contains("_case_") || op.name.ends_with("_otherwise") {
             continue;
         }
-        // Top-level abort handlers carry `aborts_if` / `aborts_total` and
-        // also have no effect by construction.
-        if !op.aborts_if.is_empty() || op.aborts_total {
+        // Top-level abort handlers carry `aborts_total` and also have no
+        // effect by construction.
+        if op.aborts_total {
             continue;
         }
         let has_lifecycle = op.pre_status.is_some() || op.post_status.is_some();
@@ -787,14 +787,9 @@ pub(super) fn check_write_without_read(ctx: &LintCtx) -> Vec<CompletenessWarning
         }
     }
     // Gather every text that might mention a state field — all
-    // requires / ensures / property bodies / invariants, not just the
-    // legacy `guard_str` slot (which modern specs leave `None`,
-    // making reads invisible and the lint false-positive-heavy).
+    // requires / ensures / property bodies / invariants.
     let mut texts: Vec<&str> = Vec::new();
     for op in &spec.handlers {
-        if let Some(ref guard) = op.guard_str {
-            texts.push(guard.as_str());
-        }
         for req in &op.requires {
             texts.push(req.lean_expr.as_str());
             texts.push(req.rust_expr.as_str());
@@ -1404,7 +1399,10 @@ mod tests {
     fn test_missing_effect_fires() {
         let mut h = make_handler("deposit");
         h.takes_params = vec![("amount".to_string(), "U64".to_string())];
-        h.guard_str = Some("amount > 0".to_string());
+        h.requires.push(crate::check::ParsedRequires {
+            lean_expr: "amount > 0".to_string(),
+            ..Default::default()
+        });
         // has lifecycle (pre/post set via make_handler) but no effect
         let spec = ParsedSpec {
             handlers: vec![h],
@@ -1427,7 +1425,10 @@ mod tests {
     fn test_missing_effect_skips_when_handler_has_only_calls() {
         let mut h = make_handler("init_mint");
         h.takes_params = vec![("decimals".to_string(), "U64".to_string())];
-        h.guard_str = Some("decimals > 0".to_string());
+        h.requires.push(crate::check::ParsedRequires {
+            lean_expr: "decimals > 0".to_string(),
+            ..Default::default()
+        });
         h.calls = vec![ParsedCall {
             target_interface: "Token".to_string(),
             target_handler: "initialize_mint".to_string(),
@@ -1455,7 +1456,10 @@ mod tests {
     fn test_missing_effect_skips_when_handler_has_modifies() {
         let mut h = make_handler("opaque_update");
         h.takes_params = vec![("payload".to_string(), "U64".to_string())];
-        h.guard_str = Some("payload > 0".to_string());
+        h.requires.push(crate::check::ParsedRequires {
+            lean_expr: "payload > 0".to_string(),
+            ..Default::default()
+        });
         h.modifies = Some(vec!["balance".to_string()]);
         let spec = ParsedSpec {
             handlers: vec![h],
@@ -1475,7 +1479,10 @@ mod tests {
     fn test_missing_effect_skips_when_effect_exists() {
         let mut h = make_handler("deposit");
         h.takes_params = vec![("amount".to_string(), "U64".to_string())];
-        h.guard_str = Some("amount > 0".to_string());
+        h.requires.push(crate::check::ParsedRequires {
+            lean_expr: "amount > 0".to_string(),
+            ..Default::default()
+        });
         h.effects = vec![ParsedEffect::from_triple("balance", "add", "amount")];
         let spec = ParsedSpec {
             handlers: vec![h],
@@ -1495,7 +1502,10 @@ mod tests {
         let mut h = make_handler("borrow");
         h.on_account = Some("Loan".to_string());
         h.takes_params = vec![("loan_amount".to_string(), "U64".to_string())];
-        h.guard_str = Some("loan_amount > 0".to_string());
+        h.requires.push(crate::check::ParsedRequires {
+            lean_expr: "loan_amount > 0".to_string(),
+            ..Default::default()
+        });
         h.pre_status = Some("Empty".to_string());
         h.post_status = Some("Active".to_string());
 
@@ -1657,7 +1667,10 @@ mod tests {
     #[test]
     fn test_write_without_read_lint() {
         let mut h = make_handler("deposit");
-        h.guard_str = Some("amount > 0".to_string());
+        h.requires.push(crate::check::ParsedRequires {
+            lean_expr: "amount > 0".to_string(),
+            ..Default::default()
+        });
         h.effects = vec![
             ParsedEffect::from_triple("balance", "add", "amount"),
             ParsedEffect::from_triple("counter", "add", "1"),
@@ -1730,7 +1743,10 @@ mod tests {
         // Field "id" written in effects, guard only has "valid" — should NOT count as read
         let mut h = make_handler("update");
         h.effects = vec![ParsedEffect::from_triple("id", "set", "1")];
-        h.guard_str = Some("valid > 0".to_string());
+        h.requires.push(crate::check::ParsedRequires {
+            lean_expr: "valid > 0".to_string(),
+            ..Default::default()
+        });
         let spec = ParsedSpec {
             handlers: vec![h],
             state_fields: vec![
@@ -1755,7 +1771,10 @@ mod tests {
         // Field "balance" written in effects, guard has "balance > 0" — should count as read
         let mut h = make_handler("deposit");
         h.effects = vec![ParsedEffect::from_triple("balance", "add", "amount")];
-        h.guard_str = Some("balance > 0".to_string());
+        h.requires.push(crate::check::ParsedRequires {
+            lean_expr: "balance > 0".to_string(),
+            ..Default::default()
+        });
         let spec = ParsedSpec {
             handlers: vec![h],
             state_fields: vec![("balance".to_string(), "U64".to_string())],
@@ -1779,7 +1798,10 @@ mod tests {
         // Field "id" written, guard has "state.id > 0" — should count as read
         let mut h = make_handler("update");
         h.effects = vec![ParsedEffect::from_triple("id", "set", "1")];
-        h.guard_str = Some("state.id > 0".to_string());
+        h.requires.push(crate::check::ParsedRequires {
+            lean_expr: "state.id > 0".to_string(),
+            ..Default::default()
+        });
         let spec = ParsedSpec {
             handlers: vec![h],
             state_fields: vec![("id".to_string(), "U64".to_string())],

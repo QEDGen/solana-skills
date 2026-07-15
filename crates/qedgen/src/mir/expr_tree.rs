@@ -373,7 +373,187 @@ impl TreePath {
     }
 }
 
+/// Structural map over every `Path` leaf: `f(path, in_old)` returns the
+/// replacement subtree, or `None` to keep the path as-is. `in_old` is true
+/// under an `Old(…)` wrapper. Every other node rebuilds structurally — the
+/// exhaustive match keeps a new `ExprTree` variant a compile error here
+/// (#66 discipline). Substitution passes (CPI ensures, `let` inlining)
+/// build on this instead of hand-rolling twin walkers.
+pub fn map_paths(
+    t: &ExprTree,
+    f: &mut impl FnMut(&TreePath, bool) -> Option<ExprTree>,
+) -> ExprTree {
+    map_paths_inner(t, f, false)
+}
+
+fn map_paths_inner(
+    t: &ExprTree,
+    f: &mut impl FnMut(&TreePath, bool) -> Option<ExprTree>,
+    in_old: bool,
+) -> ExprTree {
+    match t {
+        ExprTree::Int(_) | ExprTree::Bool(_) => t.clone(),
+        ExprTree::Path(p) => f(p, in_old).unwrap_or_else(|| ExprTree::Path(p.clone())),
+        ExprTree::Old(inner) => ExprTree::Old(Box::new(map_paths_inner(inner, f, true))),
+        ExprTree::Sum {
+            binder,
+            binder_ty,
+            fin_bound,
+            body,
+        } => ExprTree::Sum {
+            binder: binder.clone(),
+            binder_ty: binder_ty.clone(),
+            fin_bound: fin_bound.clone(),
+            body: Box::new(map_paths_inner(body, f, in_old)),
+        },
+        ExprTree::Quant {
+            kind,
+            binder,
+            binder_ty,
+            fin_bound,
+            body,
+        } => ExprTree::Quant {
+            kind: *kind,
+            binder: binder.clone(),
+            binder_ty: binder_ty.clone(),
+            fin_bound: fin_bound.clone(),
+            body: Box::new(map_paths_inner(body, f, in_old)),
+        },
+        ExprTree::QuantIn {
+            kind,
+            binder,
+            coll,
+            body,
+        } => ExprTree::QuantIn {
+            kind: *kind,
+            binder: binder.clone(),
+            coll: Box::new(map_paths_inner(coll, f, in_old)),
+            body: Box::new(map_paths_inner(body, f, in_old)),
+        },
+        ExprTree::BoolOp { op, lhs, rhs } => ExprTree::BoolOp {
+            op: *op,
+            lhs: Box::new(map_paths_inner(lhs, f, in_old)),
+            rhs: Box::new(map_paths_inner(rhs, f, in_old)),
+        },
+        ExprTree::Not(inner) => ExprTree::Not(Box::new(map_paths_inner(inner, f, in_old))),
+        ExprTree::Cmp { op, lhs, rhs } => ExprTree::Cmp {
+            op: *op,
+            lhs: Box::new(map_paths_inner(lhs, f, in_old)),
+            rhs: Box::new(map_paths_inner(rhs, f, in_old)),
+        },
+        ExprTree::Arith { op, lhs, rhs } => ExprTree::Arith {
+            op: *op,
+            lhs: Box::new(map_paths_inner(lhs, f, in_old)),
+            rhs: Box::new(map_paths_inner(rhs, f, in_old)),
+        },
+        ExprTree::MulDivFloor { a, b, d } => ExprTree::MulDivFloor {
+            a: Box::new(map_paths_inner(a, f, in_old)),
+            b: Box::new(map_paths_inner(b, f, in_old)),
+            d: Box::new(map_paths_inner(d, f, in_old)),
+        },
+        ExprTree::MulDivCeil { a, b, d } => ExprTree::MulDivCeil {
+            a: Box::new(map_paths_inner(a, f, in_old)),
+            b: Box::new(map_paths_inner(b, f, in_old)),
+            d: Box::new(map_paths_inner(d, f, in_old)),
+        },
+        ExprTree::MulDivRoundHalfUp { a, b, d } => ExprTree::MulDivRoundHalfUp {
+            a: Box::new(map_paths_inner(a, f, in_old)),
+            b: Box::new(map_paths_inner(b, f, in_old)),
+            d: Box::new(map_paths_inner(d, f, in_old)),
+        },
+        ExprTree::Contains { coll, elem } => ExprTree::Contains {
+            coll: Box::new(map_paths_inner(coll, f, in_old)),
+            elem: Box::new(map_paths_inner(elem, f, in_old)),
+        },
+        ExprTree::Len(inner) => ExprTree::Len(Box::new(map_paths_inner(inner, f, in_old))),
+        ExprTree::Match {
+            scrutinee,
+            arms,
+            enum_ty,
+        } => ExprTree::Match {
+            scrutinee: Box::new(map_paths_inner(scrutinee, f, in_old)),
+            arms: arms
+                .iter()
+                .map(|arm| TreeMatchArm {
+                    variant: arm.variant.clone(),
+                    binder: arm.binder.clone(),
+                    body: Box::new(map_paths_inner(&arm.body, f, in_old)),
+                    shape: arm.shape,
+                })
+                .collect(),
+            enum_ty: enum_ty.clone(),
+        },
+        ExprTree::Ctor { variant, payload } => ExprTree::Ctor {
+            variant: variant.clone(),
+            payload: payload
+                .as_ref()
+                .map(|p| Box::new(map_paths_inner(p, f, in_old))),
+        },
+        ExprTree::RecordLit(fields) => ExprTree::RecordLit(
+            fields
+                .iter()
+                .map(|(n, v)| (n.clone(), map_paths_inner(v, f, in_old)))
+                .collect(),
+        ),
+        ExprTree::RecordUpdate { base, updates } => ExprTree::RecordUpdate {
+            base: Box::new(map_paths_inner(base, f, in_old)),
+            updates: updates
+                .iter()
+                .map(|(n, v)| (n.clone(), map_paths_inner(v, f, in_old)))
+                .collect(),
+        },
+        ExprTree::IsVariant {
+            scrutinee,
+            variant,
+            enum_ty,
+            shape,
+        } => ExprTree::IsVariant {
+            scrutinee: Box::new(map_paths_inner(scrutinee, f, in_old)),
+            variant: variant.clone(),
+            enum_ty: enum_ty.clone(),
+            shape: *shape,
+        },
+        ExprTree::App { func, args } => ExprTree::App {
+            func: func.clone(),
+            args: args.iter().map(|a| map_paths_inner(a, f, in_old)).collect(),
+        },
+        ExprTree::Field { base, field } => ExprTree::Field {
+            base: Box::new(map_paths_inner(base, f, in_old)),
+            field: field.clone(),
+        },
+        ExprTree::Let { name, value, body } => ExprTree::Let {
+            name: name.clone(),
+            value: Box::new(map_paths_inner(value, f, in_old)),
+            body: Box::new(map_paths_inner(body, f, in_old)),
+        },
+        ExprTree::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => ExprTree::IfThenElse {
+            cond: Box::new(map_paths_inner(cond, f, in_old)),
+            then_branch: Box::new(map_paths_inner(then_branch, f, in_old)),
+            else_branch: Box::new(map_paths_inner(else_branch, f, in_old)),
+        },
+    }
+}
+
 impl ExprTree {
+    /// True when the expression's spine is a `mul_div_*` helper call
+    /// (peeling `old(…)`; grouping is structural, so there is no paren
+    /// wrapper to peel). Binding-site consumers narrow such RHSs back to
+    /// `u64` — the spec-level operation is U64 → U64, the u128 helper is
+    /// intermediate-width only.
+    pub fn is_mul_div(&self) -> bool {
+        match self {
+            ExprTree::MulDivFloor { .. }
+            | ExprTree::MulDivCeil { .. }
+            | ExprTree::MulDivRoundHalfUp { .. } => true,
+            ExprTree::Old(inner) => inner.is_mul_div(),
+            _ => false,
+        }
+    }
+
     /// Kind inference over the resolved tree — the drop-in replacement for
     /// `TypeEnv::infer` (renderers stop needing the type environment).
     /// `Int` dominates `Nat` in arithmetic joins; unknowns stay `Nat`.

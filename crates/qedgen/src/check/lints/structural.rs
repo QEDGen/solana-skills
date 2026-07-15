@@ -344,7 +344,7 @@ pub(super) fn check_unknown_guard_identifier(spec: &ParsedSpec) -> Vec<Completen
         let mut known: std::collections::BTreeSet<&str> = consts.clone();
         known.extend(h.takes_params.iter().map(|(n, _)| n.as_str()));
         known.extend(h.accounts.iter().map(|a| a.name.as_str()));
-        known.extend(h.let_bindings.iter().map(|(n, _, _)| n.as_str()));
+        known.extend(h.let_bindings.iter().map(|b| b.name.as_str()));
         known.extend(h.abstract_binders.iter().map(|(n, _)| n.as_str()));
         known.extend(h.calls.iter().filter_map(|c| c.result_binding.as_deref()));
         if let Some(who) = &h.who {
@@ -1503,7 +1503,10 @@ handler initialize : State.Uninitialized -> State.Active {
     fn test_no_properties_fires() {
         let mut h = make_handler("deposit");
         h.effects = vec![ParsedEffect::from_triple("balance", "add", "amount")];
-        h.guard_str = Some("amount > 0".to_string());
+        h.requires.push(crate::check::ParsedRequires {
+            lean_expr: "amount > 0".to_string(),
+            ..Default::default()
+        });
         let spec = ParsedSpec {
             handlers: vec![h],
             state_fields: vec![("balance".to_string(), "U64".to_string())],
@@ -1522,7 +1525,10 @@ handler initialize : State.Uninitialized -> State.Active {
     fn test_no_properties_skips_with_property() {
         let mut h = make_handler("deposit");
         h.effects = vec![ParsedEffect::from_triple("balance", "add", "amount")];
-        h.guard_str = Some("amount > 0".to_string());
+        h.requires.push(crate::check::ParsedRequires {
+            lean_expr: "amount > 0".to_string(),
+            ..Default::default()
+        });
         let spec = ParsedSpec {
             handlers: vec![h],
             state_fields: vec![("balance".to_string(), "U64".to_string())],
@@ -1552,7 +1558,10 @@ handler initialize : State.Uninitialized -> State.Active {
     #[test]
     fn test_no_errors_block_fires() {
         let mut h = make_handler("deposit");
-        h.guard_str = Some("amount > 0".to_string());
+        h.requires.push(crate::check::ParsedRequires {
+            lean_expr: "amount > 0".to_string(),
+            ..Default::default()
+        });
         let spec = ParsedSpec {
             handlers: vec![h],
             lifecycle_states: vec!["Active".to_string()],

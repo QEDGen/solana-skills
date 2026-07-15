@@ -43,7 +43,7 @@ pub(super) fn render_multi_account(mir: &Mir) -> String {
 
     emit_properties_multi(&mut out, mir);
 
-    // Pass 2 — per-account: aborts_if, ensures, frame, overflow.
+    // Pass 2 — per-account: abort theorems, ensures, frame, overflow.
     // Overflow needs each account's properties on the scoped Mir so the
     // `h_inv_<prop>` hypothesis threads correctly.
     let prop_groups = group_properties_by_account(mir);
@@ -100,12 +100,13 @@ pub(super) fn group_properties_by_account(
     let primary_name = mir.account_states[0].name.clone();
     for prop in &mir.properties {
         let target = if let Some(expr) = &prop.expression {
+            let lean = expr_lean(expr, tree_render::LeanCx::guard());
             mir.account_states
                 .iter()
                 .find(|a| {
                     a.fields
                         .iter()
-                        .any(|f| expr.lean.contains(&format!("s.{}", f.name)))
+                        .any(|f| lean.contains(&format!("s.{}", f.name)))
                 })
                 .map(|a| a.name.clone())
                 .unwrap_or_else(|| primary_name.clone())
@@ -341,7 +342,10 @@ pub(super) fn emit_invariants_as_comments(out: &mut String, mir: &Mir) {
             inv.name
         ));
         if let Some(body) = &inv.body {
-            out.push_str(&format!("--   predicate body: {}\n", body.0.lean));
+            out.push_str(&format!(
+                "--   predicate body: {}\n",
+                expr_lean(&body.0, tree_render::LeanCx::guard())
+            ));
         }
         if !inv.doc.is_empty() {
             out.push_str(&format!("--   description: {}\n", inv.doc));

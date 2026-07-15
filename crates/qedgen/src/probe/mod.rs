@@ -70,7 +70,7 @@ pub enum Category {
     /// `missing_signer` → spoof another user's init.
     InitWithoutPda,
     /// State field declared on an `account` type and read somewhere in the
-    /// spec (`auth <field>`, `requires`/`aborts_if`, effect RHS, property
+    /// spec (`auth <field>`, `requires`, effect RHS, property
     /// expression) but never written by any handler `effect`. On
     /// Quasar/Anchor, `auth X` lowers to `has_one = X`, so an unset Pubkey
     /// makes the constraint unsatisfiable; a never-written counter makes a
@@ -995,6 +995,7 @@ mod tests {
             from: "src".into(),
             to: "dst".into(),
             amount: Some("amount".into()),
+            amount_tree: None,
             authority: Some("user".into()),
         });
         assert!(predicate_arbitrary_cpi(&h).is_none());

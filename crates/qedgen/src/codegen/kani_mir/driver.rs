@@ -111,10 +111,6 @@ pub(crate) fn emit_single_account_sections(
         emit_guard_enforcement_harnesses(out, parsed, progress)?;
     }
     if progress {
-        eprintln!("Rendering Kani section: abort-condition proofs");
-    }
-    emit_abort_condition_harnesses(out, parsed)?;
-    if progress {
         eprintln!("Rendering Kani section: property preservation proofs");
     }
     emit_property_preservation_harnesses(out, parsed)?;
@@ -188,7 +184,6 @@ pub(crate) fn emit_multi_account_sections(
         } else {
             emit_guard_enforcement_harnesses(out, &scoped, progress)?;
         }
-        emit_abort_condition_harnesses(out, &scoped)?;
         emit_property_preservation_harnesses(out, &scoped)?;
         emit_ensures_preservation_harnesses(out, &scoped)?;
         emit_invariant_preservation_harnesses(out, &scoped)?;

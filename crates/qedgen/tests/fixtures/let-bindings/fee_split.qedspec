@@ -1,0 +1,54 @@
+// Spec-level `let` binding coverage fixture (#156).
+//
+// The percolator examples that exercised handler-level `let` were removed
+// in the v3.0 simplification pass, leaving the lane corpus-uncovered. This
+// fixture pins the canonical fee-split shape through every backend:
+//   - `let` RHS calling a mul_div_* helper (the `as u64` narrowing at the
+//     binding site),
+//   - `let` RHS reading state (`state.fee_bps` — the bind_state rewrite in
+//     guards.rs / scaffold.rs),
+//   - a second `let` referencing the first (`net = total - fee`),
+//   - `requires` and `effect` consuming the bindings (LetBound paths).
+
+spec FeeSplit
+
+state {
+  pool    : U64,
+  fees    : U64,
+  fee_bps : U64,
+}
+
+type Error
+  | DustAmount
+  | MathOverflow
+
+const BPS_DENOM = 10000
+
+// Ghost coverage (#156 Layer 2): spec-only running total, updated by the
+// handler — exercises the ghost-update tree render in the Lean transition.
+ghost lifetime_collected : U64 {
+  init { 0 }
+  on collect { lifetime_collected += total }
+}
+
+/// Split `total` into pool liquidity and protocol fees.
+handler collect (total : U64) {
+  permissionless
+
+  accounts {
+    state : writable
+  }
+
+  let fee = mul_div_floor(total, state.fee_bps, BPS_DENOM)
+  let net = total - fee
+
+  requires total > 0 else DustAmount
+  requires net > 0 else DustAmount
+
+  effect {
+    pool += net
+    fees += fee
+  }
+
+  ensures state.fees >= old(state.fees)
+}

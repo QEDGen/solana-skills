@@ -282,9 +282,15 @@ pub(crate) fn render_handler_scaffold(
     // RHSs reference them). The RHS carries the spec's `s.<field>`
     // shorthand, unbound here — rewrite through the same accessor logic
     // the CPI-arg path uses.
-    for (binding_name, _lean_expr, rust_expr) in &handler.let_bindings {
-        let rewritten = rewrite_state_refs_for_self(rust_expr, handler, spec);
-        out.push_str(&format!("        let {} = {};\n", binding_name, rewritten));
+    for b in &handler.let_bindings {
+        let rewritten = render_let_binding_rust(
+            b,
+            resolve_handler_state_account(handler, spec).map(|sa| format!("self.{}", sa.name)),
+            /*pod_target=*/ false,
+            /*acct_key=*/ None,
+            spec,
+        );
+        out.push_str(&format!("        let {} = {};\n", b.name, rewritten));
     }
 
     // `let X = call …` bindings must be in scope for subsequent effects
@@ -349,8 +355,7 @@ pub(crate) fn render_handler_scaffold(
         }
     } else {
         for effect in &handler.effects {
-            let mechanized =
-                state_acct.and_then(|sa| mechanize_effect(effect, sa, handler, spec, target));
+            let mechanized = state_acct.and_then(|sa| mechanize_effect(effect, sa, spec, target));
             match mechanized {
                 Some(line) => out.push_str(&line),
                 None => {

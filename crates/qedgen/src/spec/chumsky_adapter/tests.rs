@@ -1162,12 +1162,8 @@ environment rate_change {
     let spec = parse_str(&src).expect("parse environment constraints");
     let environment = &spec.environments[0];
 
-    assert_eq!(environment.constraints.len(), 2);
-    assert_eq!(environment.constraints_rust.len(), 2);
     assert_eq!(environment.typed_constraints.len(), 2);
     for (index, typed) in environment.typed_constraints.iter().enumerate() {
-        assert_eq!(typed.lean_expr, environment.constraints[index]);
-        assert_eq!(typed.rust_expr, environment.constraints_rust[index]);
         assert!(
             typed.tree.is_some(),
             "constraint {index} must retain its tree"
@@ -1416,7 +1412,11 @@ property p : state.total == state.balance preserved_by all
     let g = &spec.ghosts[0];
     assert_eq!(g.name, "total");
     assert_eq!(g.ty, "U64");
-    assert_eq!(g.init_rust.trim(), "0");
+    assert!(
+        matches!(&g.init_tree, Some(crate::mir::ExprTree::Int(0))),
+        "init tree should be the 0 literal; got {:?}",
+        g.init_tree
+    );
     assert_eq!(g.updates.len(), 1);
     assert_eq!(g.updates[0].handler, "mint");
     // `state.total` resolves to `s.total` (ghost registered as a state
@@ -1426,10 +1426,15 @@ property p : state.total == state.balance preserved_by all
         "update value_rust should read the ghost + param; got {}",
         g.updates[0].value_rust
     );
+    // The folded tree reads the ghost's pre-value: `s.total + (amount)`
+    // structurally (Lean renders from this tree).
     assert!(
-        g.updates[0].value_lean.contains("s.total"),
-        "update value_lean should read the ghost; got {}",
-        g.updates[0].value_lean
+        matches!(
+            &g.updates[0].value_tree,
+            Some(crate::mir::ExprTree::Arith { .. })
+        ),
+        "update value_tree should carry the folded add; got {:?}",
+        g.updates[0].value_tree
     );
     // The property references the ghost as a state field.
     let prop = spec.properties.iter().find(|p| p.name == "p").unwrap();
@@ -1553,10 +1558,13 @@ handler deposit (amount : U64) {
         crate::check::ParsedHookKind::AfterStore(f) if f == "balance"
     ));
     assert_eq!(h.asserts.len(), 1);
+    let rendered = crate::rust_codegen_util::tree_render::render_rust(
+        h.asserts[0].tree.as_ref().expect("hook assert tree"),
+        crate::rust_codegen_util::tree_render::RustCx::native(),
+    );
     assert!(
-        h.asserts[0].rust.contains("s.balance") && h.asserts[0].rust.contains("s.cap"),
-        "assert rust should read the state fields; got {}",
-        h.asserts[0].rust
+        rendered.contains("s.balance") && rendered.contains("s.cap"),
+        "assert tree should read the state fields; got {rendered}"
     );
 }
 
@@ -1775,11 +1783,12 @@ handler accept (total : U64) (fee_bps : U64) : State.Active -> State.Active {
         .expect("accept handler");
 
     // Find the `fee` binding's rendered RHS.
-    let (_, _, fee_rhs) = h
+    let fee_rhs = &h
         .let_bindings
         .iter()
-        .find(|(name, _, _)| name == "fee")
-        .expect("fee binding");
+        .find(|b| b.name == "fee")
+        .expect("fee binding")
+        .rust_expr;
 
     assert!(
         fee_rhs.contains("mul_div_floor_u128"),
@@ -1818,11 +1827,12 @@ handler accept (total : U64) (fee_bps : U64) : State.Active -> State.Active {
         .iter()
         .find(|h| h.name == "accept")
         .expect("accept handler");
-    let (_, _, fee_rhs) = h
+    let fee_rhs = &h
         .let_bindings
         .iter()
-        .find(|(name, _, _)| name == "fee")
-        .expect("fee binding");
+        .find(|b| b.name == "fee")
+        .expect("fee binding")
+        .rust_expr;
     assert!(
         fee_rhs.contains("mul_div_ceil_u128") && fee_rhs.contains("as u64"),
         "ceil variant must narrow too; got: {fee_rhs}"
@@ -1842,18 +1852,25 @@ handler accept (total : U64) (rate : U64) : State -> State {
 }
 "#;
     let spec = parse_str(src).expect("parse");
-    let (_, lean_rhs, rust_rhs) = spec.handlers[0]
+    let binding = spec.handlers[0]
         .let_bindings
         .iter()
-        .find(|(name, _, _)| name == "rounded")
+        .find(|b| b.name == "rounded")
         .expect("rounded binding");
+    let rust_rhs = &binding.rust_expr;
     assert!(
         rust_rhs.contains("mul_div_round_half_up_u128") && rust_rhs.contains("as u64"),
         "half-up variant must use the helper and narrow; got: {rust_rhs}"
     );
+    // The Lean half-up bias (`(a * b + d / 2) / d`) renders from the tree;
+    // the binding must carry the structural helper node.
     assert!(
-        lean_rhs.contains("/ 2"),
-        "Lean rendering must encode the half-up bias: {lean_rhs}"
+        matches!(
+            &binding.tree,
+            Some(crate::mir::ExprTree::MulDivRoundHalfUp { .. })
+        ),
+        "half-up binding must carry the MulDivRoundHalfUp tree; got {:?}",
+        binding.tree
     );
 }
 
@@ -1888,11 +1905,12 @@ handler accept (total : U64) (fee_bps : U64) : State.Active -> State.Active {
         .iter()
         .find(|h| h.name == "accept")
         .expect("accept handler");
-    let (_, _, fee_rhs) = h
+    let fee_rhs = &h
         .let_bindings
         .iter()
-        .find(|(name, _, _)| name == "fee")
-        .expect("fee binding");
+        .find(|b| b.name == "fee")
+        .expect("fee binding")
+        .rust_expr;
     assert!(
         fee_rhs.contains("mul_div_floor_u128") && fee_rhs.contains("as u64"),
         "parenthesised mul_div RHS must still narrow; got: {fee_rhs}"

@@ -102,7 +102,6 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     warnings.extend(check_write_without_read(&ctx));
 
     // Rule 14: guard conjunct subsumed by another on the same operation.
-    warnings.extend(check_dead_guard(spec));
 
     // Rule 15: lifecycle where every state has outgoing transitions.
     warnings.extend(check_circular_lifecycle_no_terminal(spec));

@@ -28,7 +28,7 @@ pub(super) fn emit_properties(out: &mut String, mir: &Mir) {
             // Strip a leading `∀ s : State,` binder (only when the binder
             // ident is exactly `s`) — the surrounding def already
             // introduces `(s : State)`.
-            let body = strip_state_forall(&expr.lean);
+            let body = strip_state_forall(&expr_lean(expr, property_cx(prop)));
             out.push_str(&format!(
                 "def {} (s : State) : Prop := {}\n\n",
                 safe_name(&prop.name),
@@ -109,7 +109,10 @@ pub(super) fn preservation_proof_script(
 ) -> String {
     let trans_name = safe_name(&format!("{}Transition", h.name));
 
-    let body_lean = prop.expression.as_ref().map(|e| e.lean.clone());
+    let body_lean = prop
+        .expression
+        .as_ref()
+        .map(|e| expr_lean(e, property_cx(prop)));
     let has_quantifier = body_lean
         .as_deref()
         .map(|e| e.contains('\u{2200}') || e.contains('\u{2203}'))
@@ -136,32 +139,41 @@ pub(super) fn preservation_proof_script(
 
     let prop_name = safe_name(&prop.name);
 
+    // Handler-level `let` bindings leave the unfolded hypothesis wrapped
+    // in `have`/`let` binders; zeta-reduce so `split`/`cases` find the
+    // `if` / record form (#156).
+    let zeta = if h.lets.is_empty() {
+        ""
+    } else {
+        " dsimp only at h;"
+    };
+
     if has_cond {
         if touches_prop_field {
             format!(
-                " := by\n  unfold {} at h; split at h\n  \
+                " := by\n  unfold {} at h;{} split at h\n  \
                  \u{B7} next hg => cases h; unfold {} at h_inv \u{22A2}; dsimp; omega\n  \
                  \u{B7} contradiction\n\n",
-                trans_name, prop_name
+                trans_name, zeta, prop_name
             )
         } else {
             format!(
-                " := by\n  unfold {} at h; split at h\n  \
+                " := by\n  unfold {} at h;{} split at h\n  \
                  \u{B7} cases h; exact h_inv\n  \
                  \u{B7} contradiction\n\n",
-                trans_name
+                trans_name, zeta
             )
         }
     } else if touches_prop_field {
         format!(
-            " := by\n  unfold {} at h; cases h; \
+            " := by\n  unfold {} at h;{} cases h; \
              unfold {} at h_inv \u{22A2}; dsimp; omega\n\n",
-            trans_name, prop_name
+            trans_name, zeta, prop_name
         )
     } else {
         format!(
-            " := by\n  unfold {} at h; cases h; exact h_inv\n\n",
-            trans_name
+            " := by\n  unfold {} at h;{} cases h; exact h_inv\n\n",
+            trans_name, zeta
         )
     }
 }
@@ -179,7 +191,10 @@ pub(super) fn preservation_proof_script(
 pub(super) fn master_inductive_proof_script(mir: &Mir, prop: &crate::mir::PropertyMir) -> String {
     let mut proof = String::from(" := by\n  cases op with\n");
 
-    let body_lean = prop.expression.as_ref().map(|e| e.lean.clone());
+    let body_lean = prop
+        .expression
+        .as_ref()
+        .map(|e| expr_lean(e, property_cx(prop)));
     let prop_fields: Vec<String> = body_lean
         .as_deref()
         .map(fields_referenced_in_expr_owned)
@@ -211,15 +226,22 @@ pub(super) fn master_inductive_proof_script(mir: &Mir, prop: &crate::mir::Proper
                 ));
             } else {
                 let has_cond = !build_guard_cond_parts(mir, h).is_empty();
+                // Zeta-reduce `let`-carrying transitions so `split`/`cases`
+                // find the `if` / record form (#156).
+                let zeta = if h.lets.is_empty() {
+                    ""
+                } else {
+                    " dsimp only at h;"
+                };
                 if has_cond {
                     proof.push_str(&format!(
-                        "  | {}{} =>\n    simp [applyOp] at h\n    unfold {} at h; split at h\n    \u{B7} next hg => cases h; unfold {} at h_inv \u{22A2}; dsimp; omega\n    \u{B7} contradiction\n",
-                        ctor, param_bind, trans_name, prop_name
+                        "  | {}{} =>\n    simp [applyOp] at h\n    unfold {} at h;{} split at h\n    \u{B7} next hg => cases h; unfold {} at h_inv \u{22A2}; dsimp; omega\n    \u{B7} contradiction\n",
+                        ctor, param_bind, trans_name, zeta, prop_name
                     ));
                 } else {
                     proof.push_str(&format!(
-                        "  | {}{} =>\n    simp [applyOp] at h\n    unfold {} at h; cases h; unfold {} at h_inv \u{22A2}; dsimp; omega\n",
-                        ctor, param_bind, trans_name, prop_name
+                        "  | {}{} =>\n    simp [applyOp] at h\n    unfold {} at h;{} cases h; unfold {} at h_inv \u{22A2}; dsimp; omega\n",
+                        ctor, param_bind, trans_name, zeta, prop_name
                     ));
                 }
             }
@@ -243,19 +265,12 @@ pub(super) fn emit_invariants(out: &mut String, mir: &Mir) {
         return;
     }
 
-    // Collect all state-field names across every variant for the
-    // `prefix_state_fields` regex pass.
-    let field_set: std::collections::HashSet<String> = mir
-        .state
-        .variants
-        .iter()
-        .flat_map(|v| v.fields.iter().map(|f| f.name.clone()))
-        .collect();
-
     for inv in &mir.invariants {
         match &inv.body {
             Some(pred) => {
-                let prefixed = prefix_state_fields(&pred.0.lean, &field_set);
+                // Post-#139 canonicalization state reads are `s.`-rooted
+                // in both the string and the tree render — no prefix pass.
+                let prefixed = &expr_lean(&pred.0, tree_render::LeanCx::guard());
                 out.push_str(&format!(
                     "/-- Invariant: {}{} -/\n",
                     inv.name,
@@ -394,16 +409,15 @@ pub(super) fn emit_frame_conditions(out: &mut String, mir: &Mir) {
     }
 }
 
-/// Emit abort theorems — per (handler, abort clause):
+/// Emit abort theorems — per (handler, `requires X else Err` clause):
 ///
 /// ```text
 /// theorem <h>_aborts_if_<Err> (s : State) (signer : Pubkey) <params>
-///     (h : <pred>) : <h>Transition s signer <args> = none := sorry
+///     (h : ¬(<requires-expr>)) : <h>Transition s signer <args> = none := sorry
 /// ```
 ///
-/// For `requires X else Err` the hypothesis is the negated form
-/// `¬(<requires-expr>)`. `aborts_total` instead emits a single
-/// `<h>_aborts_iff` theorem with the disjunction of every abort condition.
+/// `aborts_total` instead emits a single `<h>_aborts_iff` theorem with the
+/// disjunction of every abort condition.
 pub(super) fn emit_aborts_if(out: &mut String, mir: &Mir) {
     emit_aborts_if_with_sorry(out, mir, "sorry");
 }
@@ -415,7 +429,17 @@ pub(super) fn abort_requires_proof(
     trans_name: &str,
     cond_parts: &[String],
     req_index_in_cond_parts: usize,
+    handler_has_lets: bool,
 ) -> String {
+    // With handler-level `let` bindings the unfolded goal is a
+    // `let`-expression; `dsimp only` zeta-reduces so `rw [if_neg …]`
+    // reaches the `if` (the hypothesis carries the inlined form, which
+    // matches the reduced condition).
+    let zeta = if handler_has_lets {
+        "\n  dsimp only"
+    } else {
+        ""
+    };
     let atoms_per: Vec<usize> = cond_parts
         .iter()
         .map(|p| count_top_level_conjuncts(p))
@@ -425,7 +449,7 @@ pub(super) fn abort_requires_proof(
     let target_atoms = atoms_per[req_index_in_cond_parts];
 
     if total_atoms == 1 {
-        return format!(" := by\n  unfold {}\n  rw [if_neg h]\n", trans_name);
+        return format!(" := by\n  unfold {}{}\n  rw [if_neg h]\n", trans_name, zeta);
     }
 
     let projections: Vec<String> = (0..target_atoms)
@@ -438,8 +462,8 @@ pub(super) fn abort_requires_proof(
     };
 
     format!(
-        " := by\n  unfold {}\n  rw [if_neg (fun hg => h {})]\n",
-        trans_name, extraction
+        " := by\n  unfold {}{}\n  rw [if_neg (fun hg => h {})]\n",
+        trans_name, zeta, extraction
     )
 }
 
@@ -450,11 +474,32 @@ pub(super) fn emit_aborts_if_adt(out: &mut String, mir: &Mir) {
     emit_aborts_if_with_sorry(out, mir, "by sorry");
 }
 
+/// Abort-hypothesis Lean form. Predicates referencing handler `let`
+/// bindings inline them — theorem statements sit outside the transition
+/// def where the `let`s are bound, so the names would be free (#156
+/// fixture `let-bindings-fee-split`). Let-free handlers keep the
+/// adapter's pre-rendered string (byte parity with existing snapshots).
+fn abort_pred_lean(h: &crate::mir::HandlerMir, pred: &crate::mir::Predicate) -> String {
+    match &pred.0.tree {
+        Some(tree) if !h.lets.is_empty() => {
+            tree_render::render_lean(&h.inline_let_bindings(tree), tree_render::LeanCx::guard())
+        }
+        _ => expr_lean(&pred.0, tree_render::LeanCx::guard()),
+    }
+}
+
+/// Render context for a property body: `Unary` reads single-state (`s.`),
+/// `Binary` reads post-state as `s'` with `old(…)` collapsing to `s` —
+/// matching the adapter's legacy `lean_expr` conventions per class.
+fn property_cx(prop: &crate::mir::PropertyMir) -> tree_render::LeanCx {
+    match prop.class {
+        crate::check::PropertyClass::Unary => tree_render::LeanCx::guard(),
+        crate::check::PropertyClass::Binary => tree_render::LeanCx::ensures(),
+    }
+}
+
 pub(super) fn emit_aborts_if_with_sorry(out: &mut String, mir: &Mir, sorry_form: &str) {
-    let has_aborts = mir
-        .handlers
-        .iter()
-        .any(|h| !h.aborts_if.is_empty() || !h.requires_or_abort.is_empty());
+    let has_aborts = mir.handlers.iter().any(|h| !h.requires_or_abort.is_empty());
     if !has_aborts {
         return;
     }
@@ -468,7 +513,7 @@ pub(super) fn emit_aborts_if_with_sorry(out: &mut String, mir: &Mir, sorry_form:
     );
 
     for h in &mir.handlers {
-        if h.aborts_if.is_empty() && h.requires_or_abort.is_empty() {
+        if h.requires_or_abort.is_empty() {
             continue;
         }
         let trans_name = safe_name(&format!("{}Transition", h.name));
@@ -477,14 +522,9 @@ pub(super) fn emit_aborts_if_with_sorry(out: &mut String, mir: &Mir, sorry_form:
 
         // `aborts_total` collapses all abort conditions into one iff theorem.
         let all_abort_lean: Vec<String> = h
-            .aborts_if
+            .requires_or_abort
             .iter()
-            .map(|a| a.pred.0.lean.clone())
-            .chain(
-                h.requires_or_abort
-                    .iter()
-                    .map(|r| format!("\u{00AC}({})", r.pred.0.lean)),
-            )
+            .map(|r| format!("\u{00AC}({})", abort_pred_lean(h, &r.pred)))
             .collect();
 
         if h.aborts_total && !all_abort_lean.is_empty() {
@@ -506,9 +546,6 @@ pub(super) fn emit_aborts_if_with_sorry(out: &mut String, mir: &Mir, sorry_form:
         // appears multiple times on a single handler.
         let mut error_total: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
-        for a in &h.aborts_if {
-            *error_total.entry(a.err.clone()).or_insert(0) += 1;
-        }
         for r in &h.requires_or_abort {
             *error_total.entry(r.err.clone()).or_insert(0) += 1;
         }
@@ -530,19 +567,6 @@ pub(super) fn emit_aborts_if_with_sorry(out: &mut String, mir: &Mir, sorry_form:
                 }
             };
 
-        // Legacy aborts_if clauses: hypothesis IS the predicate.
-        for a in &h.aborts_if {
-            let theorem_name = theorem_name_for(&a.err, &mut error_seen);
-            out.push_str(&format!(
-                "theorem {} (s : State) (signer : Pubkey){}\n",
-                theorem_name, param_sig
-            ));
-            out.push_str(&format!(
-                "    (h : {}) : {} s signer{} = none := {}\n\n",
-                a.pred.0.lean, trans_name, param_args, sorry_form
-            ));
-        }
-
         // requires-else clauses: hypothesis is ¬(predicate). Clauses
         // referencing a handler account's `.pubkey` / `.key()` are skipped
         // — those identifiers aren't in Lean scope and the theorem would
@@ -555,7 +579,8 @@ pub(super) fn emit_aborts_if_with_sorry(out: &mut String, mir: &Mir, sorry_form:
         let cond_parts = build_guard_cond_parts(mir, h);
         let flat_path = sorry_form == "sorry";
         for r in &h.requires_or_abort {
-            if mentions_handler_account_pubkey(&r.pred.0.lean, &h.accounts) {
+            let pred_lean = abort_pred_lean(h, &r.pred);
+            if mentions_handler_account_pubkey(&pred_lean, &h.accounts) {
                 continue;
             }
             let theorem_name = theorem_name_for(&r.err, &mut error_seen);
@@ -563,13 +588,20 @@ pub(super) fn emit_aborts_if_with_sorry(out: &mut String, mir: &Mir, sorry_form:
                 "theorem {} (s : State) (signer : Pubkey){}\n",
                 theorem_name, param_sig
             ));
-            let req_pos = cond_parts.iter().position(|c| c == &r.pred.0.lean);
+            // Positioned against the guard conjunct in its original
+            // (let-name) form — the transition's `if` binds the lets, so
+            // its condition keeps the names; the hypothesis carries the
+            // inlined form, and the `if_neg` projection unifies the two
+            // up to zeta reduction.
+            let req_lean = expr_lean(&r.pred.0, tree_render::LeanCx::guard());
+            let req_pos = cond_parts.iter().position(|c| c == &req_lean);
             if flat_path {
                 if let Some(pos) = req_pos {
-                    let proof = abort_requires_proof(&trans_name, &cond_parts, pos);
+                    let proof =
+                        abort_requires_proof(&trans_name, &cond_parts, pos, !h.lets.is_empty());
                     out.push_str(&format!(
                         "    (h : \u{00AC}({})) : {} s signer{} = none{}\n",
-                        r.pred.0.lean, trans_name, param_args, proof
+                        pred_lean, trans_name, param_args, proof
                     ));
                     continue;
                 }
@@ -588,13 +620,13 @@ pub(super) fn emit_aborts_if_with_sorry(out: &mut String, mir: &Mir, sorry_form:
                 let proof = format!(" := by\n  unfold {}\n  cases s <;> simp_all\n", trans_name);
                 out.push_str(&format!(
                     "    (h : \u{00AC}({})) : {} s signer{} = none{}\n",
-                    r.pred.0.lean, trans_name, param_args, proof
+                    pred_lean, trans_name, param_args, proof
                 ));
                 continue;
             }
             out.push_str(&format!(
                 "    (h : \u{00AC}({})) : {} s signer{} = none := {}\n\n",
-                r.pred.0.lean, trans_name, param_args, sorry_form
+                pred_lean, trans_name, param_args, sorry_form
             ));
         }
     }
@@ -635,7 +667,10 @@ pub(super) fn emit_ensures(out: &mut String, mir: &Mir) {
                 "    (h : {} s signer{} = some s') :\n",
                 trans_name, param_args
             ));
-            out.push_str(&format!("    {} := sorry\n\n", ens.0.lean));
+            out.push_str(&format!(
+                "    {} := sorry\n\n",
+                expr_lean(&ens.0, tree_render::LeanCx::ensures())
+            ));
         }
     }
 }

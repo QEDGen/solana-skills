@@ -66,20 +66,19 @@ pub struct ParsedVariant {
     pub fields: Vec<(String, String)>,
 }
 
-/// Parsed aborts_if clause: condition → error name.
+/// Handler-level `let name = expr` binding. `rust_expr` carries the
+/// adapter's binding-site rendering (including the `as u64` narrowing for
+/// `mul_div_*` RHSs); `tree` is the typed RHS (#156).
 #[derive(Debug, Clone)]
-pub struct ParsedAbort {
-    pub lean_expr: String,
+pub struct ParsedLetBinding {
+    pub name: String,
     pub rust_expr: String,
-    /// Pod-aware Rust expression for Quasar (`.get()` postfix, `as i128` casts);
-    /// codegen picks between this and `rust_expr` by `Target`.
-    pub rust_expr_pod: String,
-    pub error_name: String,
+    pub tree: Option<crate::mir::ExprTree>,
 }
 
 /// Parsed requires clause. When `error_name` is Some, generates both a guard
 /// (positive form in transition) and an abort theorem (negated form).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ParsedRequires {
     pub lean_expr: String,
     pub rust_expr: String,
@@ -108,6 +107,10 @@ pub struct ParsedRequires {
 pub struct ParsedEnsures {
     pub lean_expr: String,
     pub rust_expr: String,
+    /// Read only by the pod-render parity corpus
+    /// (`corpus_parity_with_legacy_rust_strings`) — production pod
+    /// rendering flows from the tree.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub rust_expr_pod: String,
     /// Binary-mode rendering (`state.x` → `post.x`, `old(state.x)` → `pre.x`)
     /// for the ensures-preservation Kani harness; `rust_expr` flattens both to
@@ -126,7 +129,10 @@ pub struct ParsedEnsures {
 pub struct ParsedCover {
     pub name: String,
     pub traces: Vec<Vec<String>>,
-    pub reachable: Vec<(String, Option<String>)>, // (op, when_lean_expr)
+    /// `(op, when_lean_expr, when_tree)` — the typed tree rides with the
+    /// pre-rendered Lean form (#156).
+    #[allow(clippy::type_complexity)]
+    pub reachable: Vec<(String, Option<String>, Option<crate::mir::ExprTree>)>,
 }
 
 /// Parsed liveness block (leads-to).
@@ -170,14 +176,7 @@ pub struct ParsedEnvironment {
     pub mutates: Vec<(String, String)>, // (field, type)
     /// Typed fields in distinct external namespaces: `(object, field, type)`.
     pub external_fields: Vec<(String, String, String)>,
-    /// Legacy target-rendered forms, retained while environment codegen
-    /// migrates to [`ParsedEnvironmentConstraint`]. Indices correspond to
-    /// `typed_constraints`.
-    pub constraints: Vec<String>, // lean form
-    pub constraints_rust: Vec<String>, // rust form
-    /// Typed metadata for each constraint. Adapter-produced specs populate
-    /// this one-for-one with `constraints`; legacy ingest paths may leave it
-    /// empty and continue to use the rendered strings above.
+    /// Typed metadata for each constraint, one per declared `constraint`.
     pub typed_constraints: Vec<ParsedEnvironmentConstraint>,
 }
 
@@ -189,8 +188,6 @@ pub struct ParsedEnvironment {
 /// without parsing target code.
 #[derive(Debug, Clone)]
 pub struct ParsedEnvironmentConstraint {
-    pub lean_expr: String,
-    pub rust_expr: String,
     pub tree: Option<crate::mir::ExprTree>,
     pub class: PropertyClass,
 }
@@ -218,7 +215,9 @@ pub struct ParsedProperty {
     /// `QEDGEN_UNSUPPORTED_QUANTIFIER` when a forall/exists can't lower to a
     /// bool body; callers skip emission then.
     pub rust_expression: Option<String>,
-    /// Pod-aware Rust body for Quasar (mirrors `rust_expr_pod`).
+    /// Pod-aware Rust body for Quasar; read only by the pod-render parity
+    /// corpus — production pod rendering flows from the tree.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub rust_expression_pod: Option<String>,
     /// Math-exact Rust body (see `ParsedRequires::rust_expr_math`): the
     /// Kani/proptest property predicate fns consume this so evaluating a
@@ -492,10 +491,6 @@ pub struct ParsedHandler {
     /// Post-state lifecycle transition.
     pub post_status: Option<String>,
     pub takes_params: Vec<(String, String)>,
-    /// Legacy guard expression (Lean form). Deprecated: use `requires` instead.
-    pub guard_str: Option<String>,
-    /// Legacy abort conditions. Deprecated: use `requires ... else` instead.
-    pub aborts_if: Vec<ParsedAbort>,
     /// Requires clauses: guard + optional abort. When error_name is Some,
     /// generates both transition guard and abort theorem.
     pub requires: Vec<ParsedRequires>,
@@ -503,8 +498,9 @@ pub struct ParsedHandler {
     pub ensures: Vec<ParsedEnsures>,
     /// Frame condition: fields that may be modified. All others must stay unchanged.
     pub modifies: Option<Vec<String>>,
-    /// Handler-level let bindings: (name, lean_expr, rust_expr).
-    pub let_bindings: Vec<(String, String, String)>,
+    /// Handler-level `let name = expr` bindings, in declaration order
+    /// (later bindings may reference earlier ones).
+    pub let_bindings: Vec<ParsedLetBinding>,
     /// All abort conditions are exhaustive — generates ↔ theorem instead of per-abort.
     pub aborts_total: bool,
     /// Deliberately permissionless — no `auth` required. Mutually exclusive
@@ -548,13 +544,6 @@ pub struct ParsedHandler {
 /// IR form of a top-level `match` block inside `effect { … }`.
 #[derive(Debug, Clone)]
 pub struct ParsedEffectBranches {
-    /// Scrutinee expression rendered for Rust codegen.
-    pub scrutinee_rust: String,
-    /// Scrutinee rendered for Quasar/Pod targets. Threaded into the MIR as
-    /// `BranchScrutinee::Match`'s `Expr.rust_pod` by `lower_handler`, where
-    /// the pod backends read it; the Anchor `emit_transition_fn` path uses
-    /// `scrutinee_rust`.
-    pub scrutinee_rust_pod: String,
     /// Scrutinee expression rendered for Lean.
     pub scrutinee_lean: String,
     /// Typed scrutinee tree (#151 Slice 0).
@@ -565,8 +554,9 @@ pub struct ParsedEffectBranches {
 /// One arm of a `ParsedEffectBranches`.
 #[derive(Debug, Clone)]
 pub struct ParsedEffectArm {
-    pub pattern_rust: String,
     pub pattern_lean: String,
+    /// Typed pattern tree (#156); `None` for wildcard arms.
+    pub pattern_tree: Option<crate::mir::ExprTree>,
     /// `true` for a wildcard arm.
     pub is_wildcard: bool,
     /// Per-arm effects, one self-contained `ParsedEffect` per site (#151
@@ -599,9 +589,7 @@ pub struct ParsedCall {
 #[derive(Debug, Default, Clone)]
 pub struct ParsedCallArg {
     pub name: String,
-    pub lean_expr: String,
     pub rust_expr: String,
-    pub rust_expr_pod: String,
     /// Typed argument tree (#151 Slice 0).
     pub tree: Option<crate::mir::ExprTree>,
 }
@@ -624,7 +612,7 @@ pub struct ParsedStateBinder {
 
 impl ParsedHandler {
     pub fn has_guard(&self) -> bool {
-        self.guard_str.is_some() || !self.requires.is_empty()
+        !self.requires.is_empty()
     }
     pub fn has_effect(&self) -> bool {
         !self.effects.is_empty()
@@ -698,6 +686,8 @@ pub struct ParsedTransfer {
     pub from: String,
     pub to: String,
     pub amount: Option<String>,
+    /// Typed amount tree (#156); `None` when no amount declared.
+    pub amount_tree: Option<crate::mir::ExprTree>,
     pub authority: Option<String>,
 }
 
@@ -860,9 +850,8 @@ pub struct ParsedGhost {
     pub doc: Option<String>,
     /// DSL type string (`U64`, `I128`, `Bool`, …). Scalar only.
     pub ty: String,
-    /// Initial value, rendered for each backend.
-    pub init_lean: String,
-    pub init_rust: String,
+    /// Typed initial-value tree (#156) — every backend renders from it.
+    pub init_tree: Option<crate::mir::ExprTree>,
     pub updates: Vec<ParsedGhostUpdate>,
 }
 
@@ -873,8 +862,9 @@ pub struct ParsedGhost {
 #[derive(Debug, Clone)]
 pub struct ParsedGhostUpdate {
     pub handler: String,
-    pub value_lean: String,
     pub value_rust: String,
+    /// Typed complete-new-value tree (#156; op already folded in).
+    pub value_tree: Option<crate::mir::ExprTree>,
 }
 
 /// Lowered `hook` declaration, pre-rendered per backend.
@@ -895,10 +885,8 @@ pub enum ParsedHookKind {
 /// One `assert <expr>` in a hook body, rendered per backend.
 #[derive(Debug, Clone)]
 pub struct ParsedHookAssert {
-    /// Lean rendering, retained for the deferred Lean enforcement path
-    /// (qedsvm). Not consumed today — Lean ignores hooks.
-    pub lean: String,
-    pub rust: String,
+    /// Typed assert tree (#156) — every backend renders from it.
+    pub tree: Option<crate::mir::ExprTree>,
 }
 
 impl ParsedSpec {

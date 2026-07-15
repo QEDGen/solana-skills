@@ -16,9 +16,6 @@ pub(crate) fn guards_use_math_helpers(spec: &ParsedSpec) -> bool {
         if h.requires.iter().any(|r| probe(&r.rust_expr)) {
             any = true;
         }
-        if h.aborts_if.iter().any(|a| probe(&a.rust_expr)) {
-            any = true;
-        }
         if h.ensures.iter().any(|e| probe(&e.rust_expr)) {
             any = true;
         }
@@ -27,7 +24,7 @@ pub(crate) fn guards_use_math_helpers(spec: &ParsedSpec) -> bool {
         // Without this, specs that compute fee math via a `let` (a common
         // pattern for splitting amounts before the effect block) wouldn't
         // pick up the math.rs import / inline helpers.
-        if h.let_bindings.iter().any(|(_, _, r)| probe(r)) {
+        if h.let_bindings.iter().any(|b| probe(&b.rust_expr)) {
             any = true;
         }
         // Effect RHS can call the helpers directly (`fee := mul_div_floor(…)`)
@@ -211,7 +208,6 @@ pub(crate) fn generate_guards(
         emit_r27_authority_checks(&mut out, handler, spec, &surface, &err_enum);
 
         if handler.requires.is_empty()
-            && handler.aborts_if.is_empty()
             && lifecycle_pre_check.is_empty()
             && lifecycle_post_write.is_empty()
         {
@@ -246,21 +242,29 @@ pub(crate) fn generate_guards(
         // tripping `cannot find value 'lp_out' in this scope`. Each
         // RHS goes through `bind_state` so `s.<field>` reads route
         // through `ctx.<state>.<field>` (the guards binder).
-        for (binding_name, _lean_expr, rust_expr) in &handler.let_bindings {
-            let rewritten = bind_state_expr(rust_expr, handler, state_acct, spec, &surface);
+        let let_acct_key = match target {
+            Target::Quasar => crate::rust_codegen_util::tree_render::AcctKeyStyle::QuasarCtx,
+            Target::Anchor | Target::Pinocchio => {
+                crate::rust_codegen_util::tree_render::AcctKeyStyle::AnchorCtx
+            }
+        };
+        for b in &handler.let_bindings {
+            let rewritten = render_let_binding_rust(
+                b,
+                state_acct.map(|sa| format!("ctx.{}", sa.name)),
+                pod_target,
+                Some(let_acct_key),
+                spec,
+            );
             out.push_str(&format!(
                 "    // let-binding from spec: {} = {}\n",
-                binding_name, rust_expr
+                b.name, b.rust_expr
             ));
-            out.push_str(&format!("    let {} = {};\n", binding_name, rewritten));
+            out.push_str(&format!("    let {} = {};\n", b.name, rewritten));
         }
 
         emit_requires_guards(
             &mut out, handler, hm, spec, &surface, target, state_acct, pod_target, &err_enum,
-        );
-
-        emit_aborts_guards(
-            &mut out, handler, spec, &surface, state_acct, pod_target, &err_enum,
         );
 
         // R26: lifecycle post-status write — runs after all guards have
@@ -424,6 +428,46 @@ fn emit_r27_authority_checks(
 /// loads, then the state binder `s.` is rebound to `ctx.<state_acct>.`
 /// (flat state) or the ADT accessor (`(*ctx.<state>.inner.<field>())`).
 /// Free-function sibling of [`bind_pinocchio_expr`]; formerly a 180-line
+/// Render a `let`-binding RHS for a scaffold position — tree-native
+/// (#156 tail): state reads bind through `receiver` (multi-variant ADT
+/// fields through the generated accessor), account reads through the
+/// target's key-load style when given, and a `mul_div_*` spine narrows
+/// back to `u64` at the binding site — the structural twin of the
+/// adapter's `is_mul_div_let_rhs` gate on the retired string carrier.
+pub(crate) fn render_let_binding_rust(
+    b: &crate::check::ParsedLetBinding,
+    receiver: Option<String>,
+    pod_target: bool,
+    acct_key: Option<crate::rust_codegen_util::tree_render::AcctKeyStyle>,
+    spec: &ParsedSpec,
+) -> String {
+    use crate::rust_codegen_util::tree_render::{render_rust, Binder, RustCx};
+    let tree = b
+        .tree
+        .as_ref()
+        .expect("ParsedLetBinding.tree is always populated by the chumsky adapter (#151/#156)");
+    let accessors = adt_accessor_field_names(spec);
+    let binder = match &receiver {
+        Some(r) => Binder::SelfAcct(r),
+        // No resolvable state account — leave `s.` for the caller to
+        // hand-edit (same R12 contract as the requires lane).
+        None => Binder::S,
+    };
+    let cx = RustCx {
+        pod: pod_target,
+        ..RustCx::native()
+    }
+    .with_binder(binder)
+    .with_acct_key(acct_key)
+    .with_adt_accessors((!accessors.is_empty()).then_some(&accessors));
+    let rendered = render_rust(tree, cx);
+    if tree.is_mul_div() {
+        format!("({}) as u64", rendered)
+    } else {
+        rendered
+    }
+}
+
 /// closure inside `generate_guards`.
 fn bind_state_expr(
     expr: &str,
@@ -726,31 +770,6 @@ fn emit_requires_guards(
     }
 }
 
-/// Emit the `aborts_if` clause checks for one handler.
-fn emit_aborts_guards(
-    out: &mut String,
-    handler: &ParsedHandler,
-    spec: &ParsedSpec,
-    surface: &FrameworkSurface,
-    state_acct: Option<&crate::check::ParsedHandlerAccount>,
-    pod_target: bool,
-    err_enum: &str,
-) {
-    for ab in &handler.aborts_if {
-        let raw = if pod_target {
-            ab.rust_expr_pod.trim()
-        } else {
-            ab.rust_expr.trim()
-        };
-        let rust = bind_state_expr(raw, handler, state_acct, spec, surface);
-        out.push_str(&format!(
-            "    if ({}) {{ return Err({}); }}\n",
-            rust,
-            surface.error_expr(err_enum, &ab.error_name),
-        ));
-    }
-}
-
 /// True when `expr` references the spec's state binder `s` (a word-bounded
 /// `s` immediately followed by `.`), i.e. it reads a state field.
 pub(crate) fn references_pinocchio_state(expr: &str) -> bool {
@@ -869,7 +888,7 @@ pub(crate) fn bind_pinocchio_expr(
 
 /// Emit `src/guards.rs` for the Pinocchio target (slice 6 4b). Per-handler
 /// guard fns take `ctx: &<Pascal>` + params and return `ProgramResult`.
-/// Handles signer-`auth` (`is_signer`) and `requires` / `aborts_if` (param
+/// Handles signer-`auth` (`is_signer`) and `requires` (param
 /// clauses directly; scalar state clauses via a one-time zeropod decode of
 /// the state account, reusing `rust_expr_pod` since zeropod shares
 /// quasar-pod's `.get()` API). Lifecycle pre-checks + PDA verification, and
@@ -944,11 +963,7 @@ pub(crate) fn emit_pinocchio_guards(
         let needs_state = handler
             .requires
             .iter()
-            .any(|r| references_pinocchio_state(&r.rust_expr))
-            || handler
-                .aborts_if
-                .iter()
-                .any(|a| references_pinocchio_state(&a.rust_expr));
+            .any(|r| references_pinocchio_state(&r.rust_expr));
         let decoded = if needs_state && single_state {
             match resolve_handler_state_account(handler, spec) {
                 Some(acct) => {
@@ -980,22 +995,6 @@ pub(crate) fn emit_pinocchio_guards(
                 None => "ProgramError::Custom(0xFF)".to_string(),
             };
             out.push_str(&format!("    if !({}) {{ return Err({}); }}\n", rust, err));
-        }
-
-        for ab in &handler.aborts_if {
-            let raw = ab.rust_expr.trim();
-            if references_pinocchio_state(raw) && !decoded {
-                out.push_str(&format!(
-                    "    // TODO(slice 6 4b-cont): state-referencing abort — not enforced yet: {}\n",
-                    ab.lean_expr.trim()
-                ));
-                continue;
-            }
-            let rust = bind_pinocchio_expr(raw, handler, "__state", "ctx", spec);
-            out.push_str(&format!(
-                "    if ({}) {{ return Err(ProgramError::from({}::{})); }}\n",
-                rust, err_enum, ab.error_name
-            ));
         }
 
         out.push_str("    Ok(())\n}\n\n");

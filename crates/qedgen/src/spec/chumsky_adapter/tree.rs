@@ -143,6 +143,14 @@ pub(super) fn build_expr_tree(n: &Node<Expr>, cx: &TreeCx) -> ExprTree {
     build(&n.node, cx, &mut shadow)
 }
 
+/// [`build_expr_tree`] over a bare (span-less) AST expression — for
+/// synthesized nodes (transfer amounts, ghost-update RHS folding) that
+/// have no surrounding `Node`.
+pub(super) fn build_expr_tree_raw(e: &Expr, cx: &TreeCx) -> ExprTree {
+    let mut shadow: Vec<String> = Vec::new();
+    build(e, cx, &mut shadow)
+}
+
 fn boxed(n: &Node<Expr>, cx: &TreeCx, shadow: &mut Vec<String>) -> Box<ExprTree> {
     Box::new(build(&n.node, cx, shadow))
 }

@@ -334,9 +334,11 @@ pub(crate) fn emit_ensures_preservation_harnesses(
                     call.target_interface, call.target_handler,
                 ));
                 for callee_ens in &callee_handler.ensures {
-                    let abstract_fields = crate::cpi_substitute::scan_rust_abstract_fields(
-                        &callee_ens.rust_expr_binary,
+                    let ensures_tree = callee_ens.tree.as_ref().expect(
+                        "interface ensures tree is always populated by the chumsky adapter (#151/#156)",
                     );
+                    let abstract_fields =
+                        crate::cpi_substitute::scan_abstract_state_fields(ensures_tree);
                     let missing = crate::cpi_substitute::missing_state_binders(
                         &abstract_fields,
                         &call.state_binders,
@@ -350,11 +352,13 @@ pub(crate) fn emit_ensures_preservation_harnesses(
                         ));
                         continue;
                     }
-                    let substituted = crate::cpi_substitute::substitute_callee_ensures_rust_binary(
-                        &callee_ens.rust_expr_binary,
-                        call,
-                        &callee_handler.params,
-                        callee_handler.result_binder.as_deref(),
+                    let substituted = util::tree_render::render_rust(
+                        &crate::cpi_substitute::substitute_callee_ensures_tree(
+                            ensures_tree,
+                            call,
+                            callee_handler.result_binder.as_deref(),
+                        ),
+                        util::tree_render::RustCx::native(),
                     );
                     let substituted =
                         util::rewrite_kani_pubkey_comparisons(&substituted, op, parsed);

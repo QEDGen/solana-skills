@@ -7,10 +7,9 @@ use super::*;
 /// A property body as a Rust predicate — tree-native (#151 Slice 1).
 /// Renders from the typed tree under the math-exact policy (`Widened`)
 /// with the class-appropriate state binder (`Unary` → `s`, `Binary` →
-/// `pre`/`post`); falls back to the pre-rendered strings, then to
-/// text-massaging the Lean form, for properties without a tree
-/// (hand-built fixtures, legacy ingest). `None` = description-only.
-pub fn property_predicate_rust(prop: &ParsedProperty, wrapping_fallback: bool) -> Option<String> {
+/// `pre`/`post`); falls back to the pre-rendered strings for properties
+/// without a tree (bootstrap-synthesized). `None` = description-only.
+pub fn property_predicate_rust(prop: &ParsedProperty) -> Option<String> {
     use super::tree_render::{render_rust, ArithMode, Binder, RustCx};
     if let Some(tree) = &prop.tree {
         let binder = match prop.class {
@@ -29,116 +28,6 @@ pub fn property_predicate_rust(prop: &ParsedProperty, wrapping_fallback: bool) -
         .filter(|r| !r.is_empty())
         .or(prop.rust_expression.as_deref())
         .map(|r| r.to_string())
-        .or_else(|| {
-            prop.expression
-                .as_deref()
-                .map(|e| translate_property_to_rust(e, wrapping_fallback))
-        })
-}
-
-/// Translate a qedspec property expression to Rust — identical grammar
-/// to guard expressions; alias of [`translate_guard_to_rust`].
-pub fn translate_property_to_rust(expr: &str, wrapping: bool) -> String {
-    translate_guard_to_rust(expr, wrapping)
-}
-
-/// Fix standalone ` = ` (Lean equality) to ` == ` (Rust equality),
-/// without touching compound operators like `<=`, `>=`, `!=`.
-pub(crate) fn fix_equality_operator(input: &str) -> String {
-    let mut safe = String::with_capacity(input.len());
-    let bytes = input.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'='
-            && i > 0
-            && i + 1 < bytes.len()
-            && bytes[i - 1] == b' '
-            && bytes[i + 1] == b' '
-            && (i < 2 || (bytes[i - 2] != b'<' && bytes[i - 2] != b'>' && bytes[i - 2] != b'!'))
-            && (i + 2 >= bytes.len() || bytes[i + 1] != b'=')
-        {
-            safe.push_str("==");
-        } else {
-            safe.push(bytes[i] as char);
-        }
-        i += 1;
-    }
-    safe
-}
-
-/// Convert infix `a + b` and `a - b` to `a.wrapping_add(b)` and `a.wrapping_sub(b)`
-/// within comparison sub-expressions. Only transforms arithmetic within individual
-/// conjuncts/disjuncts — doesn't break boolean structure.
-pub(crate) fn wrap_arithmetic(expr: &str) -> String {
-    let parts: Vec<&str> = expr.split(" && ").collect();
-    let wrapped: Vec<String> = parts
-        .iter()
-        .map(|part| {
-            let sub_parts: Vec<&str> = part.split(" || ").collect();
-            sub_parts
-                .iter()
-                .map(|sub| wrap_arithmetic_atom(sub.trim()))
-                .collect::<Vec<_>>()
-                .join(" || ")
-        })
-        .collect();
-    wrapped.join(" && ")
-}
-
-fn wrap_arithmetic_atom(atom: &str) -> String {
-    for cmp in &[" <= ", " >= ", " < ", " > ", " == ", " != "] {
-        if let Some(pos) = atom.find(cmp) {
-            let lhs = &atom[..pos];
-            let rhs = &atom[pos + cmp.len()..];
-            let lhs_wrapped = wrap_arith_expr(lhs.trim());
-            let rhs_wrapped = wrap_arith_expr(rhs.trim());
-            return format!("{}{}{}", lhs_wrapped, cmp, rhs_wrapped);
-        }
-    }
-    atom.to_string()
-}
-
-fn wrap_arith_expr(expr: &str) -> String {
-    // Split on the RIGHTMOST top-level ` + ` / ` - ` and recurse on the LHS
-    // so chains lower left-associatively (`cap - used - reserved` →
-    // `cap.saturating_sub(used).saturating_sub(reserved)`), matching Lean's
-    // left-associative `Nat` subtraction. Subtraction is `saturating_sub`
-    // because Lean models guard/property arithmetic over `Nat` (`-`
-    // truncates at 0) — the predicate must test the same relation the Lean
-    // proof discharges. Addition keeps `wrapping_add`.
-    let bytes = expr.as_bytes();
-    let mut depth: i32 = 0;
-    let mut split: Option<(usize, u8)> = None;
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'(' => depth += 1,
-            b')' => depth -= 1,
-            op @ (b'+' | b'-')
-                if depth == 0
-                    && i > 0
-                    && bytes[i - 1] == b' '
-                    && i + 1 < bytes.len()
-                    && bytes[i + 1] == b' ' =>
-            {
-                split = Some((i, op));
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    match split {
-        Some((pos, op)) => {
-            let lhs = wrap_arith_expr(expr[..pos].trim());
-            let rhs = expr[pos + 1..].trim();
-            if op == b'+' {
-                format!("{}.wrapping_add({})", lhs, rhs)
-            } else {
-                format!("{}.saturating_sub({})", lhs, rhs)
-            }
-        }
-        None => expr.to_string(),
-    }
 }
 
 /// For a field with an "add" effect, find its upper-bound field in property expressions.
@@ -287,19 +176,19 @@ pub fn pick_kani_solver_for_effect(
     // Fixed-point taint propagation: a binding is "arith-tainted" when its
     // (transitive) RHS contains `*` or `/`. Bounded by the binding count.
     let mut tainted: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    for (name, _, bound_rhs) in &op.let_bindings {
-        if bound_rhs.contains('*') || bound_rhs.contains('/') {
-            tainted.insert(name.as_str());
+    for b in &op.let_bindings {
+        if b.rust_expr.contains('*') || b.rust_expr.contains('/') {
+            tainted.insert(b.name.as_str());
         }
     }
     for _ in 0..op.let_bindings.len() {
         let mut changed = false;
-        for (name, _, bound_rhs) in &op.let_bindings {
-            if tainted.contains(name.as_str()) {
+        for b in &op.let_bindings {
+            if tainted.contains(b.name.as_str()) {
                 continue;
             }
-            if tainted.iter().any(|t| contains_whole_word(bound_rhs, t)) {
-                tainted.insert(name.as_str());
+            if tainted.iter().any(|t| contains_whole_word(&b.rust_expr, t)) {
+                tainted.insert(b.name.as_str());
                 changed = true;
             }
         }

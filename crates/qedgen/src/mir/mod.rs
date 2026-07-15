@@ -215,9 +215,10 @@ pub struct AccountTable {
 #[derive(Debug, Clone)]
 pub struct PdaDeclaration {
     pub name: Symbol,
-    /// Seeds (literals, account refs, or param refs) as pre-rendered target
-    /// strings — same opaque-string discipline as `Expr`.
-    pub seeds: Vec<Expr>,
+    /// Seeds — string literals (quoted), account refs, or param refs, as
+    /// written in the spec. Not expressions: `ExprTree` has no string
+    /// literal, and no backend renders seeds as code (#156).
+    pub seeds: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -300,10 +301,11 @@ pub struct HandlerMir {
     /// `Stmt::RequireOrAbort` rather than `pre`. Populated during
     /// parser→MIR; empty after the Phase 3 pass synthesizes them into `body`.
     pub requires_or_abort: Vec<RequireOrAbortClause>,
-    /// Legacy `aborts_if <pred> Error` clauses — the predicate IS the abort
-    /// condition (not negated). Predicate kept alongside the error for
-    /// theorem emission (`theorem h_aborts_if_Err (s) (h : <pred>) : … = none`).
-    pub aborts_if: Vec<AbortClause>,
+    /// Handler-level `let name = expr` bindings, in declaration order
+    /// (later bindings may reference earlier ones). The Lean transition
+    /// binds them before the guard; theorem statements inline them via
+    /// [`HandlerMir::inline_let_bindings`].
+    pub lets: Vec<(Symbol, Expr)>,
     pub body: Block,
     /// Post-conditions (`ensures`).
     pub post: Vec<Predicate>,
@@ -326,17 +328,35 @@ pub struct HandlerMir {
     pub aborts_total: bool,
 }
 
-#[derive(Debug, Clone)]
-pub struct RequireOrAbortClause {
-    pub pred: Predicate,
-    pub err: ErrorRef,
+impl HandlerMir {
+    /// A predicate tree with this handler's `let`-bound names inlined,
+    /// transitively (`net = total - fee` inlines `fee` first). Emission
+    /// positions outside the transition def — theorem statements — can't
+    /// reference the def-level `let` bindings, so they substitute the RHS
+    /// trees instead. Bindings without a tree (hand-built fixtures) and
+    /// projected reads (`binding.field`) keep the bare name.
+    pub fn inline_let_bindings(&self, tree: &ExprTree) -> ExprTree {
+        let mut inlined: std::collections::HashMap<&str, ExprTree> =
+            std::collections::HashMap::new();
+        for (name, rhs) in &self.lets {
+            let Some(rhs_tree) = &rhs.tree else { continue };
+            let rhs_inlined = expr_tree::map_paths(rhs_tree, &mut |p, _| {
+                (matches!(p.binding, expr_tree::BindingKind::LetBound) && p.segments.is_empty())
+                    .then(|| inlined.get(p.root.as_str()).cloned())
+                    .flatten()
+            });
+            inlined.insert(name.as_str(), rhs_inlined);
+        }
+        expr_tree::map_paths(tree, &mut |p, _| {
+            (matches!(p.binding, expr_tree::BindingKind::LetBound) && p.segments.is_empty())
+                .then(|| inlined.get(p.root.as_str()).cloned())
+                .flatten()
+        })
+    }
 }
 
-/// Legacy `aborts_if <pred> Error` clause — inverse of
-/// `RequireOrAbortClause`: the predicate IS the abort condition. Distinct so
-/// the emitted Lean theorem hypothesis matches the source shape.
 #[derive(Debug, Clone)]
-pub struct AbortClause {
+pub struct RequireOrAbortClause {
     pub pred: Predicate,
     pub err: ErrorRef,
 }
@@ -435,10 +455,6 @@ pub enum Stmt {
         default: Option<Block>,
     },
 
-    /// Terminal abort. Used as the canonical post-`Branch` exit for
-    /// fail paths and standalone abort clauses.
-    Abort(ErrorRef),
-
     // ---- Escape hatches ----
     /// Generic CPI to a non-Token interface.
     Cpi {
@@ -492,35 +508,16 @@ pub struct CallArg {
 // Predicates and expressions (opaque carriers per design)
 // ----------------------------------------------------------------------
 
-/// Opaque expression carrier — the parser already lowers expressions to
-/// per-target strings; MIR mirrors them. `ParsedRequires`-derived exprs
-/// populate `lean` / `rust` / `rust_pod`; `ParsedEnsures`-derived exprs add
-/// `rust_binary`. Each codegen picks its field.
+/// Typed expression carrier: the name-resolved tree (#151 Slice 0) plus
+/// the source span. The six pre-rendered per-target strings are gone
+/// (#156) — every backend renders from the tree. `tree: None` marks the
+/// legitimately-empty carrier (`Expr::default()`, e.g. an undeclared
+/// transfer amount); render helpers produce the empty string for it.
 #[derive(Debug, Clone, Default)]
 pub struct Expr {
-    pub lean: String,
-    pub rust: String,
-    pub rust_pod: String,
-    /// Binary-mode rendering for ensures (`state.x` → `post.x`,
-    /// `old(state.x)` → `pre.x`); empty where the distinction doesn't apply.
-    pub rust_binary: String,
-    /// Math-exact Rust rendering for harness *predicate* positions:
-    /// arithmetic inside comparisons widens to u128/i128 so evaluation
-    /// can't overflow-panic — matches the Lean `Nat` model (issue #146).
-    /// Empty where the math form wasn't rendered; consumers fall back to
-    /// `rust` via [`Expr::rust_math_or_rust`].
-    pub rust_math: String,
-    /// Binary-mode math-exact rendering; fallback is `rust_binary`.
-    pub rust_binary_math: String,
-    /// Typed, name-resolved expression tree (#151 Slice 0). `Some` for
-    /// expressions that flowed through the chumsky adapter (requires,
-    /// ensures, properties, invariants, effect RHS, CPI args); `None` for
-    /// synthetic strings and legacy ingest paths (IDL, probes). New
-    /// consumers must prefer the tree and treat the strings as the
-    /// deprecated fallback — the strings are deleted in Slice 4.
     pub tree: Option<ExprTree>,
     /// Source span when available; lints may read it, codegens shouldn't.
-    pub source_span: Option<SourceSpan>,
+    pub source_span: Option<(usize, usize)>,
 }
 
 #[derive(Debug, Clone)]
@@ -616,6 +613,9 @@ pub struct PropertyMir {
     pub expression: Option<Expr>,
     /// Handler names this property is preserved by.
     pub preserved_by: Vec<Symbol>,
+    /// Unary (single-state, `s.`) vs Binary (`old(...)`/post) — picks the
+    /// Lean render context for the predicate body (#156 emission port).
+    pub class: crate::check::PropertyClass,
 }
 
 /// Cover (reachability) declaration, mirroring `check::ParsedCover`.
@@ -660,7 +660,6 @@ pub struct EnvironmentMir {
     pub mutates: Vec<(Symbol, Ty)>,
     pub external_fields: Vec<(Symbol, Symbol, Ty)>,
     /// Legacy predicate list retained for byte-stable generators.
-    pub constraints: Vec<Predicate>,
     /// Typed, temporally classified constraint metadata. Empty for legacy
     /// parsed specs which only supplied `constraints`.
     pub typed_constraints: Vec<EnvironmentConstraintMir>,
@@ -866,84 +865,44 @@ pub enum AccountOrField {
 // ----------------------------------------------------------------------
 
 impl Expr {
-    /// From a `ParsedRequires` — `rust_binary` stays empty (requires runs
-    /// in single-state context).
+    /// From a `ParsedRequires`.
     pub fn from_requires(req: &crate::check::ParsedRequires) -> Self {
         Expr {
-            lean: req.lean_expr.clone(),
-            rust: req.rust_expr.clone(),
-            rust_pod: req.rust_expr_pod.clone(),
-            rust_binary: String::new(),
-            rust_math: req.rust_expr_math.clone(),
-            rust_binary_math: String::new(),
             tree: req.tree.clone(),
             source_span: None,
         }
     }
 
-    /// From a `ParsedEnsures` — all render forms, including
-    /// `rust_expr_binary` for the pre/post split.
+    /// From a `ParsedEnsures`.
     pub fn from_ensures(ens: &crate::check::ParsedEnsures) -> Self {
         Expr {
-            lean: ens.lean_expr.clone(),
-            rust: ens.rust_expr.clone(),
-            rust_pod: ens.rust_expr_pod.clone(),
-            rust_binary: ens.rust_expr_binary.clone(),
-            rust_math: String::new(),
-            rust_binary_math: ens.rust_expr_binary_math.clone(),
             tree: ens.tree.clone(),
             source_span: None,
         }
     }
 
-    /// From a raw single-form string (effect value, transfer amount, seed):
-    /// the same string fills every form and no tree is available. Slice 4
-    /// (#151) retires the remaining callers.
+    /// From a raw single-form string (synthetic markers, hand-built
+    /// test triples). Numeric text becomes an `Int` leaf; anything else
+    /// becomes a verbatim-spelling `Unresolved` path, which both
+    /// renderers emit as written — reproducing the old string-carrier
+    /// behavior without a string field.
     pub fn from_raw(s: impl Into<String>) -> Self {
         let s = s.into();
+        let tree = if s.trim().is_empty() {
+            None
+        } else if let Ok(v) = s.trim().parse::<u128>() {
+            Some(ExprTree::Int(v))
+        } else {
+            Some(ExprTree::Path(expr_tree::TreePath {
+                root: s,
+                binding: expr_tree::BindingKind::Unresolved,
+                segments: vec![],
+                ty: None,
+            }))
+        };
         Expr {
-            lean: s.clone(),
-            rust: s.clone(),
-            rust_pod: s.clone(),
-            rust_binary: String::new(),
-            rust_math: String::new(),
-            rust_binary_math: String::new(),
-            tree: None,
+            tree,
             source_span: None,
-        }
-    }
-
-    /// Lean-only rendering — every Rust form stays empty (cover `when`
-    /// predicates and other Lean-exclusive positions).
-    pub fn from_lean(lean: impl Into<String>) -> Self {
-        Expr {
-            lean: lean.into(),
-            ..Default::default()
-        }
-    }
-
-    /// Lean + native-Rust renderings; `rust_pod` stays empty (invariants,
-    /// ghost init/updates, environment constraints).
-    pub fn from_lean_rust(lean: impl Into<String>, rust: impl Into<String>) -> Self {
-        Expr {
-            lean: lean.into(),
-            rust: rust.into(),
-            ..Default::default()
-        }
-    }
-
-    /// Lean + native-Rust + pod-Rust renderings (hooks, aborts_if, CPI
-    /// args, branch patterns/scrutinees).
-    pub fn from_lean_rust_pod(
-        lean: impl Into<String>,
-        rust: impl Into<String>,
-        rust_pod: impl Into<String>,
-    ) -> Self {
-        Expr {
-            lean: lean.into(),
-            rust: rust.into(),
-            rust_pod: rust_pod.into(),
-            ..Default::default()
         }
     }
 
@@ -952,26 +911,6 @@ impl Expr {
     pub fn with_tree(mut self, tree: Option<ExprTree>) -> Self {
         self.tree = tree;
         self
-    }
-
-    /// The math-exact predicate form when rendered, else the plain Rust
-    /// form. Harness predicate positions (guards, property bodies,
-    /// aborts assumes) read through this.
-    pub fn rust_math_or_rust(&self) -> &str {
-        if self.rust_math.is_empty() {
-            &self.rust
-        } else {
-            &self.rust_math
-        }
-    }
-
-    /// Binary-mode analogue of [`Expr::rust_math_or_rust`].
-    pub fn rust_binary_math_or_binary(&self) -> &str {
-        if self.rust_binary_math.is_empty() {
-            &self.rust_binary
-        } else {
-            &self.rust_binary_math
-        }
     }
 }
 
@@ -1016,7 +955,7 @@ pub fn lower(parsed: &ParsedSpec) -> Mir {
                 asserts: h
                     .asserts
                     .iter()
-                    .map(|a| Expr::from_lean_rust_pod(&a.lean, &a.rust, &a.rust))
+                    .map(|a| Expr::default().with_tree(a.tree.clone()))
                     .collect(),
             })
             .collect(),
@@ -1046,13 +985,8 @@ pub fn lower(parsed: &ParsedSpec) -> Mir {
             .iter()
             .map(|p| PropertyMir {
                 name: p.name.clone(),
-                expression: p.expression.as_ref().map(|lean| Expr {
-                    lean: lean.clone(),
-                    rust: p.rust_expression.clone().unwrap_or_default(),
-                    rust_pod: p.rust_expression_pod.clone().unwrap_or_default(),
-                    rust_binary: String::new(),
-                    rust_math: p.rust_expression_math.clone().unwrap_or_default(),
-                    rust_binary_math: String::new(),
+                class: p.class,
+                expression: p.expression.as_ref().map(|_lean| Expr {
                     tree: p.tree.clone(),
                     source_span: None,
                 }),
@@ -1161,11 +1095,7 @@ fn lower_account_table(parsed: &ParsedSpec) -> AccountTable {
             pda.name.clone(),
             PdaDeclaration {
                 name: pda.name.clone(),
-                seeds: pda
-                    .seeds
-                    .iter()
-                    .map(|s| Expr::from_raw(s.clone()))
-                    .collect(),
+                seeds: pda.seeds.clone(),
             },
         );
     }
@@ -1290,12 +1220,10 @@ fn lower_invariants(parsed: &ParsedSpec) -> Vec<InvariantMir> {
         .map(|inv| InvariantMir {
             name: inv.name.clone(),
             doc: inv.doc.clone(),
-            body: inv.lean_expr.as_ref().map(|lean| {
-                Predicate(
-                    Expr::from_lean_rust(lean, inv.rust_expr.clone().unwrap_or_default())
-                        .with_tree(inv.tree.clone()),
-                )
-            }),
+            body: inv
+                .lean_expr
+                .as_ref()
+                .map(|_lean| Predicate(Expr::default().with_tree(inv.tree.clone()))),
         })
         .collect()
 }
@@ -1310,8 +1238,10 @@ fn lower_covers(parsed: &ParsedSpec) -> Vec<CoverMir> {
             reachable: c
                 .reachable
                 .iter()
-                .map(|(op, when)| {
-                    let pred = when.as_ref().map(|expr| Predicate(Expr::from_lean(expr)));
+                .map(|(op, _when_lean, when_tree)| {
+                    let pred = when_tree
+                        .as_ref()
+                        .map(|t| Predicate(Expr::default().with_tree(Some(t.clone()))));
                     (op.clone(), pred)
                 })
                 .collect(),
@@ -1341,14 +1271,14 @@ fn lower_ghosts(parsed: &ParsedSpec) -> Vec<GhostMir> {
             name: g.name.clone(),
             doc: g.doc.clone(),
             ty: parse_ty_resolved(&g.ty, parsed),
-            init: Expr::from_lean_rust(&g.init_lean, &g.init_rust),
+            init: Expr::default().with_tree(g.init_tree.clone()),
             updates: g
                 .updates
                 .iter()
                 .map(|u| {
                     (
                         u.handler.clone(),
-                        Expr::from_lean_rust(&u.value_lean, &u.value_rust),
+                        Expr::default().with_tree(u.value_tree.clone()),
                     )
                 })
                 .collect(),
@@ -1374,25 +1304,11 @@ fn lower_environments(parsed: &ParsedSpec) -> Vec<EnvironmentMir> {
                     (object.clone(), field.clone(), parse_ty_resolved(ty, parsed))
                 })
                 .collect(),
-            constraints: env
-                .constraints
-                .iter()
-                .enumerate()
-                .map(|(i, lean)| {
-                    Predicate(Expr::from_lean_rust(
-                        lean,
-                        env.constraints_rust.get(i).cloned().unwrap_or_default(),
-                    ))
-                })
-                .collect(),
             typed_constraints: env
                 .typed_constraints
                 .iter()
                 .map(|constraint| EnvironmentConstraintMir {
-                    predicate: Predicate(
-                        Expr::from_lean_rust(&constraint.lean_expr, &constraint.rust_expr)
-                            .with_tree(constraint.tree.clone()),
-                    ),
+                    predicate: Predicate(Expr::default().with_tree(constraint.tree.clone())),
                     class: constraint.class,
                 })
                 .collect(),
@@ -1432,19 +1348,6 @@ fn lower_handler(h: &crate::check::ParsedHandler, parsed: &ParsedSpec) -> Handle
         .iter()
         .map(|r| Predicate(Expr::from_requires(r)))
         .collect();
-    let aborts_if: Vec<AbortClause> = h
-        .aborts_if
-        .iter()
-        .map(|a| AbortClause {
-            pred: Predicate(Expr::from_lean_rust_pod(
-                &a.lean_expr,
-                &a.rust_expr,
-                &a.rust_expr_pod,
-            )),
-            err: a.error_name.clone(),
-        })
-        .collect();
-
     HandlerMir {
         name: h.name.clone(),
         doc: h.doc.clone(),
@@ -1462,7 +1365,11 @@ fn lower_handler(h: &crate::check::ParsedHandler, parsed: &ParsedSpec) -> Handle
         pre,
         requires_in_order,
         requires_or_abort,
-        aborts_if,
+        lets: h
+            .let_bindings
+            .iter()
+            .map(|b| (b.name.clone(), Expr::default().with_tree(b.tree.clone())))
+            .collect(),
         body: lower_body(h),
         post: h
             .ensures
@@ -1554,12 +1461,7 @@ fn lower_body(h: &crate::check::ParsedHandler) -> Block {
         }
     }
 
-    // 2. Aborts-if (legacy form, still appears in some specs).
-    for ab in &h.aborts_if {
-        stmts.push(Stmt::Abort(ab.error_name.clone()));
-    }
-
-    // 3. Effects → typed Stmt kinds per op_kind. Suppressed under
+    // 2. Effects → typed Stmt kinds per op_kind. Suppressed under
     //    `effect { match … }`: `h.effects` then carries the *union* of all
     //    arms (parser back-compat view) and the real statements live on the
     //    step-7 `Stmt::Branch` — lowering both would double-emit.
@@ -1569,14 +1471,18 @@ fn lower_body(h: &crate::check::ParsedHandler) -> Block {
 
     // 4. Transfers — desugar each into a TokenTransfer Stmt.
     for tr in &h.transfers {
-        stmts.push(Stmt::TokenTransfer {
-            from: AccountRef::ByBinding(tr.from.clone()),
-            to: AccountRef::ByBinding(tr.to.clone()),
-            amount: tr
+        let amount = match &tr.amount_tree {
+            Some(tree) => Expr::default().with_tree(Some(tree.clone())),
+            None => tr
                 .amount
                 .as_ref()
                 .map(|a| Expr::from_raw(a.clone()))
                 .unwrap_or_default(),
+        };
+        stmts.push(Stmt::TokenTransfer {
+            from: AccountRef::ByBinding(tr.from.clone()),
+            to: AccountRef::ByBinding(tr.to.clone()),
+            amount,
             authority: tr
                 .authority
                 .as_ref()
@@ -1598,12 +1504,7 @@ fn lower_body(h: &crate::check::ParsedHandler) -> Block {
                     .iter()
                     .map(|a| CallArg {
                         name: a.name.clone(),
-                        value: Expr::from_lean_rust_pod(
-                            &a.lean_expr,
-                            &a.rust_expr,
-                            &a.rust_expr_pod,
-                        )
-                        .with_tree(a.tree.clone()),
+                        value: Expr::default().with_tree(a.tree.clone()),
                     })
                     .collect(),
                 state_binders: call
@@ -1639,24 +1540,13 @@ fn lower_body(h: &crate::check::ParsedHandler) -> Block {
                 default = Some(block);
             } else {
                 arms.push(BranchArm {
-                    pattern: Some(Expr::from_lean_rust_pod(
-                        &arm.pattern_lean,
-                        &arm.pattern_rust,
-                        &arm.pattern_rust,
-                    )),
+                    pattern: Some(Expr::default().with_tree(arm.pattern_tree.clone())),
                     block,
                 });
             }
         }
         stmts.push(Stmt::Branch {
-            scrutinee: BranchScrutinee::Match(
-                Expr::from_lean_rust_pod(
-                    &br.scrutinee_lean,
-                    &br.scrutinee_rust,
-                    &br.scrutinee_rust_pod,
-                )
-                .with_tree(br.scrutinee_tree.clone()),
-            ),
+            scrutinee: BranchScrutinee::Match(Expr::default().with_tree(br.scrutinee_tree.clone())),
             arms,
             default,
         });
@@ -1681,13 +1571,13 @@ fn lower_effects(effects: &[crate::check::ParsedEffect]) -> Vec<Stmt> {
         // adapter rendering when present (empty for ParsedHandlers built
         // outside the chumsky adapter — IDL ingest, probes — where the
         // single string is all we have).
-        let rhs = if eff.value_rust.is_empty() {
-            Expr {
-                tree,
-                ..Expr::from_raw(value.clone())
-            }
-        } else {
-            Expr::from_lean_rust_pod(value, &eff.value_rust, &eff.value_rust).with_tree(tree)
+        let rhs = match tree {
+            Some(tree) => Expr::default().with_tree(Some(tree)),
+            None => Expr::from_raw(if eff.value_rust.is_empty() {
+                value.clone()
+            } else {
+                eff.value_rust.clone()
+            }),
         };
         let stmt = match eff.op.as_str() {
             "set" => Stmt::Assign { path, rhs },
@@ -1835,7 +1725,11 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
         let BranchScrutinee::Match(scrut) = scrutinee else {
             panic!("expected Match scrutinee");
         };
-        assert_eq!(scrut.rust, "fee_type");
+        assert!(
+            matches!(&scrut.tree, Some(ExprTree::Path(p)) if p.root == "fee_type"),
+            "scrutinee tree should be the fee_type read: {:?}",
+            scrut.tree
+        );
         assert_eq!(arms.len(), 2, "two non-wildcard arms");
         assert!(
             matches!(arms[0].block.stmts.as_slice(), [Stmt::SatAdd { .. }]),
@@ -1854,7 +1748,7 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
             default.stmts
         );
 
-        // No flat union effects and no stub Abort alongside the Branch.
+        // No flat union effects alongside the Branch.
         assert!(
             !body.stmts.iter().any(|s| matches!(
                 s,
@@ -1865,9 +1759,8 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
                     | Stmt::WrapSub { .. }
                     | Stmt::SatAdd { .. }
                     | Stmt::SatSub { .. }
-                    | Stmt::Abort(_)
             )),
-            "flat union effects / stub Abort must be suppressed: {body:?}"
+            "flat union effects must be suppressed: {body:?}"
         );
     }
 
@@ -1932,7 +1825,6 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
             delta: Expr::default(),
             err: "Overflow".to_string(),
         };
-        let _ = Stmt::Abort("InvalidState".to_string());
         let _ = Stmt::Branch {
             scrutinee: BranchScrutinee::Predicate(Predicate(Expr::default())),
             arms: vec![],
@@ -1990,6 +1882,44 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
         let parsed = crate::check::parse_spec_file(&spec_path)
             .unwrap_or_else(|e| panic!("parse {}: {e}", spec_path.display()));
         lower(&parsed)
+    }
+
+    #[test]
+    fn lower_preserves_tree_less_raw_effect_and_transfer_values() {
+        let mut handler = crate::check::ParsedHandler::default();
+        handler
+            .effects
+            .push(crate::check::ParsedEffect::from_triple(
+                "balance", "set", "amount",
+            ));
+        handler.transfers.push(crate::check::ParsedTransfer {
+            from: "source".into(),
+            to: "destination".into(),
+            amount: Some("amount".into()),
+            amount_tree: None,
+            authority: None,
+        });
+
+        let body = lower_body(&handler);
+        assert_eq!(body.stmts.len(), 2);
+
+        let Stmt::Assign { rhs, .. } = &body.stmts[0] else {
+            panic!("expected tree-less effect to lower to Assign");
+        };
+        assert_eq!(
+            crate::rust_codegen_util::mir_expr_rust(rhs),
+            "amount",
+            "raw effect RHS must survive without an adapter tree"
+        );
+
+        let Stmt::TokenTransfer { amount, .. } = &body.stmts[1] else {
+            panic!("expected tree-less transfer to lower to TokenTransfer");
+        };
+        assert_eq!(
+            crate::rust_codegen_util::mir_expr_rust(amount),
+            "amount",
+            "raw transfer amount must survive without an adapter tree"
+        );
     }
 
     #[test]
@@ -2099,21 +2029,12 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
             .iter()
             .find(|environment| environment.name == "interest_rate_change")
             .expect("lending environment");
-        assert_eq!(environment.constraints.len(), 1);
         assert_eq!(environment.typed_constraints.len(), 1);
         assert_eq!(
             environment.typed_constraints[0].class,
             crate::check::PropertyClass::Unary
         );
         assert!(environment.typed_constraints[0].predicate.0.tree.is_some());
-        assert_eq!(
-            environment.typed_constraints[0].predicate.0.lean, environment.constraints[0].0.lean,
-            "typed lowering must preserve the legacy Lean rendering"
-        );
-        assert_eq!(
-            environment.typed_constraints[0].predicate.0.rust, environment.constraints[0].0.rust,
-            "typed lowering must preserve the legacy Rust rendering"
-        );
         // Lending uses TokenTransfer for deposit/withdraw flows.
         let total_xfers: usize = mir
             .handlers
@@ -2160,8 +2081,6 @@ environment rate_change {
 
         assert_eq!(typed.class, crate::check::PropertyClass::Binary);
         assert!(matches!(typed.predicate.0.tree, Some(ExprTree::Cmp { .. })));
-        assert_eq!(typed.predicate.0.lean, environment.constraints[0].0.lean);
-        assert_eq!(typed.predicate.0.rust, environment.constraints[0].0.rust);
     }
 
     #[test]
@@ -2208,11 +2127,12 @@ environment rate_change {
             for h in &mir.handlers {
                 for s in &h.body.stmts {
                     if let Stmt::Assign { rhs, .. } = s {
+                        let rendered = crate::rust_codegen_util::mir_expr_rust(rhs);
                         assert!(
-                            !rhs.rust.starts_with("/* MIR-TODO: unknown op_kind"),
+                            !rendered.starts_with("/* MIR-TODO: unknown op_kind"),
                             "fixture {} has unknown-op_kind effect: {}",
                             fixture,
-                            rhs.rust
+                            rendered
                         );
                     }
                 }
@@ -2327,9 +2247,8 @@ environment rate_change {
                 for p in h.pre.iter().chain(h.post.iter()) {
                     assert!(
                         p.0.tree.is_some(),
-                        "{fixture}: handler {} pre/post missing tree: {:?}",
+                        "{fixture}: handler {} pre/post missing tree",
                         h.name,
-                        p.0.lean
                     );
                 }
                 for s in &h.body.stmts {
@@ -2347,16 +2266,14 @@ environment rate_change {
                         Stmt::TokenTransfer { .. }
                         | Stmt::VariantPromote { .. }
                         | Stmt::Branch { .. }
-                        | Stmt::Abort(_)
                         | Stmt::Cpi { .. }
                         | Stmt::Emit { .. } => None,
                     };
                     if let Some(expr) = rhs {
                         assert!(
                             expr.tree.is_some(),
-                            "{fixture}: handler {} stmt missing tree: {:?}",
+                            "{fixture}: handler {} stmt missing tree",
                             h.name,
-                            expr.lean
                         );
                     }
                 }

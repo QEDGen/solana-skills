@@ -257,9 +257,6 @@ fn canonical_handler(handler: &crate::check::ParsedHandler) -> String {
     for (pn, pt) in &handler.takes_params {
         c.push_str(&format!("takes={}:{}\n", pn, pt));
     }
-    if let Some(ref g) = handler.guard_str {
-        c.push_str(&format!("guard={}\n", g));
-    }
     for eff in &handler.effects {
         c.push_str(&format!("effect={} {} {}\n", eff.field, eff.op, eff.value));
     }

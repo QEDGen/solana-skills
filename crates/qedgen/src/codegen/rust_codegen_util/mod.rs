@@ -30,15 +30,3 @@ pub(crate) use pubkey::*;
 
 #[cfg(test)]
 mod tests;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GuardTermSource {
-    Guard,
-    Requires { error_name: Option<String> },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GuardTerm {
-    pub source: GuardTermSource,
-    pub rust_expr: String,
-}

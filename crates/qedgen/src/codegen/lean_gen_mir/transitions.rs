@@ -73,21 +73,33 @@ pub(super) fn emit_handler_transition_adt(out: &mut String, mir: &Mir, h: &crate
         }
     }
 
+    // Handler-level `let` bindings — bound inside the pre-variant arm so
+    // guards and effect parts can reference them (#156).
+    for (name, rhs) in &h.lets {
+        pre_let_lines.push(format!(
+            "    let {} := {}",
+            safe_name(name),
+            expr_lean(rhs, tree_render::LeanCx::guard())
+        ));
+    }
+
     // User-declared requires (`pre` + `requires_or_abort`, combined so the
     // original spec ordering survives). Clauses mentioning a handler-account
     // `.pubkey` / `.key()` projection are filtered: those identifiers have
     // no Lean scope and would leave free variables in the statement.
     for p in &h.pre {
-        if mentions_handler_account_pubkey(&p.0.lean, &h.accounts) {
+        let lean = expr_lean(&p.0, tree_render::LeanCx::guard());
+        if mentions_handler_account_pubkey(&lean, &h.accounts) {
             continue;
         }
-        cond_parts.push(p.0.lean.clone());
+        cond_parts.push(lean);
     }
     for r in &h.requires_or_abort {
-        if mentions_handler_account_pubkey(&r.pred.0.lean, &h.accounts) {
+        let lean = expr_lean(&r.pred.0, tree_render::LeanCx::guard());
+        if mentions_handler_account_pubkey(&lean, &h.accounts) {
             continue;
         }
-        cond_parts.push(r.pred.0.lean.clone());
+        cond_parts.push(lean);
     }
 
     // Conditional effects (`effect { match … }`) lower to `Stmt::Branch`.
@@ -204,7 +216,7 @@ pub(super) fn adt_bound_conds(
                         conds.push(format!(
                             "{} + {} \u{2264} {}",
                             safe_name(&stripped),
-                            delta.lean,
+                            effect_rhs_lean(delta),
                             max
                         ));
                     }
@@ -219,7 +231,11 @@ pub(super) fn adt_bound_conds(
                     .map(|f| &f.ty)
                 {
                     if !matches!(ty, crate::mir::Ty::I64 | crate::mir::Ty::I128) {
-                        conds.push(format!("{} \u{2264} {}", delta.lean, safe_name(&stripped)));
+                        conds.push(format!(
+                            "{} \u{2264} {}",
+                            effect_rhs_lean(delta),
+                            safe_name(&stripped)
+                        ));
                     }
                 }
             }
@@ -233,7 +249,6 @@ pub(super) fn adt_bound_conds(
             | Stmt::TokenTransfer { .. }
             | Stmt::VariantPromote { .. }
             | Stmt::Branch { .. }
-            | Stmt::Abort(_)
             | Stmt::Cpi { .. }
             | Stmt::Emit { .. } => {}
         }
@@ -254,26 +269,34 @@ pub(super) fn adt_effect_map(
     for stmt in stmts {
         match stmt {
             Stmt::Assign { path, rhs } => {
-                if is_account_pubkey_ref(&rhs.rust) {
+                if is_account_pubkey_ref(&crate::rust_codegen_util::mir_expr_rust(rhs)) {
                     continue;
                 }
-                effect_map.insert(strip_variant_prefix(path, mir), ("set", rhs.lean.clone()));
+                effect_map.insert(
+                    strip_variant_prefix(path, mir),
+                    ("set", effect_rhs_lean(rhs)),
+                );
             }
             Stmt::CheckedAdd { path, delta, .. }
             | Stmt::WrapAdd { path, delta }
             | Stmt::SatAdd { path, delta } => {
-                effect_map.insert(strip_variant_prefix(path, mir), ("add", delta.lean.clone()));
+                effect_map.insert(
+                    strip_variant_prefix(path, mir),
+                    ("add", effect_rhs_lean(delta)),
+                );
             }
             Stmt::CheckedSub { path, delta, .. }
             | Stmt::WrapSub { path, delta }
             | Stmt::SatSub { path, delta } => {
-                effect_map.insert(strip_variant_prefix(path, mir), ("sub", delta.lean.clone()));
+                effect_map.insert(
+                    strip_variant_prefix(path, mir),
+                    ("sub", effect_rhs_lean(delta)),
+                );
             }
             Stmt::RequireOrAbort { .. }
             | Stmt::TokenTransfer { .. }
             | Stmt::VariantPromote { .. }
             | Stmt::Branch { .. }
-            | Stmt::Abort(_)
             | Stmt::Cpi { .. }
             | Stmt::Emit { .. } => {}
         }
@@ -344,8 +367,8 @@ pub(super) fn emit_adt_branch(
     default: &Option<crate::mir::Block>,
 ) {
     let scrutinee_lean = match scrutinee {
-        crate::mir::BranchScrutinee::Match(e) => e.lean.clone(),
-        crate::mir::BranchScrutinee::Predicate(p) => p.0.lean.clone(),
+        crate::mir::BranchScrutinee::Match(e) => expr_lean(e, tree_render::LeanCx::guard()),
+        crate::mir::BranchScrutinee::Predicate(p) => expr_lean(&p.0, tree_render::LeanCx::guard()),
     };
 
     // One arm → `some (<post-ctor from this arm's effects>)`, guarded by the
@@ -375,7 +398,7 @@ pub(super) fn emit_adt_branch(
         let pat = arm
             .pattern
             .as_ref()
-            .map(|p| p.lean.clone())
+            .map(|p| expr_lean(p, tree_render::LeanCx::guard()))
             .unwrap_or_else(|| "_".to_string());
         let (line, mut u) = arm_line(&arm.block.stmts);
         unconstrained.append(&mut u);
@@ -489,6 +512,18 @@ pub(super) fn emit_handler_transition(out: &mut String, mir: &Mir, h: &crate::mi
         }
     }
 
+    // Handler-level `let` bindings — bound before the guard so both the
+    // require conjunction and the effect parts can reference them.
+    // Without these the transition references the names free and the
+    // module doesn't elaborate (#156 fixture `let-bindings-fee-split`).
+    for (name, rhs) in &h.lets {
+        out.push_str(&format!(
+            "  let {} := {}\n",
+            safe_name(name),
+            expr_lean(rhs, tree_render::LeanCx::guard())
+        ));
+    }
+
     // Lifecycle promotion + ghost updates apply on every exit path
     // (appended to the flat `{ s with … }` parts, or to every arm of a
     // conditional-effect `match`).
@@ -507,7 +542,11 @@ pub(super) fn emit_handler_transition(out: &mut String, mir: &Mir, h: &crate::mi
     // the frame condition).
     for ghost in &mir.ghosts {
         if let Some(val) = ghost.updates.get(&h.name) {
-            common_parts.push(format!("{} := {}", safe_name(&ghost.name), val.lean));
+            common_parts.push(format!(
+                "{} := {}",
+                safe_name(&ghost.name),
+                expr_lean(val, tree_render::LeanCx::guard())
+            ));
         }
     }
 
@@ -537,15 +576,17 @@ pub(super) fn emit_handler_transition(out: &mut String, mir: &Mir, h: &crate::mi
 
     if let Some((scrutinee, arms, default)) = branch {
         let scrutinee_lean = match scrutinee {
-            crate::mir::BranchScrutinee::Match(e) => e.lean.clone(),
-            crate::mir::BranchScrutinee::Predicate(p) => p.0.lean.clone(),
+            crate::mir::BranchScrutinee::Match(e) => expr_lean(e, tree_render::LeanCx::guard()),
+            crate::mir::BranchScrutinee::Predicate(p) => {
+                expr_lean(&p.0, tree_render::LeanCx::guard())
+            }
         };
         // Per-arm: overflow/underflow bound guards for the arm's own
         // effects move *inside* the arm (an untaken arm's bounds must
         // not abort the transition), then the arm's record update.
         let arm_line = |block: &crate::mir::Block| -> String {
-            let body = some_body(flat_effect_with_parts(h, &block.stmts));
-            let bounds = flat_effect_bound_conds(mir, h, &block.stmts, &conds);
+            let body = some_body(flat_effect_with_parts(&block.stmts));
+            let bounds = flat_effect_bound_conds(mir, &block.stmts, &conds);
             if bounds.is_empty() {
                 body
             } else {
@@ -564,7 +605,7 @@ pub(super) fn emit_handler_transition(out: &mut String, mir: &Mir, h: &crate::mi
             let pat = arm
                 .pattern
                 .as_ref()
-                .map(|p| p.lean.clone())
+                .map(|p| expr_lean(p, tree_render::LeanCx::guard()))
                 .unwrap_or_else(|| "_".to_string());
             match_block.push_str(&format!(
                 "{}| {} => {}\n",
@@ -598,7 +639,7 @@ pub(super) fn emit_handler_transition(out: &mut String, mir: &Mir, h: &crate::mi
         return;
     }
 
-    let then_body = some_body(flat_effect_with_parts(h, &h.body.stmts));
+    let then_body = some_body(flat_effect_with_parts(&h.body.stmts));
 
     if conds.is_empty() {
         out.push_str(&format!("  {}\n\n", then_body));
@@ -617,10 +658,7 @@ pub(super) fn emit_handler_transition(out: &mut String, mir: &Mir, h: &crate::mi
 /// Assign / Add / Sub family → `{ s with … }` record-update parts for a
 /// flat-state transition. Shared by the unconditional effect path and
 /// the per-arm `Stmt::Branch` rendering.
-pub(super) fn flat_effect_with_parts(
-    h: &crate::mir::HandlerMir,
-    stmts: &[crate::mir::Stmt],
-) -> Vec<String> {
+pub(super) fn flat_effect_with_parts(stmts: &[crate::mir::Stmt]) -> Vec<String> {
     use crate::mir::Stmt;
     let mut with_parts: Vec<String> = Vec::new();
     for stmt in stmts {
@@ -628,7 +666,7 @@ pub(super) fn flat_effect_with_parts(
             Stmt::Assign { path, rhs } => {
                 // Drop `<field> := <account_binding>.pubkey` — account-
                 // binding pubkey refs have no Lean scope.
-                if is_account_pubkey_ref(&rhs.rust) {
+                if is_account_pubkey_ref(&crate::rust_codegen_util::mir_expr_rust(rhs)) {
                     continue;
                 }
                 // Tree-native RHS (#151 Slice 2): the resolved tree knows
@@ -637,28 +675,27 @@ pub(super) fn flat_effect_with_parts(
                 with_parts.push(format!(
                     "{} := {}",
                     safe_name(&path_field_name(path)),
-                    effect_rhs_lean(rhs, &h.params)
+                    effect_rhs_lean(rhs)
                 ));
             }
             Stmt::CheckedAdd { path, delta, .. }
             | Stmt::WrapAdd { path, delta }
             | Stmt::SatAdd { path, delta } => {
                 let f = safe_name(&path_field_name(path));
-                let d = effect_rhs_lean(delta, &h.params);
+                let d = effect_rhs_lean(delta);
                 with_parts.push(format!("{} := s.{} + {}", f, f, d));
             }
             Stmt::CheckedSub { path, delta, .. }
             | Stmt::WrapSub { path, delta }
             | Stmt::SatSub { path, delta } => {
                 let f = safe_name(&path_field_name(path));
-                let d = effect_rhs_lean(delta, &h.params);
+                let d = effect_rhs_lean(delta);
                 with_parts.push(format!("{} := s.{} - {}", f, f, d));
             }
             Stmt::RequireOrAbort { .. }
             | Stmt::TokenTransfer { .. }
             | Stmt::VariantPromote { .. }
             | Stmt::Branch { .. }
-            | Stmt::Abort(_)
             | Stmt::Cpi { .. }
             | Stmt::Emit { .. } => {}
         }
@@ -670,11 +707,7 @@ pub(super) fn flat_effect_with_parts(
 /// only) for every sub-kind statement in `stmts` — item 3 of
 /// `build_guard_cond_parts`, shared with the per-arm
 /// `flat_effect_bound_conds`.
-pub(super) fn sub_underflow_conds(
-    mir: &Mir,
-    h: &crate::mir::HandlerMir,
-    stmts: &[crate::mir::Stmt],
-) -> Vec<String> {
+pub(super) fn sub_underflow_conds(mir: &Mir, stmts: &[crate::mir::Stmt]) -> Vec<String> {
     use crate::mir::Stmt;
     let state_fields = flat_state_fields(mir);
     let mut conds: Vec<String> = Vec::new();
@@ -692,7 +725,6 @@ pub(super) fn sub_underflow_conds(
             | Stmt::WrapAdd { .. }
             | Stmt::SatAdd { .. }
             | Stmt::Branch { .. }
-            | Stmt::Abort(_)
             | Stmt::Cpi { .. }
             | Stmt::Emit { .. } => continue,
         };
@@ -703,7 +735,7 @@ pub(super) fn sub_underflow_conds(
             .map(|(_, t)| t.clone())
         {
             if ty_max_const(&ty).is_some() {
-                let d = effect_value_to_lean_mir(&delta.lean, &h.params);
+                let d = effect_rhs_lean(delta);
                 conds.push(format!("{} \u{2264} s.{}", d, safe_name(&field)));
             }
         }
@@ -740,7 +772,6 @@ pub(super) fn add_overflow_conds(
             | Stmt::WrapSub { .. }
             | Stmt::SatSub { .. }
             | Stmt::Branch { .. }
-            | Stmt::Abort(_)
             | Stmt::Cpi { .. }
             | Stmt::Emit { .. } => continue,
         };
@@ -758,8 +789,9 @@ pub(super) fn add_overflow_conds(
             None => continue,
         };
         let sf = safe_name(&field);
-        let needle_a = format!("s.{} + {}", sf, delta.lean);
-        let needle_b = format!("{} + s.{}", delta.lean, sf);
+        let d = effect_rhs_lean(delta);
+        let needle_a = format!("s.{} + {}", sf, d);
+        let needle_b = format!("{} + s.{}", d, sf);
         let dup = conds
             .iter()
             .chain(already.iter().flat_map(|s| s.iter()))
@@ -767,7 +799,7 @@ pub(super) fn add_overflow_conds(
         if dup {
             continue;
         }
-        conds.push(format!("s.{} + {} \u{2264} {}", sf, delta.lean, max));
+        conds.push(format!("s.{} + {} \u{2264} {}", sf, d, max));
     }
 
     conds
@@ -780,11 +812,10 @@ pub(super) fn add_overflow_conds(
 /// an arm's bounds gate only that arm.
 pub(super) fn flat_effect_bound_conds(
     mir: &Mir,
-    h: &crate::mir::HandlerMir,
     stmts: &[crate::mir::Stmt],
     outer_conds: &[String],
 ) -> Vec<String> {
-    let mut conds = sub_underflow_conds(mir, h, stmts);
+    let mut conds = sub_underflow_conds(mir, stmts);
 
     let adds = add_overflow_conds(mir, stmts, &[&conds, outer_conds]);
     conds.extend(adds);
@@ -834,14 +865,15 @@ pub(super) fn build_guard_cond_parts(mir: &Mir, h: &crate::mir::HandlerMir) -> V
         }
     }
 
-    conds.extend(sub_underflow_conds(mir, h, &h.body.stmts));
+    conds.extend(sub_underflow_conds(mir, &h.body.stmts));
 
     for stmt in &h.body.stmts {
         if let Stmt::RequireOrAbort { pred, .. } = stmt {
-            if mentions_handler_account_pubkey(&pred.0.lean, &h.accounts) {
+            let lean = expr_lean(&pred.0, tree_render::LeanCx::guard());
+            if mentions_handler_account_pubkey(&lean, &h.accounts) {
                 continue;
             }
-            conds.push(pred.0.lean.clone());
+            conds.push(lean);
         }
     }
 
@@ -908,7 +940,7 @@ pub(super) fn effect_tree_bound_conds(
             Stmt::Assign { path, rhs } => {
                 // Account-binding pubkey refs are dropped from the effect
                 // body (no Lean scope) — no guard either.
-                if is_account_pubkey_ref(&rhs.rust) {
+                if is_account_pubkey_ref(&crate::rust_codegen_util::mir_expr_rust(rhs)) {
                     continue;
                 }
                 let field = path_field_name(path);
@@ -932,7 +964,6 @@ pub(super) fn effect_tree_bound_conds(
             | Stmt::TokenTransfer { .. }
             | Stmt::VariantPromote { .. }
             | Stmt::Branch { .. }
-            | Stmt::Abort(_)
             | Stmt::Cpi { .. }
             | Stmt::Emit { .. } => continue,
         };

@@ -20,12 +20,9 @@ pub fn check_code_drift(
         "Cargo.toml".to_string(),
     ];
     // src/guards.rs is codegen-owned whenever any handler has a `requires`
-    // / `aborts_if` clause that lowers to runtime guard logic — omitting it
-    // lets material guard drift report "in sync".
-    let any_handler_has_guards = spec
-        .handlers
-        .iter()
-        .any(|h| !h.requires.is_empty() || !h.aborts_if.is_empty() || h.guard_str.is_some());
+    // clause that lowers to runtime guard logic — omitting it lets material
+    // guard drift report "in sync".
+    let any_handler_has_guards = spec.handlers.iter().any(|h| !h.requires.is_empty());
     if any_handler_has_guards {
         codegen_owned_files.push("src/guards.rs".to_string());
     }

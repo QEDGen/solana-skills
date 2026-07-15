@@ -54,53 +54,6 @@ pub(crate) fn find_canonical_state_account_name(spec: &ParsedSpec) -> Option<Str
         .map(|(name, _)| name)
 }
 
-/// Rewrite `s.<field>` patterns in a pre-rendered Rust expression so it
-/// compiles inside the user-owned handler `impl` block (state binder is
-/// `self`, not `ctx`) — mirrors `generate_guards::bind_state` with
-/// `self.<state_acct>` as the prefix. Multi-variant ADT fields route
-/// through the accessor (`(*self.<state>.inner.<field>())`); flat-state
-/// fields take `self.<state>.<field>`. Word-bounded so identifiers like
-/// `accounts[i].fee_credits` aren't corrupted. Covers in-`impl` sites
-/// (e.g. `let X = ref_impl(state.f, …)`) that
-/// `resolve_call_arg_for_amount` doesn't reach — otherwise `s.<field>`
-/// stays unbound and rustc rejects with `cannot find value 's'`.
-pub(crate) fn rewrite_state_refs_for_self(
-    expr: &str,
-    handler: &ParsedHandler,
-    spec: &ParsedSpec,
-) -> String {
-    let Some(sa) = resolve_handler_state_account(handler, spec) else {
-        return expr.to_string();
-    };
-    let accessor_fields = adt_accessor_field_names(spec);
-    let bare_target = format!("self.{}.", sa.name);
-    let bytes = expr.as_bytes();
-    let mut out = String::with_capacity(expr.len() + 16);
-    let mut i = 0;
-    while i < bytes.len() {
-        let prev_ok = i == 0 || !is_ident_char(bytes[i - 1]);
-        if prev_ok && i + 1 < bytes.len() && bytes[i] == b's' && bytes[i + 1] == b'.' {
-            let mut j = i + 2;
-            while j < bytes.len() && is_ident_char(bytes[j]) {
-                j += 1;
-            }
-            let field = &expr[i + 2..j];
-            if !field.is_empty() && accessor_fields.contains(field) {
-                out.push_str(&format!("(*self.{}.inner.{}())", sa.name, field));
-                i = j;
-                continue;
-            } else if !field.is_empty() {
-                out.push_str(&bare_target);
-                i += 2;
-                continue;
-            }
-        }
-        out.push(bytes[i] as char);
-        i += 1;
-    }
-    out
-}
-
 /// Resolve a numeric / value argument's rust_expr to a form in scope
 /// inside the handler `impl` block. Bare identifiers matching a state
 /// field get the `self.<state_acct>.` prefix; handler params and
@@ -245,8 +198,7 @@ pub(crate) fn checked_arith_error_variants<'a>(
 /// pre-rendered Lean form); the caller falls through to a `todo!()` so an
 /// LLM or human fills the body.
 ///
-/// `effect.tree` is the typed RHS; `None` falls back to the legacy string
-/// whitelist + `resolve_value` (IDL ingest, probes, hand-built fixtures).
+/// `effect.tree` is the typed RHS (always adapter-populated post-#151).
 ///
 /// `effect.on_error` is the per-site override (`pool += amount or X`) for
 /// the `checked_add` / `checked_sub` error variant; when `None`, fall back
@@ -255,27 +207,17 @@ pub(crate) fn checked_arith_error_variants<'a>(
 pub(crate) fn mechanize_effect(
     effect: &crate::check::ParsedEffect,
     state_acct: &crate::check::ParsedHandlerAccount,
-    handler: &ParsedHandler,
     spec: &ParsedSpec,
     target: Target,
 ) -> Option<String> {
-    let (field, op_kind, value) = (&effect.field, &effect.op, &effect.value);
-    let tree = effect.tree.as_ref();
+    let (field, op_kind) = (&effect.field, &effect.op);
+    let tree = effect_tree(effect);
     let on_error = effect.on_error.as_deref();
 
-    // Refuse complex RHS — structural on the tree (#151 Slice 3); the
-    // char-whitelist fallback covers tree-less handlers. A simple param /
-    // literal / constant / bare state-field read is what's always safe.
-    if let Some(t) = tree {
-        tree_bare_rhs(t)?;
-    } else {
-        let simple_rhs = value
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '_' || c == '-');
-        if !simple_rhs {
-            return None;
-        }
-    }
+    // Refuse complex RHS — structural on the tree (#151 Slice 3). A simple
+    // param / literal / constant / bare state-field read is what's always
+    // safe.
+    tree_bare_rhs(tree)?;
     // Multi-variant ADT state on Anchor: the wrapper carries only
     // `inner` + `bump`, so the flat `self.<acct>.<field>` lowering
     // doesn't apply. Bail so the per-effect path surfaces a `todo!()`
@@ -293,20 +235,16 @@ pub(crate) fn mechanize_effect(
     // Anchor / Quasar handler bodies bind state as `self.<acct>.<field>`,
     // so a bare state-field RHS (e.g. `bid_buyer := state.rfp_buyer` after
     // upstream strips `state.`) needs to resolve to `self.<acct>.rfp_buyer`.
-    // Tree path: one render under `Binder::SelfAcct` replaces
-    // `resolve_value`'s binder surgery (name resolution already happened
-    // at adapt time).
+    // One render under `Binder::SelfAcct` — name resolution already
+    // happened at adapt time.
     let acct = &state_acct.name;
-    let rhs = match tree {
-        Some(t) => {
-            use crate::rust_codegen_util::tree_render::{render_rust, Binder, RustCx};
-            let receiver = format!("self.{}", acct);
-            render_rust(t, RustCx::native().with_binder(Binder::SelfAcct(&receiver)))
-        }
-        None => {
-            let acct_binder = format!("self.{}.", acct);
-            crate::rust_codegen_util::resolve_value(value, handler, spec, Some(&acct_binder))
-        }
+    let rhs = {
+        use crate::rust_codegen_util::tree_render::{render_rust, Binder, RustCx};
+        let receiver = format!("self.{}", acct);
+        render_rust(
+            tree,
+            RustCx::native().with_binder(Binder::SelfAcct(&receiver)),
+        )
     };
     // Cast index expressions in the LHS path to `usize`. `render_effect`
     // emits the field as `voted[member_index]` (Lean-friendly); on the
@@ -401,11 +339,9 @@ pub(crate) fn strip_variant_prefix(lhs: &str, spec: &ParsedSpec) -> String {
 /// routes to a per-effect `todo!()`.
 pub(crate) fn mechanize_effect_destructured(
     effect: &crate::check::ParsedEffect,
-    handler: &ParsedHandler,
     spec: &ParsedSpec,
 ) -> Option<String> {
-    let (field_raw, op_kind, value) = (&effect.field, &effect.op, &effect.value);
-    let tree = effect.tree.as_ref();
+    let (field_raw, op_kind) = (&effect.field, &effect.op);
     let on_error = effect.on_error.as_deref();
     // The destructured binding is the bare field root — `pool[i]` keeps
     // the indexing; scalars need a `*` deref to write through `&mut T`.
@@ -415,20 +351,8 @@ pub(crate) fn mechanize_effect_destructured(
     // The destructure binding shadows the field name in scope, so a
     // bare-identifier RHS that names a sibling state field resolves
     // directly (no `self.<acct>.` prefix) — `tree_bare_rhs` emits exactly
-    // that shape (structural gate + render in one; #151 Slice 3). Legacy
-    // whitelist + `resolve_value` for tree-less handlers.
-    let rhs = match tree {
-        Some(t) => tree_bare_rhs(t)?,
-        None => {
-            let simple_rhs = value
-                .chars()
-                .all(|c| c.is_alphanumeric() || c == '_' || c == '-');
-            if !simple_rhs {
-                return None;
-            }
-            crate::rust_codegen_util::resolve_value(value, handler, spec, None)
-        }
-    };
+    // that shape (structural gate + render in one; #151 Slice 3).
+    let rhs = tree_bare_rhs(effect_tree(effect))?;
 
     let err_enum = format!("{}Error", to_pascal_case(&spec.program_name));
     let (overflow_variant, underflow_variant) = checked_arith_error_variants(spec, on_error);
@@ -461,6 +385,16 @@ pub(crate) fn mechanize_effect_destructured(
         _ => return None,
     };
     Some(line)
+}
+
+/// The typed RHS tree of an effect. Post-#151 every production
+/// `ParsedEffect` is adapter-built with `tree: Some(...)`; a `None`
+/// here is a hand-built fixture that must be fixed, not worked around.
+pub(crate) fn effect_tree(effect: &crate::check::ParsedEffect) -> &crate::mir::ExprTree {
+    effect
+        .tree
+        .as_ref()
+        .expect("ParsedEffect.tree is always populated by the chumsky adapter (#151/#156)")
 }
 
 /// Drop `[<idx>]` from a destructured field reference so the RHS-side
@@ -615,7 +549,7 @@ pub(crate) fn emit_variant_state_handler_body(
         inner_name, post, destructure
     ));
     for effect in &handler.effects {
-        let line = mechanize_effect_destructured(effect, handler, spec)?;
+        let line = mechanize_effect_destructured(effect, spec)?;
         out.push_str(&line);
     }
 

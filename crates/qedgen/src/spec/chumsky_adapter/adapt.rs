@@ -431,6 +431,7 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                                 op.clone(),
                                 when.as_ref()
                                     .map(|e| expr_to_lean(&e.node, Ctx::Guard, consts, &env)),
+                                when.as_ref().map(|e| build_expr_tree(e, &spec_tcx)),
                             )
                         })
                         .collect(),
@@ -454,8 +455,7 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                 let parsed = match &i.body {
                     a::InvariantBody::Expr(e) => {
                         let lean = expr_to_lean(&e.node, Ctx::Guard, consts, &env);
-                        let rust =
-                            crate::rust_codegen_util::translate_property_to_rust(&lean, false);
+                        let rust = expr_to_rust(&e.node, Ctx::Guard, consts, opts_native(&env));
                         crate::check::ParsedInvariant {
                             name: i.name.clone(),
                             doc: String::new(),
@@ -529,8 +529,6 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                 let environment_tcx = TreeCx::for_environment(envd, &env, consts, ghosts.clone());
                 let mut mutates: Vec<(String, String)> = Vec::new();
                 let mut external_fields: Vec<(String, String, String)> = Vec::new();
-                let mut constraints_lean: Vec<String> = Vec::new();
-                let mut constraints_rust: Vec<String> = Vec::new();
                 let mut typed_constraints: Vec<crate::check::ParsedEnvironmentConstraint> =
                     Vec::new();
                 for Node { node: c, .. } in &envd.clauses {
@@ -549,11 +547,8 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                             let lean_expr = expr_to_lean(&e.node, Ctx::Ensures, consts, &env);
                             let rust_expr =
                                 expr_to_rust(&e.node, Ctx::Ensures, consts, opts_native(&env));
-                            constraints_lean.push(lean_expr.clone());
-                            constraints_rust.push(rust_expr.clone());
+                            let _ = (lean_expr, rust_expr);
                             typed_constraints.push(crate::check::ParsedEnvironmentConstraint {
-                                lean_expr,
-                                rust_expr,
                                 tree: Some(build_expr_tree(e, &environment_tcx)),
                                 class: classify_property_body(e),
                             });
@@ -564,8 +559,6 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                     name: envd.name.clone(),
                     mutates,
                     external_fields,
-                    constraints: constraints_lean,
-                    constraints_rust,
                     typed_constraints,
                 });
             }
@@ -642,8 +635,7 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
             }
             TopItem::Ghost(g) => {
                 // Init value — a constant expression in single-state context.
-                let init_lean = expr_to_lean(&g.init.node, Ctx::Guard, consts, &env);
-                let init_rust = expr_to_rust(&g.init.node, Ctx::Guard, consts, opts_native(&env));
+                let init_tree = build_expr_tree(&g.init, &spec_tcx);
                 let mut updates = Vec::new();
                 for u in &g.updates {
                     // Resolve the named handler's params so the update RHS can
@@ -657,34 +649,56 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                         })
                         .unwrap_or(&[]);
                     let uenv = env.clone().with_params(handler_params);
-                    let rhs_lean = expr_to_lean(&u.stmt.rhs.node, Ctx::Guard, consts, &uenv);
                     let rhs_rust =
                         expr_to_rust(&u.stmt.rhs.node, Ctx::Guard, consts, opts_native(&uenv));
+                    let mut utcx = TreeCx::spec_level(&env, consts, ghosts.clone());
+                    utcx.params
+                        .extend(handler_params.iter().map(|p| p.name.clone()));
+                    let rhs_tree = build_expr_tree(&u.stmt.rhs, &utcx);
+                    let ghost_read = crate::mir::ExprTree::Path(crate::mir::expr_tree::TreePath {
+                        root: "state".to_string(),
+                        binding: crate::mir::expr_tree::BindingKind::Ghost,
+                        segments: vec![crate::mir::expr_tree::TreeSeg::Field(g.name.clone())],
+                        ty: None,
+                    });
+                    let fold =
+                        |op: crate::mir::expr_tree::TreeArithOp| crate::mir::ExprTree::Arith {
+                            op,
+                            lhs: Box::new(ghost_read.clone()),
+                            rhs: Box::new(rhs_tree.clone()),
+                        };
                     // Fold the assignment operator into a complete new-value
-                    // expression so each backend just emits `<ghost> := value`.
-                    let (value_lean, value_rust) = match u.stmt.op {
-                        a::EffectOp::Set => (rhs_lean, rhs_rust),
-                        a::EffectOp::Add | a::EffectOp::AddSat | a::EffectOp::AddWrap => (
-                            format!("s.{} + ({})", g.name, rhs_lean),
-                            format!("s.{} + ({})", g.name, rhs_rust),
-                        ),
-                        a::EffectOp::Sub | a::EffectOp::SubSat | a::EffectOp::SubWrap => (
-                            format!("s.{} - ({})", g.name, rhs_lean),
-                            format!("s.{} - ({})", g.name, rhs_rust),
-                        ),
+                    // expression so each backend just emits `<ghost> := value`
+                    // (the Lean form renders from `value_tree`).
+                    let value_rust = match u.stmt.op {
+                        a::EffectOp::Set => rhs_rust,
+                        a::EffectOp::Add | a::EffectOp::AddSat | a::EffectOp::AddWrap => {
+                            format!("s.{} + ({})", g.name, rhs_rust)
+                        }
+                        a::EffectOp::Sub | a::EffectOp::SubSat | a::EffectOp::SubWrap => {
+                            format!("s.{} - ({})", g.name, rhs_rust)
+                        }
+                    };
+                    let value_tree = match u.stmt.op {
+                        a::EffectOp::Set => rhs_tree.clone(),
+                        a::EffectOp::Add | a::EffectOp::AddSat | a::EffectOp::AddWrap => {
+                            fold(crate::mir::expr_tree::TreeArithOp::Add)
+                        }
+                        a::EffectOp::Sub | a::EffectOp::SubSat | a::EffectOp::SubWrap => {
+                            fold(crate::mir::expr_tree::TreeArithOp::Sub)
+                        }
                     };
                     updates.push(crate::check::ParsedGhostUpdate {
                         handler: u.handler.clone(),
-                        value_lean,
                         value_rust,
+                        value_tree: Some(value_tree),
                     });
                 }
                 out.ghosts.push(crate::check::ParsedGhost {
                     name: g.name.clone(),
                     doc: g.doc.clone(),
                     ty: type_ref_to_string(&g.ty),
-                    init_lean,
-                    init_rust,
+                    init_tree: Some(init_tree),
                     updates,
                 });
             }
@@ -701,8 +715,7 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                     .asserts
                     .iter()
                     .map(|e| crate::check::ParsedHookAssert {
-                        lean: expr_to_lean(&e.node, Ctx::Guard, consts, &env),
-                        rust: expr_to_rust(&e.node, Ctx::Guard, consts, opts_native(&env)),
+                        tree: Some(build_expr_tree(e, &spec_tcx)),
                     })
                     .collect();
                 out.hooks.push(crate::check::ParsedHook { kind, asserts });
@@ -843,10 +856,6 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                     .requires
                     .iter()
                     .any(|r| mentions_state(&r.lean_expr))
-                || handler
-                    .aborts_if
-                    .iter()
-                    .any(|a| mentions_state(&a.lean_expr))
                 || handler.ensures.iter().any(|e| mentions_state(&e.lean_expr));
             if !touches_state {
                 continue;
@@ -1131,9 +1140,7 @@ fn lower_call(c: &a::CallExpr, consts: ConstTable, env: &TypeEnv, tcx: &TreeCx) 
         .iter()
         .map(|arg| ParsedCallArg {
             name: arg.name.clone(),
-            lean_expr: expr_to_lean(&arg.value.node, Ctx::Guard, consts, env),
             rust_expr: expr_to_rust(&arg.value.node, Ctx::Guard, consts, opts_native(env)),
-            rust_expr_pod: expr_to_rust(&arg.value.node, Ctx::Guard, consts, opts_pod(env)),
             tree: Some(build_expr_tree(&arg.value, tcx)),
         })
         .collect();
@@ -1414,11 +1421,11 @@ fn adapt_handler(
                 } else {
                     rust
                 };
-                handler.let_bindings.push((
-                    name.clone(),
-                    expr_to_lean(&value.node, Ctx::Guard, consts, env),
-                    rust,
-                ));
+                handler.let_bindings.push(crate::check::ParsedLetBinding {
+                    name: name.clone(),
+                    rust_expr: rust,
+                    tree: Some(build_expr_tree(&value, tcx)),
+                });
             }
             a::HandlerClause::Effect(blocks) => {
                 // `effect { … }` may contain a top-level `match` block
@@ -1457,34 +1464,20 @@ fn adapt_handler(
                                         }
                                     }
                                 }
-                                let (pattern_rust, pattern_lean, is_wildcard) = match &arm.pattern {
+                                let (pattern_lean, pattern_tree, is_wildcard) = match &arm.pattern {
                                     a::EffectPattern::Literal(v) => {
-                                        (v.to_string(), v.to_string(), false)
+                                        (v.to_string(), Some(crate::mir::ExprTree::Int(*v)), false)
                                     }
-                                    a::EffectPattern::Wildcard => {
-                                        ("_".to_string(), "_".to_string(), true)
-                                    }
+                                    a::EffectPattern::Wildcard => ("_".to_string(), None, true),
                                 };
                                 parsed_arms.push(crate::check::ParsedEffectArm {
-                                    pattern_rust,
                                     pattern_lean,
+                                    pattern_tree,
                                     is_wildcard,
                                     effects: arm_effects,
                                 });
                             }
                             branches = Some(crate::check::ParsedEffectBranches {
-                                scrutinee_rust: expr_to_rust(
-                                    &scrutinee.node,
-                                    Ctx::Guard,
-                                    consts,
-                                    opts_native(env),
-                                ),
-                                scrutinee_rust_pod: expr_to_rust(
-                                    &scrutinee.node,
-                                    Ctx::Guard,
-                                    consts,
-                                    opts_pod(env),
-                                ),
                                 scrutinee_lean: expr_to_lean(
                                     &scrutinee.node,
                                     Ctx::Guard,
@@ -1521,10 +1514,17 @@ fn adapt_handler(
                             p.to_source_string()
                         }
                     });
+                    let amount_tree = tc.amount.as_ref().map(|a| match a {
+                        crate::ast::TransferAmount::Literal(v) => crate::mir::ExprTree::Int(*v),
+                        crate::ast::TransferAmount::Path(p) => {
+                            build_expr_tree_raw(&a::Expr::Path(p.clone()), tcx)
+                        }
+                    });
                     handler.transfers.push(crate::check::ParsedTransfer {
                         from: tc.from.clone(),
                         to: tc.to.clone(),
                         amount,
+                        amount_tree,
                         authority: tc.authority.clone(),
                     });
                 }

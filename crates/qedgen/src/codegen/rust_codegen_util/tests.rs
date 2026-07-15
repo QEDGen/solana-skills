@@ -40,7 +40,7 @@ handler churn (amount : U64) (who : Pubkey) {
         let body = mir.handler_block(&op.name).expect("mir body");
         let got: Vec<(String, String, String)> = block_effect_triples(body)
             .into_iter()
-            .map(|(f, k, v)| (f, k.to_string(), v.rust.clone()))
+            .map(|(f, k, v)| (f, k.to_string(), mir_expr_rust(v)))
             .collect();
         let want: Vec<(String, String, String)> = op
             .effects
@@ -158,7 +158,7 @@ fn stmt_effect_triples_round_trip_bundled_examples() {
                 .unwrap_or_else(|| panic!("MIR missing `{}` in {:?}", op.name, spec_path));
             let got: Vec<(String, String, String)> = block_effect_triples(body)
                 .into_iter()
-                .map(|(f, k, v)| (f, k.to_string(), v.rust.clone()))
+                .map(|(f, k, v)| (f, k.to_string(), mir_expr_rust(v)))
                 .collect();
             let want: Vec<(String, String, String)> = op
                 .effects
@@ -186,23 +186,6 @@ fn effect_target_base_strips_subscripts_and_dots() {
     assert_eq!(effect_target_base("s.foo"), "s");
     assert_eq!(effect_target_base("map[0]"), "map");
     assert_eq!(effect_target_base("  padded  "), "padded");
-}
-
-#[test]
-fn chained_subtraction_lowers_left_assoc_saturating() {
-    // `cap - used - reserved` is left-associative `Nat` subtraction in
-    // the Lean tier; the guard must lower recursive, correctly
-    // grouped, and saturating.
-    let got = translate_guard_to_rust("amount <= state.cap - state.used - state.reserved", true);
-    assert_eq!(
-        got,
-        "amount <= s.cap.saturating_sub(s.used).saturating_sub(s.reserved)"
-    );
-    // Addition keeps left-assoc grouping (wrapping unchanged).
-    assert_eq!(
-        translate_guard_to_rust("state.a + state.b + state.c <= state.d", true),
-        "s.a.wrapping_add(s.b).wrapping_add(s.c) <= s.d"
-    );
 }
 
 #[test]
@@ -452,7 +435,7 @@ fn split_top_level_and_splits_only_balanced_top_level_terms() {
 }
 
 #[test]
-fn collect_guard_terms_splits_guard_and_requires_without_nested_or_splits() {
+fn collect_guard_terms_splits_requires_without_nested_or_splits() {
     let src = r#"spec T
 type State | Active of { admin_key : Pubkey, allowed : Bool }
 type Error | Unauthorized | InvalidAmount
@@ -462,19 +445,12 @@ handler swap (amount : U64) (min_out : U64) : State.Active -> State.Active {
   requires amount >= min_out and min_out > 0 else InvalidAmount
 }
 "#;
-    let mut spec = parse_str(src).expect("parse");
-    spec.handlers[0].guard_str = Some("state.allowed && (amount > 0 || min_out > 0)".into());
+    let spec = parse_str(src).expect("parse");
     let op = &spec.handlers[0];
-    let terms = collect_guard_terms_with_account_env(op, false, Some("accounts"));
-    let exprs = terms
-        .into_iter()
-        .map(|term| term.rust_expr)
-        .collect::<Vec<_>>();
+    let exprs = collect_guard_terms_with_account_env(op, false, Some("accounts"));
     assert_eq!(
         exprs,
         vec![
-            "s.allowed",
-            "(amount > 0 || min_out > 0)",
             "accounts.admin.pubkey == s.admin_key",
             "(amount >= min_out)",
             "(min_out > 0)",

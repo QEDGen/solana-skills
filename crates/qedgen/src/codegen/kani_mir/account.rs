@@ -66,7 +66,7 @@ pub(crate) fn emit_account_section_structural(
         // `&[&_]` — rebuild an owned Vec.
         let owned: Vec<crate::check::ParsedProperty> =
             properties.iter().map(|p| (*p).clone()).collect();
-        util::emit_property_predicates_with(out, &owned, false, |t| map_type(t, parsed));
+        util::emit_property_predicates_with(out, &owned, |t| map_type(t, parsed));
     }
 
     // Invariant predicates — only those linked from a handler in this section.

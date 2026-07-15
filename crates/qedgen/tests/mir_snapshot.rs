@@ -114,6 +114,14 @@ fn snapshot_cross_program_vault() {
 }
 
 #[test]
+fn snapshot_let_bindings_fee_split() {
+    assert_or_update_snapshot(
+        "let-bindings-fee-split",
+        "crates/qedgen/tests/fixtures/let-bindings/fee_split.qedspec",
+    );
+}
+
+#[test]
 fn snapshot_escrow_split() {
     assert_or_update_snapshot("escrow-split", "examples/rust/escrow-split");
 }

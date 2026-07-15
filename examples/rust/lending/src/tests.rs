@@ -88,22 +88,22 @@ fn apply_liquidate(state: &mut LoanState) {
 
 /// Guard predicate for `init_pool`.
 fn guard_init_pool(_state: &PoolState, rate: u64) -> bool {
-    true
+    (rate > 0)
 }
 
 /// Guard predicate for `deposit`.
 fn guard_deposit(_state: &PoolState, amount: u64) -> bool {
-    true
+    (amount > 0)
 }
 
 /// Guard predicate for `borrow`.
 fn guard_borrow(_state: &LoanState, amount: u64, collateral: u64) -> bool {
-    true
+    (amount > 0) && (collateral > 0)
 }
 
 /// Guard predicate for `liquidate`.
-fn guard_liquidate(_state: &LoanState) -> bool {
-    true
+fn guard_liquidate(state: &LoanState) -> bool {
+    (state.amount > state.collateral)
 }
 
 #[cfg(test)]
@@ -257,7 +257,7 @@ mod tests {
             collateral: 0,
         };
         let amount: u64 = 0;
-        let collateral: u64 = 0;
+        let collateral: u64 = 1;
         assert!(!guard_borrow(&state, amount, collateral));
     }
 
