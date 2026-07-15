@@ -198,7 +198,7 @@ environment clock_check {
 }
 
 #[test]
-fn environment_unary_constraint_keeps_legacy_rendering() {
+fn environment_unary_constraint_renders_live_state_binder() {
     let src = format!(
         "{}{}",
         ENVIRONMENT_SPEC_HEAD,
@@ -209,44 +209,14 @@ environment rate_change {
 }
 "#
     );
-    let (mut mir, parsed) = lower_inline(&src);
+    let (mir, parsed) = lower_inline(&src);
     let typed_out = render(&mir, &parsed);
 
-    // Simulate a pre-seam / legacy MIR. Unary typed metadata must not change
-    // generated output compared with the existing string-only path.
-    mir.environments[0].typed_constraints.clear();
-    let legacy_out = render(&mir, &parsed);
-    assert_eq!(typed_out, legacy_out);
+    // Unary post-state assumptions read the live `s` binder — no pre/post
+    // snapshots emitted for a constraint with no `old(...)` read.
     assert!(typed_out.contains("    kani::assume(s.rate > 0);\n"));
     assert!(!typed_out.contains("    let pre = s.clone();\n"));
     assert!(!typed_out.contains("    let post = &s;\n"));
-}
-
-#[test]
-fn environment_binary_constraint_without_tree_falls_back_wholesale() {
-    let src = format!(
-        "{}{}",
-        ENVIRONMENT_SPEC_HEAD,
-        r#"
-environment rate_change {
-  mutates rate : U64
-  constraint state.rate >= old(state.rate)
-  constraint state.rate > 0
-}
-"#
-    );
-    let (mut mir, parsed) = lower_inline(&src);
-    mir.environments[0].typed_constraints[0].predicate.0.tree = None;
-    let out = render(&mir, &parsed);
-
-    for constraint in &parsed.environments[0].constraints_rust {
-        assert!(
-            out.contains(&format!("    kani::assume({constraint});\n")),
-            "legacy constraint missing after fallback:\n{out}"
-        );
-    }
-    assert!(!out.contains("    let pre = s.clone();\n"));
-    assert!(!out.contains("    let post = &s;\n"));
 }
 
 #[test]

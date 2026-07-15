@@ -527,7 +527,7 @@ fn effect_triples(op_name: &str, mir: &crate::mir::Mir, spec: &ParsedSpec) -> Ve
                     &crate::rust_codegen_util::strip_variant_prefix_for_flat_state(&field, spec),
                 ),
                 kind,
-                value.rust.clone(),
+                crate::rust_codegen_util::mir_expr_rust(value),
             )
         })
         .collect()

@@ -216,7 +216,7 @@ pub(super) fn adt_bound_conds(
                         conds.push(format!(
                             "{} + {} \u{2264} {}",
                             safe_name(&stripped),
-                            effect_rhs_lean(delta, &[]),
+                            effect_rhs_lean(delta),
                             max
                         ));
                     }
@@ -233,7 +233,7 @@ pub(super) fn adt_bound_conds(
                     if !matches!(ty, crate::mir::Ty::I64 | crate::mir::Ty::I128) {
                         conds.push(format!(
                             "{} \u{2264} {}",
-                            effect_rhs_lean(delta, &[]),
+                            effect_rhs_lean(delta),
                             safe_name(&stripped)
                         ));
                     }
@@ -269,12 +269,12 @@ pub(super) fn adt_effect_map(
     for stmt in stmts {
         match stmt {
             Stmt::Assign { path, rhs } => {
-                if is_account_pubkey_ref(&rhs.rust) {
+                if is_account_pubkey_ref(&crate::rust_codegen_util::mir_expr_rust(rhs)) {
                     continue;
                 }
                 effect_map.insert(
                     strip_variant_prefix(path, mir),
-                    ("set", effect_rhs_lean(rhs, &[])),
+                    ("set", effect_rhs_lean(rhs)),
                 );
             }
             Stmt::CheckedAdd { path, delta, .. }
@@ -282,7 +282,7 @@ pub(super) fn adt_effect_map(
             | Stmt::SatAdd { path, delta } => {
                 effect_map.insert(
                     strip_variant_prefix(path, mir),
-                    ("add", effect_rhs_lean(delta, &[])),
+                    ("add", effect_rhs_lean(delta)),
                 );
             }
             Stmt::CheckedSub { path, delta, .. }
@@ -290,7 +290,7 @@ pub(super) fn adt_effect_map(
             | Stmt::SatSub { path, delta } => {
                 effect_map.insert(
                     strip_variant_prefix(path, mir),
-                    ("sub", effect_rhs_lean(delta, &[])),
+                    ("sub", effect_rhs_lean(delta)),
                 );
             }
             Stmt::RequireOrAbort { .. }
@@ -585,8 +585,8 @@ pub(super) fn emit_handler_transition(out: &mut String, mir: &Mir, h: &crate::mi
         // effects move *inside* the arm (an untaken arm's bounds must
         // not abort the transition), then the arm's record update.
         let arm_line = |block: &crate::mir::Block| -> String {
-            let body = some_body(flat_effect_with_parts(h, &block.stmts));
-            let bounds = flat_effect_bound_conds(mir, h, &block.stmts, &conds);
+            let body = some_body(flat_effect_with_parts(&block.stmts));
+            let bounds = flat_effect_bound_conds(mir, &block.stmts, &conds);
             if bounds.is_empty() {
                 body
             } else {
@@ -639,7 +639,7 @@ pub(super) fn emit_handler_transition(out: &mut String, mir: &Mir, h: &crate::mi
         return;
     }
 
-    let then_body = some_body(flat_effect_with_parts(h, &h.body.stmts));
+    let then_body = some_body(flat_effect_with_parts(&h.body.stmts));
 
     if conds.is_empty() {
         out.push_str(&format!("  {}\n\n", then_body));
@@ -658,10 +658,7 @@ pub(super) fn emit_handler_transition(out: &mut String, mir: &Mir, h: &crate::mi
 /// Assign / Add / Sub family → `{ s with … }` record-update parts for a
 /// flat-state transition. Shared by the unconditional effect path and
 /// the per-arm `Stmt::Branch` rendering.
-pub(super) fn flat_effect_with_parts(
-    h: &crate::mir::HandlerMir,
-    stmts: &[crate::mir::Stmt],
-) -> Vec<String> {
+pub(super) fn flat_effect_with_parts(stmts: &[crate::mir::Stmt]) -> Vec<String> {
     use crate::mir::Stmt;
     let mut with_parts: Vec<String> = Vec::new();
     for stmt in stmts {
@@ -669,7 +666,7 @@ pub(super) fn flat_effect_with_parts(
             Stmt::Assign { path, rhs } => {
                 // Drop `<field> := <account_binding>.pubkey` — account-
                 // binding pubkey refs have no Lean scope.
-                if is_account_pubkey_ref(&rhs.rust) {
+                if is_account_pubkey_ref(&crate::rust_codegen_util::mir_expr_rust(rhs)) {
                     continue;
                 }
                 // Tree-native RHS (#151 Slice 2): the resolved tree knows
@@ -678,21 +675,21 @@ pub(super) fn flat_effect_with_parts(
                 with_parts.push(format!(
                     "{} := {}",
                     safe_name(&path_field_name(path)),
-                    effect_rhs_lean(rhs, &h.params)
+                    effect_rhs_lean(rhs)
                 ));
             }
             Stmt::CheckedAdd { path, delta, .. }
             | Stmt::WrapAdd { path, delta }
             | Stmt::SatAdd { path, delta } => {
                 let f = safe_name(&path_field_name(path));
-                let d = effect_rhs_lean(delta, &h.params);
+                let d = effect_rhs_lean(delta);
                 with_parts.push(format!("{} := s.{} + {}", f, f, d));
             }
             Stmt::CheckedSub { path, delta, .. }
             | Stmt::WrapSub { path, delta }
             | Stmt::SatSub { path, delta } => {
                 let f = safe_name(&path_field_name(path));
-                let d = effect_rhs_lean(delta, &h.params);
+                let d = effect_rhs_lean(delta);
                 with_parts.push(format!("{} := s.{} - {}", f, f, d));
             }
             Stmt::RequireOrAbort { .. }
@@ -710,11 +707,7 @@ pub(super) fn flat_effect_with_parts(
 /// only) for every sub-kind statement in `stmts` — item 3 of
 /// `build_guard_cond_parts`, shared with the per-arm
 /// `flat_effect_bound_conds`.
-pub(super) fn sub_underflow_conds(
-    mir: &Mir,
-    h: &crate::mir::HandlerMir,
-    stmts: &[crate::mir::Stmt],
-) -> Vec<String> {
+pub(super) fn sub_underflow_conds(mir: &Mir, stmts: &[crate::mir::Stmt]) -> Vec<String> {
     use crate::mir::Stmt;
     let state_fields = flat_state_fields(mir);
     let mut conds: Vec<String> = Vec::new();
@@ -742,7 +735,7 @@ pub(super) fn sub_underflow_conds(
             .map(|(_, t)| t.clone())
         {
             if ty_max_const(&ty).is_some() {
-                let d = effect_rhs_lean(delta, &h.params);
+                let d = effect_rhs_lean(delta);
                 conds.push(format!("{} \u{2264} s.{}", d, safe_name(&field)));
             }
         }
@@ -796,7 +789,7 @@ pub(super) fn add_overflow_conds(
             None => continue,
         };
         let sf = safe_name(&field);
-        let d = effect_rhs_lean(delta, &[]);
+        let d = effect_rhs_lean(delta);
         let needle_a = format!("s.{} + {}", sf, d);
         let needle_b = format!("{} + s.{}", d, sf);
         let dup = conds
@@ -819,11 +812,10 @@ pub(super) fn add_overflow_conds(
 /// an arm's bounds gate only that arm.
 pub(super) fn flat_effect_bound_conds(
     mir: &Mir,
-    h: &crate::mir::HandlerMir,
     stmts: &[crate::mir::Stmt],
     outer_conds: &[String],
 ) -> Vec<String> {
-    let mut conds = sub_underflow_conds(mir, h, stmts);
+    let mut conds = sub_underflow_conds(mir, stmts);
 
     let adds = add_overflow_conds(mir, stmts, &[&conds, outer_conds]);
     conds.extend(adds);
@@ -873,7 +865,7 @@ pub(super) fn build_guard_cond_parts(mir: &Mir, h: &crate::mir::HandlerMir) -> V
         }
     }
 
-    conds.extend(sub_underflow_conds(mir, h, &h.body.stmts));
+    conds.extend(sub_underflow_conds(mir, &h.body.stmts));
 
     for stmt in &h.body.stmts {
         if let Stmt::RequireOrAbort { pred, .. } = stmt {
@@ -948,7 +940,7 @@ pub(super) fn effect_tree_bound_conds(
             Stmt::Assign { path, rhs } => {
                 // Account-binding pubkey refs are dropped from the effect
                 // body (no Lean scope) — no guard either.
-                if is_account_pubkey_ref(&rhs.rust) {
+                if is_account_pubkey_ref(&crate::rust_codegen_util::mir_expr_rust(rhs)) {
                     continue;
                 }
                 let field = path_field_name(path);

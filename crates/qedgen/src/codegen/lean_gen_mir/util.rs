@@ -41,18 +41,14 @@ pub(super) fn strip_variant_prefix(path: &crate::mir::Path, mir: &Mir) -> String
     path.segments.join(".")
 }
 
-/// Lean form of an expression — tree render when the tree is present
-/// (#156 emission port; parity-gated by
-/// `corpus_parity_with_legacy_lean_strings`), the adapter's pre-rendered
-/// string otherwise. The string arm covers the carriers that don't
-/// thread trees yet (ghost updates, hook asserts, branch patterns,
-/// transfer amounts, PDA seeds) — Layer 2 of the port retires it.
+/// Lean form of an expression — tree render (#156 emission port;
+/// parity-gated by `corpus_parity_with_legacy_lean_strings`). A missing
+/// tree is the legitimately-empty carrier (`Expr::default()`, e.g. an
+/// undeclared transfer amount) and renders as the empty string.
 pub(super) fn expr_lean(e: &crate::mir::Expr, cx: super::tree_render::LeanCx) -> String {
     match &e.tree {
         Some(t) => super::tree_render::render_lean(t, cx),
-        // Tree-less Exprs are `from_raw`-built (every form carries the
-        // same string) or `Expr::default()` — `rust` is the Lean text.
-        None => e.rust.clone(),
+        None => String::new(),
     }
 }
 
@@ -63,72 +59,19 @@ pub(super) fn expr_lean_app(e: &crate::mir::Expr) -> String {
     use super::tree_render::{render_lean, LeanCx};
     match &e.tree {
         Some(t) => render_lean(t, LeanCx::guard().with_application_subscripts()),
-        None => rewrite_subscripts_lean(&e.rust),
+        None => String::new(),
     }
 }
 
-/// Effect RHS for a transition body — tree-native (#151 Slice 2): one
-/// `render_lean` call with application-style subscripts replaces the
-/// shape heuristics below. The string path stays only for `Expr`s
-/// without trees (IDL ingest, probes).
-pub(super) fn effect_rhs_lean(
-    expr: &crate::mir::Expr,
-    params: &[(crate::mir::Symbol, crate::mir::Ty)],
-) -> String {
+/// Effect RHS for a transition body — one `render_lean` call with
+/// application-style subscripts (#151 Slice 2). A missing tree is the
+/// legitimately-empty carrier and renders as the empty string.
+pub(super) fn effect_rhs_lean(expr: &crate::mir::Expr) -> String {
     use super::tree_render::{render_lean, LeanCx};
     match &expr.tree {
         Some(tree) => render_lean(tree, LeanCx::guard().with_application_subscripts()),
-        None => effect_value_to_lean_mir(&expr.rust, params),
+        None => String::new(),
     }
-}
-
-/// Render an effect RHS for the indexed-state transition body. Bare
-/// numeric literals and bare param refs pass through; pre-rendered Lean
-/// compounds (starting with `s.`, `(`, `match`, etc.) get subscript
-/// rewriting only; bare field names take an `s.` prefix + rewriting.
-/// Legacy fallback for tree-less `Expr`s — prefer [`effect_rhs_lean`].
-pub(super) fn effect_value_to_lean_mir(
-    value: &str,
-    params: &[(crate::mir::Symbol, crate::mir::Ty)],
-) -> String {
-    let trimmed = value.trim();
-    if !trimmed.is_empty()
-        && trimmed
-            .chars()
-            .all(|c| c.is_ascii_digit() || c == '_' || c == '-')
-    {
-        return trimmed.replace('_', "");
-    }
-    let is_bare_ident = trimmed
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_');
-    if is_bare_ident && params.iter().any(|(n, _)| n == trimmed) {
-        return trimmed.to_string();
-    }
-    let looks_prerendered = trimmed.starts_with("s.")
-        || trimmed.starts_with("s'.")
-        || trimmed.starts_with('(')
-        || trimmed.contains("match ")
-        || trimmed.contains("=> ")
-        || trimmed.contains(" with ")
-        || trimmed.contains(".{")
-        // Any compound expression (spaces / call parens) arrives from the
-        // adapter already canonicalized — state reads are `s.X`-qualified
-        // (issue #139 seam) — so front-prefixing the whole string (the
-        // legacy heuristic below) would corrupt it: `amount + 1` must not
-        // become `s.amount + 1`.
-        || trimmed.contains(' ')
-        || trimmed.contains('(');
-    if looks_prerendered {
-        return rewrite_subscripts_lean(trimmed);
-    }
-    let first = trimmed.chars().next().unwrap_or('_');
-    let prefixed = if first.is_ascii_alphabetic() || first == '_' {
-        format!("s.{}", trimmed)
-    } else {
-        trimmed.to_string()
-    };
-    rewrite_subscripts_lean(&prefixed)
 }
 
 // Shared Lean naming/type helpers (single source with `lean_sidecars`).

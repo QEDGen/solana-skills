@@ -383,55 +383,6 @@ pub(super) fn scan_indexed_in_expr(expr: &str, record: &mut dyn FnMut(&str, &str
     }
 }
 
-/// Subscript rewriter — `state.members[i] = approver` →
-/// `(s.members i) = approver`. Operates on a pre-rendered Lean expression
-/// string (the opaque-expression discipline applies here too).
-pub(super) fn rewrite_subscripts_lean(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 8);
-    let mut it = s.char_indices().peekable();
-    while let Some((i, ch)) = it.next() {
-        if ch != '[' {
-            out.push(ch);
-            continue;
-        }
-        let mut k = out.len();
-        while k > 0 {
-            let bytes = out.as_bytes();
-            let c = bytes[k - 1] as char;
-            if c.is_ascii_alphanumeric() || c == '_' || c == '.' {
-                k -= 1;
-            } else {
-                break;
-            }
-        }
-        let after = &s[i + 1..];
-        let close_rel = match after.find(']') {
-            Some(n) => n,
-            None => {
-                out.push(ch);
-                continue;
-            }
-        };
-        let idx = after[..close_rel].trim().to_string();
-        let path: String = out[k..].to_string();
-        out.truncate(k);
-        out.push('(');
-        out.push_str(&path);
-        out.push(' ');
-        out.push_str(&idx);
-        out.push(')');
-        let consumed_until = i + 1 + close_rel + 1;
-        while let Some(&(p, _)) = it.peek() {
-            if p < consumed_until {
-                it.next();
-            } else {
-                break;
-            }
-        }
-    }
-    out
-}
-
 /// Emit one transition def for an indexed-state handler. Distinct
 /// from `emit_handler_transition` (flat-state path) because:
 ///   * scalar param types lift to `Fin <bound>` when promoted;
@@ -529,7 +480,7 @@ pub(super) fn emit_indexed_transition(
         }
         // Plain scalar effect.
         let sf = safe_name(&lhs);
-        let val_lean = effect_rhs_lean(val, &h.params);
+        let val_lean = effect_rhs_lean(val);
         match op_kind {
             "add" => scalar_parts.push(format!("{} := s.{} + {}", sf, sf, val_lean)),
             "sub" => scalar_parts.push(format!("{} := s.{} - {}", sf, sf, val_lean)),
@@ -550,7 +501,7 @@ pub(super) fn emit_indexed_transition(
         } else {
             let mut inner_updates: Vec<String> = Vec::new();
             for (fname, op_kind, value) in ops {
-                let val_lean = effect_rhs_lean(value, &h.params);
+                let val_lean = effect_rhs_lean(value);
                 let rhs = match op_kind.as_str() {
                     "add" => format!("(s.{root} {idx}).{fname} + {val_lean}"),
                     "sub" => format!("(s.{root} {idx}).{fname} - {val_lean}"),

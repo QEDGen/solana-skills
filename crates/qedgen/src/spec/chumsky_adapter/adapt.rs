@@ -529,8 +529,6 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                 let environment_tcx = TreeCx::for_environment(envd, &env, consts, ghosts.clone());
                 let mut mutates: Vec<(String, String)> = Vec::new();
                 let mut external_fields: Vec<(String, String, String)> = Vec::new();
-                let mut constraints_lean: Vec<String> = Vec::new();
-                let mut constraints_rust: Vec<String> = Vec::new();
                 let mut typed_constraints: Vec<crate::check::ParsedEnvironmentConstraint> =
                     Vec::new();
                 for Node { node: c, .. } in &envd.clauses {
@@ -549,10 +547,8 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                             let lean_expr = expr_to_lean(&e.node, Ctx::Ensures, consts, &env);
                             let rust_expr =
                                 expr_to_rust(&e.node, Ctx::Ensures, consts, opts_native(&env));
-                            constraints_lean.push(lean_expr);
-                            constraints_rust.push(rust_expr.clone());
+                            let _ = (lean_expr, rust_expr);
                             typed_constraints.push(crate::check::ParsedEnvironmentConstraint {
-                                rust_expr,
                                 tree: Some(build_expr_tree(e, &environment_tcx)),
                                 class: classify_property_body(e),
                             });
@@ -563,8 +559,6 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                     name: envd.name.clone(),
                     mutates,
                     external_fields,
-                    constraints: constraints_lean,
-                    constraints_rust,
                     typed_constraints,
                 });
             }
@@ -641,7 +635,6 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
             }
             TopItem::Ghost(g) => {
                 // Init value — a constant expression in single-state context.
-                let init_rust = expr_to_rust(&g.init.node, Ctx::Guard, consts, opts_native(&env));
                 let init_tree = build_expr_tree(&g.init, &spec_tcx);
                 let mut updates = Vec::new();
                 for u in &g.updates {
@@ -705,7 +698,6 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                     name: g.name.clone(),
                     doc: g.doc.clone(),
                     ty: type_ref_to_string(&g.ty),
-                    init_rust,
                     init_tree: Some(init_tree),
                     updates,
                 });
@@ -723,7 +715,6 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                     .asserts
                     .iter()
                     .map(|e| crate::check::ParsedHookAssert {
-                        rust: expr_to_rust(&e.node, Ctx::Guard, consts, opts_native(&env)),
                         tree: Some(build_expr_tree(e, &spec_tcx)),
                     })
                     .collect();
@@ -1150,7 +1141,6 @@ fn lower_call(c: &a::CallExpr, consts: ConstTable, env: &TypeEnv, tcx: &TreeCx) 
         .map(|arg| ParsedCallArg {
             name: arg.name.clone(),
             rust_expr: expr_to_rust(&arg.value.node, Ctx::Guard, consts, opts_native(env)),
-            rust_expr_pod: expr_to_rust(&arg.value.node, Ctx::Guard, consts, opts_pod(env)),
             tree: Some(build_expr_tree(&arg.value, tcx)),
         })
         .collect();
@@ -1474,20 +1464,13 @@ fn adapt_handler(
                                         }
                                     }
                                 }
-                                let (pattern_rust, pattern_lean, pattern_tree, is_wildcard) =
-                                    match &arm.pattern {
-                                        a::EffectPattern::Literal(v) => (
-                                            v.to_string(),
-                                            v.to_string(),
-                                            Some(crate::mir::ExprTree::Int(*v)),
-                                            false,
-                                        ),
-                                        a::EffectPattern::Wildcard => {
-                                            ("_".to_string(), "_".to_string(), None, true)
-                                        }
-                                    };
+                                let (pattern_lean, pattern_tree, is_wildcard) = match &arm.pattern {
+                                    a::EffectPattern::Literal(v) => {
+                                        (v.to_string(), Some(crate::mir::ExprTree::Int(*v)), false)
+                                    }
+                                    a::EffectPattern::Wildcard => ("_".to_string(), None, true),
+                                };
                                 parsed_arms.push(crate::check::ParsedEffectArm {
-                                    pattern_rust,
                                     pattern_lean,
                                     pattern_tree,
                                     is_wildcard,
@@ -1495,18 +1478,6 @@ fn adapt_handler(
                                 });
                             }
                             branches = Some(crate::check::ParsedEffectBranches {
-                                scrutinee_rust: expr_to_rust(
-                                    &scrutinee.node,
-                                    Ctx::Guard,
-                                    consts,
-                                    opts_native(env),
-                                ),
-                                scrutinee_rust_pod: expr_to_rust(
-                                    &scrutinee.node,
-                                    Ctx::Guard,
-                                    consts,
-                                    opts_pod(env),
-                                ),
                                 scrutinee_lean: expr_to_lean(
                                     &scrutinee.node,
                                     Ctx::Guard,

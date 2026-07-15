@@ -1162,11 +1162,8 @@ environment rate_change {
     let spec = parse_str(&src).expect("parse environment constraints");
     let environment = &spec.environments[0];
 
-    assert_eq!(environment.constraints.len(), 2);
-    assert_eq!(environment.constraints_rust.len(), 2);
     assert_eq!(environment.typed_constraints.len(), 2);
     for (index, typed) in environment.typed_constraints.iter().enumerate() {
-        assert_eq!(typed.rust_expr, environment.constraints_rust[index]);
         assert!(
             typed.tree.is_some(),
             "constraint {index} must retain its tree"
@@ -1415,7 +1412,11 @@ property p : state.total == state.balance preserved_by all
     let g = &spec.ghosts[0];
     assert_eq!(g.name, "total");
     assert_eq!(g.ty, "U64");
-    assert_eq!(g.init_rust.trim(), "0");
+    assert!(
+        matches!(&g.init_tree, Some(crate::mir::ExprTree::Int(0))),
+        "init tree should be the 0 literal; got {:?}",
+        g.init_tree
+    );
     assert_eq!(g.updates.len(), 1);
     assert_eq!(g.updates[0].handler, "mint");
     // `state.total` resolves to `s.total` (ghost registered as a state
@@ -1557,10 +1558,13 @@ handler deposit (amount : U64) {
         crate::check::ParsedHookKind::AfterStore(f) if f == "balance"
     ));
     assert_eq!(h.asserts.len(), 1);
+    let rendered = crate::rust_codegen_util::tree_render::render_rust(
+        h.asserts[0].tree.as_ref().expect("hook assert tree"),
+        crate::rust_codegen_util::tree_render::RustCx::native(),
+    );
     assert!(
-        h.asserts[0].rust.contains("s.balance") && h.asserts[0].rust.contains("s.cap"),
-        "assert rust should read the state fields; got {}",
-        h.asserts[0].rust
+        rendered.contains("s.balance") && rendered.contains("s.cap"),
+        "assert tree should read the state fields; got {rendered}"
     );
 }
 

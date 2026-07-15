@@ -55,11 +55,12 @@ impl WitnessState {
         for stmt in &h.body.stmts {
             match stmt {
                 Stmt::Assign { path, rhs } => {
-                    if is_account_pubkey_ref(&rhs.rust) {
+                    let rhs_rust = crate::rust_codegen_util::mir_expr_rust(rhs);
+                    if is_account_pubkey_ref(&rhs_rust) {
                         continue;
                     }
                     let key = strip_variant_prefix(path, mir);
-                    let resolved = self.resolve_value(&rhs.rust, params, constants);
+                    let resolved = self.resolve_value(&rhs_rust, params, constants);
                     if let Some(f) = self.fields.iter_mut().find(|(n, _)| n == &key) {
                         f.1 = resolved;
                     }
@@ -68,7 +69,11 @@ impl WitnessState {
                 | Stmt::WrapAdd { path, delta }
                 | Stmt::SatAdd { path, delta } => {
                     let key = strip_variant_prefix(path, mir);
-                    let resolved = self.resolve_value(&delta.rust, params, constants);
+                    let resolved = self.resolve_value(
+                        &crate::rust_codegen_util::mir_expr_rust(delta),
+                        params,
+                        constants,
+                    );
                     if let Some(f) = self.fields.iter_mut().find(|(n, _)| n == &key) {
                         let cur: u128 = f.1.parse().unwrap_or(0);
                         let add: u128 = resolved.parse().unwrap_or(0);
@@ -79,7 +84,11 @@ impl WitnessState {
                 | Stmt::WrapSub { path, delta }
                 | Stmt::SatSub { path, delta } => {
                     let key = strip_variant_prefix(path, mir);
-                    let resolved = self.resolve_value(&delta.rust, params, constants);
+                    let resolved = self.resolve_value(
+                        &crate::rust_codegen_util::mir_expr_rust(delta),
+                        params,
+                        constants,
+                    );
                     if let Some(f) = self.fields.iter_mut().find(|(n, _)| n == &key) {
                         let cur: u128 = f.1.parse().unwrap_or(0);
                         let sub: u128 = resolved.parse().unwrap_or(0);
@@ -824,31 +833,18 @@ pub(super) fn emit_environments_body(out: &mut String, mir: &Mir) {
             // Rewrite `s.<field>` / `state.<field>` / bare `<field>` in
             // each constraint to refer to the new value.
             let constraint_hyps: String = env
-                .constraints
+                .typed_constraints
                 .iter()
                 .enumerate()
-                .map(|(i, c)| {
+                .map(|(i, constraint)| {
                     // Render through the typed tree with the single-state
                     // (`s.`) binder: the theorem binds `s`, `new_<mutated>`,
                     // and `pre_/post_<external>` — but never `s'`. State reads
                     // render as `s.<field>` so the mutates rewrite below maps
                     // mutated fields to `new_<field>` and leaves the rest as
                     // `s.<field>`; external reads render as `pre_/post_<…>`
-                    // (binder-independent). The legacy `Ctx::Ensures` string
-                    // (`s'.<field>`) is a last-resort fallback only when the
-                    // tree is absent. (The two-state `ensures()` binder emitted
-                    // an unbound `s'` here.)
-                    let mut expr = env
-                        .typed_constraints
-                        .get(i)
-                        .and_then(|constraint| constraint.predicate.0.tree.as_ref())
-                        .map(|tree| {
-                            crate::lean_gen_mir::tree_render::render_lean(
-                                tree,
-                                crate::lean_gen_mir::tree_render::LeanCx::guard(),
-                            )
-                        })
-                        .unwrap_or_else(|| expr_lean(&c.0, tree_render::LeanCx::guard()));
+                    // (binder-independent).
+                    let mut expr = expr_lean(&constraint.predicate.0, tree_render::LeanCx::guard());
                     for (field, _) in &env.mutates {
                         expr = expr
                             .replace(&format!("s.{}", field), &format!("new_{}", field))

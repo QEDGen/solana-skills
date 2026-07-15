@@ -107,6 +107,10 @@ pub struct ParsedRequires {
 pub struct ParsedEnsures {
     pub lean_expr: String,
     pub rust_expr: String,
+    /// Read only by the pod-render parity corpus
+    /// (`corpus_parity_with_legacy_rust_strings`) — production pod
+    /// rendering flows from the tree.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub rust_expr_pod: String,
     /// Binary-mode rendering (`state.x` → `post.x`, `old(state.x)` → `pre.x`)
     /// for the ensures-preservation Kani harness; `rust_expr` flattens both to
@@ -172,14 +176,7 @@ pub struct ParsedEnvironment {
     pub mutates: Vec<(String, String)>, // (field, type)
     /// Typed fields in distinct external namespaces: `(object, field, type)`.
     pub external_fields: Vec<(String, String, String)>,
-    /// Legacy target-rendered forms, retained while environment codegen
-    /// migrates to [`ParsedEnvironmentConstraint`]. Indices correspond to
-    /// `typed_constraints`.
-    pub constraints: Vec<String>, // lean form
-    pub constraints_rust: Vec<String>, // rust form
-    /// Typed metadata for each constraint. Adapter-produced specs populate
-    /// this one-for-one with `constraints`; legacy ingest paths may leave it
-    /// empty and continue to use the rendered strings above.
+    /// Typed metadata for each constraint, one per declared `constraint`.
     pub typed_constraints: Vec<ParsedEnvironmentConstraint>,
 }
 
@@ -191,7 +188,6 @@ pub struct ParsedEnvironment {
 /// without parsing target code.
 #[derive(Debug, Clone)]
 pub struct ParsedEnvironmentConstraint {
-    pub rust_expr: String,
     pub tree: Option<crate::mir::ExprTree>,
     pub class: PropertyClass,
 }
@@ -219,7 +215,9 @@ pub struct ParsedProperty {
     /// `QEDGEN_UNSUPPORTED_QUANTIFIER` when a forall/exists can't lower to a
     /// bool body; callers skip emission then.
     pub rust_expression: Option<String>,
-    /// Pod-aware Rust body for Quasar (mirrors `rust_expr_pod`).
+    /// Pod-aware Rust body for Quasar; read only by the pod-render parity
+    /// corpus — production pod rendering flows from the tree.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub rust_expression_pod: Option<String>,
     /// Math-exact Rust body (see `ParsedRequires::rust_expr_math`): the
     /// Kani/proptest property predicate fns consume this so evaluating a
@@ -546,13 +544,6 @@ pub struct ParsedHandler {
 /// IR form of a top-level `match` block inside `effect { … }`.
 #[derive(Debug, Clone)]
 pub struct ParsedEffectBranches {
-    /// Scrutinee expression rendered for Rust codegen.
-    pub scrutinee_rust: String,
-    /// Scrutinee rendered for Quasar/Pod targets. Threaded into the MIR as
-    /// `BranchScrutinee::Match`'s `Expr.rust_pod` by `lower_handler`, where
-    /// the pod backends read it; the Anchor `emit_transition_fn` path uses
-    /// `scrutinee_rust`.
-    pub scrutinee_rust_pod: String,
     /// Scrutinee expression rendered for Lean.
     pub scrutinee_lean: String,
     /// Typed scrutinee tree (#151 Slice 0).
@@ -563,7 +554,6 @@ pub struct ParsedEffectBranches {
 /// One arm of a `ParsedEffectBranches`.
 #[derive(Debug, Clone)]
 pub struct ParsedEffectArm {
-    pub pattern_rust: String,
     pub pattern_lean: String,
     /// Typed pattern tree (#156); `None` for wildcard arms.
     pub pattern_tree: Option<crate::mir::ExprTree>,
@@ -600,7 +590,6 @@ pub struct ParsedCall {
 pub struct ParsedCallArg {
     pub name: String,
     pub rust_expr: String,
-    pub rust_expr_pod: String,
     /// Typed argument tree (#151 Slice 0).
     pub tree: Option<crate::mir::ExprTree>,
 }
@@ -861,9 +850,7 @@ pub struct ParsedGhost {
     pub doc: Option<String>,
     /// DSL type string (`U64`, `I128`, `Bool`, …). Scalar only.
     pub ty: String,
-    /// Initial value, rendered for Rust; Lean renders from `init_tree`.
-    pub init_rust: String,
-    /// Typed initial-value tree (#156).
+    /// Typed initial-value tree (#156) — every backend renders from it.
     pub init_tree: Option<crate::mir::ExprTree>,
     pub updates: Vec<ParsedGhostUpdate>,
 }
@@ -898,8 +885,7 @@ pub enum ParsedHookKind {
 /// One `assert <expr>` in a hook body, rendered per backend.
 #[derive(Debug, Clone)]
 pub struct ParsedHookAssert {
-    pub rust: String,
-    /// Typed assert tree (#156).
+    /// Typed assert tree (#156) — every backend renders from it.
     pub tree: Option<crate::mir::ExprTree>,
 }
 

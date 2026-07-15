@@ -508,34 +508,16 @@ pub struct CallArg {
 // Predicates and expressions (opaque carriers per design)
 // ----------------------------------------------------------------------
 
-/// Opaque expression carrier — the parser already lowers expressions to
-/// per-target strings; MIR mirrors them. `ParsedRequires`-derived exprs
-/// populate `lean` / `rust` / `rust_pod`; `ParsedEnsures`-derived exprs add
-/// `rust_binary`. Each codegen picks its field.
+/// Typed expression carrier: the name-resolved tree (#151 Slice 0) plus
+/// the source span. The six pre-rendered per-target strings are gone
+/// (#156) — every backend renders from the tree. `tree: None` marks the
+/// legitimately-empty carrier (`Expr::default()`, e.g. an undeclared
+/// transfer amount); render helpers produce the empty string for it.
 #[derive(Debug, Clone, Default)]
 pub struct Expr {
-    pub rust: String,
-    pub rust_pod: String,
-    /// Binary-mode rendering for ensures (`state.x` → `post.x`,
-    /// `old(state.x)` → `pre.x`); empty where the distinction doesn't apply.
-    pub rust_binary: String,
-    /// Math-exact Rust rendering for harness *predicate* positions:
-    /// arithmetic inside comparisons widens to u128/i128 so evaluation
-    /// can't overflow-panic — matches the Lean `Nat` model (issue #146).
-    /// Empty where the math form wasn't rendered; consumers fall back to
-    /// `rust` via [`Expr::rust_math_or_rust`].
-    pub rust_math: String,
-    /// Binary-mode math-exact rendering; fallback is `rust_binary`.
-    pub rust_binary_math: String,
-    /// Typed, name-resolved expression tree (#151 Slice 0). `Some` for
-    /// expressions that flowed through the chumsky adapter (requires,
-    /// ensures, properties, invariants, effect RHS, CPI args); `None` for
-    /// synthetic strings and legacy ingest paths (IDL, probes). New
-    /// consumers must prefer the tree and treat the strings as the
-    /// deprecated fallback — the strings are deleted in Slice 4.
     pub tree: Option<ExprTree>,
     /// Source span when available; lints may read it, codegens shouldn't.
-    pub source_span: Option<SourceSpan>,
+    pub source_span: Option<(usize, usize)>,
 }
 
 #[derive(Debug, Clone)]
@@ -678,7 +660,6 @@ pub struct EnvironmentMir {
     pub mutates: Vec<(Symbol, Ty)>,
     pub external_fields: Vec<(Symbol, Symbol, Ty)>,
     /// Legacy predicate list retained for byte-stable generators.
-    pub constraints: Vec<Predicate>,
     /// Typed, temporally classified constraint metadata. Empty for legacy
     /// parsed specs which only supplied `constraints`.
     pub typed_constraints: Vec<EnvironmentConstraintMir>,
@@ -884,68 +865,44 @@ pub enum AccountOrField {
 // ----------------------------------------------------------------------
 
 impl Expr {
-    /// From a `ParsedRequires` — `rust_binary` stays empty (requires runs
-    /// in single-state context).
+    /// From a `ParsedRequires`.
     pub fn from_requires(req: &crate::check::ParsedRequires) -> Self {
         Expr {
-            rust: req.rust_expr.clone(),
-            rust_pod: req.rust_expr_pod.clone(),
-            rust_binary: String::new(),
-            rust_math: req.rust_expr_math.clone(),
-            rust_binary_math: String::new(),
             tree: req.tree.clone(),
             source_span: None,
         }
     }
 
-    /// From a `ParsedEnsures` — all render forms, including
-    /// `rust_expr_binary` for the pre/post split.
+    /// From a `ParsedEnsures`.
     pub fn from_ensures(ens: &crate::check::ParsedEnsures) -> Self {
         Expr {
-            rust: ens.rust_expr.clone(),
-            rust_pod: ens.rust_expr_pod.clone(),
-            rust_binary: ens.rust_expr_binary.clone(),
-            rust_math: String::new(),
-            rust_binary_math: ens.rust_expr_binary_math.clone(),
             tree: ens.tree.clone(),
             source_span: None,
         }
     }
 
-    /// From a raw single-form string (synthetic markers, transfer-amount
-    /// text): the same string fills every Rust form and no tree is
-    /// available; Lean render sites fall back to `rust` (identical by
-    /// construction here).
+    /// From a raw single-form string (synthetic markers, hand-built
+    /// test triples). Numeric text becomes an `Int` leaf; anything else
+    /// becomes a verbatim-spelling `Unresolved` path, which both
+    /// renderers emit as written — reproducing the old string-carrier
+    /// behavior without a string field.
     pub fn from_raw(s: impl Into<String>) -> Self {
         let s = s.into();
+        let tree = if s.trim().is_empty() {
+            None
+        } else if let Ok(v) = s.trim().parse::<u128>() {
+            Some(ExprTree::Int(v))
+        } else {
+            Some(ExprTree::Path(expr_tree::TreePath {
+                root: s,
+                binding: expr_tree::BindingKind::Unresolved,
+                segments: vec![],
+                ty: None,
+            }))
+        };
         Expr {
-            rust: s.clone(),
-            rust_pod: s.clone(),
-            rust_binary: String::new(),
-            rust_math: String::new(),
-            rust_binary_math: String::new(),
-            tree: None,
+            tree,
             source_span: None,
-        }
-    }
-
-    /// Native-Rust rendering only; other forms empty (invariants,
-    /// ghost init/updates, environment constraints — Lean renders from
-    /// the tree).
-    pub fn from_rust(rust: impl Into<String>) -> Self {
-        Expr {
-            rust: rust.into(),
-            ..Default::default()
-        }
-    }
-
-    /// Native-Rust + pod-Rust renderings (hooks, CPI args, branch
-    /// patterns/scrutinees — Lean renders from the tree).
-    pub fn from_rust_pod(rust: impl Into<String>, rust_pod: impl Into<String>) -> Self {
-        Expr {
-            rust: rust.into(),
-            rust_pod: rust_pod.into(),
-            ..Default::default()
         }
     }
 
@@ -954,26 +911,6 @@ impl Expr {
     pub fn with_tree(mut self, tree: Option<ExprTree>) -> Self {
         self.tree = tree;
         self
-    }
-
-    /// The math-exact predicate form when rendered, else the plain Rust
-    /// form. Harness predicate positions (guards, property bodies,
-    /// aborts assumes) read through this.
-    pub fn rust_math_or_rust(&self) -> &str {
-        if self.rust_math.is_empty() {
-            &self.rust
-        } else {
-            &self.rust_math
-        }
-    }
-
-    /// Binary-mode analogue of [`Expr::rust_math_or_rust`].
-    pub fn rust_binary_math_or_binary(&self) -> &str {
-        if self.rust_binary_math.is_empty() {
-            &self.rust_binary
-        } else {
-            &self.rust_binary_math
-        }
     }
 }
 
@@ -1018,7 +955,7 @@ pub fn lower(parsed: &ParsedSpec) -> Mir {
                 asserts: h
                     .asserts
                     .iter()
-                    .map(|a| Expr::from_rust_pod(&a.rust, &a.rust).with_tree(a.tree.clone()))
+                    .map(|a| Expr::default().with_tree(a.tree.clone()))
                     .collect(),
             })
             .collect(),
@@ -1050,11 +987,6 @@ pub fn lower(parsed: &ParsedSpec) -> Mir {
                 name: p.name.clone(),
                 class: p.class,
                 expression: p.expression.as_ref().map(|_lean| Expr {
-                    rust: p.rust_expression.clone().unwrap_or_default(),
-                    rust_pod: p.rust_expression_pod.clone().unwrap_or_default(),
-                    rust_binary: String::new(),
-                    rust_math: p.rust_expression_math.clone().unwrap_or_default(),
-                    rust_binary_math: String::new(),
                     tree: p.tree.clone(),
                     source_span: None,
                 }),
@@ -1288,12 +1220,10 @@ fn lower_invariants(parsed: &ParsedSpec) -> Vec<InvariantMir> {
         .map(|inv| InvariantMir {
             name: inv.name.clone(),
             doc: inv.doc.clone(),
-            body: inv.lean_expr.as_ref().map(|_lean| {
-                Predicate(
-                    Expr::from_rust(inv.rust_expr.clone().unwrap_or_default())
-                        .with_tree(inv.tree.clone()),
-                )
-            }),
+            body: inv
+                .lean_expr
+                .as_ref()
+                .map(|_lean| Predicate(Expr::default().with_tree(inv.tree.clone()))),
         })
         .collect()
 }
@@ -1341,14 +1271,14 @@ fn lower_ghosts(parsed: &ParsedSpec) -> Vec<GhostMir> {
             name: g.name.clone(),
             doc: g.doc.clone(),
             ty: parse_ty_resolved(&g.ty, parsed),
-            init: Expr::from_rust(&g.init_rust).with_tree(g.init_tree.clone()),
+            init: Expr::default().with_tree(g.init_tree.clone()),
             updates: g
                 .updates
                 .iter()
                 .map(|u| {
                     (
                         u.handler.clone(),
-                        Expr::from_rust(&u.value_rust).with_tree(u.value_tree.clone()),
+                        Expr::default().with_tree(u.value_tree.clone()),
                     )
                 })
                 .collect(),
@@ -1374,23 +1304,11 @@ fn lower_environments(parsed: &ParsedSpec) -> Vec<EnvironmentMir> {
                     (object.clone(), field.clone(), parse_ty_resolved(ty, parsed))
                 })
                 .collect(),
-            constraints: env
-                .constraints
-                .iter()
-                .enumerate()
-                .map(|(i, _lean)| {
-                    Predicate(Expr::from_rust(
-                        env.constraints_rust.get(i).cloned().unwrap_or_default(),
-                    ))
-                })
-                .collect(),
             typed_constraints: env
                 .typed_constraints
                 .iter()
                 .map(|constraint| EnvironmentConstraintMir {
-                    predicate: Predicate(
-                        Expr::from_rust(&constraint.rust_expr).with_tree(constraint.tree.clone()),
-                    ),
+                    predicate: Predicate(Expr::default().with_tree(constraint.tree.clone())),
                     class: constraint.class,
                 })
                 .collect(),
@@ -1450,12 +1368,7 @@ fn lower_handler(h: &crate::check::ParsedHandler, parsed: &ParsedSpec) -> Handle
         lets: h
             .let_bindings
             .iter()
-            .map(|b| {
-                (
-                    b.name.clone(),
-                    Expr::from_rust_pod(&b.rust_expr, &b.rust_expr).with_tree(b.tree.clone()),
-                )
-            })
+            .map(|b| (b.name.clone(), Expr::default().with_tree(b.tree.clone())))
             .collect(),
         body: lower_body(h),
         post: h
@@ -1588,8 +1501,7 @@ fn lower_body(h: &crate::check::ParsedHandler) -> Block {
                     .iter()
                     .map(|a| CallArg {
                         name: a.name.clone(),
-                        value: Expr::from_rust_pod(&a.rust_expr, &a.rust_expr_pod)
-                            .with_tree(a.tree.clone()),
+                        value: Expr::default().with_tree(a.tree.clone()),
                     })
                     .collect(),
                 state_binders: call
@@ -1625,19 +1537,13 @@ fn lower_body(h: &crate::check::ParsedHandler) -> Block {
                 default = Some(block);
             } else {
                 arms.push(BranchArm {
-                    pattern: Some(
-                        Expr::from_rust_pod(&arm.pattern_rust, &arm.pattern_rust)
-                            .with_tree(arm.pattern_tree.clone()),
-                    ),
+                    pattern: Some(Expr::default().with_tree(arm.pattern_tree.clone())),
                     block,
                 });
             }
         }
         stmts.push(Stmt::Branch {
-            scrutinee: BranchScrutinee::Match(
-                Expr::from_rust_pod(&br.scrutinee_rust, &br.scrutinee_rust_pod)
-                    .with_tree(br.scrutinee_tree.clone()),
-            ),
+            scrutinee: BranchScrutinee::Match(Expr::default().with_tree(br.scrutinee_tree.clone())),
             arms,
             default,
         });
@@ -1668,7 +1574,7 @@ fn lower_effects(effects: &[crate::check::ParsedEffect]) -> Vec<Stmt> {
                 ..Expr::from_raw(value.clone())
             }
         } else {
-            Expr::from_rust_pod(&eff.value_rust, &eff.value_rust).with_tree(tree)
+            Expr::default().with_tree(tree)
         };
         let stmt = match eff.op.as_str() {
             "set" => Stmt::Assign { path, rhs },
@@ -1816,7 +1722,11 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
         let BranchScrutinee::Match(scrut) = scrutinee else {
             panic!("expected Match scrutinee");
         };
-        assert_eq!(scrut.rust, "fee_type");
+        assert!(
+            matches!(&scrut.tree, Some(ExprTree::Path(p)) if p.root == "fee_type"),
+            "scrutinee tree should be the fee_type read: {:?}",
+            scrut.tree
+        );
         assert_eq!(arms.len(), 2, "two non-wildcard arms");
         assert!(
             matches!(arms[0].block.stmts.as_slice(), [Stmt::SatAdd { .. }]),
@@ -2078,17 +1988,12 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
             .iter()
             .find(|environment| environment.name == "interest_rate_change")
             .expect("lending environment");
-        assert_eq!(environment.constraints.len(), 1);
         assert_eq!(environment.typed_constraints.len(), 1);
         assert_eq!(
             environment.typed_constraints[0].class,
             crate::check::PropertyClass::Unary
         );
         assert!(environment.typed_constraints[0].predicate.0.tree.is_some());
-        assert_eq!(
-            environment.typed_constraints[0].predicate.0.rust, environment.constraints[0].0.rust,
-            "typed lowering must preserve the legacy Rust rendering"
-        );
         // Lending uses TokenTransfer for deposit/withdraw flows.
         let total_xfers: usize = mir
             .handlers
@@ -2135,7 +2040,6 @@ environment rate_change {
 
         assert_eq!(typed.class, crate::check::PropertyClass::Binary);
         assert!(matches!(typed.predicate.0.tree, Some(ExprTree::Cmp { .. })));
-        assert_eq!(typed.predicate.0.rust, environment.constraints[0].0.rust);
     }
 
     #[test]
@@ -2182,11 +2086,12 @@ environment rate_change {
             for h in &mir.handlers {
                 for s in &h.body.stmts {
                     if let Stmt::Assign { rhs, .. } = s {
+                        let rendered = crate::rust_codegen_util::mir_expr_rust(rhs);
                         assert!(
-                            !rhs.rust.starts_with("/* MIR-TODO: unknown op_kind"),
+                            !rendered.starts_with("/* MIR-TODO: unknown op_kind"),
                             "fixture {} has unknown-op_kind effect: {}",
                             fixture,
-                            rhs.rust
+                            rendered
                         );
                     }
                 }
@@ -2301,9 +2206,8 @@ environment rate_change {
                 for p in h.pre.iter().chain(h.post.iter()) {
                     assert!(
                         p.0.tree.is_some(),
-                        "{fixture}: handler {} pre/post missing tree: {:?}",
+                        "{fixture}: handler {} pre/post missing tree",
                         h.name,
-                        p.0.rust
                     );
                 }
                 for s in &h.body.stmts {
@@ -2327,9 +2231,8 @@ environment rate_change {
                     if let Some(expr) = rhs {
                         assert!(
                             expr.tree.is_some(),
-                            "{fixture}: handler {} stmt missing tree: {:?}",
+                            "{fixture}: handler {} stmt missing tree",
                             h.name,
-                            expr.rust
                         );
                     }
                 }

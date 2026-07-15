@@ -260,7 +260,6 @@ mod tests {
                 .map(|(n, tree)| ParsedCallArg {
                     name: n.to_string(),
                     rust_expr: String::new(),
-                    rust_expr_pod: String::new(),
                     tree: Some(tree.clone()),
                 })
                 .collect(),

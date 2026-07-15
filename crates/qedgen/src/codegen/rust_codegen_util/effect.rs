@@ -42,6 +42,16 @@ pub fn handler_account_env_struct_name(op_name: &str) -> String {
 /// RHS carries a tree copied from the adapter-built `ParsedEffect.tree`;
 /// a `None` here is a hand-built fixture that must be fixed, not worked
 /// around.
+/// Rust form of a MIR expression — tree render under the native context
+/// when the tree is present (#156 sweep), the pre-rendered string
+/// otherwise (from_raw carriers, hand-built fixtures).
+pub fn mir_expr_rust(e: &crate::mir::Expr) -> String {
+    match &e.tree {
+        Some(t) => super::tree_render::render_rust(t, super::tree_render::RustCx::native()),
+        None => String::new(),
+    }
+}
+
 pub fn mir_expr_tree(e: &crate::mir::Expr) -> &crate::mir::ExprTree {
     e.tree
         .as_ref()
@@ -330,7 +340,7 @@ fn emit_one_effect_inner(
         _ => {
             out.push_str(&format!(
                 "{indent}// unknown effect: {field} {op_kind} {}\n",
-                value.rust
+                mir_expr_rust(value)
             ));
         }
     }

@@ -321,7 +321,9 @@ fn emit_after_store_hooks(
                 for a in &hook.asserts {
                     out.push_str(&format!(
                         "{}assert!({}, \"hook after_store({}) violated\");\n",
-                        indent, a.rust, base
+                        indent,
+                        mir_expr_rust(a),
+                        base
                     ));
                 }
             }
@@ -479,8 +481,8 @@ pub fn emit_transition_fn_inner(
         _ => None,
     }) {
         let scrutinee_rust = match scrutinee {
-            crate::mir::BranchScrutinee::Match(e) => e.rust.as_str(),
-            crate::mir::BranchScrutinee::Predicate(p) => p.0.rust.as_str(),
+            crate::mir::BranchScrutinee::Match(e) => mir_expr_rust(e),
+            crate::mir::BranchScrutinee::Predicate(p) => mir_expr_rust(&p.0),
         };
         out.push_str(&format!("    match {} {{\n", scrutinee_rust));
         let emit_arm_block = |out: &mut String, block: &crate::mir::Block| {
@@ -507,7 +509,11 @@ pub fn emit_transition_fn_inner(
             }
         };
         for arm in arms {
-            let pattern = arm.pattern.as_ref().map(|p| p.rust.as_str()).unwrap_or("_");
+            let pattern = arm
+                .pattern
+                .as_ref()
+                .map(mir_expr_rust)
+                .unwrap_or_else(|| "_".to_string());
             out.push_str(&format!("        {} => {{\n", pattern));
             emit_arm_block(out, &arm.block);
             out.push_str("        }\n");

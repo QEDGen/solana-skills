@@ -97,15 +97,15 @@ pub(crate) fn emit_effect_conformance_harnesses(
         });
         if let Some((scrutinee, arms, default)) = branch {
             let scrut = match scrutinee {
-                crate::mir::BranchScrutinee::Match(e) => e.rust.as_str(),
-                crate::mir::BranchScrutinee::Predicate(p) => p.0.rust.as_str(),
+                crate::mir::BranchScrutinee::Match(e) => util::mir_expr_rust(e),
+                crate::mir::BranchScrutinee::Predicate(p) => util::mir_expr_rust(&p.0),
             };
-            let patterns: Vec<&str> = arms
+            let patterns: Vec<String> = arms
                 .iter()
-                .filter_map(|a| a.pattern.as_ref().map(|p| p.rust.as_str()))
+                .filter_map(|a| a.pattern.as_ref().map(util::mir_expr_rust))
                 .collect();
             for (idx, arm) in arms.iter().enumerate() {
-                let Some(pattern) = arm.pattern.as_ref().map(|p| p.rust.as_str()) else {
+                let Some(pattern) = arm.pattern.as_ref().map(util::mir_expr_rust) else {
                     continue;
                 };
                 let assume = vec![format!("    kani::assume({} == {});\n", scrut, pattern)];
@@ -218,7 +218,7 @@ pub(crate) fn emit_one_conformance_harness(
     }
 
     let field_type = field_type_lookup.get(field).copied().unwrap_or("");
-    let solver = util::pick_kani_solver_for_effect(field_type, &value.rust, op);
+    let solver = util::pick_kani_solver_for_effect(field_type, &util::mir_expr_rust(value), op);
 
     emit_proof_preamble(
         out,
@@ -656,11 +656,8 @@ pub(crate) fn emit_file_level_features(
                 if prop.expression.is_none() {
                     continue;
                 }
-                let (rust_constraints, needs_pre, needs_post) = render_environment_constraints(
-                    mir_env,
-                    &env.constraints_rust,
-                    !env.external_fields.is_empty(),
-                );
+                let (rust_constraints, needs_pre, needs_post) =
+                    render_environment_constraints(mir_env, !env.external_fields.is_empty());
 
                 emit_proof_preamble(
                     out,
@@ -726,10 +723,11 @@ pub(crate) fn emit_file_level_features(
 /// Render environment constraints from typed MIR when it is complete, and
 /// report which snapshot bindings the rendered constraints require.
 ///
-/// Unary constraints intentionally keep their legacy Rust strings for byte
-/// stability. Binary constraints need the structural tree so `old(state.x)`
-/// and `state.x` route to distinct `pre` / `post` receivers. An incomplete or
-/// legacy MIR carrier falls back wholesale to the parsed string list.
+/// Every constraint renders from its typed tree (#156): Binary relations
+/// (and any environment with typed external fields) under the two-state
+/// `PrePost` binder so `old(state.x)` / `state.x` route to distinct
+/// `pre` / `post` receivers; Unary post-state assumptions under the live
+/// `s` binder.
 ///
 /// Returns `(constraints, needs_pre, needs_post)`. A state-field read renders
 /// as a `pre.` / `post.` receiver (external fields render as `pre_` / `post_`,
@@ -740,36 +738,34 @@ pub(crate) fn emit_file_level_features(
 /// bindings the constraints reference, or the harness fails to compile.
 fn render_environment_constraints(
     mir_env: Option<&crate::mir::EnvironmentMir>,
-    legacy: &[String],
     has_external_fields: bool,
 ) -> (Vec<String>, bool, bool) {
     use crate::rust_codegen_util::tree_render::{render_rust, Binder, RustCx};
 
-    let usable = mir_env.filter(|mir_env| {
-        !mir_env.typed_constraints.is_empty()
-            && mir_env.typed_constraints.len() == legacy.len()
-            && !mir_env.typed_constraints.iter().any(|constraint| {
-                constraint.class == crate::check::PropertyClass::Binary
-                    && constraint.predicate.0.tree.is_none()
-            })
-    });
-
-    let constraints: Vec<String> = match usable {
-        Some(mir_env) => mir_env
-            .typed_constraints
-            .iter()
-            .enumerate()
-            .map(|(index, constraint)| {
-                if constraint.class == crate::check::PropertyClass::Binary || has_external_fields {
-                    if let Some(tree) = &constraint.predicate.0.tree {
-                        return render_rust(tree, RustCx::native().with_binder(Binder::PrePost));
-                    }
-                }
-                legacy[index].clone()
-            })
-            .collect(),
-        None => legacy.to_vec(),
-    };
+    let constraints: Vec<String> = mir_env
+        .map(|mir_env| {
+            mir_env
+                .typed_constraints
+                .iter()
+                .map(|constraint| {
+                    let tree = constraint.predicate.0.tree.as_ref().expect(
+                        "environment constraint tree is always populated by the chumsky adapter (#156)",
+                    );
+                    // Binary relations (and any environment with typed
+                    // external fields) read pre/post snapshots; unary
+                    // post-state assumptions read the live state binder.
+                    let binder = if constraint.class == crate::check::PropertyClass::Binary
+                        || has_external_fields
+                    {
+                        Binder::PrePost
+                    } else {
+                        Binder::S
+                    };
+                    render_rust(tree, RustCx::native().with_binder(binder))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
     let needs_pre = constraints.iter().any(|c| c.contains("pre."));
     let needs_post = constraints.iter().any(|c| c.contains("post."));
