@@ -22,7 +22,19 @@ Pre-release checklist. Run before cutting a new release or tag. (Moved out of `C
 
 8a. **`old(...)` preservation harnesses (v2.23+)** — for every bundled spec whose `property` body contains `old(...)` (`grep -rl '\bold(' examples crates/qedgen/tests/fixtures --include='*.qedspec'`), regen and confirm `tests/proptest.rs` emits the binary signature (`fn <prop>(pre: &State, post: &State) -> bool`) and the per-handler harness captures `let pre = s.clone(); let mut post = s;` before the handler call. Pre-v2.23 this lowered to a structural tautology silently. Bundled coverage today: `crates/qedgen/tests/fixtures/regressions/issue-8/pool.qedspec` is the canonical pre/post test corpus.
 
-8b. **Supply-chain gate** — `cargo audit --deny warnings` (with the ignores below) and `cargo deny check` must both exit 0. CI's `supply-chain` job runs both on every push and PR. Install once with `cargo install --locked cargo-audit cargo-deny`. New RustSec advisories on transitive deps are the actionable signal; the ignored IDs are documented in `deny.toml`'s `[advisories].ignore` array — keep the CI command, README, and `deny.toml` ignore lists in sync. Currently ignored: `RUSTSEC-2024-0436` (`paste` unmaintained), `RUSTSEC-2024-0388` (`derivative` unmaintained), `RUSTSEC-2025-0141` (`bincode` unmaintained — Anza migrating to 2.x), `RUSTSEC-2025-0161` (`libsecp256k1` unmaintained — pulled by `agave-syscalls`), `RUSTSEC-2026-0097` (`rand` unsoundness with custom logger — doesn't fire in our usage). License allowlist + registry / git-source pin live in `deny.toml`.
+8b. **Supply-chain gate** — run the exact CI command below, then `cargo deny check`; both must exit 0. Install once with `cargo install --locked cargo-audit cargo-deny`. New RustSec advisories on transitive deps are the actionable signal; the ignored IDs are documented in `deny.toml`'s `[advisories].ignore` array — keep this command, CI, README, and `deny.toml` in sync.
+
+   ```bash
+   cargo audit --deny warnings \
+     --ignore RUSTSEC-2024-0436 \
+     --ignore RUSTSEC-2024-0388 \
+     --ignore RUSTSEC-2025-0141 \
+     --ignore RUSTSEC-2025-0161 \
+     --ignore RUSTSEC-2026-0097
+   cargo deny check
+   ```
+
+   The accepted advisories are `paste` and `derivative` (unmaintained Arkworks transitive dependencies), `bincode` and `libsecp256k1` (unmaintained Anza/Solana transitive dependencies), and `rand`'s custom-logger unsoundness (the triggering logger configuration is not used here). License allowlist + registry / git-source policy live in `deny.toml`.
 
 9. **Doc/code drift sweep** — README, SKILL.md, CLAUDE.md, `references/`, `docs/design/`, this file, `docs/prds/RELEASE-v<version>.md`, and module `//!` docstrings all have to match shipped reality. The `check-readme-drift.sh` script only covers top-level command coverage in README; everything else needs an explicit pass. Concretely:
    - Every `Subcommand` arm in `crates/qedgen/src/main.rs` has a section in `references/cli.md`, with every flag in its `#[arg]` set documented.

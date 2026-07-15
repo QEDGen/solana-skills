@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>QEDGen v2.43.0 release review</title>
+  <style>
+    body { font: 16px/1.5 system-ui, sans-serif; max-width: 980px; margin: 2rem auto; padding: 0 1rem; color: #17202a; }
+    table { border-collapse: collapse; width: 100%; margin: 1rem 0 2rem; }
+    th, td { border: 1px solid #ccd1d1; padding: .55rem; text-align: left; vertical-align: top; }
+    th { background: #f4f6f7; } code { background: #f4f6f7; padding: .1rem .25rem; }
+    .high { color: #b42318; font-weight: 700; } .medium { color: #9a6700; font-weight: 700; } .low { color: #2874a6; font-weight: 700; }
+    .pass { color: #18794e; font-weight: 700; } .pending { color: #9a6700; font-weight: 700; } .fail { color: #b42318; font-weight: 700; }
+  </style>
+</head>
+<body>
+  <h1>QEDGen v2.43.0 release review</h1>
+  <p><strong>Reviewed range:</strong> v2.42.0..09d1285 — 12 merged PRs, 20 commits, 239 files.</p>
+  <p><strong>Assessment:</strong> Security A-, quality B+. Ship-ready: the live replay blocker and package-confidentiality defect are fixed and covered by release gates.</p>
+
+  <h2>PR coverage</h2>
+  <table>
+    <tr><th>PRs</th><th>Subsystem</th><th>Review result</th></tr>
+    <tr><td>#216</td><td>Kani trusted models, proofs, Bytes32/64, Vec bound lint</td><td>No unmitigated security issue found; standing Kani proof gate required.</td></tr>
+    <tr><td>#217</td><td>Generated-Rust rustfmt seam</td><td>Format-before-hash ordering is correct; snapshots and fmt gate pass.</td></tr>
+    <tr><td>#218–#219</td><td>Auditor reliability, packaging, routed handbook</td><td>Skill/preflight/link/drift/package gates pass.</td></tr>
+    <tr><td>#220–#221</td><td>Domain extraction, schemas, ratification, replay, codegen fixes</td><td>Schema/corpus/CLI tests pass; live replay remains the principal release gate.</td></tr>
+    <tr><td>#222, #224</td><td>Typed-tree rendering migration</td><td>Full workspace and widened snapshots pass; no legacy live expression carrier remains except documented RefImpl.</td></tr>
+    <tr><td>#226, #232–#234</td><td>Probe CLI/schema/evidence/replay/reproducer</td><td>Schema and CLI behavior are tested; evidence-scope limitation recorded below.</td></tr>
+  </table>
+
+  <h2>Findings</h2>
+  <table>
+    <tr><th>Severity</th><th>Category</th><th>Description</th><th>Specific fix</th></tr>
+    <tr><td class="high">High (fixed)</td><td>Bounded execution / availability</td><td>A one-second live domain fuzz run produced 3,747 crash metadata files and previously replayed every file sequentially.</td><td>Fixed with deterministic shape sampling, 32-total/4-per-shape caps, total and per-child deadlines, process-group termination, bounded minimization, truthful incomplete-coverage reporting, a 3,747-crash regression, and the passing live SBF/Crucible gate.</td></tr>
+    <tr><td class="high">High (fixed in prep)</td><td>Package confidentiality</td><td><code>.npmignore</code> did not exclude nested build caches or local-only state. A dry-run attempted to traverse multi-gigabyte <code>target/.lake</code> trees and included <code>.qed/findings</code>, local Claude settings, internal learnings, review state, and debug binaries.</td><td>Exclude build caches, local agent/audit/review state, internal learnings, and non-release binaries. Verify the resulting tarball manifest before publish. Fixed in this release-prep worktree.</td></tr>
+    <tr><td class="medium">Medium</td><td>Evidence semantics</td><td>The #234 boundary harness executes a standalone model of Rust wrapping. It proves the declared operator wraps, but does not execute the generated/deployed handler or prove attacker reachability. Calling it a confirmed vulnerability can overstate evidence.</td><td>Add an explicit <code>evidence_scope: spec_model</code> (or keep it a candidate) and reserve implementation-confirmed findings for a generated/deployed handler harness. Release notes must state the current scope.</td></tr>
+    <tr><td class="low">Low</td><td>Reliability</td><td><code>execute_harness</code> accepts a wall-clock budget but currently ignores it. The present witness is O(1), but the API contract is unsafe for future reproducers.</td><td>Implement bounded subprocess execution before adding nontrivial reproducers; kill and reap rustc/harness children on timeout and return <code>KaniTimeout</code>/<code>BuildError</code>.</td></tr>
+    <tr><td class="low">Low</td><td>Documentation</td><td>The release checklist showed <code>cargo audit --deny warnings</code> without its required ignore arguments, and README described five accepted advisories as two.</td><td>Use the exact CI command in release docs and keep README/CI/deny.toml synchronized. Fixed in the release-prep worktree.</td></tr>
+    <tr><td class="low">Low</td><td>Coverage</td><td>The Quasar + multi-variant ADT + Pod field-read combination is intentionally outside the current corpus.</td><td>Add a compile/snapshot fixture before changing that renderer path; do not claim this combination as independently validated in release notes.</td></tr>
+  </table>
+
+  <h2>Gate evidence</h2>
+  <table>
+    <tr><th>Gate</th><th>Status</th></tr>
+    <tr><td>Version/readme/auditor/domain/preflight/npm/diff checks</td><td class="pass">Passed post-bump</td></tr>
+    <tr><td><code>cargo fmt --check</code></td><td class="pass">Passed</td></tr>
+    <tr><td><code>cargo clippy --all-targets -- -D warnings</code></td><td class="pass">Passed</td></tr>
+    <tr><td><code>cargo test --workspace</code></td><td class="pass">Passed (1,248 core tests plus integration/snapshot suites)</td></tr>
+    <tr><td>cargo-audit with accepted ignores / cargo-deny</td><td class="pass">Passed</td></tr>
+    <tr><td>Live SBF/Crucible boundary test</td><td class="pass">Passed after bounded replay fix</td></tr>
+    <tr><td>Generated drift / Kani prelude</td><td class="pass">Passed; 16/16 Kani harnesses verified</td></tr>
+    <tr><td>npm package dry-run</td><td class="pass">Passed after exclusions: 13.1 MB packed / 37.5 MB unpacked / 889 entries; no forbidden local or build-state paths</td></tr>
+    <tr><td>Frozen locks</td><td class="pass">No stale-lock findings; three examples retain documented lint-driven nonzero exits</td></tr>
+    <tr><td>Strict Lean builds</td><td class="pass">Passed: 9/9 examples, 0 skipped, 0 failed</td></tr>
+  </table>
+</body>
+</html>

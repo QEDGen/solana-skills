@@ -16,6 +16,26 @@ tests/
 node_modules/
 dist/
 build/
+target/
+**/target/
+.lake/
+**/.lake/
+*.olean
+*.olean.trace
+*.old
+bin/qedgen-debug
+bin/qedgen-release
+
+# Local agent, audit, and review state
+.agents/
+.claude/
+.qed/
+**/.qed/
+.superstack/
+learnings/
+LEARNINGS_*.md
+docs/research/
+docs/reviews/
 
 # IDE files
 .vscode/

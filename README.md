@@ -535,10 +535,11 @@ cargo deny check
 `cargo audit` and `cargo deny check` enforce the supply-chain gate
 defined in `deny.toml`: zero unignored RustSec vulnerabilities, only
 permissive licenses (MIT / Apache-2.0 / BSD / ISC / etc.), and only
-`crates.io` as a dep source (no git-branch pins). The two ignored
-RUSTSEC IDs are `paste 1.0.15` and `derivative 2.2.0` — both
-informational "unmaintained" tags on transitive deps the Solana SDK
-and Arkworks pull in. Install once with `cargo install --locked
+`crates.io` as a dep source (no git-branch pins). The five ignored
+RUSTSEC IDs cover `paste`, `derivative`, `bincode`, and
+`libsecp256k1` maintenance notices plus `rand`'s custom-logger
+unsoundness; all are transitive, justified in `deny.toml`, and do not
+match QEDGen's runtime usage. Install once with `cargo install --locked
 cargo-audit cargo-deny`; CI runs both in the dedicated `supply-chain`
 job on every push and PR.
 

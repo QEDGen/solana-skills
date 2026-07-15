@@ -1,6 +1,6 @@
 [package]
 name = "qedgen-solana-skills"
-version = "2.42.0"
+version = "2.43.0"
 edition = "2021"
 authors = ["abishekk92"]
 description = "Spec-driven formal verification for Solana programs: .qedspec → Lean 4 proofs, Kani harnesses, coverage matrix, and Anchor-compatible Rust codegen"
@@ -30,6 +30,7 @@ chumsky = "0.12"
 toml = { workspace = true }
 tempfile = "3"
 time = { workspace = true }
+libc = "0.2"
 
 # ratchet — upgrade-safety + mainnet-readiness lint.
 # `ratchet-anchor` default-features is off to drop `ureq` (ratchet's RPC
@@ -42,4 +43,3 @@ ratchet-anchor = { package = "solana-ratchet-anchor", version = "0.3.2", default
 # `ratchet-quasar` covers Quasar IDLs end-to-end. Not RPC-bearing —
 # the loader reads JSON straight off disk, no fetch path to gate.
 ratchet-quasar = { package = "solana-ratchet-quasar", version = "0.3.2" }
-

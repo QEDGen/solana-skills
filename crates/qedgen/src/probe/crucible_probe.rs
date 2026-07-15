@@ -4,13 +4,17 @@
 //!
 //! Pipeline: IDL discovery → build → smoke pre-flight (stops early when smoke
 //! already surfaces findings; re-finding the same bug class burns budget) →
-//! full run → per-crash tmin → categorize → dedupe by `(handler, dedupe_key)`.
+//! full run → bounded tmin/replay sampling → categorize → dedupe by
+//! `(handler, dedupe_key)`.
 
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
+use std::collections::{BTreeMap, VecDeque};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::Duration;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::crucible_gen::InvariantMode;
 use crate::probe::{Category, CrucibleCrashMetadata, Finding, Reproducer, Severity};
@@ -247,8 +251,8 @@ fn mark_domain_lane_blocked(dossier_path: &Path, spec_path: &Path, reason: &str)
     Ok(())
 }
 
-/// Per-crash `crucible tmin` cap — keeps minimization from eating the
-/// user's budget after a productive fuzz run.
+/// `crucible tmin --all` cap — keeps minimization from eating the user's
+/// budget after a productive fuzz run.
 pub const TMIN_BUDGET_PER_CRASH: Duration = Duration::from_secs(30);
 
 /// Smoke pre-flight budget: long enough to dispatch a few actions,
@@ -259,6 +263,23 @@ pub const SMOKE_BUDGET: Duration = Duration::from_secs(30);
 /// (post-dedupe) — burning the full budget to re-find the same bug
 /// class is anti-quality.
 pub const SMOKE_FINDING_CAP: usize = 4;
+
+/// Hard ceiling on replay work after one fuzz round. Crash storms commonly
+/// contain thousands of value variants for the same action shape; replaying
+/// every file would defeat the user-requested fuzz budget.
+pub const MAX_CRASH_REPLAYS: usize = 32;
+
+/// Preserve a small deterministic sample of value variants per action shape.
+/// This retains a chance to surface parameter-dependent invariant markers
+/// without allowing one hot shape to consume the entire replay allowance.
+pub const MAX_REPLAYS_PER_CRASH_SHAPE: usize = 4;
+
+/// Replay classification is post-fuzz evidence work, but it must remain
+/// bounded. Long fuzz requests do not grant an unbounded triage tail.
+pub const MAX_REPLAY_TRIAGE_BUDGET: Duration = Duration::from_secs(30);
+
+/// One malformed replay must not consume the whole triage allowance.
+pub const MAX_REPLAY_PER_CRASH: Duration = Duration::from_secs(2);
 
 /// Default full-run budget for `--fuzz` without an explicit value
 /// (~a few k iterations for a small/medium harness on a laptop).
@@ -278,7 +299,7 @@ pub struct FuzzProbeContext<'a> {
     pub project_root: PathBuf,
     /// Harness directory (`fuzz/<prog>/`) from `qedgen codegen --crucible`.
     pub harness_dir: PathBuf,
-    /// Per-crash tmin cap; defaults to TMIN_BUDGET_PER_CRASH.
+    /// Whole-set tmin cap; defaults to TMIN_BUDGET_PER_CRASH.
     pub tmin_cap: Duration,
     /// Smoke pre-flight budget; defaults to SMOKE_BUDGET. Duration::ZERO
     /// skips smoke (`--no-smoke`).
@@ -344,7 +365,10 @@ pub fn run_fuzz_probe(ctx: &FuzzProbeContext) -> Result<FuzzProbeResult> {
 
     if let Some(seed_report) = &ctx.domain_seed_report {
         replay_domain_seed_report(&ctx.harness_dir, seed_report)?;
-        acc.merge(harvest_crucible_findings(ctx)?);
+        acc.merge(harvest_crucible_findings(
+            ctx,
+            replay_triage_budget(ctx.fuzz_budget),
+        )?);
     }
 
     if !ctx.smoke_budget.is_zero() {
@@ -371,10 +395,13 @@ pub fn run_fuzz_probe(ctx: &FuzzProbeContext) -> Result<FuzzProbeResult> {
 
 /// Dedupe findings and derive the coarse `replay_success` signal.
 fn finalize_fuzz_result(acc: HarvestResult) -> FuzzProbeResult {
-    let replay_success = if acc.crashes_seen == 0 {
+    let replay_success = if acc.crashes_discovered == 0 {
         None
     } else {
-        Some(acc.crashes_reproduced == acc.crashes_seen)
+        Some(
+            acc.crashes_seen == acc.crashes_discovered
+                && acc.crashes_reproduced == acc.crashes_seen,
+        )
     };
     FuzzProbeResult {
         findings: dedupe_findings(acc.findings),
@@ -398,13 +425,23 @@ fn run_crucible_round(
             .map(|report| report.corpus_dir.as_path()),
     )
     .with_context(|| format!("crucible run ({label}) failed"))?;
-    harvest_crucible_findings_from(ctx, &crash_dir)
+    harvest_crucible_findings_from(ctx, &crash_dir, replay_triage_budget(budget))
 }
 
-fn harvest_crucible_findings(ctx: &FuzzProbeContext) -> Result<HarvestResult> {
+fn replay_triage_budget(fuzz_budget: Duration) -> Duration {
+    fuzz_budget
+        .max(Duration::from_secs(1))
+        .min(MAX_REPLAY_TRIAGE_BUDGET)
+}
+
+fn harvest_crucible_findings(
+    ctx: &FuzzProbeContext,
+    replay_budget: Duration,
+) -> Result<HarvestResult> {
     harvest_crucible_findings_from(
         ctx,
         &ctx.harness_dir.join("crashes").join(HARNESS_TEST_NAME),
+        replay_budget,
     )
 }
 
@@ -412,6 +449,8 @@ fn harvest_crucible_findings(ctx: &FuzzProbeContext) -> Result<HarvestResult> {
 #[derive(Default)]
 struct HarvestResult {
     findings: Vec<Finding>,
+    /// Parseable crashes discovered before bounded sampling.
+    crashes_discovered: usize,
     /// Crashes we attempted to replay for classification.
     crashes_seen: usize,
     /// Of those, how many reproduced under replay (`reproduces:true`).
@@ -421,6 +460,7 @@ struct HarvestResult {
 impl HarvestResult {
     fn merge(&mut self, other: HarvestResult) {
         self.findings.extend(other.findings);
+        self.crashes_discovered += other.crashes_discovered;
         self.crashes_seen += other.crashes_seen;
         self.crashes_reproduced += other.crashes_reproduced;
     }
@@ -429,27 +469,49 @@ impl HarvestResult {
 fn harvest_crucible_findings_from(
     ctx: &FuzzProbeContext,
     crash_dir: &Path,
+    replay_budget: Duration,
 ) -> Result<HarvestResult> {
-    let crashes = collect_crash_files(crash_dir).unwrap_or_default();
-    if !crashes.is_empty() {
+    let mut crashes = load_crash_candidates(crash_dir)?;
+    let discovered = crashes.len();
+    let started = Instant::now();
+    if discovered <= MAX_CRASH_REPLAYS && !crashes.is_empty() {
         // tmin failure is non-fatal — raw crashes are still valid
         // reproducers, we just lose minimization.
-        let _ = auto_tmin_all(&ctx.harness_dir, ctx.tmin_cap);
+        // Reserve at least half the triage allowance for the evidence-bearing
+        // replay step; minimization is useful but non-authoritative.
+        let tmin_budget = ctx.tmin_cap.min(replay_budget / 2);
+        let _ = auto_tmin_all(&ctx.harness_dir, tmin_budget);
+        // tmin may rewrite metadata in place; classification must use the
+        // minimized evidence rather than the pre-minimization snapshot.
+        crashes = load_crash_candidates(crash_dir)?;
+    } else if discovered > MAX_CRASH_REPLAYS {
+        eprintln!(
+            "[crucible] {discovered} crashes exceed the bounded replay threshold; skipping `tmin --all` and sampling at most {MAX_CRASH_REPLAYS}."
+        );
     }
-    // Read after tmin — minimization may rewrite .meta.json in place.
-    let mut result = HarvestResult::default();
-    for crash in crashes {
-        let raw = match std::fs::read(&crash) {
-            Ok(bytes) => bytes,
-            Err(_) => continue,
-        };
-        let meta = match parse_crash_metadata(&raw) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
+    let crashes = select_crashes_for_replay(crashes);
+    let mut result = HarvestResult {
+        crashes_discovered: discovered,
+        ..HarvestResult::default()
+    };
+    for CrashCandidate { path: crash, meta } in crashes {
+        let remaining = replay_budget.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            eprintln!(
+                "[crucible] replay triage exhausted its {}s budget after {}/{} parseable crashes.",
+                replay_budget.as_secs(),
+                result.crashes_seen,
+                discovered
+            );
+            break;
+        }
         result.crashes_seen += 1;
         // #229: classify from replay evidence, not the last-action heuristic.
-        match replay_capture(&ctx.harness_dir, &crash) {
+        match replay_capture(
+            &ctx.harness_dir,
+            &crash,
+            remaining.min(MAX_REPLAY_PER_CRASH),
+        ) {
             Some(ev) if !ev.reproduces => {
                 // The recorded crash did not re-fire on replay — no
                 // reproducible evidence, so it must NOT become a finding.
@@ -483,7 +545,80 @@ fn harvest_crucible_findings_from(
             }
         }
     }
+    if result.crashes_seen < discovered {
+        eprintln!(
+            "[crucible] bounded replay classified {}/{} parseable crashes; coverage.replay_success is false until every crash is replayed.",
+            result.crashes_seen, discovered
+        );
+    }
     Ok(result)
+}
+
+#[derive(Clone)]
+struct CrashCandidate {
+    path: PathBuf,
+    meta: CrucibleCrashMetadata,
+}
+
+type CrashShapeKey = (String, String, u32, Vec<(String, bool, Option<u32>)>);
+
+fn crash_shape_key(meta: &CrucibleCrashMetadata) -> CrashShapeKey {
+    let (_, tag) = categorize_crash(meta);
+    let error_code = meta
+        .actions
+        .last()
+        .and_then(|action| action.error_code)
+        .unwrap_or(0);
+    let actions = meta
+        .actions
+        .iter()
+        .map(|action| (action.name.clone(), action.success, action.error_code))
+        .collect();
+    (
+        derive_handler_for_crash(meta),
+        tag.to_string(),
+        error_code,
+        actions,
+    )
+}
+
+fn load_crash_candidates(crash_dir: &Path) -> Result<Vec<CrashCandidate>> {
+    let mut candidates = Vec::new();
+    for path in collect_crash_files(crash_dir)? {
+        let Ok(raw) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(meta) = parse_crash_metadata(&raw) else {
+            continue;
+        };
+        candidates.push(CrashCandidate { path, meta });
+    }
+    Ok(candidates)
+}
+
+/// Deterministically round-robin across distinct action shapes, retaining at
+/// most a few value variants per shape and a fixed total number of replays.
+fn select_crashes_for_replay(crashes: Vec<CrashCandidate>) -> Vec<CrashCandidate> {
+    let mut buckets: BTreeMap<CrashShapeKey, VecDeque<CrashCandidate>> = BTreeMap::new();
+    for crash in crashes {
+        buckets
+            .entry(crash_shape_key(&crash.meta))
+            .or_default()
+            .push_back(crash);
+    }
+
+    let mut selected = Vec::new();
+    for _ in 0..MAX_REPLAYS_PER_CRASH_SHAPE {
+        for bucket in buckets.values_mut() {
+            if selected.len() == MAX_CRASH_REPLAYS {
+                return selected;
+            }
+            if let Some(crash) = bucket.pop_front() {
+                selected.push(crash);
+            }
+        }
+    }
+    selected
 }
 
 // ============================================================================
@@ -699,14 +834,72 @@ fn finding_from_crash(
 fn replay_capture(
     harness_dir: &Path,
     crash_path: &Path,
+    timeout: Duration,
 ) -> Option<crate::probe::crucible_replay::ReplayEvidence> {
     let command = crucible_replay_command(harness_dir, crash_path).ok()?;
-    let output = Command::new(&command[0])
-        .args(&command[1..])
-        .output()
-        .ok()?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut process = Command::new(&command[0]);
+    process.args(&command[1..]);
+    let TimedCommandOutput::Completed { stdout } =
+        run_command_with_timeout(&mut process, timeout).ok()?
+    else {
+        eprintln!(
+            "[crucible] replay timed out after {}ms for {}.",
+            timeout.as_millis(),
+            crash_path.display()
+        );
+        return None;
+    };
+    let stdout = String::from_utf8_lossy(&stdout);
     crate::probe::crucible_replay::parse_fuzz_finding(&stdout)
+}
+
+enum TimedCommandOutput {
+    Completed { stdout: Vec<u8> },
+    TimedOut,
+}
+
+/// Run a subprocess under a hard wall-clock deadline. On Unix the child owns
+/// a fresh process group so a timeout kills Crucible and its harness child,
+/// preventing orphaned replay processes from surviving the probe.
+fn run_command_with_timeout(
+    command: &mut Command,
+    timeout: Duration,
+) -> Result<TimedCommandOutput> {
+    let mut stdout = tempfile::tempfile().context("creating replay stdout capture")?;
+    command
+        .stdout(Stdio::from(stdout.try_clone()?))
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+
+    let mut child = command.spawn().context("spawning bounded subprocess")?;
+    let started = Instant::now();
+    loop {
+        if child.try_wait()?.is_some() {
+            stdout.seek(SeekFrom::Start(0))?;
+            let mut bytes = Vec::new();
+            stdout.read_to_end(&mut bytes)?;
+            return Ok(TimedCommandOutput::Completed { stdout: bytes });
+        }
+        if started.elapsed() >= timeout {
+            #[cfg(unix)]
+            // SAFETY: the child was spawned as leader of a fresh process
+            // group, so the negated child PID targets only this command tree.
+            unsafe {
+                libc::kill(-(child.id() as i32), libc::SIGKILL);
+            }
+            // Also target the direct child so a rare process-group signalling
+            // failure cannot turn the subsequent wait back into an unbounded
+            // operation.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(TimedCommandOutput::TimedOut);
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn stable_finding_id(
@@ -949,26 +1142,32 @@ fn write_domain_replay_report(path: &Path, report: &DomainReplayReport) -> Resul
     Ok(())
 }
 
-/// Minimize every crash in one shot via `crucible tmin --all`. Per-crash
-/// invocation doesn't work: tmin wants `<CRASH_FILE>` relative to the
-/// crashes dir (not a full path) and has no `--timeout` flag.
-///
-/// `_unused_per_crash_cap` is kept for callers passing
-/// `TMIN_BUDGET_PER_CRASH` — tmin has no wall-clock dial today; if one is
-/// needed, wrap the spawn in a `tokio::time::timeout` here.
-fn auto_tmin_all(harness_dir: &Path, _unused_per_crash_cap: Duration) -> Result<()> {
+/// Minimize the crash set in one shot via `crucible tmin --all`, under the
+/// same hard subprocess deadline used by replay. Per-crash invocation doesn't
+/// work: tmin wants `<CRASH_FILE>` relative to the crashes dir and exposes no
+/// native timeout flag. Crash storms skip minimization before calling here.
+fn auto_tmin_all(harness_dir: &Path, timeout: Duration) -> Result<()> {
     let prog = harness_dir
         .file_name()
         .and_then(|s| s.to_str())
         .ok_or_else(|| anyhow::anyhow!("harness_dir has no leaf name"))?;
-    let _ = Command::new("crucible")
+    let mut command = Command::new("crucible");
+    command
         .arg("tmin")
         .arg(prog)
         .arg(HARNESS_TEST_NAME)
         .arg("--all")
         .arg("-C")
-        .arg(harness_dir)
-        .status();
+        .arg(harness_dir);
+    if matches!(
+        run_command_with_timeout(&mut command, timeout),
+        Ok(TimedCommandOutput::TimedOut)
+    ) {
+        eprintln!(
+            "[crucible] `tmin --all` exceeded its {}s budget; replaying raw sampled crashes.",
+            timeout.as_secs()
+        );
+    }
     Ok(())
 }
 
@@ -1315,6 +1514,58 @@ mod tests {
             success,
             error_code,
         }
+    }
+
+    fn crash_candidate(path: &str, actions: Vec<CrucibleActionRecord>) -> CrashCandidate {
+        CrashCandidate {
+            path: PathBuf::from(path),
+            meta: meta_with(actions),
+        }
+    }
+
+    #[test]
+    fn crash_storm_sampling_is_bounded_and_shape_diverse() {
+        let mut crashes = (0..3_747)
+            .map(|index| {
+                crash_candidate(
+                    &format!("accept-{index}.meta.json"),
+                    vec![action("accept", true, None)],
+                )
+            })
+            .collect::<Vec<_>>();
+        crashes.extend((0..20).map(|index| {
+            crash_candidate(
+                &format!("withdraw-{index}.meta.json"),
+                vec![action("withdraw", false, Some(6001))],
+            )
+        }));
+
+        let selected = select_crashes_for_replay(crashes);
+        assert!(selected.len() <= MAX_CRASH_REPLAYS);
+        let accept_count = selected
+            .iter()
+            .filter(|candidate| derive_handler_for_crash(&candidate.meta) == "accept")
+            .count();
+        let withdraw_count = selected
+            .iter()
+            .filter(|candidate| derive_handler_for_crash(&candidate.meta) == "withdraw")
+            .count();
+        assert_eq!(accept_count, MAX_REPLAYS_PER_CRASH_SHAPE);
+        assert_eq!(withdraw_count, MAX_REPLAYS_PER_CRASH_SHAPE);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_subprocess_kills_a_slow_command_tree() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 10"]);
+        let started = Instant::now();
+        let outcome = run_command_with_timeout(&mut command, Duration::from_millis(50)).unwrap();
+        assert!(matches!(outcome, TimedCommandOutput::TimedOut));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "timeout helper exceeded its wall-clock allowance"
+        );
     }
 
     #[test]
