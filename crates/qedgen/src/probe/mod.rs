@@ -21,6 +21,7 @@ pub(crate) mod arithmetic_symbol_probe;
 pub(crate) mod cluster;
 pub(crate) mod crucible_brownfield;
 pub(crate) mod crucible_probe;
+pub(crate) mod crucible_replay;
 pub(crate) mod domain_account_overlay;
 pub(crate) mod domain_extract;
 pub(crate) mod domain_interview;
@@ -323,6 +324,14 @@ pub enum Reproducer {
         /// Crucible binary version at run time — re-running against a
         /// different build surfaces as version mismatch, not silent drift.
         crucible_version: String,
+        /// The specific invariant/property name replay evidence named
+        /// (#229), e.g. `"conservation"` from `"invariant conservation
+        /// violated"`. Absent when the crash was a protocol-guard break,
+        /// a bare assertion, or classified by the fallback heuristic. Keys
+        /// dedupe so two distinct invariants tripped by one handler stay
+        /// distinct findings.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        invariant_id: Option<String>,
     },
 }
 

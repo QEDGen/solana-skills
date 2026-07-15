@@ -677,17 +677,21 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 if let Some(report) = domain_seed_report {
                     ctx.domain_seed_report = Some(report);
                 }
-                let findings = crucible_probe::run_fuzz_probe(&ctx)?;
+                let fuzz_result = crucible_probe::run_fuzz_probe(&ctx)?;
                 // A completed fuzz run that found nothing is `passed` (it
                 // executed) but low-coverage evidence — distinct from a
-                // finding-bearing run. Fine-grained coverage counts arrive
-                // with #229's replay work; the outcome split is the #227
-                // deliverable.
-                let fuzz_outcome = if findings.is_empty() {
+                // finding-bearing run.
+                let fuzz_outcome = if fuzz_result.findings.is_empty() {
                     probe::ProbeOutcome::NoFindingsLowCoverage
                 } else {
                     probe::ProbeOutcome::PassedWithCoverage
                 };
+                // #229: report whether minimized crashes replayed. `None`
+                // (no crashes) leaves the field absent.
+                let coverage = fuzz_result.replay_success.map(|ok| probe::ProbeCoverage {
+                    replay_success: Some(ok),
+                    ..probe::ProbeCoverage::default()
+                });
                 let output = probe::ProbeOutput {
                     spec_path: spec.as_ref().map(|p| p.display().to_string()),
                     project_root: root.as_ref().map(|p| p.display().to_string()),
@@ -698,7 +702,8 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                         candidates_dropped: 0,
                         skipped_files: Vec::new(),
                     }],
-                    findings,
+                    findings: fuzz_result.findings,
+                    coverage,
                     outcome: fuzz_outcome,
                     ..probe::ProbeOutput::envelope(probe_mode)
                 };

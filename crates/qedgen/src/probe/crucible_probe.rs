@@ -316,7 +316,17 @@ impl<'a> FuzzProbeContext<'a> {
 /// Top-level entry: discovery → build → smoke → run → triage → dedupe.
 /// Requires `crucible` on PATH and an existing harness directory
 /// (`qedgen codegen --crucible` first).
-pub fn run_fuzz_probe(ctx: &FuzzProbeContext) -> Result<Vec<Finding>> {
+/// Findings from a fuzz probe plus the replay-triage summary (#229).
+pub struct FuzzProbeResult {
+    pub findings: Vec<Finding>,
+    /// Whether minimized crashes replayed successfully: `None` when there were
+    /// no crashes to replay; `Some(true)` when every replayed crash
+    /// reproduced; `Some(false)` when at least one did not (so some crashes
+    /// were dropped as non-reproducing). Feeds `ProbeCoverage.replay_success`.
+    pub replay_success: Option<bool>,
+}
+
+pub fn run_fuzz_probe(ctx: &FuzzProbeContext) -> Result<FuzzProbeResult> {
     crate::deps::require_crucible()?;
     if !ctx.harness_dir.exists() {
         bail!(
@@ -330,40 +340,55 @@ pub fn run_fuzz_probe(ctx: &FuzzProbeContext) -> Result<Vec<Finding>> {
 
     build_harness(&ctx.harness_dir).context("building Crucible harness")?;
 
-    let mut findings = Vec::new();
+    let mut acc = HarvestResult::default();
 
     if let Some(seed_report) = &ctx.domain_seed_report {
         replay_domain_seed_report(&ctx.harness_dir, seed_report)?;
-        findings.extend(harvest_crucible_findings(ctx)?);
+        acc.merge(harvest_crucible_findings(ctx)?);
     }
 
     if !ctx.smoke_budget.is_zero() {
-        let smoke = run_crucible_round(ctx, ctx.smoke_budget, "smoke")
-            .context("running Crucible smoke pre-flight")?;
-        findings.extend(smoke);
-        if dedupe_findings(findings.clone()).len() >= SMOKE_FINDING_CAP {
+        acc.merge(
+            run_crucible_round(ctx, ctx.smoke_budget, "smoke")
+                .context("running Crucible smoke pre-flight")?,
+        );
+        if dedupe_findings(acc.findings.clone()).len() >= SMOKE_FINDING_CAP {
             eprintln!(
                 "Smoke surfaced {} distinct findings — stopping early. Fix these before re-running with the full budget (or pass --no-smoke to bypass).",
-                findings.len()
+                acc.findings.len()
             );
-            return Ok(dedupe_findings(findings));
+            return Ok(finalize_fuzz_result(acc));
         }
     }
 
-    let full = run_crucible_round(ctx, ctx.fuzz_budget, HARNESS_TEST_NAME)
-        .context("running Crucible full fuzz")?;
-    findings.extend(full);
+    acc.merge(
+        run_crucible_round(ctx, ctx.fuzz_budget, HARNESS_TEST_NAME)
+            .context("running Crucible full fuzz")?,
+    );
 
-    Ok(dedupe_findings(findings))
+    Ok(finalize_fuzz_result(acc))
 }
 
-/// One round: fuzz → harvest crashes → tmin → categorize. Smoke and
+/// Dedupe findings and derive the coarse `replay_success` signal.
+fn finalize_fuzz_result(acc: HarvestResult) -> FuzzProbeResult {
+    let replay_success = if acc.crashes_seen == 0 {
+        None
+    } else {
+        Some(acc.crashes_reproduced == acc.crashes_seen)
+    };
+    FuzzProbeResult {
+        findings: dedupe_findings(acc.findings),
+        replay_success,
+    }
+}
+
+/// One round: fuzz → harvest crashes → tmin → replay-classify. Smoke and
 /// full passes differ only by budget.
 fn run_crucible_round(
     ctx: &FuzzProbeContext,
     budget: Duration,
     label: &str,
-) -> Result<Vec<Finding>> {
+) -> Result<HarvestResult> {
     let crash_dir = run_crucible(
         &ctx.harness_dir,
         budget,
@@ -376,17 +401,35 @@ fn run_crucible_round(
     harvest_crucible_findings_from(ctx, &crash_dir)
 }
 
-fn harvest_crucible_findings(ctx: &FuzzProbeContext) -> Result<Vec<Finding>> {
+fn harvest_crucible_findings(ctx: &FuzzProbeContext) -> Result<HarvestResult> {
     harvest_crucible_findings_from(
         ctx,
         &ctx.harness_dir.join("crashes").join(HARNESS_TEST_NAME),
     )
 }
 
+/// Findings plus replay accounting from harvesting one crash directory.
+#[derive(Default)]
+struct HarvestResult {
+    findings: Vec<Finding>,
+    /// Crashes we attempted to replay for classification.
+    crashes_seen: usize,
+    /// Of those, how many reproduced under replay (`reproduces:true`).
+    crashes_reproduced: usize,
+}
+
+impl HarvestResult {
+    fn merge(&mut self, other: HarvestResult) {
+        self.findings.extend(other.findings);
+        self.crashes_seen += other.crashes_seen;
+        self.crashes_reproduced += other.crashes_reproduced;
+    }
+}
+
 fn harvest_crucible_findings_from(
     ctx: &FuzzProbeContext,
     crash_dir: &Path,
-) -> Result<Vec<Finding>> {
+) -> Result<HarvestResult> {
     let crashes = collect_crash_files(crash_dir).unwrap_or_default();
     if !crashes.is_empty() {
         // tmin failure is non-fatal — raw crashes are still valid
@@ -394,7 +437,7 @@ fn harvest_crucible_findings_from(
         let _ = auto_tmin_all(&ctx.harness_dir, ctx.tmin_cap);
     }
     // Read after tmin — minimization may rewrite .meta.json in place.
-    let mut findings = Vec::new();
+    let mut result = HarvestResult::default();
     for crash in crashes {
         let raw = match std::fs::read(&crash) {
             Ok(bytes) => bytes,
@@ -404,9 +447,43 @@ fn harvest_crucible_findings_from(
             Ok(m) => m,
             Err(_) => continue,
         };
-        findings.push(finding_from_crash(&ctx.harness_dir, &crash, &meta)?);
+        result.crashes_seen += 1;
+        // #229: classify from replay evidence, not the last-action heuristic.
+        match replay_capture(&ctx.harness_dir, &crash) {
+            Some(ev) if !ev.reproduces => {
+                // The recorded crash did not re-fire on replay — no
+                // reproducible evidence, so it must NOT become a finding.
+                // Demote to a visible note rather than silently dropping.
+                eprintln!(
+                    "[crucible] crash {} did not reproduce on replay — dropped (not a finding).",
+                    ev.crash_id
+                );
+            }
+            Some(ev) => {
+                result.crashes_reproduced += 1;
+                let class = crate::probe::crucible_replay::classify_reproduced(&ev.summary);
+                result.findings.push(finding_from_crash(
+                    &ctx.harness_dir,
+                    &crash,
+                    &meta,
+                    Some(&class),
+                )?);
+            }
+            None => {
+                // Replay unavailable or marker unparseable — fall back to the
+                // heuristic so we don't lose the crash, but the finding text
+                // flags that its class is not replay-confirmed.
+                eprintln!(
+                    "[crucible] replay produced no parseable marker for {} — using heuristic classification.",
+                    crash.display()
+                );
+                result
+                    .findings
+                    .push(finding_from_crash(&ctx.harness_dir, &crash, &meta, None)?);
+            }
+        }
     }
-    Ok(findings)
+    Ok(result)
 }
 
 // ============================================================================
@@ -423,11 +500,15 @@ pub fn parse_crash_metadata(json: &[u8]) -> Result<CrucibleCrashMetadata> {
     })
 }
 
-/// Map crash characteristics to (severity, category_tag). There is no
-/// in-band signal for a tripped invariant assert, so the heuristic is
-/// "no error code on the last action means the post-action assert fired."
-/// TODO: replay via `crucible show --replay` and parse the FUZZ_FINDING
-/// line for the actual assertion.
+/// FALLBACK classifier (superseded by replay evidence, #229). Maps crash
+/// characteristics to (severity, category_tag) using only the recorded action
+/// sequence: "no error code on the last action means the post-action assert
+/// fired." This is unreliable — it can't name the invariant and misclassifies
+/// any crash whose violating action isn't the last one — which is exactly why
+/// the harvest path now replays each crash and classifies from the
+/// `[FUZZ_FINDING]` marker (`crucible_replay`). This function is used ONLY when
+/// replay is unavailable or its marker can't be parsed, and the resulting
+/// finding is flagged as heuristic rather than replay-confirmed.
 pub fn categorize_crash(meta: &CrucibleCrashMetadata) -> (Severity, &'static str) {
     let last = meta.actions.last();
     match last {
@@ -476,7 +557,7 @@ pub fn dedupe_key_for_crash(meta: &CrucibleCrashMetadata) -> (String, &'static s
 /// later crashes contribute their `.meta.json` path to `extra_seeds`.
 pub fn dedupe_findings(findings: Vec<Finding>) -> Vec<Finding> {
     use std::collections::BTreeMap;
-    let mut by_key: BTreeMap<(String, String, u32), Finding> = BTreeMap::new();
+    let mut by_key: BTreeMap<(String, String, Option<String>, u32), Finding> = BTreeMap::new();
     for f in findings {
         let key = finding_dedupe_key(&f);
         match by_key.get_mut(&key) {
@@ -498,26 +579,27 @@ pub fn dedupe_findings(findings: Vec<Finding>) -> Vec<Finding> {
 }
 
 /// Mirrors `dedupe_key_for_crash` but pulls from `Finding` state.
-fn finding_dedupe_key(f: &Finding) -> (String, String, u32) {
-    let (tag, err) = match &f.reproducer {
+fn finding_dedupe_key(f: &Finding) -> (String, String, Option<String>, u32) {
+    // Key off the finding's own (evidence-based) `category_tag` and the
+    // replay-named `invariant_id` rather than re-deriving a tag from the
+    // action sequence via the heuristic. This is what keeps two distinct
+    // invariants tripped by one handler from collapsing into a single finding
+    // (the over-dedup the old meta-based key suffered).
+    let (invariant_id, err) = match &f.reproducer {
         Some(Reproducer::Crucible {
-            action_sequence, ..
+            action_sequence,
+            invariant_id,
+            ..
         }) => {
-            let last = action_sequence.last();
-            let err = last.and_then(|a| a.error_code).unwrap_or(0);
-            let synth = CrucibleCrashMetadata {
-                test_name: String::new(),
-                timestamp: String::new(),
-                iteration: 0,
-                seed: None,
-                actions: action_sequence.clone(),
-            };
-            let (_, tag) = categorize_crash(&synth);
-            (tag.to_string(), err)
+            let err = action_sequence
+                .last()
+                .and_then(|a| a.error_code)
+                .unwrap_or(0);
+            (invariant_id.clone(), err)
         }
-        _ => ("unknown".to_string(), 0),
+        _ => (None, 0),
     };
-    (f.handler.clone(), tag, err)
+    (f.handler.clone(), f.category_tag.clone(), invariant_id, err)
 }
 
 fn crash_path_from_reproducer(f: &Finding) -> Option<String> {
@@ -529,14 +611,36 @@ fn crash_path_from_reproducer(f: &Finding) -> Option<String> {
 
 /// `harness_dir` and `crash_path` are persisted on the reproducer so the
 /// user can re-run.
+///
+/// `class` carries evidence-based classification from a successful replay
+/// (#229). When present, its `(severity, tag, detail)` supersede the
+/// last-action heuristic and the named invariant/property is woven into the
+/// finding text + dedupe id. When `None` (replay unavailable or its marker
+/// unparseable), we fall back to `categorize_crash` and flag that the class is
+/// heuristic rather than replay-confirmed.
 fn finding_from_crash(
     harness_dir: &Path,
     crash_path: &Path,
     meta: &CrucibleCrashMetadata,
+    class: Option<&crate::probe::crucible_replay::CrashClass>,
 ) -> Result<Finding> {
-    let (severity, tag) = categorize_crash(meta);
+    let (severity, tag, detail, evidence_based) = match class {
+        Some(c) => (c.severity.clone(), c.tag, c.detail.clone(), true),
+        None => {
+            let (sev, tag) = categorize_crash(meta);
+            (sev, tag, None, false)
+        }
+    };
     let handler = derive_handler_for_crash(meta);
-    let id = stable_finding_id(harness_dir, &handler, tag, meta);
+    // Fold the named invariant into the dedupe salt so two distinct invariants
+    // tripped by the same handler no longer collapse into one finding (the
+    // limitation `dedupe_key_for_crash` documented — now fixable with the
+    // replay-provided name).
+    let id_salt = match &detail {
+        Some(name) => format!("{tag}:{name}"),
+        None => tag.to_string(),
+    };
+    let id = stable_finding_id(harness_dir, &handler, &id_salt, meta);
     let invocation = format!(
         "crucible show {} {} --replay",
         harness_dir.display(),
@@ -544,14 +648,22 @@ fn finding_from_crash(
     );
     let crucible_version = crucible_version().unwrap_or_else(|| "unknown".to_string());
 
+    let named = match &detail {
+        Some(name) => format!(" (`{name}`)"),
+        None => String::new(),
+    };
+    let spec_silent_on = if evidence_based {
+        format!("replay-confirmed `{tag}`{named}: a fuzz-discovered action sequence reproduces the violation. The spec is silent on this case.")
+    } else {
+        format!("fuzz-discovered path triggers `{tag}` (heuristic classification — replay evidence unavailable). The spec is silent on this case.")
+    };
+
     Ok(Finding {
         id,
         category: Category::CrucibleFuzzCrash,
         severity,
         handler,
-        spec_silent_on: format!(
-            "fuzz-discovered path triggers `{tag}`. The spec is silent on this case."
-        ),
+        spec_silent_on,
         suppression_hint: "add a `requires` clause covering this input, \
                            or refine the invariant if the violation is real."
             .to_string(),
@@ -566,9 +678,35 @@ fn finding_from_crash(
             action_sequence: meta.actions.clone(),
             extra_seeds: Vec::new(),
             crucible_version,
+            invariant_id: detail,
         }),
         gated_by: None,
     })
+}
+
+/// Replay one minimized crash and capture its `[FUZZ_FINDING]` marker.
+///
+/// Uses the same `crucible run … --replay <file>` surface the domain-replay
+/// path already drives (`crucible_replay_command`): it re-runs the
+/// already-built harness binary in replay mode (`FUZZ_INPUT_FILE` set) and
+/// prints the marker to stdout. The harness's replay block reconstructs the
+/// action sequence from the `.meta.json` when the raw bytes don't fully
+/// deserialize, so passing the crash meta path is sufficient.
+///
+/// Returns `None` if crucible can't be spawned or emits no parseable marker —
+/// the caller then falls back to heuristic classification rather than dropping
+/// the crash.
+fn replay_capture(
+    harness_dir: &Path,
+    crash_path: &Path,
+) -> Option<crate::probe::crucible_replay::ReplayEvidence> {
+    let command = crucible_replay_command(harness_dir, crash_path).ok()?;
+    let output = Command::new(&command[0])
+        .args(&command[1..])
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    crate::probe::crucible_replay::parse_fuzz_finding(&stdout)
 }
 
 fn stable_finding_id(
@@ -1137,8 +1275,15 @@ mod tests {
         assert!(last.error_code.is_none());
     }
 
+    /// Pins the FALLBACK heuristic's behavior on the real fixture: last action
+    /// is a successful `withdraw`, so the last-action rule guesses
+    /// `invariant_violation` with no name. #229's whole point is that this
+    /// guess is unreliable — the crash may originate from the earlier `claim`
+    /// (err 6003) — which is why the harvest path prefers replay evidence and
+    /// only falls back here. The evidence path is covered by
+    /// `crucible_replay::tests::earlier_action_marker_wins_over_last_action`.
     #[test]
-    fn real_crash_categorizes_as_high_invariant_violation() {
+    fn real_crash_fallback_heuristic_guesses_high_invariant_violation() {
         let meta = parse_crash_metadata(REAL_CRASH_META.as_bytes()).expect("parse");
         let (sev, tag) = categorize_crash(&meta);
         assert!(matches!(sev, Severity::High));
@@ -1277,6 +1422,16 @@ mod tests {
         error_code: Option<u32>,
         crash: &str,
     ) -> Finding {
+        synthetic_finding_named(handler, tag, None, error_code, crash)
+    }
+
+    fn synthetic_finding_named(
+        handler: &str,
+        tag: &str,
+        invariant_id: Option<&str>,
+        error_code: Option<u32>,
+        crash: &str,
+    ) -> Finding {
         Finding {
             id: format!("{handler}-{tag}-{}", error_code.unwrap_or(0)),
             category: Category::CrucibleFuzzCrash,
@@ -1297,6 +1452,7 @@ mod tests {
                 )],
                 extra_seeds: Vec::new(),
                 crucible_version: "test".into(),
+                invariant_id: invariant_id.map(str::to_string),
             }),
             gated_by: None,
         }
@@ -1337,6 +1493,60 @@ mod tests {
         ];
         let out = dedupe_findings(findings);
         assert_eq!(out.len(), 2);
+    }
+
+    /// #229: two DIFFERENT invariants tripped by the same handler must stay
+    /// separate findings — the over-dedup the old meta-based key caused
+    /// (both would classify `invariant_violation` and collapse). The
+    /// replay-provided `invariant_id` now keys them apart.
+    #[test]
+    fn dedupe_keeps_distinct_invariant_names_separate() {
+        let findings = vec![
+            synthetic_finding_named(
+                "settle",
+                "invariant_violation",
+                Some("conservation"),
+                None,
+                "a.meta.json",
+            ),
+            synthetic_finding_named(
+                "settle",
+                "invariant_violation",
+                Some("no_dilution"),
+                None,
+                "b.meta.json",
+            ),
+        ];
+        let out = dedupe_findings(findings);
+        assert_eq!(out.len(), 2, "distinct invariants must not collapse");
+    }
+
+    /// The same invariant tripped by different seeds still collapses, with
+    /// the extra seed collected — dedup didn't become too eager.
+    #[test]
+    fn dedupe_collapses_same_invariant_name_across_seeds() {
+        let findings = vec![
+            synthetic_finding_named(
+                "settle",
+                "invariant_violation",
+                Some("conservation"),
+                None,
+                "a.meta.json",
+            ),
+            synthetic_finding_named(
+                "settle",
+                "invariant_violation",
+                Some("conservation"),
+                None,
+                "b.meta.json",
+            ),
+        ];
+        let out = dedupe_findings(findings);
+        assert_eq!(out.len(), 1);
+        let Reproducer::Crucible { extra_seeds, .. } = out[0].reproducer.as_ref().unwrap() else {
+            panic!("expected Crucible reproducer");
+        };
+        assert_eq!(extra_seeds, &vec!["b.meta.json".to_string()]);
     }
 
     #[test]
