@@ -156,12 +156,12 @@ pub(super) fn witness_state_to_adt(
 ///   * Index-like numeric params (`param < s.X` without bound) → `0`
 ///   * Otherwise → `1` (satisfies common `> 0` / `≤ N` guards)
 pub(super) fn choose_param_values(h: &crate::mir::HandlerMir) -> Vec<(String, String)> {
-    let mut all_exprs: Vec<&str> = Vec::new();
+    let mut all_exprs: Vec<String> = Vec::new();
     for p in &h.pre {
-        all_exprs.push(&p.0.lean);
+        all_exprs.push(expr_lean(&p.0, tree_render::LeanCx::guard()));
     }
     for r in &h.requires_or_abort {
-        all_exprs.push(&r.pred.0.lean);
+        all_exprs.push(expr_lean(&r.pred.0, tree_render::LeanCx::guard()));
     }
     let combined = all_exprs.join(" ");
     h.params
@@ -430,7 +430,10 @@ pub(super) fn emit_covers_body(out: &mut String, mir: &Mir, adt_form: bool) {
                 cover.name, op_name
             ));
             if let Some(p) = when_pred {
-                out.push_str(&format!(" when {}. -/\n", p.0.lean));
+                out.push_str(&format!(
+                    " when {}. -/\n",
+                    expr_lean(&p.0, tree_render::LeanCx::guard())
+                ));
             } else {
                 out.push_str(". -/\n");
             }
@@ -440,7 +443,10 @@ pub(super) fn emit_covers_body(out: &mut String, mir: &Mir, adt_form: bool) {
                 safe_name(op_name)
             ));
             if let Some(p) = when_pred {
-                out.push_str(&format!("    {} \u{2227} ", p.0.lean));
+                out.push_str(&format!(
+                    "    {} \u{2227} ",
+                    expr_lean(&p.0, tree_render::LeanCx::guard())
+                ));
             } else {
                 out.push_str("    ");
             }
@@ -842,7 +848,7 @@ pub(super) fn emit_environments_body(out: &mut String, mir: &Mir) {
                                 crate::lean_gen_mir::tree_render::LeanCx::guard(),
                             )
                         })
-                        .unwrap_or_else(|| c.0.lean.clone());
+                        .unwrap_or_else(|| expr_lean(&c.0, tree_render::LeanCx::guard()));
                     for (field, _) in &env.mutates {
                         expr = expr
                             .replace(&format!("s.{}", field), &format!("new_{}", field))
@@ -882,9 +888,10 @@ pub(super) fn emit_environments_body(out: &mut String, mir: &Mir) {
             // Trivial-preservation shortcut: if no mutated field
             // appears in the property's lean expression, the property
             // holds by reflexivity after the struct update.
+            let prop_body_lean = expr_lean(prop_expr, tree_render::LeanCx::guard());
             let mutated_overlap = env.mutates.iter().any(|(field, _)| {
-                prop_expr.lean.contains(&format!("s.{}", safe_name(field)))
-                    || prop_expr.lean.contains(&format!("state.{}", field))
+                prop_body_lean.contains(&format!("s.{}", safe_name(field)))
+                    || prop_body_lean.contains(&format!("state.{}", field))
             });
 
             if !mutated_overlap {

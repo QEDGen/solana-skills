@@ -631,6 +631,9 @@ pub struct PropertyMir {
     pub expression: Option<Expr>,
     /// Handler names this property is preserved by.
     pub preserved_by: Vec<Symbol>,
+    /// Unary (single-state, `s.`) vs Binary (`old(...)`/post) — picks the
+    /// Lean render context for the predicate body (#156 emission port).
+    pub class: crate::check::PropertyClass,
 }
 
 /// Cover (reachability) declaration, mirroring `check::ParsedCover`.
@@ -1061,6 +1064,7 @@ pub fn lower(parsed: &ParsedSpec) -> Mir {
             .iter()
             .map(|p| PropertyMir {
                 name: p.name.clone(),
+                class: p.class,
                 expression: p.expression.as_ref().map(|lean| Expr {
                     lean: lean.clone(),
                     rust: p.rust_expression.clone().unwrap_or_default(),

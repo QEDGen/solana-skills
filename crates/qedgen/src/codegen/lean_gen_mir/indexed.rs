@@ -182,7 +182,7 @@ pub(super) fn render_indexed_state(mir: &Mir) -> String {
     // proofs to `Proofs.lean`.
     for prop in &mir.properties {
         if let Some(expr) = &prop.expression {
-            let rewritten = rewrite_subscripts_lean(&expr.lean);
+            let rewritten = expr_lean_app(expr);
             out.push_str(&format!(
                 "/-- Property: {}. -/\ndef {} (s : State) : Prop :=\n  {}\n\n",
                 prop.name,
@@ -332,11 +332,11 @@ pub(super) fn infer_idx_promotions_mir(
     // etc. The expression carrier is opaque; scan raw Lean form for
     // `<path>[<idx>]` patterns.
     for pred in &h.pre {
-        scan_indexed_in_expr(&pred.0.lean, &mut record);
+        scan_indexed_in_expr(&expr_lean(&pred.0, tree_render::LeanCx::guard()), &mut record);
     }
     for stmt in &h.body.stmts {
         if let Stmt::RequireOrAbort { pred, .. } = stmt {
-            scan_indexed_in_expr(&pred.0.lean, &mut record);
+            scan_indexed_in_expr(&expr_lean(&pred.0, tree_render::LeanCx::guard()), &mut record);
         }
     }
 
@@ -471,10 +471,11 @@ pub(super) fn emit_indexed_transition(
     // condition + error-carrying abort marker). Parenthesized as wholes;
     // subscript-rewritten so `state.members[i]` → `(s.members i)`.
     for pred in &h.requires_in_order {
-        if mentions_handler_account_pubkey(&pred.0.lean, &h.accounts) {
+        let lean = expr_lean_app(&pred.0);
+        if mentions_handler_account_pubkey(&lean, &h.accounts) {
             continue;
         }
-        conds.push(format!("({})", rewrite_subscripts_lean(&pred.0.lean)));
+        conds.push(format!("({})", lean));
     }
 
     // Effect updates.
@@ -500,7 +501,7 @@ pub(super) fn emit_indexed_transition(
         };
         // Drop `<field> := <account_binding>.pubkey` — no Lean scope
         // for account-binding pubkey refs.
-        if op_kind == "set" && is_account_pubkey_ref(&val.lean) {
+        if op_kind == "set" && is_account_pubkey_ref(&expr_lean(val, tree_render::LeanCx::guard())) {
             continue;
         }
         // Reconstruct the full dotted LHS: an indexed-record-field write
@@ -537,13 +538,7 @@ pub(super) fn emit_indexed_transition(
             let (_, _, value) = &ops[0];
             // Whole-entry writes never took the s.-prefix heuristic —
             // subscript rewriting only; the tree path renders directly.
-            let val_lean = match &value.tree {
-                Some(t) => super::tree_render::render_lean(
-                    t,
-                    super::tree_render::LeanCx::guard().with_application_subscripts(),
-                ),
-                None => rewrite_subscripts_lean(&value.lean),
-            };
+            let val_lean = expr_lean_app(value);
             format!("Function.update s.{root} {idx} ({val})", val = val_lean)
         } else {
             let mut inner_updates: Vec<String> = Vec::new();

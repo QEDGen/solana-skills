@@ -109,7 +109,7 @@ pub(super) fn preservation_proof_script(
 ) -> String {
     let trans_name = safe_name(&format!("{}Transition", h.name));
 
-    let body_lean = prop.expression.as_ref().map(|e| e.lean.clone());
+    let body_lean = prop.expression.as_ref().map(|e| expr_lean(e, property_cx(prop)));
     let has_quantifier = body_lean
         .as_deref()
         .map(|e| e.contains('\u{2200}') || e.contains('\u{2203}'))
@@ -188,7 +188,7 @@ pub(super) fn preservation_proof_script(
 pub(super) fn master_inductive_proof_script(mir: &Mir, prop: &crate::mir::PropertyMir) -> String {
     let mut proof = String::from(" := by\n  cases op with\n");
 
-    let body_lean = prop.expression.as_ref().map(|e| e.lean.clone());
+    let body_lean = prop.expression.as_ref().map(|e| expr_lean(e, property_cx(prop)));
     let prop_fields: Vec<String> = body_lean
         .as_deref()
         .map(fields_referenced_in_expr_owned)
@@ -262,9 +262,9 @@ pub(super) fn emit_invariants(out: &mut String, mir: &Mir) {
     for inv in &mir.invariants {
         match &inv.body {
             Some(pred) => {
-                // Post-#139 canonicalization the adapter's Lean form is
-                // always `s.`-rooted for state reads — no prefix pass.
-                let prefixed = &pred.0.lean;
+                // Post-#139 canonicalization state reads are `s.`-rooted
+                // in both the string and the tree render — no prefix pass.
+                let prefixed = &expr_lean(&pred.0, tree_render::LeanCx::guard());
                 out.push_str(&format!(
                     "/-- Invariant: {}{} -/\n",
                     inv.name,
@@ -474,13 +474,23 @@ pub(super) fn emit_aborts_if_adt(out: &mut String, mir: &Mir) {
 /// fixture `let-bindings-fee-split`). Let-free handlers keep the
 /// adapter's pre-rendered string (byte parity with existing snapshots).
 fn abort_pred_lean(h: &crate::mir::HandlerMir, pred: &crate::mir::Predicate) -> String {
-    if h.lets.is_empty() {
-        return pred.0.lean.clone();
+    match &pred.0.tree {
+        Some(tree) if !h.lets.is_empty() => tree_render::render_lean(
+            &h.inline_let_bindings(tree),
+            tree_render::LeanCx::guard(),
+        ),
+        _ => expr_lean(&pred.0, tree_render::LeanCx::guard()),
     }
-    let Some(tree) = &pred.0.tree else {
-        return pred.0.lean.clone();
-    };
-    tree_render::render_lean(&h.inline_let_bindings(tree), tree_render::LeanCx::guard())
+}
+
+/// Render context for a property body: `Unary` reads single-state (`s.`),
+/// `Binary` reads post-state as `s'` with `old(…)` collapsing to `s` —
+/// matching the adapter's legacy `lean_expr` conventions per class.
+fn property_cx(prop: &crate::mir::PropertyMir) -> tree_render::LeanCx {
+    match prop.class {
+        crate::check::PropertyClass::Unary => tree_render::LeanCx::guard(),
+        crate::check::PropertyClass::Binary => tree_render::LeanCx::ensures(),
+    }
 }
 
 pub(super) fn emit_aborts_if_with_sorry(out: &mut String, mir: &Mir, sorry_form: &str) {
@@ -578,7 +588,8 @@ pub(super) fn emit_aborts_if_with_sorry(out: &mut String, mir: &Mir, sorry_form:
             // its condition keeps the names; the hypothesis carries the
             // inlined form, and the `if_neg` projection unifies the two
             // up to zeta reduction.
-            let req_pos = cond_parts.iter().position(|c| c == &r.pred.0.lean);
+            let req_lean = expr_lean(&r.pred.0, tree_render::LeanCx::guard());
+            let req_pos = cond_parts.iter().position(|c| c == &req_lean);
             if flat_path {
                 if let Some(pos) = req_pos {
                     let proof =
@@ -651,7 +662,10 @@ pub(super) fn emit_ensures(out: &mut String, mir: &Mir) {
                 "    (h : {} s signer{} = some s') :\n",
                 trans_name, param_args
             ));
-            out.push_str(&format!("    {} := sorry\n\n", ens.0.lean));
+            out.push_str(&format!(
+                "    {} := sorry\n\n",
+                expr_lean(&ens.0, tree_render::LeanCx::ensures())
+            ));
         }
     }
 }

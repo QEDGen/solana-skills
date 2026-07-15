@@ -69,8 +69,9 @@ pub(super) fn emit_cpi_theorems(out: &mut String, mir: &Mir) -> std::collections
                 "/-- {} transfer envelope: {} \u{2192} {}",
                 h.name, from_label, to_label,
             ));
-            if !amount.lean.is_empty() {
-                out.push_str(&format!(" amount {}", amount.lean));
+            let amount_lean = expr_lean(amount, tree_render::LeanCx::guard());
+            if !amount_lean.is_empty() {
+                out.push_str(&format!(" amount {}", amount_lean));
             }
             if let Some(auth) = authority {
                 out.push_str(&format!(" authority {}", account_ref_label(auth)));

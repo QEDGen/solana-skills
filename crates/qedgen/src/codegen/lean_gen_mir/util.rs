@@ -41,6 +41,30 @@ pub(super) fn strip_variant_prefix(path: &crate::mir::Path, mir: &Mir) -> String
     path.segments.join(".")
 }
 
+/// Lean form of an expression — tree render when the tree is present
+/// (#156 emission port; parity-gated by
+/// `corpus_parity_with_legacy_lean_strings`), the adapter's pre-rendered
+/// string otherwise. The string arm covers the carriers that don't
+/// thread trees yet (ghost updates, hook asserts, branch patterns,
+/// transfer amounts, PDA seeds) — Layer 2 of the port retires it.
+pub(super) fn expr_lean(e: &crate::mir::Expr, cx: super::tree_render::LeanCx) -> String {
+    match &e.tree {
+        Some(t) => super::tree_render::render_lean(t, cx),
+        None => e.lean.clone(),
+    }
+}
+
+/// `expr_lean` with application-style subscripts (`s.members i`) — the
+/// indexed-state lane's convention. The fallback applies the legacy
+/// bracket→application rewrite to the pre-rendered string.
+pub(super) fn expr_lean_app(e: &crate::mir::Expr) -> String {
+    use super::tree_render::{render_lean, LeanCx};
+    match &e.tree {
+        Some(t) => render_lean(t, LeanCx::guard().with_application_subscripts()),
+        None => rewrite_subscripts_lean(&e.lean),
+    }
+}
+
 /// Effect RHS for a transition body — tree-native (#151 Slice 2): one
 /// `render_lean` call with application-style subscripts replaces the
 /// shape heuristics below. The string path stays only for `Expr`s

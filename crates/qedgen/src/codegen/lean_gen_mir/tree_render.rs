@@ -720,6 +720,28 @@ mod tests {
             "examples/rust/multisig/multisig.qedspec",
             "examples/rust/bundled-stdlib-demo/pool.qedspec",
             "examples/rust/cross-program-vault",
+            // #156 Lean emission port: widen the corpus with the regression
+            // fixtures so the string→tree swaps in lean_gen_mir are parity-
+            // gated over quantifiers, uninterpreted helpers, conditional
+            // effects, invariants, and let bindings — not just the pilots.
+            "crates/qedgen/tests/fixtures/let-bindings/fee_split.qedspec",
+            "crates/qedgen/tests/fixtures/regressions/issue-8/pool.qedspec",
+            "crates/qedgen/tests/fixtures/regressions/issue-8/repro-01-u16-type.qedspec",
+            "crates/qedgen/tests/fixtures/regressions/issue-8/repro-02-composite-or-parens.qedspec",
+            "crates/qedgen/tests/fixtures/regressions/issue-8/repro-03-duplicate-theorem.qedspec",
+            "crates/qedgen/tests/fixtures/regressions/issue-8/repro-04-liveness-params.qedspec",
+            "crates/qedgen/tests/fixtures/regressions/issue-8/repro-05-uninterpreted-helper.qedspec",
+            "crates/qedgen/tests/fixtures/regressions/issue-8/repro-06-cover-witness-bool.qedspec",
+            // (repro-07-* / repro-08-* are parse-rejection fixtures — not
+            // parseable corpus.)
+            "crates/qedgen/tests/fixtures/regressions/quantifiers/repro-forall-u64.qedspec",
+            "crates/qedgen/tests/fixtures/regressions/quantifiers/repro-forall-u8.qedspec",
+            "crates/qedgen/tests/fixtures/regressions/quantifiers/repro-forall-value-binder.qedspec",
+            "crates/qedgen/tests/fixtures/regressions/issue-139-bare-state-refs/generic_vault.qedspec",
+            "crates/qedgen/tests/fixtures/regressions/issue-42-conditional/fee_router.qedspec",
+            "crates/qedgen/tests/fixtures/regressions/issue-42-conditional/adt_router.qedspec",
+            "crates/qedgen/tests/fixtures/regressions/invariants/repro-establishes-clause.qedspec",
+            "crates/qedgen/tests/fixtures/regressions/invariants/repro-handler-invariant-clause.qedspec",
         ] {
             let spec = parse_fixture(fixture);
             for h in &spec.handlers {
