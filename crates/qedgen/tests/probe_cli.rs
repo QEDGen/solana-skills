@@ -105,5 +105,85 @@ fn fuzz_and_spec_probe_agree_on_schema_version() {
     );
     // Pin the canonical value so both paths can't drift in lockstep by
     // accident; bump alongside probe::SCHEMA_VERSION on a conscious change.
-    assert_eq!(spec_json["version"], serde_json::json!(2));
+    assert_eq!(spec_json["version"], serde_json::json!(3));
+    // v3 (#227): budget-0 fuzz is a dry run, not a clean pass.
+    assert_eq!(fuzz_json["outcome"], serde_json::json!("dry_run"));
+    assert_eq!(
+        fuzz_json["engine_runs"][0]["status"],
+        serde_json::json!("blocked"),
+        "budget-0 must report the fuzz engine as blocked, not passed"
+    );
+}
+
+/// The headline #227 fix: a spec whose predicates fire but whose
+/// reproducers aren't built yet must expose those hits as `candidates[]` —
+/// NOT return an empty result indistinguishable from a clean spec. And a
+/// candidate must never masquerade as a finding (no severity, no
+/// reproducer, findings[] stays empty under the all-stubs constructors).
+#[test]
+fn spec_probe_preserves_predicate_hits_as_candidates() {
+    let tmp = tempfile::tempdir().unwrap();
+    let spec = tmp.path().join("unbounded.qedspec");
+    // `permissionless` + unbounded `amount` in a transfer → multiple
+    // predicates fire (unbounded_amount_param, permissionless_state_writer).
+    std::fs::write(
+        &spec,
+        r#"spec Drain
+
+type State
+  | Active
+
+handler withdraw (amount : U64) : State.Active -> State.Active {
+  permissionless
+  effect { balance -= amount }
+}
+"#,
+    )
+    .unwrap();
+
+    let out = qedgen(&["probe", "--spec", spec.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "probe failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+
+    let candidates = json["candidates"].as_array().expect("candidates[] present");
+    assert!(
+        !candidates.is_empty(),
+        "predicate hits must surface as candidates, got empty:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    // Contract: candidates carry NO severity and NO reproducer.
+    for c in candidates {
+        assert!(
+            c.get("severity").is_none(),
+            "candidate must not carry severity"
+        );
+        assert!(
+            c.get("reproducer").is_none(),
+            "candidate must not carry a reproducer"
+        );
+        assert!(
+            c["reason"].as_str().is_some_and(|r| !r.is_empty()),
+            "candidate must explain why it isn't a finding"
+        );
+    }
+    // findings[] keeps its reproducer-only contract — empty while all
+    // constructors are stubs.
+    assert_eq!(
+        json["findings"].as_array().map(Vec::len),
+        Some(0),
+        "no reproducer constructors exist yet, so findings must be empty"
+    );
+    // The predicate engine ran to completion and recorded the demotions.
+    let engine = &json["engine_runs"][0];
+    assert_eq!(engine["engine"], serde_json::json!("spec_predicates"));
+    assert_eq!(engine["status"], serde_json::json!("passed"));
+    assert!(
+        engine["candidates_dropped"].as_u64().unwrap() >= 1,
+        "engine run must account for the demoted candidates"
+    );
+    assert!(json["coverage"]["handlers_discovered"].as_u64().unwrap() >= 1);
 }

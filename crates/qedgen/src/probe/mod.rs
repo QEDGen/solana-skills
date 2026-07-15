@@ -41,12 +41,22 @@ pub(crate) mod spec_predicates;
 use spec_predicates::*;
 
 /// Probe output schema version. Bump on incompatible finding-shape changes;
-/// the auditor pins against this. v2: spec-aware findings carry a
-/// `reproducer` (drop-on-fail pipeline) — the field is typed `Option` as a
-/// transitional shim, but candidates without a constructible reproducer are
-/// dropped, so every emitted finding has one. Spec-less / `--bootstrap`
-/// never emits findings.
-const SCHEMA_VERSION: u32 = 2;
+/// the auditor pins against this.
+///
+/// - v2: spec-aware findings carry a `reproducer` (drop-on-fail pipeline).
+/// - v3 (#227): the evidence model. Every predicate hit that can't (yet)
+///   acquire a reproducer is preserved in `candidates[]` instead of being
+///   silently dropped; `engine_runs[]` records per-engine status (including
+///   candidate-drop counts and skipped files); `coverage` reports what was
+///   discovered/exercised; and `outcome` distinguishes a real pass from a
+///   low-coverage empty result or a budget-zero dry run. `findings[]` keeps
+///   its v2 reproducer-only contract unchanged.
+///
+/// Additive for a v2 reader that ignores unknown fields: `findings[]` still
+/// means the same thing. A v2 reader that treated "empty findings" as
+/// "clean", however, MUST now also consult `candidates[]` and `outcome` —
+/// see `docs/design/probe-schema-v3-migration.md`.
+const SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -483,6 +493,130 @@ pub struct Finding {
     pub gated_by: Option<Vec<String>>,
 }
 
+/// A predicate hit or static pattern that warrants investigation but is
+/// NOT a demonstrated vulnerability. The evidence tier below `findings[]`:
+/// deliberately carries **no severity and no reproducer** so it can never
+/// be mistaken for a confirmed finding (the "no advisory tier" rule applies
+/// to `findings[]`, and candidates stay clearly on the other side of that
+/// line). The auditor surfaces these as a work list, not as results.
+#[derive(Debug, Clone, Serialize)]
+pub struct Candidate {
+    pub category: Category,
+    pub category_tag: String,
+    pub handler: String,
+    /// What the spec is silent on (human-readable) — same text a finding
+    /// would carry, minus any claim of exploitability.
+    pub spec_silent_on: String,
+    /// Minimal spec edit that would close it, if it is a real gap.
+    pub suppression_hint: String,
+    /// Where/how to investigate the impl to confirm or dismiss.
+    pub investigation_hint: String,
+    /// Why this predicate hit is a candidate rather than a finding — almost
+    /// always "no constructible reproducer yet" (the constructor for this
+    /// category is not implemented). Distinguishes "we can't prove it" from
+    /// "we proved it safe".
+    pub reason: String,
+}
+
+/// Per-engine execution record. `findings[]`/`candidates[]` say *what* was
+/// found; this says *whether the engine that would find it actually ran to
+/// completion* — the difference between "no bugs" and "the scanner skipped
+/// half the files".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[allow(dead_code)] // `failed`/`skipped` are constructed by #228/#229 engines
+pub enum EngineStatus {
+    /// Ran to completion over all inputs.
+    Passed,
+    /// Ran, but skipped some inputs (unreadable/unparseable files, dropped
+    /// candidates) — results are incomplete.
+    Partial,
+    /// Could not run because a precondition was unmet (e.g. budget-zero
+    /// harness dry run, missing IDL) — not a failure, but no coverage.
+    Blocked,
+    /// Attempted and errored (build failure, crash) — coverage unknown.
+    Failed,
+    /// Not requested this invocation.
+    Skipped,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EngineRun {
+    /// Stable engine id: `spec_predicates`, `crucible_fuzz`,
+    /// `arithmetic_symbol`, `paired_validator`, `lifecycle`,
+    /// `pinocchio_sites`, …
+    pub engine: String,
+    pub status: EngineStatus,
+    /// One-line human explanation of a non-`passed` status.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// Predicate hits this engine produced that were demoted to candidates
+    /// (or dropped) for want of a reproducer. `0` for engines that don't
+    /// run the reproducer pipeline.
+    #[serde(skip_serializing_if = "is_zero")]
+    #[serde(default)]
+    pub candidates_dropped: u32,
+    /// Source files the engine could not read or parse, relative to the
+    /// project root. Empty unless `status == partial`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
+    pub skipped_files: Vec<String>,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+/// What the probe actually discovered, generated, executed, and asserted —
+/// so a zero-finding result is interpretable. All counts are best-effort
+/// and engine-dependent; `None` fields mean "this engine doesn't measure
+/// that", not "zero".
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ProbeCoverage {
+    /// Handlers the probe saw (spec handlers, or discovered brownfield
+    /// handlers).
+    pub handlers_discovered: u32,
+    /// Fuzz actions generated from those handlers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actions_generated: Option<u32>,
+    /// Generated actions still carrying an agent-fill `todo!()` (cannot be
+    /// exercised until filled).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actions_stubbed: Option<u32>,
+    /// Spec invariants actually evaluated by the fuzz harness.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub invariants_evaluated: Option<u32>,
+    /// Fuzz corpus size after the run (seeds on disk).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub corpus_size: Option<u32>,
+    /// Deepest stateful action sequence reached.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_sequence_depth: Option<u32>,
+    /// Whether minimized crashes replayed successfully (Crucible triage).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replay_success: Option<bool>,
+}
+
+/// Top-level interpretation of the run. Lets a consumer branch on outcome
+/// instead of guessing from an empty `findings[]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[allow(dead_code)] // `blocked_incomplete_harness`/`engine_failed` land with #228/#229
+pub enum ProbeOutcome {
+    /// Engines ran to completion; findings/candidates reflect real coverage.
+    PassedWithCoverage,
+    /// Engines ran but exercised little — an empty result here is weak
+    /// evidence, not a clean bill of health.
+    NoFindingsLowCoverage,
+    /// A harness was required but is incomplete (stubbed actions,
+    /// budget-zero emit) — the probe did not really run.
+    BlockedIncompleteHarness,
+    /// An engine errored; results are unreliable.
+    EngineFailed,
+    /// Harness was emitted for preview only (budget 0) — nothing executed.
+    DryRun,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ProbeOutput {
     pub version: u32,
@@ -503,11 +637,28 @@ pub struct ProbeOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub applicable_categories: Option<Vec<String>>,
     /// Findings (spec-aware mode only — spec-less is investigation-by-auditor).
+    /// v2 reproducer-only contract unchanged: every entry has a reproducer.
     pub findings: Vec<Finding>,
+    /// v3 (#227): predicate hits preserved as investigation candidates when
+    /// no reproducer could be constructed — ends the silent drop. Always
+    /// present (may be empty); a v2 consumer ignores it.
+    #[serde(default)]
+    pub candidates: Vec<Candidate>,
+    /// v3 (#227): per-engine execution status, so an empty `findings[]` can
+    /// be told apart from an engine that skipped files or didn't run.
+    #[serde(default)]
+    pub engine_runs: Vec<EngineRun>,
+    /// v3 (#227): what the run discovered/exercised/asserted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<ProbeCoverage>,
+    /// v3 (#227): top-level interpretation — a consumer branches on this
+    /// instead of guessing from `findings.is_empty()`.
+    pub outcome: ProbeOutcome,
     /// Candidate spec clauses derived from findings + runtime signals.
     /// Populated only under `--emit-spec-candidates` (additive — older
     /// consumers ignore it). The auditor reads these to drive the
-    /// scaffold-to-spec interview.
+    /// scaffold-to-spec interview. (Distinct from `candidates[]`: these are
+    /// clustered proto-spec-clauses, not investigation candidates.)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub clusters: Option<Vec<crate::cluster::Cluster>>,
     /// Structural shape of the native dispatcher when detected. Only
@@ -531,8 +682,31 @@ impl ProbeOutput {
             handlers: None,
             applicable_categories: None,
             findings: Vec::new(),
+            candidates: Vec::new(),
+            engine_runs: Vec::new(),
+            coverage: None,
+            // Overwritten by every real construction site; the neutral
+            // default suits a bare/empty envelope (bootstrap work list).
+            outcome: ProbeOutcome::PassedWithCoverage,
             clusters: None,
             dispatcher_kind: None,
+        }
+    }
+}
+
+impl Candidate {
+    /// Demote a predicate `Finding` whose reproducer couldn't be built into
+    /// an investigation candidate. Drops severity + reproducer + gate info —
+    /// a candidate makes no exploitability claim.
+    pub fn from_dropped_finding(f: Finding, reason: impl Into<String>) -> Self {
+        Candidate {
+            category: f.category,
+            category_tag: f.category_tag,
+            handler: f.handler,
+            spec_silent_on: f.spec_silent_on,
+            suppression_hint: f.suppression_hint,
+            investigation_hint: f.investigation_hint,
+            reason: reason.into(),
         }
     }
 }
@@ -565,22 +739,59 @@ pub fn run_probe(spec_path: &Path) -> Result<ProbeOutput> {
     }
     findings.extend(predicate_stored_field_never_written(&spec));
 
-    // Drop-on-fail: every candidate must acquire a concrete reproducer
-    // or be silently dropped. No advisory tier.
+    // v3 (#227): a predicate hit either acquires a concrete reproducer and
+    // becomes a `finding`, or is preserved as an investigation `candidate`.
+    // The old pipeline dropped the latter silently, making a spec with live
+    // predicate hits indistinguishable from a clean one.
     let ctx = crate::probe_repro::ReproducerContext::from_spec_path(&spec, spec_path);
-    findings.retain_mut(
-        |finding| match crate::probe_repro::construct_reproducer(finding, &ctx) {
+    let mut kept: Vec<Finding> = Vec::new();
+    let mut candidates: Vec<Candidate> = Vec::new();
+    for mut finding in findings {
+        match crate::probe_repro::construct_reproducer(&finding, &ctx) {
             Ok(repro) => {
                 finding.reproducer = Some(repro);
-                true
+                kept.push(finding);
             }
-            Err(_) => false,
-        },
-    );
+            Err(reason) => {
+                candidates.push(Candidate::from_dropped_finding(
+                    finding,
+                    crate::probe_repro::describe_failure(&reason),
+                ));
+            }
+        }
+    }
+
+    let coverage = ProbeCoverage {
+        handlers_discovered: spec.handlers.len() as u32,
+        ..ProbeCoverage::default()
+    };
+    // The predicate engine ran to completion over every handler — `passed`
+    // even when all hits demoted to candidates (that's an honest scan, not
+    // an incomplete one). The demotions are recorded, not hidden.
+    let engine_runs = vec![EngineRun {
+        engine: "spec_predicates".to_string(),
+        status: EngineStatus::Passed,
+        detail: (!candidates.is_empty()).then(|| {
+            format!(
+                "{} predicate hit(s) preserved as candidates (no reproducer constructor yet)",
+                candidates.len()
+            )
+        }),
+        candidates_dropped: candidates.len() as u32,
+        skipped_files: Vec::new(),
+    }];
 
     Ok(ProbeOutput {
         spec_path: Some(spec_path.display().to_string()),
-        findings,
+        findings: kept,
+        candidates,
+        engine_runs,
+        coverage: Some(coverage),
+        // The predicate engine visits every handler, so its coverage is
+        // always complete — a clean result here is a real (predicate-scoped)
+        // pass, and live candidates are surfaced explicitly rather than
+        // hidden behind an empty `findings[]`.
+        outcome: ProbeOutcome::PassedWithCoverage,
         ..ProbeOutput::envelope(Mode::SpecAware)
     })
 }

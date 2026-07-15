@@ -78,6 +78,25 @@ Probe output prioritizes investigation; it is not a verdict. Independently walk
 the program's handlers, authority graph, state transitions, account identities,
 arithmetic, CPIs, and documented invariants.
 
+Read the probe envelope by evidence tier (schema v3, `version: 3`):
+
+- **`findings[]`** — issues backed by a replayable reproducer. Treat as
+  confirmed subject to your own review.
+- **`candidates[]`** — predicate hits and static patterns that warrant
+  investigation but carry **no severity and no reproducer**. These are a work
+  list, never results: each is a lead to confirm or dismiss by reading the
+  impl, and each `reason` says why it isn't yet a finding (usually "no
+  reproducer constructor yet"). Never file a candidate as a finding without
+  independently confirming it and attaching a reproducer.
+- **`engine_runs[]`** — per-engine `passed | partial | blocked | failed |
+  skipped`. A `partial` run lists `skipped_files` it could not read; a
+  `blocked` run (e.g. budget-0 fuzz) did not execute. An empty `findings[]`
+  next to a `partial`/`blocked` engine is weak evidence, not a clean pass.
+- **`outcome`** — `passed_with_coverage` | `no_findings_low_coverage` |
+  `blocked_incomplete_harness` | `engine_failed` | `dry_run`. Only
+  `passed_with_coverage` licenses "the probe found nothing here"; the rest
+  mean the probe under-ran and you must lean on manual review.
+
 Always extract a domain dossier from source, tests, comments, documentation,
 and paired operations, even when QEDGen is missing or stale, the ordinary probe
 fails or returns no sites, the runtime adapter is unsupported, or compilation

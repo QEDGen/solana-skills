@@ -381,6 +381,8 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                         /*lenient_skeleton=*/ false,
                     )?;
                 }
+                let engine_run = run_helpers::source_scan_engine_run(prog_root);
+                let outcome = run_helpers::source_scan_outcome(&engine_run);
                 let output = probe::ProbeOutput {
                     project_root: Some(prog_root.display().to_string()),
                     runtime: Some(probe::Runtime::Pinocchio),
@@ -388,6 +390,8 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                         &probe::Runtime::Pinocchio,
                     )),
                     findings,
+                    engine_runs: vec![engine_run],
+                    outcome,
                     clusters,
                     ..probe::ProbeOutput::envelope(probe::Mode::SpecLess)
                 };
@@ -631,11 +635,25 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                     probe::Mode::SpecAware
                 };
                 // Budget 0 = emit the harness and exit (dry-run preview
-                // without the Crucible build cost).
+                // without the Crucible build cost). v3 (#227): this is a
+                // DRY RUN, not a successful probe — the outcome + a blocked
+                // engine run say so explicitly, so an empty `findings[]`
+                // here can't be read as "clean".
                 if budget_secs == 0 {
                     let output = probe::ProbeOutput {
                         spec_path: spec.as_ref().map(|p| p.display().to_string()),
                         project_root: root.as_ref().map(|p| p.display().to_string()),
+                        engine_runs: vec![probe::EngineRun {
+                            engine: "crucible_fuzz".to_string(),
+                            status: probe::EngineStatus::Blocked,
+                            detail: Some(format!(
+                                "budget 0: harness emitted at {} for preview; not built or run",
+                                harness.display()
+                            )),
+                            candidates_dropped: 0,
+                            skipped_files: Vec::new(),
+                        }],
+                        outcome: probe::ProbeOutcome::DryRun,
                         ..probe::ProbeOutput::envelope(probe_mode)
                     };
                     eprintln!(
@@ -660,10 +678,28 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                     ctx.domain_seed_report = Some(report);
                 }
                 let findings = crucible_probe::run_fuzz_probe(&ctx)?;
+                // A completed fuzz run that found nothing is `passed` (it
+                // executed) but low-coverage evidence — distinct from a
+                // finding-bearing run. Fine-grained coverage counts arrive
+                // with #229's replay work; the outcome split is the #227
+                // deliverable.
+                let fuzz_outcome = if findings.is_empty() {
+                    probe::ProbeOutcome::NoFindingsLowCoverage
+                } else {
+                    probe::ProbeOutcome::PassedWithCoverage
+                };
                 let output = probe::ProbeOutput {
                     spec_path: spec.as_ref().map(|p| p.display().to_string()),
                     project_root: root.as_ref().map(|p| p.display().to_string()),
+                    engine_runs: vec![probe::EngineRun {
+                        engine: "crucible_fuzz".to_string(),
+                        status: probe::EngineStatus::Passed,
+                        detail: None,
+                        candidates_dropped: 0,
+                        skipped_files: Vec::new(),
+                    }],
                     findings,
+                    outcome: fuzz_outcome,
                     ..probe::ProbeOutput::envelope(probe_mode)
                 };
                 println!("{}", serde_json::to_string_pretty(&output)?);

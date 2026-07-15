@@ -359,12 +359,24 @@ walk a brownfield project root and emit a per-handler work list
 consumed by the auditor subagent. Spec-aware emits `findings`;
 spec-less emits `runtime`, `handlers`, `applicable_categories`.
 v2.16 schema bumps to `version: 2` with the addition of an optional
-`reproducer` field on findings (drop-on-fail pipeline; findings
-without a confirmed reproducer are silently dropped — see
-`feedback_probes_reproducible_only.md`). v2.19 adds an optional
-`clusters[]` array under `--emit-spec-candidates` (additive — the
-schema stays `version: 2`) that the auditor subagent surfaces
-through the scaffold-to-spec interview. v2.20 extends the bootstrap envelope
+`reproducer` field on findings (findings without a confirmed
+reproducer are demoted, not emitted — see
+`feedback_probes_reproducible_only.md`). **v3 (#227) — the evidence
+model**: a predicate hit that can't (yet) acquire a reproducer is
+preserved in a new `candidates[]` array (no severity, no reproducer —
+an investigation lead, not a finding) instead of being silently
+dropped; `engine_runs[]` records per-engine status (`passed | partial
+| blocked | failed | skipped`, with `candidates_dropped` and
+`skipped_files`); `coverage` reports what was discovered/exercised;
+and `outcome` (`passed_with_coverage | no_findings_low_coverage |
+blocked_incomplete_harness | engine_failed | dry_run`) lets a consumer
+tell a real clean pass from a probe that under-ran (only
+`passed_with_coverage` licenses "found nothing"). `findings[]` keeps
+its reproducer-only contract. Budget-0 fuzz reports `outcome: dry_run`
+with the fuzz engine `blocked`. Migration: `docs/design/probe-schema-v3-migration.md`.
+v2.19 adds an optional `clusters[]` array under `--emit-spec-candidates`
+(additive; distinct from `candidates[]` — clusters are proto-spec-clauses
+for the scaffold-to-spec interview). v2.20 extends the bootstrap envelope
 with `dispatcher_kind: "shank_central_match"` for native programs
 where `qedgen probe --bootstrap` detects a central-match dispatcher
 in `lib.rs` (S2.1 Shank adapter), and each `handlers[]` entry now
