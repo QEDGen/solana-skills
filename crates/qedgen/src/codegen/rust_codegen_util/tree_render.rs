@@ -1053,6 +1053,21 @@ fn render_mul_div(
 /// pure-model harness projection (the harness `State` carries no handler
 /// accounts) when no account env is bound. Rides the `for_each_path`
 /// spine below, so new `ExprTree` variants are handled in one place.
+/// True when the expression reads ANY handler-account binding (bare
+/// `approver`, `owner.pubkey`, …). The unit-test guard projection uses
+/// this: its plain state struct carries no accounts at all, so every
+/// account-touching clause is unexpressible there (#156 — the pubkey-only
+/// scan let `state.members[i] == approver` through as a free variable).
+pub fn tree_mentions_account(e: &ExprTree) -> bool {
+    let mut found = false;
+    for_each_path(e, &mut |p| {
+        if matches!(p.binding, BindingKind::Account) {
+            found = true;
+        }
+    });
+    found
+}
+
 pub fn tree_mentions_account_pubkey(e: &ExprTree) -> bool {
     let mut found = false;
     for_each_path(e, &mut |p| {

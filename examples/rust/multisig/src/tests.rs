@@ -92,23 +92,17 @@ fn guard_create_vault(_state: &MultisigState, threshold: u8, member_count: u8) -
 
 /// Guard predicate for `approve`.
 fn guard_approve(state: &MultisigState, member_index: u8) -> bool {
-    (member_index < state.member_count)
-        && (state.members[(member_index) as usize] == approver)
-        && (state.voted[(member_index) as usize] == 0)
+    (member_index < state.member_count) && (state.voted[(member_index) as usize] == 0)
 }
 
 /// Guard predicate for `reject`.
 fn guard_reject(state: &MultisigState, member_index: u8) -> bool {
-    (member_index < state.member_count)
-        && (state.members[(member_index) as usize] == rejecter)
-        && (state.voted[(member_index) as usize] == 0)
+    (member_index < state.member_count) && (state.voted[(member_index) as usize] == 0)
 }
 
 /// Guard predicate for `execute`.
 fn guard_execute(state: &MultisigState, member_index: u8) -> bool {
-    (member_index < state.member_count)
-        && (state.members[(member_index) as usize] == executor)
-        && (state.approval_count >= state.threshold)
+    (member_index < state.member_count) && (state.approval_count >= state.threshold)
 }
 
 /// Guard predicate for `cancel_proposal`.

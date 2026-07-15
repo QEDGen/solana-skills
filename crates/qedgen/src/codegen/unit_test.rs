@@ -472,14 +472,16 @@ fn resolve_state_for_property<'a>(
 /// read that left requires-only handlers with a vacuous `true` guard fn
 /// and an always-failing rejects-test). Requires touching handler-account
 /// pubkeys are suppressed: the unit-test state struct carries no
-/// accounts, matching the shared harness projection. `None` when nothing
-/// is expressible — the caller skips the guard fn and its tests.
+/// accounts at all, so any account-touching clause (bare `approver`
+/// comparisons included, not just `.pubkey` reads) is unexpressible
+/// here. `None` when nothing is expressible — the caller skips the
+/// guard fn and its tests.
 fn guard_predicate_rust(op: &ParsedHandler) -> Option<String> {
     let parts: Vec<String> = op
         .requires
         .iter()
         .map(requires_tree)
-        .filter(|t| !crate::rust_codegen_util::tree_render::tree_mentions_account_pubkey(t))
+        .filter(|t| !crate::rust_codegen_util::tree_render::tree_mentions_account(t))
         .map(|t| format!("({})", render_for_state(t)))
         .collect();
     if parts.is_empty() {
