@@ -818,16 +818,13 @@ pub(crate) fn run_anchor_probe(
     }
 
     let output = probe::ProbeOutput {
-        version: probe::schema_version(),
-        mode: probe::Mode::SpecLess,
-        spec_path: None,
         project_root: Some(prog_root.display().to_string()),
         runtime: Some(runtime_final),
         handlers: handlers_opt,
         applicable_categories: Some(applicable),
         findings: runtime_agnostic_findings(prog_root)?,
         clusters,
-        dispatcher_kind: None,
+        ..probe::ProbeOutput::envelope(probe::Mode::SpecLess)
     };
     println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(())
@@ -894,9 +891,6 @@ pub(crate) fn run_native_probe(
     };
 
     let output = probe::ProbeOutput {
-        version: probe::schema_version(),
-        mode: probe::Mode::SpecLess,
-        spec_path: None,
         project_root: Some(prog_root.display().to_string()),
         runtime: Some(runtime_final),
         handlers,
@@ -904,6 +898,7 @@ pub(crate) fn run_native_probe(
         findings: runtime_agnostic_findings(prog_root)?,
         clusters,
         dispatcher_kind,
+        ..probe::ProbeOutput::envelope(probe::Mode::SpecLess)
     };
     println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(())

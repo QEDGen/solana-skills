@@ -242,18 +242,24 @@ pub(crate) enum Commands {
         #[arg(long)]
         root: Option<PathBuf>,
 
-        /// Pinocchio audit mode (v2.19). Walks `<path>` and emits the
-        /// site catalogue + SAFETY-comment metadata the audit subagent
-        /// consumes. Detection auto-routes via `Cargo.toml` (`pinocchio`
-        /// dep), so `--program <path>` is the same as `--bootstrap
-        /// --root <path>` when the runtime is Pinocchio — `--program`
-        /// is the user-facing alias documented in the PRD.
-        #[arg(long, conflicts_with_all = ["spec", "bootstrap"])]
+        /// Program audit mode. Walks `<path>` and routes through the
+        /// runtime's dedicated extractor: Pinocchio emits the site
+        /// catalogue + SAFETY-comment metadata (v2.19); Anchor/Quasar
+        /// route through the anchor extractor (scaffold-to-spec
+        /// interview); native/qedgen-codegen route through the native
+        /// extractor. Runtimes without an extractor fall back to the
+        /// bootstrap envelope. Detection auto-routes via `Cargo.toml`.
+        ///
+        /// This is a static engine only — it conflicts with `--fuzz`
+        /// (use `--fuzz <budget> --root <path>` for brownfield fuzzing
+        /// and merge the two JSON outputs yourself).
+        #[arg(long, conflicts_with_all = ["spec", "bootstrap", "fuzz", "root"])]
         program: Option<PathBuf>,
 
         /// Override runtime detection (`pinocchio`, `anchor`, `quasar`,
-        /// `native`, `sbpf`). Only `pinocchio` has dedicated probe
-        /// output today; the others fall back to the generic bootstrap
+        /// `native`, `sbpf`). Pinocchio, Anchor/Quasar, and native each
+        /// have a dedicated extractor under `--program`; runtimes
+        /// without one (e.g. sbpf) fall back to the generic bootstrap
         /// envelope.
         #[arg(long, value_enum)]
         runtime: Option<RuntimeOverride>,
@@ -261,8 +267,10 @@ pub(crate) enum Commands {
         /// Coverage-guided fuzz probe engine (v2.18). Drives a generated
         /// Crucible harness for the given budget and converts each crash
         /// into a Finding with `Reproducer::Crucible`. Different engine
-        /// from the pattern-match predicates above — both can run; both
-        /// emit into the same `findings[]`.
+        /// from the pattern-match predicates above — a `--fuzz` run
+        /// REPLACES the predicate pass in a single invocation. To get
+        /// both, run `probe --spec` and `probe --fuzz --spec` separately
+        /// and merge the JSON.
         ///
         /// Pair with either `--spec <path>` (spec-driven harness,
         /// asserts spec invariants) or `--root <project-path>` (v2.21

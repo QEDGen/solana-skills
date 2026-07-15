@@ -516,6 +516,27 @@ pub struct ProbeOutput {
     pub dispatcher_kind: Option<String>,
 }
 
+impl ProbeOutput {
+    /// Canonical empty envelope at the current schema version. Every
+    /// construction site must start here (struct-update syntax) rather
+    /// than spelling `version:` out — fuzz-mode outputs shipped
+    /// `version: 1` against the v2 schema before this seam existed.
+    pub fn envelope(mode: Mode) -> Self {
+        ProbeOutput {
+            version: SCHEMA_VERSION,
+            mode,
+            spec_path: None,
+            project_root: None,
+            runtime: None,
+            handlers: None,
+            applicable_categories: None,
+            findings: Vec::new(),
+            clusters: None,
+            dispatcher_kind: None,
+        }
+    }
+}
+
 pub fn run_probe(spec_path: &Path) -> Result<ProbeOutput> {
     let spec = parse_spec_file(spec_path)?;
     let spec_models_lifecycle = !spec.lifecycle_states.is_empty()
@@ -558,16 +579,9 @@ pub fn run_probe(spec_path: &Path) -> Result<ProbeOutput> {
     );
 
     Ok(ProbeOutput {
-        version: SCHEMA_VERSION,
-        mode: Mode::SpecAware,
         spec_path: Some(spec_path.display().to_string()),
-        project_root: None,
-        runtime: None,
-        handlers: None,
-        applicable_categories: None,
         findings,
-        clusters: None,
-        dispatcher_kind: None,
+        ..ProbeOutput::envelope(Mode::SpecAware)
     })
 }
 
@@ -630,16 +644,12 @@ pub fn run_bootstrap(project_root: &Path) -> Result<ProbeOutput> {
     let applicable = applicable_categories(&runtime);
 
     Ok(ProbeOutput {
-        version: SCHEMA_VERSION,
-        mode: Mode::SpecLess,
-        spec_path: None,
         project_root: Some(project_root.display().to_string()),
         runtime: Some(runtime),
         handlers: Some(handlers),
         applicable_categories: Some(applicable),
-        findings: Vec::new(),
-        clusters: None,
         dispatcher_kind,
+        ..ProbeOutput::envelope(Mode::SpecLess)
     })
 }
 
@@ -651,12 +661,6 @@ pub fn detect_runtime_public(root: &Path) -> Runtime {
 /// Public wrapper for the main.rs dispatcher.
 pub fn applicable_categories_public(runtime: &Runtime) -> Vec<String> {
     applicable_categories(runtime)
-}
-
-/// Exposed so the Pinocchio dispatcher emits envelopes with the canonical
-/// version rather than hard-coding a duplicate.
-pub fn schema_version() -> u32 {
-    SCHEMA_VERSION
 }
 
 /// Runtime detection by filesystem heuristics. Order matters: a project
