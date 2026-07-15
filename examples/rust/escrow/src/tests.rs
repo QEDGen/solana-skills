@@ -44,7 +44,7 @@ fn apply_initialize(state: &mut EscrowState, deposit_amount: u64, receive_amount
 
 /// Guard predicate for `initialize`.
 fn guard_initialize(_state: &EscrowState, deposit_amount: u64, receive_amount: u64) -> bool {
-    true
+    ((deposit_amount > 0) && (receive_amount > 0))
 }
 
 /// Guard predicate for `exchange`.

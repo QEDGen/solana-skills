@@ -87,37 +87,44 @@ fn apply_remove_member(state: &mut MultisigState) {
 
 /// Guard predicate for `create_vault`.
 fn guard_create_vault(_state: &MultisigState, threshold: u8, member_count: u8) -> bool {
-    true
+    ((threshold > 0) && (threshold <= member_count)) && (member_count <= 32)
 }
 
 /// Guard predicate for `approve`.
-fn guard_approve(_state: &MultisigState, member_index: u8) -> bool {
-    true
+fn guard_approve(state: &MultisigState, member_index: u8) -> bool {
+    (member_index < state.member_count)
+        && (state.members[(member_index) as usize] == approver)
+        && (state.voted[(member_index) as usize] == 0)
 }
 
 /// Guard predicate for `reject`.
-fn guard_reject(_state: &MultisigState, member_index: u8) -> bool {
-    true
+fn guard_reject(state: &MultisigState, member_index: u8) -> bool {
+    (member_index < state.member_count)
+        && (state.members[(member_index) as usize] == rejecter)
+        && (state.voted[(member_index) as usize] == 0)
 }
 
 /// Guard predicate for `execute`.
-fn guard_execute(_state: &MultisigState, member_index: u8) -> bool {
-    true
+fn guard_execute(state: &MultisigState, member_index: u8) -> bool {
+    (member_index < state.member_count)
+        && (state.members[(member_index) as usize] == executor)
+        && (state.approval_count >= state.threshold)
 }
 
 /// Guard predicate for `cancel_proposal`.
-fn guard_cancel_proposal(_state: &MultisigState) -> bool {
-    true
+fn guard_cancel_proposal(state: &MultisigState) -> bool {
+    (state.member_count - state.rejection_count < state.threshold)
 }
 
 /// Guard predicate for `add_member`.
-fn guard_add_member(_state: &MultisigState, member_index: u8, member_pubkey: [u8; 32]) -> bool {
-    true
+fn guard_add_member(state: &MultisigState, member_index: u8, member_pubkey: [u8; 32]) -> bool {
+    (member_index < state.member_count)
 }
 
 /// Guard predicate for `remove_member`.
-fn guard_remove_member(_state: &MultisigState) -> bool {
-    true
+fn guard_remove_member(state: &MultisigState) -> bool {
+    (state.member_count > state.threshold)
+        && ((state.approval_count == 0) && (state.rejection_count == 0))
 }
 
 #[cfg(test)]
@@ -297,8 +304,8 @@ mod tests {
             approval_count: 0,
             rejection_count: 0,
         };
-        let threshold: u8 = 0;
-        let member_count: u8 = 0;
+        let threshold: u8 = 1;
+        let member_count: u8 = 33;
         assert!(!guard_create_vault(&state, threshold, member_count));
     }
 
@@ -500,7 +507,7 @@ mod tests {
         apply_create_vault(&mut state, threshold, member_count);
         // Property: threshold bounded must hold after create_vault
         assert!(
-            state.threshold <= state.member_count && state.threshold > 0,
+            (state.threshold <= state.member_count) && (state.threshold > 0),
             "threshold_bounded must hold after create_vault"
         );
     }
@@ -519,7 +526,7 @@ mod tests {
         apply_propose(&mut state);
         // Property: threshold bounded must hold after propose
         assert!(
-            state.threshold <= state.member_count && state.threshold > 0,
+            (state.threshold <= state.member_count) && (state.threshold > 0),
             "threshold_bounded must hold after propose"
         );
     }
@@ -539,7 +546,7 @@ mod tests {
         apply_approve(&mut state, member_index);
         // Property: threshold bounded must hold after approve
         assert!(
-            state.threshold <= state.member_count && state.threshold > 0,
+            (state.threshold <= state.member_count) && (state.threshold > 0),
             "threshold_bounded must hold after approve"
         );
     }
@@ -559,7 +566,7 @@ mod tests {
         apply_reject(&mut state, member_index);
         // Property: threshold bounded must hold after reject
         assert!(
-            state.threshold <= state.member_count && state.threshold > 0,
+            (state.threshold <= state.member_count) && (state.threshold > 0),
             "threshold_bounded must hold after reject"
         );
     }
@@ -579,7 +586,7 @@ mod tests {
         apply_execute(&mut state, member_index);
         // Property: threshold bounded must hold after execute
         assert!(
-            state.threshold <= state.member_count && state.threshold > 0,
+            (state.threshold <= state.member_count) && (state.threshold > 0),
             "threshold_bounded must hold after execute"
         );
     }
@@ -598,7 +605,7 @@ mod tests {
         apply_cancel_proposal(&mut state);
         // Property: threshold bounded must hold after cancel_proposal
         assert!(
-            state.threshold <= state.member_count && state.threshold > 0,
+            (state.threshold <= state.member_count) && (state.threshold > 0),
             "threshold_bounded must hold after cancel_proposal"
         );
     }
@@ -619,7 +626,7 @@ mod tests {
         apply_add_member(&mut state, member_index, member_pubkey);
         // Property: threshold bounded must hold after add_member
         assert!(
-            state.threshold <= state.member_count && state.threshold > 0,
+            (state.threshold <= state.member_count) && (state.threshold > 0),
             "threshold_bounded must hold after add_member"
         );
     }
@@ -638,7 +645,7 @@ mod tests {
         apply_remove_member(&mut state);
         // Property: threshold bounded must hold after remove_member
         assert!(
-            state.threshold <= state.member_count && state.threshold > 0,
+            (state.threshold <= state.member_count) && (state.threshold > 0),
             "threshold_bounded must hold after remove_member"
         );
     }
