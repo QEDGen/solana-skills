@@ -260,6 +260,19 @@ pub(crate) fn apply(
     handlers: &mut Vec<BootstrapHandler>,
     global_categories: &[String],
 ) -> OverlayOutcome {
+    // Anchor workspaces aggregate handlers from `programs/*`, while their
+    // build emits one IDL per program under the workspace-level target dir.
+    // Overlay each source crate only with its own IDL; comparing the aggregate
+    // handler set to the alphabetically first IDL creates false drift and is
+    // ambiguous when two programs expose the same instruction name.
+    if matches!(runtime, Runtime::Anchor | Runtime::Quasar) {
+        if let Some(outcome) =
+            apply_anchor_workspace(project_root, runtime, handlers, global_categories)
+        {
+            return outcome;
+        }
+    }
+
     let mut outcome = OverlayOutcome::default();
 
     let Ok(discovered) = discover_idl(project_root) else {
@@ -272,6 +285,121 @@ pub(crate) fn apply(
         outcome.derivable_idl = detect_derivable_idl(project_root).map(str::to_string);
         return outcome;
     };
+
+    apply_discovered_idl(
+        project_root,
+        runtime,
+        handlers,
+        global_categories,
+        idl_path,
+        idl_text,
+    )
+}
+
+fn apply_anchor_workspace(
+    project_root: &Path,
+    runtime: &Runtime,
+    handlers: &mut [BootstrapHandler],
+    global_categories: &[String],
+) -> Option<OverlayOutcome> {
+    let mut groups: std::collections::BTreeMap<String, Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for (index, handler) in handlers.iter().enumerate() {
+        let mut components = Path::new(&handler.source_file).components();
+        let programs = components.next()?.as_os_str().to_str()?;
+        if programs != "programs" {
+            return None;
+        }
+        let program_dir = components.next()?.as_os_str().to_str()?.to_string();
+        groups.entry(program_dir).or_default().push(index);
+    }
+    if groups.is_empty() {
+        return None;
+    }
+
+    let mut aggregate = OverlayOutcome::default();
+    for (program_dir, indices) in groups {
+        let crate_root = project_root.join("programs").join(&program_dir);
+        let Ok(discovered) =
+            discover_workspace_program_idl(project_root, &crate_root, &program_dir)
+        else {
+            continue;
+        };
+        let Some((idl_path, idl_text)) = discovered else {
+            // Missing one program's IDL is the same graceful pre-build absence
+            // as a missing single-crate IDL; do not compare it to a sibling's.
+            continue;
+        };
+
+        let mut program_handlers: Vec<BootstrapHandler> = indices
+            .iter()
+            .map(|index| handlers[*index].clone())
+            .collect();
+        let mut outcome = apply_discovered_idl(
+            project_root,
+            runtime,
+            &mut program_handlers,
+            global_categories,
+            idl_path,
+            idl_text,
+        );
+        for (index, handler) in indices.into_iter().zip(program_handlers) {
+            handlers[index] = handler;
+        }
+        if aggregate.idl_path.is_none() {
+            aggregate.idl_path = outcome.idl_path.take();
+        }
+        aggregate
+            .drift_candidates
+            .append(&mut outcome.drift_candidates);
+    }
+    Some(aggregate)
+}
+
+fn discover_workspace_program_idl(
+    workspace_root: &Path,
+    crate_root: &Path,
+    fallback_name: &str,
+) -> anyhow::Result<Option<(PathBuf, String)>> {
+    use anyhow::Context;
+
+    let manifest = std::fs::read_to_string(crate_root.join("Cargo.toml")).unwrap_or_default();
+    let manifest: Option<toml::Value> = toml::from_str(&manifest).ok();
+    let idl_name = manifest
+        .as_ref()
+        .and_then(|value| value.get("lib"))
+        .and_then(|lib| lib.get("name"))
+        .and_then(toml::Value::as_str)
+        .or_else(|| {
+            manifest
+                .as_ref()
+                .and_then(|value| value.get("package"))
+                .and_then(|package| package.get("name"))
+                .and_then(toml::Value::as_str)
+        })
+        .unwrap_or(fallback_name)
+        .replace('-', "_");
+
+    for subdir in ["target/idl", "idl"] {
+        let path = workspace_root.join(subdir).join(format!("{idl_name}.json"));
+        if path.is_file() {
+            let text = std::fs::read_to_string(&path)
+                .with_context(|| format!("reading {}", path.display()))?;
+            return Ok(Some((path, text)));
+        }
+    }
+    Ok(None)
+}
+
+fn apply_discovered_idl(
+    project_root: &Path,
+    runtime: &Runtime,
+    handlers: &mut Vec<BootstrapHandler>,
+    global_categories: &[String],
+    idl_path: PathBuf,
+    idl_text: String,
+) -> OverlayOutcome {
+    let mut outcome = OverlayOutcome::default();
 
     let instructions = parse_instructions(&idl_text);
     if instructions.is_empty() {
@@ -518,6 +646,49 @@ mod tests {
     }
 
     #[test]
+    fn anchor_composite_accounts_preserve_nested_signers() {
+        let root = tmp_root("anchor-composite-signer");
+        std::fs::write(
+            root.join("idl.json"),
+            r#"{
+                "instructions": [{
+                    "name": "execute",
+                    "accounts": [{
+                        "name": "nested",
+                        "accounts": [{
+                            "name": "authority",
+                            "signer": true,
+                            "writable": false
+                        }]
+                    }],
+                    "args": []
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        let global = vec![
+            "missing_signer".to_string(),
+            "permissionless_state_writer".to_string(),
+        ];
+        let mut handlers = vec![mk_handler("execute")];
+        apply(&root, &Runtime::Anchor, &mut handlers, &global);
+
+        let handler = &handlers[0];
+        assert_eq!(handler.intent_tag.as_deref(), Some("authority_gated"));
+        assert!(handler
+            .applicable_categories
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|category| category == "missing_signer"));
+        assert_eq!(handler.idl_accounts.as_ref().unwrap().len(), 1);
+        assert!(handler.idl_accounts.as_ref().unwrap()[0].signer);
+        assert_eq!(handler.idl_accounts.as_ref().unwrap()[0].name, "authority");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn body_classification_wins_over_idl_intent() {
         let root = tmp_root("body-wins");
         std::fs::create_dir_all(root.join("target/idl")).unwrap();
@@ -597,6 +768,62 @@ mod tests {
         assert!(tags.contains(&("emergency_withdraw", "idl_source_drift")));
         assert!(tags.contains(&("crank", "idl_source_drift")));
         assert_eq!(out.drift_candidates.len(), 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn anchor_workspace_pairs_each_program_with_its_own_idl() {
+        let root = tmp_root("anchor-workspace-idls");
+        for program in ["alpha", "beta"] {
+            let crate_root = root.join("programs").join(program);
+            std::fs::create_dir_all(&crate_root).unwrap();
+            std::fs::write(
+                crate_root.join("Cargo.toml"),
+                format!("[package]\nname = \"{program}\"\nversion = \"0.1.0\"\n"),
+            )
+            .unwrap();
+        }
+        std::fs::create_dir_all(root.join("target/idl")).unwrap();
+        std::fs::write(
+            root.join("target/idl/alpha.json"),
+            r#"{
+                "instructions": [{
+                    "name": "shared",
+                    "accounts": [{"name": "alpha_admin", "signer": true}],
+                    "args": []
+                }]
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("target/idl/beta.json"),
+            r#"{
+                "instructions": [{
+                    "name": "shared",
+                    "accounts": [{"name": "beta_payer", "signer": true}],
+                    "args": []
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        let mut alpha = mk_handler("shared");
+        alpha.source_file = "programs/alpha/src/lib.rs".to_string();
+        let mut beta = mk_handler("shared");
+        beta.source_file = "programs/beta/src/lib.rs".to_string();
+        let mut handlers = vec![alpha, beta];
+
+        let out = apply(&root, &Runtime::Anchor, &mut handlers, &[]);
+
+        assert!(out.drift_candidates.is_empty());
+        assert_eq!(
+            handlers[0].idl_accounts.as_ref().unwrap()[0].name,
+            "alpha_admin"
+        );
+        assert_eq!(
+            handlers[1].idl_accounts.as_ref().unwrap()[0].name,
+            "beta_payer"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
