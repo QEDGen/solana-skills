@@ -153,8 +153,9 @@ the CLI extractor).
 
 The probe envelope's new `clusters[]` field appears only when
 `--emit-spec-candidates` is passed. v2-shape consumers without that
-flag see the unchanged envelope. Cluster schema documented in the
-SCOPING-v2.19-scaffold-to-spec.md design doc.
+flag see the unchanged envelope. The cluster schema was documented in the
+internal scaffold-to-spec scoping note; current behavior is documented in
+`references/cli.md`.
 
 ### Auditor §3c — Trust-surface dep walk
 

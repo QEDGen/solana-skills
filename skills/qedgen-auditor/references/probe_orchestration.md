@@ -74,7 +74,7 @@ auto-ratified skeleton, per the auto-chain below). Each crash →
 ```
 Bash (run_in_background=true): qedgen probe \
     --fuzz 300 --spec .qed/audit/<ts>/skeleton.qedspec --no-smoke \
-    --json > .qed/audit/<ts>/crucible.json
+    > .qed/audit/<ts>/crucible.json
 ```
 
 Budget tuning: 300s first pass; 1800s (30 min) if depth is wanted;
@@ -288,7 +288,7 @@ you're inferring from context, it's not.
 Bash (run_in_background=true): qedgen probe \
         --fuzz 300 \
         --spec .qed/audit/<ts>/skeleton.qedspec \
-        --json > .qed/audit/<ts>/crucible.json
+        > .qed/audit/<ts>/crucible.json
 ```
 
 Crucible reads the high-confidence invariants and fuzzes for

@@ -41,6 +41,8 @@ applicable.
 - v2.32 completes the MIR migration: the legacy `ParsedSpec`-direct renderers (`lean_gen`, `kani`, `codegen::generate`, `proptest_gen`) and the `QEDGEN_LEGACY_*` env-var escape hatches from v2.30 are **deleted** — `lean_gen_mir` / `kani_mir` / `codegen_mir` / `proptest_gen_mir` are the sole codegen paths, gated by the snapshot suites. Also relocates test fixtures under `crates/qedgen/tests/fixtures/` (examples/ is showcase-only).
 - v2.33 decouples the flat-vs-inductive State representation from the `WrongState` error variant: an explicit `pragma state_repr = adt` opts into the inductive multi-variant `State` (default stays flat `structure State` + `status`). Removes a footgun where adding/removing a lifecycle error silently flipped the State shape and which proof obligations auto-discharged.
 
-Use per-release notes in `docs/prds/RELEASE-vN.md` for detailed
-historical context (this file is a sparse highlights index, not a
-full changelog).
+Use per-release notes in `docs/prds/RELEASE-v*.md` for detailed historical
+context (this file is a sparse highlights index, not a full changelog).
+Planning drafts, handoffs, spikes, and eval notebooks are intentionally ignored
+and disposable; see `docs/prds/README.md` for the archive policy. Durable
+planning history belongs in GitHub issues and pull requests.

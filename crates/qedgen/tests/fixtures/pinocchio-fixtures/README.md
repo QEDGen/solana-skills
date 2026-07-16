@@ -5,8 +5,8 @@ for `qedgen probe --program <path>`. Each fixture pairs a hand-authored
 program with a `expected_findings.json` golden file the CI diffs
 against.
 
-These are **synthesized** to match the canonical patterns called out
-in `docs/prds/PRD-v2.19-pinocchio-audit.md`. They are NOT verbatim
+These are **synthesized** to match the maintained Pinocchio probe taxonomy in
+`references/probes/pinocchio/`. They are NOT verbatim
 vendor checkouts — the upstream `solana-program/token/pinocchio` (a.k.a.
 p-token) and `solana-program/associated-token-account/pinocchio` (a.k.a.
 p-ata) are the inspiration, but our fixtures are scoped down to a
@@ -32,7 +32,7 @@ own README.
 ## Shared harness
 
 `_harness/` ships the reproducer primitives every Miri repro imports
-from. Per v2.19 PRD Phase 2.6 (G1 + G3 gap closers):
+from. The shared components are:
 
 - `account.rs` — synthesizes Pinocchio `AccountInfo` from `Vec<u8>` for
   direct-call Miri tests

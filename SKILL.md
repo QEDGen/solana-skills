@@ -53,10 +53,10 @@ Prefer the installed skill wrapper when available:
 QEDGEN="$HOME/.agents/skills/qedgen/tools/qedgen"
 ```
 
-From a repo checkout, the local binary also works:
+From this repo checkout, run the crate by manifest path:
 
 ```bash
-cargo run -p qedgen-solana-skills -- <command>
+cargo run --manifest-path crates/qedgen/Cargo.toml -- <command>
 ```
 
 Every write path expects a git repo. If the command errors outside a repo, run `git init` or move into the project root.

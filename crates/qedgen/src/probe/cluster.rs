@@ -50,8 +50,8 @@ pub struct Cluster {
     /// `.qed/audit/<ts>/interview.md`.
     pub question_md: String,
     /// Routing for the four interview outcomes: logical destination keys
-    /// the prompts reader dispatches on. Documented in
-    /// SCOPING-v2.19-scaffold-to-spec.md §4.
+    /// the prompts reader dispatches on. The current user-facing behavior is
+    /// documented under `qedgen ratify` in `references/cli.md`.
     pub writes_on_accept: String,
     pub writes_on_narrow: String,
     pub writes_on_reject: String,
@@ -59,8 +59,8 @@ pub struct Cluster {
 }
 
 /// The 14 cluster kinds — one vocabulary across all runtimes; per-runtime
-/// extractors decide which site shapes lift to each kind. Detection-to-kind
-/// table: `docs/prds/SCOPING-v2.19-scaffold-to-spec.md` §3.
+/// extractors decide which site shapes lift to each kind. The maintained
+/// taxonomy lives in `skills/qedgen-auditor/references/category-catalog.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClusterKind {

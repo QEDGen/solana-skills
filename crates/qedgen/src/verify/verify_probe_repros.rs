@@ -75,7 +75,7 @@ pub fn run(project_root: &Path) -> Result<ProbeReproReport> {
             results: Vec::new(),
             duration_ms: start.elapsed().as_millis(),
             note: Some(
-                "no repros found at target/qedgen-repros/ — run `qedgen probe` first to generate them (D3 scheduled for v2.16)".to_string(),
+                "no repros found at target/qedgen-repros/ — run `qedgen probe --spec <path>` to generate supported category repros, or add an auditor-authored repro under target/qedgen-repros/audit/".to_string(),
             ),
         });
     }
@@ -107,7 +107,7 @@ pub fn run(project_root: &Path) -> Result<ProbeReproReport> {
 
     let note = if results.is_empty() {
         Some(format!(
-            "{} exists but no repro crates found inside — D3 not yet wired",
+            "{} exists but contains no runnable repro crate (expected a shared Cargo.toml or per-repro subdirectories with Cargo.toml)",
             repros_dir.display()
         ))
     } else {
@@ -258,13 +258,17 @@ mod tests {
     }
 
     #[test]
-    fn empty_repros_dir_returns_d3_pending_note() {
+    fn empty_repros_dir_explains_expected_layout() {
         let tmp = tempdir().unwrap();
         let repros_dir = tmp.path().join("target").join("qedgen-repros");
         fs::create_dir_all(&repros_dir).unwrap();
         let report = run(tmp.path()).unwrap();
         assert!(report.results.is_empty());
-        assert!(report.note.as_ref().unwrap().contains("D3 not yet wired"));
+        assert!(report
+            .note
+            .as_ref()
+            .unwrap()
+            .contains("no runnable repro crate"));
     }
 
     #[test]

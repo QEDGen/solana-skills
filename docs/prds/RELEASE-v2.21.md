@@ -1,7 +1,7 @@
 # Release v2.21.0 — Crucible crash-first + spec-mode codegen quality + tooling ergonomics
 
-> **Release status:** unpaused. Per
-> `docs/prds/PLAN-v2.21-finish.md` the deferred v2.21.1 items have
+> **Release status:** unpaused. Per the internal v2.21 finish plan, the
+> deferred v2.21.1 items have
 > been folded into the same release: S2.2 (per-ADT Kani State + the
 > proptest mirror-fix), S2.1 (cross-ADT field-ambiguity lint), and
 > S1.2 lamport-conservation companion. S1.2 discriminator/size kept

@@ -57,8 +57,10 @@ bin/
 *.olean.trace
 *.old
 
-# PRDs (internal planning docs) stay local; release notes track in-repo.
+# Internal planning docs stay local and disposable; release notes and the
+# archive policy track in-repo.
 docs/prds/*
+!docs/prds/README.md
 !docs/prds/RELEASE-*.md
 
 # Research notes / prior-art comparisons stay local; the source material

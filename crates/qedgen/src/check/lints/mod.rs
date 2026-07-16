@@ -147,8 +147,8 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     // alone — lives in check, not probe (reproducer-only probe contract).
     warnings.extend(check_wrapping_arithmetic_opt_in(spec));
 
-    // Spec-authoring lints for post-codegen-audit security shapes. See
-    // `docs/prds/SPEC-AUTHORING-LINTS-v2.10.md` for the auditor-finding mapping.
+    // Spec-authoring lints for post-codegen-audit security shapes. Keep the
+    // current mapping aligned with the auditor category catalog and DSL reference.
     warnings.extend(check_unbound_auth(spec));
     warnings.extend(check_unguarded_indexed_mutation(spec));
     warnings.extend(check_scalar_counter_no_dedup(spec));

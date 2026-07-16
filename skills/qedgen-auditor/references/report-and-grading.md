@@ -209,10 +209,11 @@ Next: review vault.qedspec, refine intent, re-run /audit for
 spec-aware mode (precise gap detection + ratchet integration).
 ```
 
-The `n silent-repro` count tracks findings dropped because their
-reproducer didn't fire — they're suppressed silently per the v2.16
-contract, but the count appears in the digest so the user knows the
-audit attempted them. Zero is the expected number for a clean audit;
+The `n silent-repro` count tracks candidate claims rejected because their
+reproducer did not fire. Their details are omitted from the report; only the
+aggregate count appears in the digest. This is distinct from schema-v3
+`candidates[]`, which remain an internal work list and are never vulnerability
+findings. Zero is the expected number for a clean audit;
 non-zero is a signal that either the auditor wrote a too-narrow
 attack or the structural pattern doesn't actually exploit (in which
 case the pattern shouldn't have been flagged at CRIT/HIGH).

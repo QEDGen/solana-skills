@@ -29,5 +29,5 @@ against this golden.
 Pattern shapes inspired by Solana Foundation's
 `solana-program/token/pinocchio` (a.k.a. p-token). This is **synthesized**
 fixture source — not a vendored checkout — scoped down to the three
-patterns the v2.19 PRD success bar tests. See
-`docs/prds/PRD-v2.19-pinocchio-audit.md` for the full design.
+patterns covered by the maintained
+`references/probes/pinocchio/` taxonomy.

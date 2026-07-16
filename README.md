@@ -22,9 +22,9 @@
 
 ---
 
-Write what your Solana program must guarantee in a `.qedspec` file. QEDGen validates the spec, finds bugs your tests miss, then generates the verification artifacts and implementation scaffold needed to keep them fixed: **property tests**, **Kani harnesses**, **Lean 4 proofs**, **agent-fill program scaffolds**, and **CI workflows** — all from a single source of truth. Frameworks: **Anchor**, **Quasar**, and **Pinocchio** (greenfield scaffold via `qedgen init --target ...`), plus **sBPF assembly**. Brownfield audit covers **Anchor / Quasar / Pinocchio / native / sBPF** via `qedgen probe` (with Miri-backed UB detection for Pinocchio) and lifts findings into a ratifiable spec.
+Write what your Solana program must guarantee in a `.qedspec` file. QEDGen validates the spec, finds bugs your tests miss, then generates the verification artifacts and implementation scaffold needed to keep them fixed: **property tests**, **Kani harnesses**, **Lean 4 proofs**, **agent-fill program scaffolds**, and **CI workflows** — all from a single source of truth. Frameworks: **Anchor**, **Quasar**, and **Pinocchio** (greenfield scaffold via `qedgen init --target ...`), plus **sBPF assembly** through the dedicated Lean/qedsvm proof path. Brownfield source audit covers **Anchor / Quasar / Pinocchio / native Rust** via `qedgen probe` (with Miri-backed UB detection for Pinocchio) and lifts findings into a ratifiable spec. The auditor does not audit sBPF assembly; use `qedgen asm2lean` or a `.qedspec` for that target.
 
-NOTE: Project is alpha stage, we are constantly shipping. So there would be bugs and breaking API changes.
+> **Alpha:** expect bugs and breaking API changes while the project evolves.
 
 ```bash
 npx skills add qedgen/solana-skills
@@ -85,8 +85,8 @@ Two paths from here — pick the one that matches what you have:
 
 ### A. Existing program (brownfield) — audit first, spec second
 
-The v2.23 first-contact flow. Works on Anchor, Pinocchio, native, and
-sBPF. Pitch: _"Find the bugs that are already there, then turn each
+The audit-first flow works on Anchor, Quasar, Pinocchio, and native Rust.
+sBPF assembly uses the proof-first path instead. Pitch: _"Find the bugs that are already there, then turn each
 finding into a spec property that locks it in."_
 
 ```bash
@@ -105,7 +105,7 @@ finding into a spec property that locks it in."_
 qedgen adapt --program ./programs/my_program           # Anchor source → spec
 qedgen spec --idl target/idl/my_program.json           # Anchor IDL → spec
 qedgen probe --program ./my_program --emit-spec-candidates \
-  --audit-dir .qed/audit/$(date +%F)                   # native / Pinocchio / sBPF
+  --audit-dir .qed/audit/$(date +%F)                   # Anchor / Quasar / Pinocchio / native
 qedgen ratify --audit-dir .qed/audit/$(date +%F) \
   --out my_program.qedspec
 ```
@@ -152,9 +152,9 @@ export ARISTOTLE_API_KEY=your_key_here                  # sign up at https://ari
 
 ## Usage
 
-### Brownfield — audit-first first contact (v2.23, recommended)
+### Brownfield — audit-first first contact (recommended)
 
-Works across Anchor, Pinocchio, native, and sBPF. Spec-writing from a cold start is unmotivated work; the audit gives you something to write the spec _about_.
+Works across Anchor, Quasar, Pinocchio, and native Rust. Spec-writing from a cold start is unmotivated work; the audit gives you something to write the spec _about_. For sBPF assembly, skip the source auditor and use the dedicated Lean/qedsvm proof path.
 
 In your harness (Claude Code, Codex, Cursor), invoke the auditor:
 
@@ -184,7 +184,7 @@ qedgen spec --idl target/idl/my_program.json
 
 `adapt` carries forward what it can read from source: handler names, argument types, the `Context<X>` accounts struct, and pointers to handler bodies. Lifecycle, requires, effects, and transfers stay as TODOs for you or your agent to fill in.
 
-**Pinocchio / native / sBPF.** No framework convention to anchor an extractor on, so the entry point is probe + ratify. `qedgen probe --program <root>` runtime-detects from `Cargo.toml` (`pinocchio` dep → Pinocchio mode; otherwise the generic bootstrap envelope). Override with `--runtime pinocchio|anchor|quasar|native|sbpf` when detection misses.
+**Pinocchio / native.** The entry point is probe + ratify. `qedgen probe --program <root>` runtime-detects from `Cargo.toml` (`pinocchio` dep → Pinocchio mode; native programs use the native extractor or generic bootstrap envelope). Override with `--runtime pinocchio|native` when detection misses. `--runtime sbpf` can identify the target, but the source auditor deliberately declines assembly audits; use `qedgen asm2lean` or a `.qedspec` instead.
 
 ```bash
 # Pinocchio: enumerate `unsafe`-serde / arithmetic sites, parse

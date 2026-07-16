@@ -211,7 +211,8 @@ pub(crate) enum Commands {
     ///
     /// Modes:
     /// - **Spec-aware** (`--spec <path>`): runs runtime-agnostic predicates
-    ///   against the parsed `.qedspec`, emits per-handler findings.
+    ///   against the parsed `.qedspec`; unconfirmed hits are candidates and
+    ///   only reproducer-backed results are findings.
     /// - **Spec-less** (`--bootstrap --root <path>`): walks a brownfield
     ///   project, detects runtime, discovers handlers, emits the work-list
     ///   envelope (handlers + applicable categories) for the auditor to
@@ -220,9 +221,11 @@ pub(crate) enum Commands {
     ///   the spec-driven Crucible harness and surfaces crashes as Findings.
     /// - **Fuzz, brownfield** (`--fuzz <budget> --root <path>`, v2.21):
     ///   synthesises a minimal handler list from the project, emits a
-    ///   protocol-only Crucible harness under `<root>/.qed/fuzz/`, and
-    ///   surfaces panics / unwrap-on-None / BorrowMutError / overflow
-    ///   as crashes. No `.qedspec` required.
+    ///   protocol-only Crucible harness under `<root>/.qed/fuzz/` and checks
+    ///   observable post-state guards (lamports, ownership/type, close/realloc,
+    ///   rent, and token conservation). Program-internal faults remain
+    ///   transaction errors and need a spec assertion or separate reproducer.
+    ///   No `.qedspec` required.
     Probe {
         /// Path to `.qedspec` file (spec-aware mode)
         #[arg(long, conflicts_with = "bootstrap")]
@@ -236,7 +239,7 @@ pub(crate) enum Commands {
         /// - `--bootstrap` (emits auditor work list)
         /// - `--fuzz` without `--spec` (v2.21 brownfield protocol-mode
         ///   Crucible — emits a harness at `<root>/.qed/fuzz/<prog>/`
-        ///   and surfaces panic / unwrap / overflow crashes).
+        ///   with mechanical post-state guards).
         ///
         /// Typically the program crate dir, e.g. `programs/lending`.
         #[arg(long)]
@@ -259,8 +262,9 @@ pub(crate) enum Commands {
         /// Override runtime detection (`pinocchio`, `anchor`, `quasar`,
         /// `native`, `sbpf`). Pinocchio, Anchor/Quasar, and native each
         /// have a dedicated extractor under `--program`; runtimes
-        /// without one (e.g. sbpf) fall back to the generic bootstrap
-        /// envelope.
+        /// without one fall back to the generic bootstrap envelope. `sbpf`
+        /// identifies the target but provides metadata only; the source
+        /// auditor does not audit assembly.
         #[arg(long, value_enum)]
         runtime: Option<RuntimeOverride>,
 
@@ -274,14 +278,12 @@ pub(crate) enum Commands {
         ///
         /// Pair with either `--spec <path>` (spec-driven harness,
         /// asserts spec invariants) or `--root <project-path>` (v2.21
-        /// brownfield protocol-mode — emits a harness with an empty
-        /// `invariant_test()` body and surfaces only intrinsic
-        /// Crucible crashes: panic / unwrap-on-None / BorrowMutError /
-        /// arithmetic overflow). Passing both layers spec invariants on
-        /// top of protocol crashes.
+        /// brownfield protocol-mode — emits a harness with mechanical
+        /// post-state guards). Passing both layers spec invariants on top
+        /// of protocol guards.
         ///
         /// Budget is wall-clock seconds (e.g. `300` for 5 min). Pass `0`
-        /// to disable.
+        /// for a dry run that emits the harness but does not build or fuzz.
         #[arg(long)]
         fuzz: Option<u64>,
 
@@ -330,10 +332,10 @@ pub(crate) enum Commands {
         #[arg(long)]
         stateful: bool,
 
-        /// v2.19 M1: lift findings into candidate spec clauses (clusters)
-        /// the auditor subagent uses to drive the scaffold-to-spec
-        /// interview. Schema v3 — adds `clusters[]` to the probe envelope.
-        /// Off by default; v2-shape consumers see no change.
+        /// Lift probe evidence into candidate spec clauses (`clusters[]`)
+        /// for the scaffold-to-spec interview. Clusters are proto-spec
+        /// clauses and are distinct from unconfirmed security leads in
+        /// `candidates[]`. Off by default within the schema-v3 envelope.
         #[arg(long)]
         emit_spec_candidates: bool,
 
@@ -759,8 +761,8 @@ pub(crate) enum Commands {
         /// asserting a specific probe finding's bug fires; the verb
         /// captures pass/fail per finding so the auditor / next probe
         /// invocation can drop findings whose repros didn't reproduce.
-        /// Pre-D3 (no repros generated yet) this is a no-op that emits
-        /// a `note: no repros found` placeholder.
+        /// Emits `note: no repros found` only when the directory contains
+        /// no runnable reproducers.
         #[arg(long)]
         probe_repros: bool,
 

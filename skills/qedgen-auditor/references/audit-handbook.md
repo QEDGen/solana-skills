@@ -121,8 +121,12 @@ Every CRIT/HIGH finding you surface must ship with a Mollusk-driven
 reproducer that **fires** — i.e., a Rust integration test under
 `target/qedgen-repros/audit/<finding-id>.rs` whose assertion holds
 against the user's deployed program. If the repro doesn't fire, you
-**suppress the finding silently**: no warning, no informational
-message, no "we thought this might be a bug" line.
+omit the vulnerability claim from the finding list: no warning, no
+informational message, and no "we thought this might be a bug" line. The final
+digest may include only an aggregate silent-repro count; it must not disclose
+or imply a rejected claim. This report rule is separate from probe schema v3:
+an unconfirmed `candidates[]` entry remains an internal investigation lead,
+never a surfaced vulnerability.
 
 This is `feedback_probes_reproducible_only.md` applied to the audit
 channel. The user has lived with auditor-grade noise (generic

@@ -2,8 +2,8 @@
 
 **Date:** 2026-04-28
 **Branch shipped from:** `qedgen-skill-contract-simplify`
-**PRD:** `docs/prds/PRD-v2.11-codegen-simplification.md`
-**Eval logs:** `docs/prds/EVAL-v2.11.md`, `docs/prds/EVAL-v2.11-external.md`, `docs/prds/EVAL-v2.11-external-end-to-end.md`
+**Planning inputs:** internal PRD and evaluation logs (intentionally not shipped;
+see this directory's README).
 
 ## Headline
 

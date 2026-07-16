@@ -3,10 +3,11 @@
 //! Lifts the `qedgen probe --fuzz requires --spec` gate by synthesising a
 //! minimal [`ParsedSpec`] from a brownfield project root (no `.qedspec`
 //! required). The synthesised spec carries enough handler metadata for
-//! [`crucible_gen::generate`] to emit a working harness whose
-//! `invariant_test()` body is empty — Crucible's intrinsic crash detector
-//! (panic / unwrap-on-None / BorrowMutError / arithmetic overflow) does
-//! the lifting.
+//! [`crucible_gen::generate`] to emit a working harness with mechanical
+//! post-state guards for lamports, account ownership/type, close/realloc
+//! behavior, rent exemption, and token conservation. Program-internal faults
+//! remain transaction errors; they require a spec assertion or a separate
+//! reproducer.
 //!
 //! ## Runtime coverage
 //!
@@ -20,10 +21,9 @@
 //!   intentionally out of scope — account flags and arg types extracted
 //!   via regex are too noisy to ship; the maintainer-authored Codama IDL
 //!   is the trusted source.
-//! - **Native / sBPF** — deferred (errors with a clear message). Native
-//!   follows the same gate and is unblocked by Shank IDL discovery. sBPF
-//!   brownfield fuzz is parked indefinitely (no AccountInfo abstraction
-//!   at source level).
+//! - **Native / sBPF** — unsupported (errors with a clear message). Native
+//!   retains its static probe path. sBPF assembly uses the dedicated
+//!   `.qedspec` and Lean/qedsvm proof path.
 
 use anyhow::{anyhow, bail, Context, Result};
 use regex::Regex;
@@ -62,11 +62,11 @@ pub fn synthesize_spec(project_root: &Path, runtime: Runtime) -> Result<Brownfie
         }
         Runtime::Pinocchio => synthesize_pinocchio(project_root),
         Runtime::Native | Runtime::Sbpf | Runtime::Unknown => bail!(
-            "Crucible brownfield mode (`--fuzz --root`) on `{runtime:?}` is tracked for v2.24+. \
-             v2.22 covers Anchor / Quasar / qedgen-codegen / Pinocchio (v2.23 shipped pre/post \
-             property lowering + brownfield first-contact instead of touching this gate). \
-             Until then, fall back to `qedgen probe --program <path>` for the site-catalogue \
-             audit envelope. Pass `--runtime <name>` to override detection if needed."
+            "Crucible brownfield mode (`--fuzz --root`) is not supported for `{runtime:?}`. \
+             Brownfield Crucible currently supports Anchor, Quasar, qedgen-codegen, and \
+             Pinocchio (with an on-disk IDL). Use `qedgen probe --program <path>` for the \
+             native static audit envelope. For sBPF assembly, use the dedicated `.qedspec` \
+             and Lean/qedsvm proof path. Pass `--runtime <name>` to override detection if needed."
         ),
     }
 }
@@ -722,8 +722,9 @@ pub mod my_prog {
             let err = synthesize_spec(tmp.path(), rt).unwrap_err();
             let msg = format!("{err:#}");
             assert!(
-                msg.contains("v2.24"),
-                "{label} bail should cite v2.24+ deferral, got: {msg}"
+                msg.contains("not supported")
+                    && msg.contains("Anchor, Quasar, qedgen-codegen, and Pinocchio"),
+                "{label} bail should name the current supported runtimes, got: {msg}"
             );
         }
     }

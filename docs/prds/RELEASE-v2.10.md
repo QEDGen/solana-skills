@@ -113,7 +113,7 @@ Verified on the audit's pre-fix specs — every original audit finding
 that the lint covers fires; on the post-fix specs all four examples
 are clean.
 
-PRD: `docs/prds/SPEC-AUTHORING-LINTS-v2.10.md`.
+Design source: internal spec-authoring-lints PRD (intentionally not shipped).
 
 ### `qedgen probe` + auditor subagent
 
@@ -229,7 +229,7 @@ pub vault: &'info mut Account<MultisigAccount>,
 
 - `project_v2_10_codegen_pass.md` — full codegen pass status table
 - `.qed/findings/audit-20260427-v210.md` — audit closure report
-- `docs/prds/SPEC-AUTHORING-LINTS-v2.10.md` — lint design + audit mapping
+- Internal spec-authoring-lints PRD — lint design + audit mapping (not shipped)
 - `feedback_audit_bear_hug.md` — bear-hug requires examples that work
 - `feedback_audit_as_subagent.md` — auditor as harness-native subagent
 - `feedback_minor_release_completeness.md` — bias ambition over cadence

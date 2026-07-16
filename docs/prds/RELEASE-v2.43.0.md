@@ -1,6 +1,6 @@
 # QEDGen v2.43.0 — evidence-aware probes, domain fuzzing, and tree-native codegen
 
-**Status:** ready to ship. **Scope:** 12 merged PRs / 20 commits since
+**Status:** released. **Scope:** 12 merged PRs / 20 commits since
 v2.42.0. **Theme:** audit evidence becomes explicit and replayable, the auditor
 gains a portable domain-invariant pipeline, and every active expression backend
 now renders from the typed `ExprTree` rather than pre-rendered strings.

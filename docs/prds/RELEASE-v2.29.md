@@ -1,7 +1,7 @@
 # QEDGen v2.29 — DSL Close-Out + Unified Imports
 
 **Date:** 2026-05-24
-**PRD:** `docs/prds/PRD-v2.29.md`
+**Planning input:** internal v2.29 PRD (intentionally not shipped).
 
 ## Headline
 

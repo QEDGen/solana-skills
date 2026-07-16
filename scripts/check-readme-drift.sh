@@ -70,4 +70,16 @@ if [[ -n "$missing" ]]; then
     exit 1
 fi
 
+# Internal planning files under docs/prds/ are ignored and disposable. Tracked
+# documentation or source comments must point to maintained references or
+# shipped release notes, never to a local-only PRD/plan/handoff.
+if stale_prd_refs="$(git -C "$REPO_ROOT" grep -nE \
+    'docs/prds/(AUDITOR|CODEGEN|EVAL|HANDOFF|MANUAL|PLAN|PRD|REVIEW|SCOPING|SMOKE|SPEC|SPIKE)[^[:space:]`]*\.md' \
+    -- '*.md' '*.rs' '*.sh' || true)" && [[ -n "$stale_prd_refs" ]]; then
+    echo "Documentation drift detected! Tracked files reference ignored planning docs:"
+    echo "$stale_prd_refs"
+    echo "Point these references at maintained docs, release notes, issues, or PRs."
+    exit 1
+fi
+
 echo "No README drift detected. All $total CLI commands are documented."
