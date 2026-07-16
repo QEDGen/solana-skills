@@ -12,10 +12,22 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Stacked pushes to main supersede each other — cancel the older run
+# rather than queueing hour-long builds back to back.
+concurrency:
+  group: lake-build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lake-build:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Warm-cache runs finish in ~50 min; a cold run (cache invalidated by
+    # a qedsvm/Mathlib bump, or evicted by the repo's 10 GB cache limit)
+    # takes ~2h+ across all 9 examples. The job timeout must cover the
+    # cold case: with the old 60-min ceiling every cold run was cancelled,
+    # and a cancelled job skips the cache post-steps, so the cache could
+    # never be re-seeded (35 consecutive cancellations, 2026-07-07→15).
+    timeout-minutes: 170
     steps:
       - uses: actions/checkout@v4
 
@@ -38,9 +50,13 @@ jobs:
 
       # Cache per-example `.lake/` (built oleans + downloaded Mathlib).
       # Keyed on the lakefiles + manifests so dependency or toolchain
-      # bumps invalidate the right examples.
-      - name: Cache example .lake directories
-        uses: actions/cache@v4
+      # bumps invalidate the right examples. Restore/save are split (not
+      # plain actions/cache) so the save step below can run `if: always()`
+      # — a sweep that fails or times out still persists partial build
+      # progress instead of losing the whole cache warm-up.
+      - name: Restore example .lake directories
+        id: lake-cache
+        uses: actions/cache/restore@v4
         with:
           path: examples/**/formal_verification/.lake
           key: ${{ runner.os }}-lake-${{ hashFiles('examples/**/lakefile.lean', 'examples/**/lake-manifest.json', '**/lean-toolchain') }}
@@ -114,5 +130,21 @@ jobs:
             fi
           done
 
+      # Step-level timeout (below the job's 170) so a hung sweep fails the
+      # STEP, leaving the job alive to run the always() cache save below.
+      # A job-level cancellation would skip it.
       - name: Run lake-build sweep
+        timeout-minutes: 150
         run: bash scripts/check-lake-build.sh --strict
+
+      # Save even when the sweep failed or timed out: the oleans built so
+      # far make the next run incremental. Skip only on an exact-key
+      # restore hit (nothing new to save). Reuse the restore step's
+      # resolved key — the regen step rewrites lakefiles/manifests mid-job,
+      # so re-hashing here would mint a new multi-GB entry every run.
+      - name: Save example .lake directories
+        if: always() && steps.lake-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: examples/**/formal_verification/.lake
+          key: ${{ steps.lake-cache.outputs.cache-primary-key }}
