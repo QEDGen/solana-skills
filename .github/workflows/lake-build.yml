@@ -3,13 +3,11 @@ name: Lake build (Lean side)
 # Runs `bash scripts/check-lake-build.sh --strict` over every bundled
 # `examples/*/formal_verification/` project. Heavier than the Rust-side
 # gates because it provisions elan + Mathlib (cache-miss can take 15–45
-# min). Runs on push-to-main and manual dispatch only — PRs that touch
-# Lean codegen should request this workflow via a comment trigger or a
-# follow-up commit, not block on every PR.
+# min). Temporarily manual-only: routine pushes rely on Rust-side generation,
+# snapshot, and drift gates. Run this workflow before a release or when changing
+# Lean codegen/proof dependencies.
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 # Stacked pushes to main supersede each other — cancel the older run

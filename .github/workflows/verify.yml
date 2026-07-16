@@ -1,15 +1,10 @@
 name: Formal Verification
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'src/**'
-      - 'formal_verification/**'
-  pull_request:
-    paths:
-      - 'src/**'
-      - 'formal_verification/**'
+  # Temporarily manual-only. The expensive repository-wide example proof sweep
+  # lives in lake-build.yml; this workflow remains available for a root proof
+  # project if one is added again.
+  workflow_dispatch:
 
 jobs:
   verify:

@@ -555,7 +555,10 @@ imports can use an empty `[dependencies]` table.
 above don't catch. `--strict` fails on missing `.lake/`/manifests
 (cold checkout — run `lake update` once first); drop `--strict` for
 a non-release sanity check. Add `--only <pattern>` to scope to a
-single example.
+single example. The repository's Lean workflows are temporarily manual-only
+because a cold example sweep can take more than two hours; routine push/PR CI
+still runs generation snapshots and example drift checks. Run the Lake workflow
+manually for Lean/codegen changes and before a release.
 
 ### Deploy-safety lint (ratchet)
 
