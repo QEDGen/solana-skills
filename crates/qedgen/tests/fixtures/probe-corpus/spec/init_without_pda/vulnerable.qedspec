@@ -1,0 +1,23 @@
+// Corpus (#231) init_without_pda/vulnerable: init-shape handler
+// (Uninitialized -> Active) whose writable account declares no PDA seeds
+// — default-address collision; fires.
+
+spec IwpVuln
+
+type State
+  | Uninitialized
+  | Active of {
+      owner : Pubkey,
+      total : U64,
+    }
+
+handler create : State.Uninitialized -> State.Active {
+  accounts {
+    owner : signer
+    vault : writable
+  }
+  effect {
+    Active.owner := owner.pubkey
+    Active.total := 0
+  }
+}

@@ -1,0 +1,16 @@
+// Corpus (#231) permissionless_state_writer/hard_safe: `permissionless`
+// handler that writes nothing — a guard-only public probe. A naive
+// "permissionless = griefing surface" scanner fires on the marker; the
+// predicate requires an actual state write.
+
+spec PswHardSafe
+
+type State
+  | Active of {
+      total : U64,
+    }
+
+handler check_solvency : State.Active -> State.Active {
+  permissionless
+  requires state.total >= 0
+}

@@ -1,0 +1,28 @@
+// Corpus (#231) lifecycle_one_shot_violation/safe: every mutating handler
+// declares its lifecycle transition — no candidate.
+
+spec LcSafe
+
+type State
+  | Uninitialized
+  | Active of {
+      owner : Pubkey,
+      total : U64,
+    }
+
+handler create : State.Uninitialized -> State.Active {
+  accounts {
+    owner : signer
+    vault : writable, pda ["vault", owner]
+  }
+  effect {
+    Active.owner := owner.pubkey
+    Active.total := 0
+  }
+}
+
+handler update_total (amount : U64) : State.Active -> State.Active {
+  auth owner
+  requires amount <= 1000
+  effect { total += amount }
+}

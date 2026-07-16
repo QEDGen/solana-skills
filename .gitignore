@@ -36,6 +36,11 @@ yarn-error.log*
 # Anchor/Solana
 .anchor/
 target/
+# Probe-corpus fixture (#231): a committed `anchor build`-shaped IDL under a
+# `target/idl/` path is test data, not build output — keep it tracked.
+!crates/qedgen/tests/fixtures/probe-corpus/specless/anchor-idl/target/
+!crates/qedgen/tests/fixtures/probe-corpus/specless/anchor-idl/target/idl/
+!crates/qedgen/tests/fixtures/probe-corpus/specless/anchor-idl/target/idl/vault.json
 test-ledger/
 # Cargo.lock is tracked for binaries but not for libraries
 package-lock.json

@@ -1,0 +1,14 @@
+// Corpus (#231) unbounded_amount_param/vulnerable: integer param flows
+// into an effect RHS with no bounding `requires` — fires.
+
+spec UapVuln
+
+type State
+  | Active of {
+      total : U64,
+    }
+
+handler deposit (amount : U64) : State.Active -> State.Active {
+  auth owner
+  effect { total += amount }
+}

@@ -1,0 +1,20 @@
+{
+  "program": {
+    "name": "counter",
+    "instructions": [
+      {
+        "name": "increment",
+        "accounts": [
+          { "name": "payer", "isSigner": true, "isWritable": true },
+          { "name": "counter", "isSigner": false, "isWritable": true }
+        ],
+        "arguments": [ { "name": "amount", "type": { "kind": "numberTypeNode", "format": "u64" } } ]
+      },
+      {
+        "name": "reset",
+        "accounts": [ { "name": "authority", "isSigner": true, "isWritable": false } ],
+        "arguments": []
+      }
+    ]
+  }
+}

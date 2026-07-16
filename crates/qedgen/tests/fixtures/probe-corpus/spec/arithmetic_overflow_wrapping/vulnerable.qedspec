@@ -1,0 +1,14 @@
+// Corpus (#231) arithmetic_overflow_wrapping/vulnerable: explicit wrapping
+// `+=?` on an amount-shaped field — fires (High).
+
+spec AowVuln
+
+type State
+  | Active of {
+      balance : U64,
+    }
+
+handler deposit (amount : U64) : State.Active -> State.Active {
+  auth owner
+  effect { balance +=? amount }
+}

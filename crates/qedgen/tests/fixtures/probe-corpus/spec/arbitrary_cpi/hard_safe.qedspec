@@ -1,0 +1,26 @@
+// Corpus (#231) arbitrary_cpi/hard_safe: a writable token account with no
+// transfers block trips a naive scanner — but this is an init-shape
+// handler (Uninitialized pre-state): writable token accounts are creation
+// targets, not transfer targets, and the predicate suppresses the init
+// pattern structurally.
+
+spec AcpiHardSafe
+
+type State
+  | Uninitialized
+  | Active of {
+      owner : Pubkey,
+      total : U64,
+    }
+
+handler create : State.Uninitialized -> State.Active {
+  accounts {
+    owner : signer
+    vault : writable, pda ["vault", owner]
+    vault_ta : writable, token
+  }
+  effect {
+    Active.owner := owner.pubkey
+    Active.total := 0
+  }
+}

@@ -1,0 +1,22 @@
+// Corpus (#231) init_without_pda/safe: the initialized account is a PDA
+// scoped to the caller — no candidate.
+
+spec IwpSafe
+
+type State
+  | Uninitialized
+  | Active of {
+      owner : Pubkey,
+      total : U64,
+    }
+
+handler create : State.Uninitialized -> State.Active {
+  accounts {
+    owner : signer
+    vault : writable, pda ["vault", owner]
+  }
+  effect {
+    Active.owner := owner.pubkey
+    Active.total := 0
+  }
+}

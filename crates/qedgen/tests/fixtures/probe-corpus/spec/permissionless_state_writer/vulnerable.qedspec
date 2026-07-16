@@ -1,0 +1,14 @@
+// Corpus (#231) permissionless_state_writer/vulnerable: `permissionless`
+// handler mutating shared state — fires.
+
+spec PswVuln
+
+type State
+  | Active of {
+      tick_count : U64,
+    }
+
+handler crank : State.Active -> State.Active {
+  permissionless
+  effect { tick_count += 1 }
+}

@@ -1,0 +1,26 @@
+// Corpus (#231) stored_field_never_written/safe: `threshold` is read by a
+// `requires` and written by an explicit `:=` effect, so the predicate sees
+// a writer and stays silent. `owner` (the auth field) is a PDA seed, also
+// treated as written. Contrast the vulnerable case, where the auth field
+// is read but never written by any effect.
+
+spec SfnwSafe
+
+type State
+  | Active of {
+      owner     : Pubkey,
+      threshold : U64,
+      total     : U64,
+    }
+
+pda vault ["vault", owner]
+
+handler set_threshold (t : U64) : State.Active -> State.Active {
+  auth owner
+  requires t <= 10000
+  requires state.threshold <= 1000000
+  effect {
+    threshold := t
+    total := 0
+  }
+}

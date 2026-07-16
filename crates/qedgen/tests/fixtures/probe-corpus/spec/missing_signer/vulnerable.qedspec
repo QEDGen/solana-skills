@@ -1,0 +1,14 @@
+// Corpus (#231) missing_signer/vulnerable: state-mutating handler with no
+// `auth` clause and no `permissionless` marker — the predicate fires.
+
+spec MsVuln
+
+type State
+  | Active of {
+      total : U64,
+    }
+
+handler update_total (amount : U64) : State.Active -> State.Active {
+  requires amount <= 1000
+  effect { total += amount }
+}

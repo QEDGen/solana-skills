@@ -1,0 +1,17 @@
+// Corpus (#231) stored_field_never_written/vulnerable: `admin` is read by
+// `auth admin` (lowers to has_one = admin) but no handler effect ever
+// writes it — unset Pubkey makes the handler unreachable; fires (Critical).
+
+spec SfnwVuln
+
+type State
+  | Active of {
+      admin : Pubkey,
+      total : U64,
+    }
+
+handler update_total (amount : U64) : State.Active -> State.Active {
+  auth admin
+  requires amount <= 1000
+  effect { total += amount }
+}

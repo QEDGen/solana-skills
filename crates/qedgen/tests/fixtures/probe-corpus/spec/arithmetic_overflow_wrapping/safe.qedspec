@@ -1,0 +1,15 @@
+// Corpus (#231) arithmetic_overflow_wrapping/safe: default checked `+=`
+// aborts on overflow — no candidate.
+
+spec AowSafe
+
+type State
+  | Active of {
+      balance : U64,
+    }
+
+handler deposit (amount : U64) : State.Active -> State.Active {
+  auth owner
+  requires amount <= 1000000
+  effect { balance += amount }
+}

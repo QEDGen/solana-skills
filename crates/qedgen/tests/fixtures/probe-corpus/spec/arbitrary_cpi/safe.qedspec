@@ -1,0 +1,24 @@
+// Corpus (#231) arbitrary_cpi/safe: the token flow is declared in a
+// `transfers` block — no candidate.
+
+spec AcpiSafe
+
+type State
+  | Active of {
+      owner : Pubkey,
+      total : U64,
+    }
+
+handler withdraw (amount : U64) : State.Active -> State.Active {
+  auth owner
+  accounts {
+    owner : signer
+    owner_ta : writable, token
+    vault_ta : writable, token
+  }
+  requires amount <= 1000
+  effect { total -= amount }
+  transfers {
+    from vault_ta to owner_ta amount amount authority owner
+  }
+}
