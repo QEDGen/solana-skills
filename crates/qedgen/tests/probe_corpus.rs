@@ -20,7 +20,8 @@
 //! - `specless/<scenario>/` — brownfield project trees exercising the #235
 //!   IDL-enrichment overlay end to end (enrich, framework-enforced
 //!   narrowing, source/IDL drift, Pinocchio handler fill, derivable-IDL
-//!   hint on a marker-without-IDL and on an unbuilt framework checkout).
+//!   hint on a marker-without-IDL and on an unbuilt framework checkout, and
+//!   the #240 dead-guard / unwired-error-variant sweep).
 //!
 //! These are pass/fail *regression* tests, not a metric: they pin that a
 //! shipped predicate keeps firing on its vuln fixture and stays silent on
@@ -280,5 +281,42 @@ fn unbuilt_anchor_without_idl_reports_derivable_anchor() {
     assert_eq!(
         env.get("derivable_idl").and_then(Value::as_str),
         Some("anchor")
+    );
+}
+
+/// #240 dead-guard sweep: an `#[error_code]` variant defined but wired into
+/// no enforcement call-site surfaces as an `unwired_error_variant` candidate;
+/// variants that ARE enforced (require! / return Err) stay silent. The sweep
+/// runs on the spec-less envelope (a source lens the bootstrap previously
+/// lacked) and emits candidates, never reproducer-backed findings.
+#[test]
+fn unwired_error_variant_surfaces_as_candidate() {
+    let env = probe(&[
+        "--bootstrap",
+        "--root",
+        &specless_root("anchor-unwired-guard"),
+    ]);
+
+    let unwired: Vec<&str> = env
+        .get("candidates")
+        .and_then(Value::as_array)
+        .unwrap()
+        .iter()
+        .filter(|c| c.get("category_tag").and_then(Value::as_str) == Some("unwired_error_variant"))
+        .filter_map(|c| c.get("handler").and_then(Value::as_str))
+        .collect();
+
+    // Exactly the defined-but-unenforced variant; the two wired ones are silent.
+    assert_eq!(
+        unwired,
+        vec!["HookAuthorityCannotBePartOfHookAccounts"],
+        "got {unwired:?}"
+    );
+
+    // A dead guard is an absence — it must be a candidate, never a finding.
+    let findings = tags_of(&env, "findings");
+    assert!(
+        !findings.contains(&"unwired_error_variant"),
+        "unwired variant must not be a reproducer-backed finding: {findings:?}"
     );
 }

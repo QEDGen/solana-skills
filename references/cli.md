@@ -405,6 +405,19 @@ the built IDL), a `shank`/`codama` dep or codama config file is one
 `shank idl` / `codama run` away. A hint for the agent, the CLI does not
 shell out.
 
+v2.44 (#240) also runs a **dead-guard / unwired-error-variant sweep** on
+every spec-less envelope: each `#[error_code]` enum variant that is defined
+but has no enforcement call-site (`require!` / `require_*!` / `err!` /
+`return Err(.. Variant ..)` / a match arm) anywhere in `src/` surfaces as an
+`unwired_error_variant` entry in `candidates[]` (`handler` = the variant,
+`spec_silent_on` = its definition `file:line`). A named-but-never-fired
+error is a guard that exists in name only — the path it was meant to protect
+proceeds unchecked. Deterministic (enumerate the enum, grep each variant),
+so it is a candidate, never a reproducer-backed finding; the
+`investigation_hint` carries the severity rule (grade at the impact ceiling
+of the unguarded path, not a dead-variant floor). No `#[error_code]` enum →
+no candidates (clean no-op, not a false positive).
+
 ```bash
 # Spec-aware
 $QEDGEN probe --spec my_program.qedspec
