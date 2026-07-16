@@ -16,11 +16,13 @@
 //!   `handlers[]` from the Codama IDL instruction list.
 //!
 //! No IDL on disk → the overlay is skipped silently (fresh clone
-//! pre-build); a `shank` / `codama` marker without an on-disk IDL is
-//! reported as `derivable_idl` so the agent knows one command
-//! (`shank idl` / `codama run`) away exists. Codama / Shank flags on
-//! non-framework runtimes are declarative, not enforced, so they enrich
-//! but never narrow there.
+//! pre-build); an IDL-derivable marker without an on-disk IDL is
+//! reported as `derivable_idl` so the agent knows one command away
+//! exists: the Anchor / Quasar runtimes themselves (`anchor build` emits
+//! `target/idl/*.json`, idl-build default-on since 0.30), or a `shank` /
+//! `codama` marker (`shank idl` / `codama run`) elsewhere (#238).
+//! Codama / Shank flags on non-framework runtimes are declarative, not
+//! enforced, so they enrich but never narrow there.
 
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -56,8 +58,8 @@ pub struct IdlArgMeta {
 pub struct OverlayOutcome {
     /// On-disk IDL consumed, relative to the project root when possible.
     pub idl_path: Option<String>,
-    /// `"shank"` / `"codama"` when no IDL is on disk but the marker says
-    /// one is mechanically derivable.
+    /// `"anchor"` / `"quasar"` / `"shank"` / `"codama"` when no IDL is on
+    /// disk but the runtime or a marker says one is mechanically derivable.
     pub derivable_idl: Option<String>,
     /// `idl_source_drift` investigation leads (both directions).
     pub drift_candidates: Vec<Candidate>,
@@ -102,11 +104,23 @@ pub(crate) fn discover_idl(project_root: &Path) -> anyhow::Result<Option<(PathBu
     Ok(None)
 }
 
-/// Detect an IDL-derivable marker when nothing is on disk: a `shank` dep
-/// (the derive macros imply `shank idl` extracts an IDL from source, no
-/// build needed) or a `codama` dep / config file. Root `Cargo.toml` only,
-/// mirroring `detect_runtime`'s dep heuristics.
-pub(crate) fn detect_derivable_idl(project_root: &Path) -> Option<&'static str> {
+/// Detect an IDL-derivable marker when nothing is on disk. The runtime
+/// itself is the strongest signal (#238): every Anchor / Quasar build
+/// emits `target/idl/*.json`, so an unbuilt checkout is exactly one
+/// `anchor build` away — and it beats any codama config, which in
+/// framework repos *consumes* the built IDL rather than replacing the
+/// build. Keying on the detected runtime (not a root `Cargo.toml` grep)
+/// also covers workspaces, where `anchor-lang` lives in
+/// `programs/*/Cargo.toml`. Elsewhere: a `shank` dep (the derive macros
+/// imply `shank idl` extracts an IDL from source, no build needed) or a
+/// `codama` dep / config file, root `Cargo.toml` only, mirroring
+/// `detect_runtime`'s dep heuristics.
+pub(crate) fn detect_derivable_idl(project_root: &Path, runtime: &Runtime) -> Option<&'static str> {
+    match runtime {
+        Runtime::Anchor => return Some("anchor"),
+        Runtime::Quasar => return Some("quasar"),
+        _ => {}
+    }
     let cargo = std::fs::read_to_string(project_root.join("Cargo.toml")).unwrap_or_default();
     let has_dep = |name: &str| {
         cargo.lines().any(|line| {
@@ -278,11 +292,11 @@ pub(crate) fn apply(
     let Ok(discovered) = discover_idl(project_root) else {
         // Unreadable IDL: leave the envelope source-only; the source_scan
         // engine-run already reports unreadable-file coverage separately.
-        outcome.derivable_idl = detect_derivable_idl(project_root).map(str::to_string);
+        outcome.derivable_idl = detect_derivable_idl(project_root, runtime).map(str::to_string);
         return outcome;
     };
     let Some((idl_path, idl_text)) = discovered else {
-        outcome.derivable_idl = detect_derivable_idl(project_root).map(str::to_string);
+        outcome.derivable_idl = detect_derivable_idl(project_root, runtime).map(str::to_string);
         return outcome;
     };
 
@@ -353,6 +367,11 @@ fn apply_anchor_workspace(
             .drift_candidates
             .append(&mut outcome.drift_candidates);
     }
+    if aggregate.idl_path.is_none() {
+        // Unbuilt workspace: no program had an IDL on disk, so the same
+        // "one build away" hint applies as in the single-crate case (#238).
+        aggregate.derivable_idl = detect_derivable_idl(project_root, runtime).map(str::to_string);
+    }
     Some(aggregate)
 }
 
@@ -405,7 +424,7 @@ fn apply_discovered_idl(
     if instructions.is_empty() {
         // A JSON file at a canonical path that carries no instructions is
         // not an IDL we can use — treat as absent.
-        outcome.derivable_idl = detect_derivable_idl(project_root).map(str::to_string);
+        outcome.derivable_idl = detect_derivable_idl(project_root, runtime).map(str::to_string);
         return outcome;
     }
 
@@ -555,11 +574,82 @@ mod tests {
     fn no_idl_no_markers_is_a_silent_skip() {
         let root = tmp_root("none");
         let mut handlers = vec![mk_handler("initialize")];
-        let out = apply(&root, &Runtime::Anchor, &mut handlers, &[]);
+        let out = apply(&root, &Runtime::Native, &mut handlers, &[]);
         assert!(out.idl_path.is_none());
         assert!(out.derivable_idl.is_none());
         assert!(out.drift_candidates.is_empty());
         assert!(handlers[0].idl_accounts.is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unbuilt_anchor_reports_derivable_anchor() {
+        // Fresh Anchor clone, never `anchor build`-ed: no target/idl, no
+        // shank/codama markers — the runtime itself is the hint (#238).
+        let root = tmp_root("anchor-unbuilt");
+        let mut handlers = vec![mk_handler("initialize")];
+        let out = apply(&root, &Runtime::Anchor, &mut handlers, &[]);
+        assert!(out.idl_path.is_none());
+        assert_eq!(out.derivable_idl.as_deref(), Some("anchor"));
+        assert!(handlers[0].idl_accounts.is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unbuilt_anchor_workspace_reports_derivable_anchor() {
+        // Workspace shape: handlers live under programs/*, anchor-lang is
+        // in per-program manifests (not the root Cargo.toml), and no
+        // program has an IDL on disk.
+        let root = tmp_root("anchor-workspace-unbuilt");
+        let crate_root = root.join("programs").join("vault");
+        std::fs::create_dir_all(&crate_root).unwrap();
+        std::fs::write(
+            crate_root.join("Cargo.toml"),
+            "[package]\nname = \"vault\"\nversion = \"0.1.0\"\n\n[dependencies]\nanchor-lang = \"0.31\"\n",
+        )
+        .unwrap();
+        let mut h = mk_handler("initialize");
+        h.source_file = "programs/vault/src/lib.rs".to_string();
+        let mut handlers = vec![h];
+        let out = apply(&root, &Runtime::Anchor, &mut handlers, &[]);
+        assert!(out.idl_path.is_none());
+        assert_eq!(out.derivable_idl.as_deref(), Some("anchor"));
+        assert!(out.drift_candidates.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unbuilt_quasar_reports_derivable_quasar() {
+        let root = tmp_root("quasar-unbuilt");
+        let out = apply(&root, &Runtime::Quasar, &mut vec![mk_handler("crank")], &[]);
+        assert_eq!(out.derivable_idl.as_deref(), Some("quasar"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn built_anchor_workspace_does_not_report_derivable() {
+        // A workspace whose program IDL IS on disk consumes it; the
+        // derivable hint must stay absent.
+        let root = tmp_root("anchor-workspace-built");
+        let crate_root = root.join("programs").join("alpha");
+        std::fs::create_dir_all(&crate_root).unwrap();
+        std::fs::write(
+            crate_root.join("Cargo.toml"),
+            "[package]\nname = \"alpha\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("target/idl")).unwrap();
+        std::fs::write(
+            root.join("target/idl/alpha.json"),
+            r#"{ "instructions": [ { "name": "initialize", "accounts": [], "args": [] } ] }"#,
+        )
+        .unwrap();
+        let mut h = mk_handler("initialize");
+        h.source_file = "programs/alpha/src/lib.rs".to_string();
+        let mut handlers = vec![h];
+        let out = apply(&root, &Runtime::Anchor, &mut handlers, &[]);
+        assert_eq!(out.idl_path.as_deref(), Some("target/idl/alpha.json"));
+        assert!(out.derivable_idl.is_none());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -595,7 +685,7 @@ mod tests {
             "[dependencies]\nshankles = \"1\"\n",
         )
         .unwrap();
-        assert_eq!(detect_derivable_idl(&root), None);
+        assert_eq!(detect_derivable_idl(&root, &Runtime::Native), None);
         let _ = std::fs::remove_dir_all(&root);
     }
 

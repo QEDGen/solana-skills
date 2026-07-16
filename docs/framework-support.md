@@ -32,7 +32,7 @@ sBPF assembly is selected by `pragma sbpf` in the spec, not by a `Target`.
 | proptest (`proptest_gen_mir`) | ✅ | ✅ | ✅ | n/a | skip by design |
 | Lean (`lean_gen_mir`) | ✅ | ✅ | ✅ | n/a | ✅ dedicated sBPF path |
 | Probe: runtime-agnostic scanners (`run_helpers`) | ✅ (#196) | ✅ (#196) | ✅ | ✅ (#196) | ❌ bootstrap only |
-| Probe: IDL-enrichment overlay (`probe/idl_overlay`) | ✅ enrich + narrow (#235) | ✅ enrich + narrow (#235) | ✅ enrich + handler fill | ⚠️ enrich only (declarative flags) | ❌ |
+| Probe: IDL-enrichment overlay (`probe/idl_overlay`) | ✅ enrich + narrow (#235); unbuilt → `derivable_idl` (#238) | ✅ enrich + narrow (#235); unbuilt → `derivable_idl` (#238) | ✅ enrich + handler fill | ⚠️ enrich only (declarative flags) | ❌ |
 | Probe: runtime-specific findings (`probe/`) | ❌ agent-layer (SKILL.md) | ❌ agent-layer | ✅ richest (`pinocchio_probe`) | ⚠️ Shank dispatcher discovery only | ❌ |
 | Miri divergence repros (`verify/miri_verify`) | ❌ | ❌ | ✅ | ❌ | n/a |
 | Ratchet / readiness (`verify/ratchet`) | ✅ | ✅ | ❌ no ratchet crate | ❌ | ❌ |
