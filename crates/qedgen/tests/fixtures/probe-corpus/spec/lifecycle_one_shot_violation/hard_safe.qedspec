@@ -1,0 +1,29 @@
+// Corpus (#231) lifecycle_one_shot_violation/hard_safe: `audit_log` has no
+// lifecycle annotation — a naive "every handler must declare a transition"
+// scanner fires. It mutates nothing (guard-only), so cross-state replay
+// has no surface; the predicate requires a state mutation.
+
+spec LcHardSafe
+
+type State
+  | Uninitialized
+  | Active of {
+      owner : Pubkey,
+      total : U64,
+    }
+
+handler create : State.Uninitialized -> State.Active {
+  accounts {
+    owner : signer
+    vault : writable, pda ["vault", owner]
+  }
+  effect {
+    Active.owner := owner.pubkey
+    Active.total := 0
+  }
+}
+
+handler audit_log {
+  auth owner
+  requires state.total >= 0
+}

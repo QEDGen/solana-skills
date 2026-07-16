@@ -1,0 +1,29 @@
+// Corpus (#231) lifecycle_one_shot_violation/vulnerable: the spec models
+// lifecycle states, but `update_total` mutates state with no lifecycle
+// pre-condition — invokable in any state; fires.
+
+spec LcVuln
+
+type State
+  | Uninitialized
+  | Active of {
+      owner : Pubkey,
+      total : U64,
+    }
+
+handler create : State.Uninitialized -> State.Active {
+  accounts {
+    owner : signer
+    vault : writable, pda ["vault", owner]
+  }
+  effect {
+    Active.owner := owner.pubkey
+    Active.total := 0
+  }
+}
+
+handler update_total (amount : U64) {
+  auth owner
+  requires amount <= 1000
+  effect { total += amount }
+}

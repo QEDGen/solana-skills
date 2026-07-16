@@ -1,0 +1,21 @@
+// Corpus (#231) arbitrary_cpi/vulnerable: writable token account on a
+// non-init handler with no `transfers` block or `call` site — the spec
+// gives codegen nothing to mechanize; fires.
+
+spec AcpiVuln
+
+type State
+  | Active of {
+      owner : Pubkey,
+      total : U64,
+    }
+
+handler withdraw (amount : U64) : State.Active -> State.Active {
+  auth owner
+  accounts {
+    owner : signer
+    vault_ta : writable, token
+  }
+  requires amount <= 1000
+  effect { total -= amount }
+}

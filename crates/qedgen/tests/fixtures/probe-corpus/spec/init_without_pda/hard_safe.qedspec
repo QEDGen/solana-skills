@@ -1,0 +1,23 @@
+// Corpus (#231) init_without_pda/hard_safe: name bait — a handler named
+// `initialize_config` writes a writable non-PDA account, so a
+// name-keyed scanner fires. Its pre-state is `Active` (reconfiguration of
+// a live singleton, not an init): the predicate keys on init-shape
+// pre_status, not the handler name.
+
+spec IwpHardSafe
+
+type State
+  | Active of {
+      owner : Pubkey,
+      fee_bps : U64,
+    }
+
+handler initialize_config (fee_bps_new : U64) : State.Active -> State.Active {
+  auth owner
+  accounts {
+    owner : signer
+    config : writable
+  }
+  requires fee_bps_new <= 10000
+  effect { fee_bps := fee_bps_new }
+}

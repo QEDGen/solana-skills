@@ -1,0 +1,20 @@
+// Corpus (#231) stored_field_never_written/hard_safe: no explicit effect
+// writes `admin`, so a naive "read but never assigned" scanner fires. The
+// field is a PDA seed (`pda vault ["vault", admin]`) — codegen binds seed
+// fields implicitly at init, which the predicate treats as written.
+
+spec SfnwHardSafe
+
+type State
+  | Active of {
+      admin : Pubkey,
+      total : U64,
+    }
+
+pda vault ["vault", admin]
+
+handler update_total (amount : U64) : State.Active -> State.Active {
+  auth admin
+  requires amount <= 1000
+  effect { total += amount }
+}

@@ -1,0 +1,20 @@
+// Corpus (#231) missing_signer/safe: single handler gated by `auth owner`
+// — predicate_missing_signer returns None. `owner` is a PDA seed
+// (implicitly bound at init), so it does not trip
+// stored_field_never_written either.
+
+spec MsSafe
+
+type State
+  | Active of {
+      owner : Pubkey,
+      total : U64,
+    }
+
+pda vault ["vault", owner]
+
+handler update_total (amount : U64) : State.Active -> State.Active {
+  auth owner
+  requires amount <= 1000
+  effect { total += amount }
+}

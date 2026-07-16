@@ -1,0 +1,15 @@
+// Corpus (#231) permissionless_state_writer/safe: same mutation, gated by
+// `auth owner` — no candidate.
+
+spec PswSafe
+
+type State
+  | Active of {
+      owner : Pubkey,
+      tick_count : U64,
+    }
+
+handler crank : State.Active -> State.Active {
+  auth owner
+  effect { tick_count += 1 }
+}

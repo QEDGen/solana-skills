@@ -1,0 +1,19 @@
+// Corpus (#231) unbounded_amount_param/hard_safe: word-boundary trap. The
+// param `amount` never reaches an effect RHS or transfer slot — the only
+// RHS-adjacent token is the *field* `amount_total` (substring match hits,
+// word-boundary match does not), and the param appears in a lower-bound
+// requires only. A naive scanner flags the integer param; the predicate
+// requires actual effect/transfer flow.
+
+spec UapHardSafe
+
+type State
+  | Active of {
+      amount_total : U64,
+    }
+
+handler tick (amount : U64) : State.Active -> State.Active {
+  auth owner
+  requires amount > 0
+  effect { amount_total += 1 }
+}

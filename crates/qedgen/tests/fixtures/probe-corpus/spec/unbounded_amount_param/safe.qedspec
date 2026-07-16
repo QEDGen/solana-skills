@@ -1,0 +1,15 @@
+// Corpus (#231) unbounded_amount_param/safe: same flow, upper-bounded by
+// `requires amount <= 1000000` — no candidate.
+
+spec UapSafe
+
+type State
+  | Active of {
+      total : U64,
+    }
+
+handler deposit (amount : U64) : State.Active -> State.Active {
+  auth owner
+  requires amount <= 1000000
+  effect { total += amount }
+}

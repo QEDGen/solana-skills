@@ -1,0 +1,17 @@
+// Corpus (#231) arithmetic_overflow_wrapping/hard_safe: grep bait — the
+// identifiers are saturated with "wrap" (`wrap_total`, `wrap_amount`), so
+// a token-matching scanner fires. The operator is the default checked
+// `+=`; the predicate keys on the op, not the names.
+
+spec AowHardSafe
+
+type State
+  | Active of {
+      wrap_total : U64,
+    }
+
+handler add_wrap_fee (wrap_amount : U64) : State.Active -> State.Active {
+  auth owner
+  requires wrap_amount <= 100
+  effect { wrap_total += wrap_amount }
+}

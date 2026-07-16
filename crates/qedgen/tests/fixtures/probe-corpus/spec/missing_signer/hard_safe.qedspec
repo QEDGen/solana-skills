@@ -1,0 +1,16 @@
+// Corpus (#231) missing_signer/hard_safe: no `auth` clause anywhere — a
+// naive "flag every handler without auth" scanner fires. The handler is
+// explicitly `permissionless` (a public crank), which suppresses
+// missing_signer by declared intent.
+
+spec MsHardSafe
+
+type State
+  | Active of {
+      tick_count : U64,
+    }
+
+handler crank : State.Active -> State.Active {
+  permissionless
+  effect { tick_count += 1 }
+}
