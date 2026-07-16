@@ -397,9 +397,13 @@ surfaces as `idl_source_drift` entries in `candidates[]` (both
 directions, never silently reconciled). Pinocchio bootstrap fills its
 otherwise-empty `handlers[]` from the Codama IDL (`discovered_via:
 "idl"`, `source_file` = the IDL path). No IDL on disk → overlay skipped;
-a `shank`/`codama` dep or codama config file without an on-disk IDL is
-reported as `derivable_idl: "shank" | "codama"` (one `shank idl` /
-`codama run` away — a hint for the agent, the CLI does not shell out).
+when one is mechanically derivable it is reported as `derivable_idl:
+"anchor" | "quasar" | "shank" | "codama"` — an unbuilt Anchor/Quasar
+checkout is one `anchor build` away (idl-build default-on since Anchor
+0.30, and this beats any codama config, which in framework repos consumes
+the built IDL), a `shank`/`codama` dep or codama config file is one
+`shank idl` / `codama run` away. A hint for the agent, the CLI does not
+shell out.
 
 ```bash
 # Spec-aware

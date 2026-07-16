@@ -735,10 +735,11 @@ pub struct ProbeOutput {
     /// (source-only envelope).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idl_path: Option<String>,
-    /// IDL overlay (#235, spec-less mode): `"shank"` / `"codama"` when no
-    /// IDL is on disk but project markers say one is mechanically
-    /// derivable (`shank idl` / `codama run`) — a hint for the agent, not
-    /// something the CLI shells out to.
+    /// IDL overlay (#235/#238, spec-less mode): `"anchor"` / `"quasar"` /
+    /// `"shank"` / `"codama"` when no IDL is on disk but the runtime or a
+    /// project marker says one is mechanically derivable (`anchor build` /
+    /// `shank idl` / `codama run`) — a hint for the agent, not something
+    /// the CLI shells out to.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub derivable_idl: Option<String>,
     /// Structural shape of the native dispatcher when detected. Only

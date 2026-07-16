@@ -20,7 +20,7 @@
 //! - `specless/<scenario>/` — brownfield project trees exercising the #235
 //!   IDL-enrichment overlay end to end (enrich, framework-enforced
 //!   narrowing, source/IDL drift, Pinocchio handler fill, derivable-IDL
-//!   hint on a marker-without-IDL).
+//!   hint on a marker-without-IDL and on an unbuilt framework checkout).
 //!
 //! These are pass/fail *regression* tests, not a metric: they pin that a
 //! shipped predicate keeps firing on its vuln fixture and stays silent on
@@ -266,5 +266,19 @@ fn shank_marker_without_idl_reports_derivable() {
     assert_eq!(
         env.get("derivable_idl").and_then(Value::as_str),
         Some("shank")
+    );
+}
+
+/// An unbuilt Anchor checkout (no `target/idl`, no shank/codama markers)
+/// reports `derivable_idl: "anchor"` — the runtime itself says an IDL is one
+/// `anchor build` away (#238).
+#[test]
+fn unbuilt_anchor_without_idl_reports_derivable_anchor() {
+    let env = probe(&["--bootstrap", "--root", &specless_root("anchor-unbuilt")]);
+    assert_eq!(env.get("runtime").and_then(Value::as_str), Some("anchor"));
+    assert!(env.get("idl_path").is_none(), "no IDL is on disk");
+    assert_eq!(
+        env.get("derivable_idl").and_then(Value::as_str),
+        Some("anchor")
     );
 }
