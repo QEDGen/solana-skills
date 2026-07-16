@@ -159,6 +159,10 @@ pub fn construct_reproducer(
         | Category::UncheckedArithWithFundFlow
         | Category::PairedValidatorInputDomainMismatch
         | Category::ExternalAuthorityNotRevokedOnClose => Err(ConstructFailure::NotImplemented),
+        // #235: drift is born as a candidate in `idl_overlay` — a
+        // deterministic cross-check has no runnable reproducer, so it never
+        // flows through this dispatcher.
+        Category::IdlSourceDrift => Err(ConstructFailure::NotImplemented),
     }
 }
 

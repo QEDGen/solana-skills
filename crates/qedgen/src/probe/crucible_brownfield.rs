@@ -203,38 +203,11 @@ fn program_name_from_idl(idl_text: &str) -> Option<String> {
 /// 4. `<root>/idl/*.json` — Codama default output dir.
 ///
 /// Same-level matches are sorted alphabetically and the first picked —
-/// deterministic across runs.
+/// deterministic across runs. The path walk itself lives in
+/// `idl_overlay::discover_idl` (#235) so the fuzz gate and the bootstrap
+/// enrichment overlay can never disagree on where an IDL may live.
 pub(crate) fn discover_pinocchio_idl(project_root: &Path) -> Result<Option<String>> {
-    let candidates = [
-        project_root.join("idl.json"),
-        project_root.join("program").join("idl.json"),
-    ];
-    for c in &candidates {
-        if c.is_file() {
-            return Ok(Some(
-                std::fs::read_to_string(c).with_context(|| format!("reading {}", c.display()))?,
-            ));
-        }
-    }
-    for sub in ["target/idl", "idl"] {
-        let dir = project_root.join(sub);
-        if dir.is_dir() {
-            let mut entries: Vec<PathBuf> = std::fs::read_dir(&dir)
-                .with_context(|| format!("reading {}", dir.display()))?
-                .filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("json"))
-                .collect();
-            entries.sort();
-            if let Some(first) = entries.first() {
-                return Ok(Some(
-                    std::fs::read_to_string(first)
-                        .with_context(|| format!("reading {}", first.display()))?,
-                ));
-            }
-        }
-    }
-    Ok(None)
+    Ok(crate::probe::idl_overlay::discover_idl(project_root)?.map(|(_, text)| text))
 }
 
 /// Per-instruction `(snake_name, vec![(arg_name, type), ...])`. The
@@ -247,7 +220,7 @@ pub(crate) fn discover_pinocchio_idl(project_root: &Path) -> Result<Option<Strin
 /// Unrecognised types map to a `"u64"` placeholder: it compiles, but a
 /// type-coercion failure in the macro's field is the signal that the type
 /// isn't supported yet (refine the IDL or accept the compile error).
-fn handlers_with_args_from_idl(idl_text: &str) -> Vec<(String, Vec<(String, String)>)> {
+pub(crate) fn handlers_with_args_from_idl(idl_text: &str) -> Vec<(String, Vec<(String, String)>)> {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(idl_text) else {
         return Vec::new();
     };
@@ -311,7 +284,7 @@ fn handlers_with_args_from_idl(idl_text: &str) -> Vec<(String, Vec<(String, Stri
 /// - `defaultValue.kind: "pdaValueNode"` → `pda_seeds: Some(vec![])` when
 ///   Codama does not carry the derivation inline (an empty seed tuple is also
 ///   a valid Anchor PDA and remains distinguishable only from the IDL shape).
-fn accounts_per_handler_from_idl(
+pub(crate) fn accounts_per_handler_from_idl(
     idl_text: &str,
 ) -> std::collections::HashMap<String, Vec<ParsedHandlerAccount>> {
     let mut out = std::collections::HashMap::new();
@@ -343,8 +316,9 @@ fn accounts_per_handler_from_idl(
             .iter()
             .filter_map(|a| {
                 let name = a.get("name").and_then(|n| n.as_str())?.to_string();
-                // Anchor ≥0.30 IDLs use `signer`/`writable`; legacy Anchor +
-                // Codama IRs use `isSigner`/`isWritable`. Accept either.
+                // Anchor ≥0.30 IDLs use `signer`/`writable`; Codama IRs use
+                // `isSigner`/`isWritable`; legacy Anchor uses `isSigner`/
+                // `isMut`. Accept all three.
                 let is_signer = a
                     .get("signer")
                     .or_else(|| a.get("isSigner"))
@@ -353,6 +327,7 @@ fn accounts_per_handler_from_idl(
                 let is_writable = a
                     .get("writable")
                     .or_else(|| a.get("isWritable"))
+                    .or_else(|| a.get("isMut"))
                     .and_then(|b| b.as_bool())
                     .unwrap_or(false);
                 let default = a.get("defaultValue");

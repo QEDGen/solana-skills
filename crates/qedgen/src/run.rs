@@ -362,6 +362,17 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 // paired-validator, lifecycle) — same set every runtime
                 // branch merges (#196).
                 findings.extend(run_helpers::runtime_agnostic_findings(prog_root)?);
+                // #235 IDL overlay: Pinocchio source discovery yields no
+                // handler list, so the on-disk Codama/Anchor IDL fills
+                // `handlers[]` (declarative metas only — no narrowing).
+                let mut idl_handlers = Vec::new();
+                let applicable = probe::applicable_categories_public(&probe::Runtime::Pinocchio);
+                let overlay = probe::idl_overlay::apply(
+                    prog_root,
+                    &probe::Runtime::Pinocchio,
+                    &mut idl_handlers,
+                    &applicable,
+                );
                 // --emit-spec-candidates: lift findings into proto-clauses,
                 // then cluster.
                 let clusters = if emit_spec_candidates {
@@ -387,13 +398,15 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 let output = probe::ProbeOutput {
                     project_root: Some(prog_root.display().to_string()),
                     runtime: Some(probe::Runtime::Pinocchio),
-                    applicable_categories: Some(probe::applicable_categories_public(
-                        &probe::Runtime::Pinocchio,
-                    )),
+                    handlers: (!idl_handlers.is_empty()).then_some(idl_handlers),
+                    applicable_categories: Some(applicable),
                     findings,
+                    candidates: overlay.drift_candidates,
                     engine_runs: vec![engine_run],
                     outcome,
                     clusters,
+                    idl_path: overlay.idl_path,
+                    derivable_idl: overlay.derivable_idl,
                     ..probe::ProbeOutput::envelope(probe::Mode::SpecLess)
                 };
                 // Include the raw catalogue so the subagent has both

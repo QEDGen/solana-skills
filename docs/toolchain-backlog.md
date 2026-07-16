@@ -863,3 +863,37 @@ the guard is wired — the regression gate).
   off the superseded post-snapshot-move assertion. All suites + fmt + clippy green.
 - **Verdict: FIXED in source.** Supersedes the R1 post-snapshot-move optimization and
   the R2 "FILE — upstream" verdict for the brownfield path.
+
+---
+
+## Session: probe framework-support review (2026-07-16)
+
+Source: design review of spec-less probe coverage across Anchor/Quasar/Pinocchio
+(no audit target; findings are code-reading evidence in-repo).
+
+### 🧩 P1 — spec-less bootstrap ignores on-disk IDL (Anchor/Quasar always have one)
+
+`probe --bootstrap` / `--program` builds the work-list purely from source parsing
+(`#[program]` parser, Shank detector, Pinocchio scanner) and never reads an IDL —
+yet Anchor emits `target/idl/*.json` on every build (idl-build default-on in 0.30),
+Quasar likewise, and qedgen already treats IDL as a default input on those runtimes
+elsewhere (`readiness --idl`, `crucible_brownfield` canonical-path probe,
+`spec --idl`/`interface --idl` #197). Accident of history, not design — the probe
+grew from the source-walk side (#196 fixed the same wiring gap for the
+runtime-agnostic scanners).
+- **Evidence:** `probe/mod.rs::run_bootstrap` (source-only discovery); zero IDL
+  reads anywhere under `probe/` outside `crucible_brownfield`; Pinocchio bootstrap
+  emits empty `handlers[]` despite the Crucible dispatcher knowing how to find a
+  Codama IDL on disk.
+- **Proposed:** opportunistic IDL-enrichment overlay — source stays ground truth;
+  IDL (a) enriches `handlers[]` with signer/writable flags + arg types,
+  (b) pre-narrows per-handler `applicable_categories`, (c) mismatches surface as
+  an `idl_source_drift` finding (never silently reconciled). No IDL → skip overlay.
+  Additive within schema v3.
+- **Verdict:** FILE (feature).
+- **Issue:** #235
+
+### 🩹 P2 — stale comment: `run_helpers.rs:839` calls `run_bootstrap` "IDL-aware"
+
+It is source-only today. Folded into #235 as a drive-by (fix the comment or make
+it true).

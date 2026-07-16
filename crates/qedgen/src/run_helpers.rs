@@ -836,12 +836,14 @@ pub(crate) fn run_anchor_probe(
     audit_dir: Option<&Path>,
 ) -> Result<()> {
     let applicable = probe::applicable_categories_public(&runtime_final);
-    // IDL-aware enumerator; empty on non-standard layouts (don't fail —
+    // Source-walk enumerator (+ #235 IDL overlay applied inside
+    // `run_bootstrap`); empty on non-standard layouts (don't fail —
     // ratify continues with what it has).
-    let handlers_opt = match probe::run_bootstrap(prog_root) {
-        Ok(bs) => bs.handlers,
-        Err(_) => None,
-    };
+    let (handlers_opt, idl_path, derivable_idl, drift_candidates) =
+        match probe::run_bootstrap(prog_root) {
+            Ok(bs) => (bs.handlers, bs.idl_path, bs.derivable_idl, bs.candidates),
+            Err(_) => (None, None, None, Vec::new()),
+        };
     let clusters = if emit_spec_candidates {
         let protos = anchor_extractor::extract_proto_clauses(prog_root)?;
         Some(cluster::cluster_protos(protos))
@@ -871,9 +873,12 @@ pub(crate) fn run_anchor_probe(
         handlers: handlers_opt,
         applicable_categories: Some(applicable),
         findings: runtime_agnostic_findings(prog_root)?,
+        candidates: drift_candidates,
         engine_runs: vec![engine_run],
         outcome,
         clusters,
+        idl_path,
+        derivable_idl,
         ..probe::ProbeOutput::envelope(probe::Mode::SpecLess)
     };
     println!("{}", serde_json::to_string_pretty(&output)?);
@@ -932,6 +937,9 @@ pub(crate) fn run_native_probe(
                         line: Some(sh.line),
                         applicable_categories: narrowed,
                         intent_tag,
+                        idl_accounts: None,
+                        idl_args: None,
+                        discovered_via: None,
                     }
                 })
                 .collect();
@@ -939,6 +947,14 @@ pub(crate) fn run_native_probe(
         }
         None => (None, None),
     };
+
+    // #235 IDL overlay: enrich Shank-discovered handlers with account/arg
+    // metas (declarative flags — no category narrowing on native), fill an
+    // empty handler list from an on-disk IDL, surface drift as candidates.
+    let mut handler_vec = handlers.unwrap_or_default();
+    let overlay =
+        probe::idl_overlay::apply(prog_root, &runtime_final, &mut handler_vec, &applicable);
+    let handlers = (!handler_vec.is_empty()).then_some(handler_vec);
 
     let engine_run = source_scan_engine_run(prog_root);
     let outcome = source_scan_outcome(&engine_run);
@@ -948,9 +964,12 @@ pub(crate) fn run_native_probe(
         handlers,
         applicable_categories: Some(applicable),
         findings: runtime_agnostic_findings(prog_root)?,
+        candidates: overlay.drift_candidates,
         engine_runs: vec![engine_run],
         outcome,
         clusters,
+        idl_path: overlay.idl_path,
+        derivable_idl: overlay.derivable_idl,
         dispatcher_kind,
         ..probe::ProbeOutput::envelope(probe::Mode::SpecLess)
     };
