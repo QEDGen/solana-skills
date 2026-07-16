@@ -163,6 +163,9 @@ pub fn construct_reproducer(
         // deterministic cross-check has no runnable reproducer, so it never
         // flows through this dispatcher.
         Category::IdlSourceDrift => Err(ConstructFailure::NotImplemented),
+        // #240: an unwired error variant is an *absence* (a guard never
+        // called) — born as a candidate in `dead_guard_probe`, no reproducer.
+        Category::UnwiredErrorVariant => Err(ConstructFailure::NotImplemented),
     }
 }
 

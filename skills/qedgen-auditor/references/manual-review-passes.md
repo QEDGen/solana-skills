@@ -234,22 +234,33 @@ output format in [report-and-grading.md](report-and-grading.md).
    the invariant) but no call site ever fires it, so the path it was meant
    to protect proceeds unchecked. This class is invisible to the per-category
    catalog and to 3a–3e: there IS no guard to find a coverage gap against;
-   the guard exists in name only. Run it on every audit — it is mechanical
-   and high signal.
+   the guard exists in name only.
 
-   1. **Enumerate the program's error enum.** List every variant of the
-      `errors.rs` (or equivalent) error type.
-   2. **Grep each variant for an enforcement call-site** in the program
-      tree: `require!` / `require_*!` / `err!` / `return Err(.. Variant ..)`
-      / a `match` arm that returns it. Auto-generated SDK / IDL / TypeScript
-      / doc references do NOT count — they mirror the enum, they don't
-      enforce it. Restrict the grep to the program crate's `src/`.
-   3. **Any variant with zero enforcement call-sites is a candidate.** Read
-      the variant name and the handler/path it was evidently meant to guard,
-      then ask: is the missing enforcement exploitable? A dead variant whose
-      invariant is load-bearing (a signer/authority/limit the path assumes)
-      is a real finding; a dead variant that a *different* guard already
-      covers redundantly is INFO.
+   **Mechanized (#240): qedgen runs the enumeration + grep for you.** The
+   probe envelope now carries the candidate list — every `#[error_code]`
+   variant with zero enforcement call-sites in `src/` appears as an
+   `unwired_error_variant` candidate (`handler` = the variant, `spec_silent_on`
+   = its definition `file:line`). Read them off `candidates[]`; do NOT
+   re-derive the sweep by hand — an earlier benchmark run showed free-form
+   manual review under-executes it (one run missed the class, another mis-rated
+   it). Your job is step 3 below: triage each candidate and grade it.
+
+   1. **Enumerate + grep — done by the probe.** (Historically manual:
+      enumerate the `errors.rs` error enum, grep each variant for a
+      `require!` / `require_*!` / `err!` / `return Err(.. Variant ..)` /
+      match-arm call-site in `src/`, excluding SDK/IDL/TS/doc mirrors. The
+      probe's `unwired_error_variant` candidates ARE this result.) On a tree
+      the probe cannot parse, fall back to running the grep by hand.
+   2. **Confirm the grep** for any candidate you intend to file — one bare-name
+      reference the sweep counts as enforcement can still be a non-enforcing
+      use (a log line, a display arm), so a variant the sweep left *un*flagged
+      is occasionally still dead; spot-check the load-bearing ones.
+   3. **Triage each candidate.** Read the variant name and the handler/path it
+      was evidently meant to guard, then ask: is the missing enforcement
+      exploitable? A dead variant whose invariant is load-bearing (a
+      signer/authority/limit the path assumes) is a real finding; a dead
+      variant that a *different* guard already covers redundantly, or a
+      deprecated/placeholder variant, is INFO.
 
    High signal-to-noise: a named-but-unused error is a strong signal that an
    intended check was dropped or never wired. Corpus: a defined-but-never-

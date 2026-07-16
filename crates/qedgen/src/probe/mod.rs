@@ -22,6 +22,7 @@ pub(crate) mod cluster;
 pub(crate) mod crucible_brownfield;
 pub(crate) mod crucible_probe;
 pub(crate) mod crucible_replay;
+pub(crate) mod dead_guard_probe;
 pub(crate) mod domain_account_overlay;
 pub(crate) mod domain_extract;
 pub(crate) mod domain_interview;
@@ -169,6 +170,15 @@ pub enum Category {
     /// interface). Deterministic cross-check; emitted as a candidate, not
     /// a finding — there is no runnable reproducer for drift by nature.
     IdlSourceDrift,
+    /// Dead-guard sweep (#240): an error-enum variant that is *defined* but
+    /// has no enforcement call-site anywhere in the crate's `src/` — the
+    /// maintainer named a check (the variant often spells out the invariant)
+    /// that no `require!` / `err!` / `return Err` ever fires, so the path it
+    /// was meant to protect proceeds unchecked. Deterministic (enumerate the
+    /// enum, grep each variant); emitted as a candidate, not a finding — an
+    /// absence has no runnable reproducer. The model triages and grades it at
+    /// the impact ceiling of the unguarded path, not a dead-variant floor.
+    UnwiredErrorVariant,
 }
 
 impl Category {
@@ -207,6 +217,7 @@ impl Category {
                 "external_authority_not_revoked_on_close"
             }
             Category::IdlSourceDrift => "idl_source_drift",
+            Category::UnwiredErrorVariant => "unwired_error_variant",
         }
     }
 }
@@ -1061,12 +1072,20 @@ pub fn run_bootstrap(project_root: &Path) -> Result<ProbeOutput> {
     // surface source/IDL handler-set drift as candidates.
     let overlay = idl_overlay::apply(project_root, &runtime, &mut handlers, &applicable);
 
+    // #240: deterministic dead-guard sweep — every `#[error_code]` variant
+    // defined but wired into no enforcement call-site in `src/` becomes an
+    // `unwired_error_variant` candidate for the model to triage. Runs on the
+    // spec-less envelope (source-scanner lens the bootstrap previously
+    // lacked); a no-op where there is no error enum.
+    let mut candidates = overlay.drift_candidates;
+    candidates.extend(dead_guard_probe::scan_program(project_root).unwrap_or_default());
+
     Ok(ProbeOutput {
         project_root: Some(project_root.display().to_string()),
         runtime: Some(runtime),
         handlers: Some(handlers),
         applicable_categories: Some(applicable),
-        candidates: overlay.drift_candidates,
+        candidates,
         idl_path: overlay.idl_path,
         derivable_idl: overlay.derivable_idl,
         dispatcher_kind,
