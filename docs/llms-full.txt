@@ -59,6 +59,7 @@ qedgen codegen --spec program.qedspec --all                 # everything
 qedgen codegen --spec program.qedspec --target pinocchio    # program skeleton (anchor | quasar | pinocchio)
 qedgen codegen --spec program.qedspec --lean                # Lean proofs only
 qedgen codegen --spec program.qedspec --kani                # Kani harnesses
+qedgen codegen --spec program.qedspec --kani-impl           # impl-targeted Kani: real Anchor handler vs symbolic accounts
 qedgen codegen --spec program.qedspec --proptest            # proptest harnesses
 ```
 
@@ -92,8 +93,12 @@ qedgen reconcile --spec program.qedspec                 # unified drift report a
 
 ```bash
 qedgen probe --program ./src                            # find category-coverage gaps + reproducible bugs (JSON for the auditor)
+qedgen probe --fuzz 300 --root ./my-program             # Crucible coverage-guided fuzzing (protocol-invariant crash-finder, no spec required)
 qedgen adapt --program ./my-anchor-program              # draft a .qedspec from an existing Anchor program
 qedgen interface --idl target/idl/dep.json              # generate a Tier-0 interface block for a CPI dependency
+qedgen probe --program ./src --emit-spec-candidates \
+  --audit-dir .qed/audit/<id>                           # emit the scaffold-to-spec interview working set
+qedgen ratify --audit-dir .qed/audit/<id>               # turn the answered interview into a .qedspec + side-files
 ```
 
 `probe` powers the harness-native auditor subagent: it surfaces real vulnerabilities first (each paired with a Kani/proptest/Mollusk reproducer), spec-coverage gaps second. Works on Anchor, native Rust, sBPF, and Pinocchio.
@@ -114,7 +119,7 @@ qedgen fill-sorry \
   --validate
 ```
 
-Sends each `sorry` location to the Leanstral model with focused context. Requires `MISTRAL_API_KEY`.
+Sends each `sorry` location to the Leanstral model with focused context. Requires `MISTRAL_API_KEY`. (`qedgen generate` is the older whole-proof Leanstral entry point; prefer `fill-sorry`.)
 
 ### Escalate to Aristotle (deep, minutes to hours)
 
@@ -137,6 +142,16 @@ qedgen asm2lean --input src/program.s --output formal_verification/Program.lean
 
 Generates a Lean module with `@[simp] def prog`, chunked `progAt` for large programs, `Int`-typed offsets, named constants, and auto-generated `ea_*`, `bridge_*`, and `insn_*` simp lemmas. Designed for the `wp_exec` one-shot tactic.
 
+### Discharge a spec effect against the compiled binary (qedgen ↔ qedsvm seam)
+
+```bash
+qedgen descriptor --spec program.qedspec --handler increment   # emit the name-level refinement descriptor (JSON, stdout)
+qedgen discharge --spec program.qedspec --handler increment \
+  --so target/deploy/program.so --qedlift <path-to-qedlift>    # prove the handler's effect against the compiled bytes
+```
+
+`discharge` is the one-command driver over the seam: it builds the descriptor from the `.qedspec`, then discharges it against the `.so` via qedsvm's `qedlift` (built with `--features qedrecover`). Currently covers single-field `+= <int literal>` effects; field offsets resolve from the IDL on the qedsvm side.
+
 ### Consolidate proofs
 
 ```bash
@@ -152,6 +167,14 @@ qedgen setup
 ```
 
 First-time Mathlib build takes 15-45 minutes. Subsequent builds reuse the cache.
+
+### Report a toolchain failure
+
+```bash
+qedgen feedback                                         # file a GitHub issue with the last failure's context
+```
+
+Bundles the qedgen version, OS/arch, detected runtime, the last command's stderr, and the relevant `.qedspec` excerpt; previews the issue and asks for confirmation before filing.
 
 ## Proof-Writing Workflow (SKILL.md)
 
@@ -212,7 +235,7 @@ After `import QEDGen.Solana` and `open QEDGen.Solana`:
 
 **Constants:** `TOKEN_PROGRAM_ID`, `SYSTEM_PROGRAM_ID`, `U8_MAX`, `U16_MAX`, `U32_MAX`, `U64_MAX`, `U128_MAX`
 
-**Functions:** `findByKey`, `findByAuthority`, `canWrite`, `transferCpiValid`, `closes`, `valid_u64`
+**Functions:** `findByKey`, `findByAuthority`, `canWrite`, `closes`, `valid_u64`; CPI predicates `targetsProgram`, `hasDiscriminator`, `hasNAccounts`, `wellFormed` (all rfl-provable on concrete `CpiInstruction` values)
 
 **Key lemmas:** `closes_is_closed`, `closes_was_open`, `closed_irreversible`, `valid_u64_zero`, `find_map_update_other`, `find_map_update_same`
 
@@ -320,7 +343,7 @@ A token escrow that lets two parties trade safely. Verified properties include a
 
 ### Escrow-split (Anchor, multi-file)
 
-The same escrow decomposed across `escrow.qedspec`, `handlers/initialize.qedspec`, `handlers/exchange.qedspec`, `handlers/cancel.qedspec`, `interfaces/token.qedspec`, and `properties.qedspec`. Demonstrates spec composition across files and upstream interface dependencies.
+The same escrow decomposed across `escrow.qedspec`, `handlers/initialize.qedspec`, `handlers/exchange.qedspec`, `handlers/cancel.qedspec`, and `properties.qedspec`, with the SPL Token interface imported from the bundled stdlib (`import Token from "spl"`) and pinned in `qed.toml` / `qed.lock`. Demonstrates spec composition across files and upstream interface dependencies.
 
 ### Multisig (Anchor)
 

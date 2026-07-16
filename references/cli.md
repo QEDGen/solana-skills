@@ -237,6 +237,7 @@ $QEDGEN check --regen-drift --examples-root examples/rust
 | `--no-cache` | bool | false | Force-refresh the github source cache for every imported dep. Wipes `~/.qedgen/cache/github/<org>/<repo>/<kind>/<ref>/` and re-clones. |
 | `--regen-drift` | bool | false | Regenerate bundled examples into temporary directories and fail if committed generated support code, harnesses, or `Spec.lean` drift. Also fails when an example has `.qed/` state or generated artifacts but no `qed.toml`. |
 | `--examples-root` | Path | `examples/rust` | Example root scanned by `--regen-drift` |
+| `--write` | bool | false | With `--regen-drift`, also write the regenerated content into the repo so committed example outputs match current codegen. Useful for rebasing PRs across codegen-touching releases. Never touches user-owned files (handler bodies, Spec.lean proofs) — only the codegen-owned set `--regen-drift` already compares. |
 | `--json` | bool | false | Machine-readable output |
 
 Lints fired by `check` include `[shape_only_cpi]` for `call
@@ -338,6 +339,7 @@ $QEDGEN verify --spec my_program.qedspec --check-upstream --upstream-stale-ok
 | `--kani-path` | Path | `./programs/tests/kani.rs` | Kani harness file |
 | `--lean` | bool | false | Run Lean proofs (`lake build`) |
 | `--lean-dir` | Path | `./formal_verification` | Lean project directory |
+| `--miri` | bool | false | Run Pinocchio Miri reproducers under `.qed/probes/pinocchio/*/repro_miri.rs` via `cargo +nightly miri test`. UB / aliasing / overflow diagnostics surface as findings; dual-execution divergence against Mollusk repros surfaces as Critical. |
 | `--fail-fast` | bool | false | Stop on the first failing backend |
 | `--json` | bool | false | Machine-readable output for CI |
 | `--check-upstream` | bool | false | Diff each pinned `upstream_binary_hash` against the on-chain `.so` via `solana program dump`. Skips deps without a pinned hash. Non-zero exit on any mismatch. |
@@ -768,6 +770,7 @@ $QEDGEN readiness --list-rules
 | Flag | Type | Default | Description |
 |---|---|---|---|
 | `--idl` | Path | required | Anchor IDL JSON (typically `target/idl/<program>.json`) |
+| `--quasar` | bool | auto | Treat `--idl` as a Quasar-emitted IDL rather than an Anchor IDL. Auto-detected when a `Quasar.toml` (and no shadowing `Anchor.toml`) lives in the current working directory; pass explicitly to force Quasar mode from elsewhere. |
 | `--list-rules` | bool | false | Print the catalog of P-rules applied and exit |
 | `--json` | bool | false | Machine-readable output |
 
@@ -800,6 +803,7 @@ $QEDGEN check-upgrade --list-rules
 | `--unsafe` | String | - | Acknowledge a specific finding so it reports as Additive (repeatable). Pass `--list-rules` to see the full flag catalog. |
 | `--migrated-account` | String | - | Declare an account as having a migration in source; demotes R003/R004 findings for that account to Additive (repeatable) |
 | `--realloc-account` | String | - | Declare an account as having `realloc = ...` in source; demotes R005 for that account to Additive (repeatable) |
+| `--quasar` | bool | auto | Treat both IDLs as Quasar-emitted rather than Anchor. Auto-detected from `Quasar.toml`; the flag forces Quasar mode when running from elsewhere. Mixed-framework diffs (Anchor old vs Quasar new) are out of scope. |
 | `--list-rules` | bool | false | Print the catalog of R-rules applied and exit |
 | `--json` | bool | false | Machine-readable output |
 
