@@ -382,6 +382,25 @@ carries per-handler `applicable_categories` + `intent_tag`
 narrowed by handler-body heuristic (S2.2 — authority-gated /
 trader-gated / permissionless).
 
+v2.44 (#235) adds the **IDL-enrichment overlay** to every spec-less
+envelope. Source discovery stays ground truth; when an on-disk IDL exists
+(canonical paths: `idl.json`, `program/idl.json`, `target/idl/*.json`,
+`idl/*.json` — Anchor legacy / 0.30 / Codama IR all accepted) the envelope
+reports it as `idl_path` and each matched `handlers[]` entry gains
+`idl_accounts` (signer/writable flags) + `idl_args` (name/type,
+discriminators elided). On Anchor/Quasar — where declared signer flags are
+runtime-enforced — the IDL derives an `intent_tag` for handlers the body
+classifier left untagged, narrowing `applicable_categories` (body
+classification always wins; Codama/Shank flags on other runtimes enrich
+but never narrow). Handler-set disagreement between source and IDL
+surfaces as `idl_source_drift` entries in `candidates[]` (both
+directions, never silently reconciled). Pinocchio bootstrap fills its
+otherwise-empty `handlers[]` from the Codama IDL (`discovered_via:
+"idl"`, `source_file` = the IDL path). No IDL on disk → overlay skipped;
+a `shank`/`codama` dep or codama config file without an on-disk IDL is
+reported as `derivable_idl: "shank" | "codama"` (one `shank idl` /
+`codama run` away — a hint for the agent, the CLI does not shell out).
+
 ```bash
 # Spec-aware
 $QEDGEN probe --spec my_program.qedspec

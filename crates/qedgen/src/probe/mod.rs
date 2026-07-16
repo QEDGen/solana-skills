@@ -29,6 +29,7 @@ pub(crate) mod domain_sequence;
 pub(crate) mod domain_sequence_binding;
 pub(crate) mod domain_sequence_seed;
 pub(crate) mod handler_intent;
+pub(crate) mod idl_overlay;
 pub(crate) mod lifecycle_probe;
 pub(crate) mod paired_validator_probe;
 pub(crate) mod pinocchio_probe;
@@ -161,6 +162,13 @@ pub enum Category {
     /// (`Revoke`, `SetAuthority::None`, `Assign`). The closed PDA remains
     /// registered as live permission on the external account.
     ExternalAuthorityNotRevokedOnClose,
+    /// Spec-less overlay (#235): the on-disk IDL and source handler
+    /// discovery disagree — a source handler the IDL doesn't declare
+    /// (undeclared surface, invisible to IDL-driven clients/audits) or an
+    /// IDL instruction with no matching source handler (stale shipped
+    /// interface). Deterministic cross-check; emitted as a candidate, not
+    /// a finding — there is no runnable reproducer for drift by nature.
+    IdlSourceDrift,
 }
 
 impl Category {
@@ -198,6 +206,7 @@ impl Category {
             Category::ExternalAuthorityNotRevokedOnClose => {
                 "external_authority_not_revoked_on_close"
             }
+            Category::IdlSourceDrift => "idl_source_drift",
         }
     }
 }
@@ -482,6 +491,21 @@ pub struct BootstrapHandler {
     /// Surfaced for auditor explainability when phrasing findings.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub intent_tag: Option<String>,
+    /// IDL overlay (#235): the instruction's account metas (signer /
+    /// writable flags) from the on-disk IDL. Anchor/Quasar flags are
+    /// runtime-enforced; Codama/Shank flags are declarative only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idl_accounts: Option<Vec<idl_overlay::IdlAccountMeta>>,
+    /// IDL overlay (#235): the instruction's args (name + type) from the
+    /// on-disk IDL, discriminator args elided.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idl_args: Option<Vec<idl_overlay::IdlArgMeta>>,
+    /// `"idl"` when this handler entry was filled from the IDL because
+    /// source discovery yielded nothing (Pinocchio bootstrap);
+    /// `source_file` then points at the IDL, not a `.rs` file. Absent for
+    /// source-discovered handlers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discovered_via: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -706,6 +730,17 @@ pub struct ProbeOutput {
     /// clustered proto-spec-clauses, not investigation candidates.)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub clusters: Option<Vec<crate::cluster::Cluster>>,
+    /// IDL overlay (#235, spec-less mode): on-disk IDL consumed to enrich
+    /// `handlers[]`, relative to `project_root`. Absent = no IDL found
+    /// (source-only envelope).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idl_path: Option<String>,
+    /// IDL overlay (#235, spec-less mode): `"shank"` / `"codama"` when no
+    /// IDL is on disk but project markers say one is mechanically
+    /// derivable (`shank idl` / `codama run`) — a hint for the agent, not
+    /// something the CLI shells out to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub derivable_idl: Option<String>,
     /// Structural shape of the native dispatcher when detected. Only
     /// `"shank_central_match"` is emitted; other runtimes leave it absent.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -734,6 +769,8 @@ impl ProbeOutput {
             // default suits a bare/empty envelope (bootstrap work list).
             outcome: ProbeOutcome::PassedWithCoverage,
             clusters: None,
+            idl_path: None,
+            derivable_idl: None,
             dispatcher_kind: None,
         }
     }
@@ -974,7 +1011,7 @@ pub fn run_bootstrap(project_root: &Path) -> Result<ProbeOutput> {
     }
 
     let runtime = detect_runtime(project_root);
-    let (handlers, dispatcher_kind) = match runtime {
+    let (mut handlers, dispatcher_kind) = match runtime {
         // Quasar's `#[program] mod` form is structurally compatible with
         // the Anchor parser — `#[instruction(discriminator = N)]` is an
         // extra attribute that doesn't disturb `pub fn` extraction.
@@ -1003,6 +1040,9 @@ pub fn run_bootstrap(project_root: &Path) -> Result<ProbeOutput> {
                             line: Some(sh.line),
                             applicable_categories: narrowed,
                             intent_tag,
+                            idl_accounts: None,
+                            idl_args: None,
+                            discovered_via: None,
                         }
                     })
                     .collect();
@@ -1014,11 +1054,20 @@ pub fn run_bootstrap(project_root: &Path) -> Result<ProbeOutput> {
     };
     let applicable = applicable_categories(&runtime);
 
+    // #235: opportunistic IDL overlay — enrich handlers with account/arg
+    // metas, narrow untagged Anchor/Quasar handlers via enforced signer
+    // flags, fill an empty (Pinocchio) handler list from the IDL, and
+    // surface source/IDL handler-set drift as candidates.
+    let overlay = idl_overlay::apply(project_root, &runtime, &mut handlers, &applicable);
+
     Ok(ProbeOutput {
         project_root: Some(project_root.display().to_string()),
         runtime: Some(runtime),
         handlers: Some(handlers),
         applicable_categories: Some(applicable),
+        candidates: overlay.drift_candidates,
+        idl_path: overlay.idl_path,
+        derivable_idl: overlay.derivable_idl,
         dispatcher_kind,
         ..ProbeOutput::envelope(Mode::SpecLess)
     })
@@ -1172,6 +1221,9 @@ fn single_crate_handlers(crate_root: &Path, project_root: &Path) -> Result<Vec<B
             line: None,
             applicable_categories: None,
             intent_tag: None,
+            idl_accounts: None,
+            idl_args: None,
+            discovered_via: None,
         })
         .collect())
 }
