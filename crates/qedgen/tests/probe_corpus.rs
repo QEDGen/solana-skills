@@ -20,8 +20,9 @@
 //! - `specless/<scenario>/` — brownfield project trees exercising the #235
 //!   IDL-enrichment overlay end to end (enrich, framework-enforced
 //!   narrowing, source/IDL drift, Pinocchio handler fill, derivable-IDL
-//!   hint on a marker-without-IDL and on an unbuilt framework checkout, and
-//!   the #240 dead-guard / unwired-error-variant sweep).
+//!   hint on a marker-without-IDL and on an unbuilt framework checkout,
+//!   the #240 dead-guard / unwired-error-variant sweep, and the #241
+//!   workspace-member ancestor walk to a repo-root `idl/`).
 //!
 //! These are pass/fail *regression* tests, not a metric: they pin that a
 //! shipped predicate keeps firing on its vuln fixture and stays silent on
@@ -323,6 +324,49 @@ fn pinocchio_codama_overlay_fills_handlers_from_idl() {
             h.get("name")
         );
     }
+}
+
+/// #241: a workspace member probed at program-dir granularity
+/// (`--root programs/foo`) with its IDL at the *repo* root (`idl/foo.json`)
+/// still resolves `idl_path` via the ancestor walk and applies the overlay —
+/// previously this cwd reported `derivable_idl: "anchor"` with no `idl_path`
+/// while probing the repo root enriched fine.
+#[test]
+fn workspace_member_program_root_finds_repo_root_idl() {
+    let program_root = PathBuf::from(specless_root("anchor-workspace-member"))
+        .join("programs")
+        .join("foo")
+        .display()
+        .to_string();
+    let env = probe(&["--bootstrap", "--root", &program_root]);
+
+    assert_eq!(env.get("runtime").and_then(Value::as_str), Some("anchor"));
+    let idl_path = env
+        .get("idl_path")
+        .and_then(Value::as_str)
+        .expect("idl_path must resolve from the workspace root");
+    assert!(
+        idl_path.ends_with("idl/foo.json"),
+        "unexpected idl_path: {idl_path}"
+    );
+    assert!(
+        env.get("derivable_idl").is_none(),
+        "a consumed IDL must suppress the derivable hint"
+    );
+
+    // The overlay applies as if the IDL were local: enrichment + narrowing.
+    let init = handler(&env, "initialize");
+    assert_eq!(
+        init.get("intent_tag").and_then(Value::as_str),
+        Some("authority_gated")
+    );
+    assert!(init.get("idl_accounts").is_some());
+    assert_eq!(
+        handler(&env, "crank")
+            .get("intent_tag")
+            .and_then(Value::as_str),
+        Some("permissionless")
+    );
 }
 
 /// A `shank` dep with no on-disk IDL reports `derivable_idl: "shank"` and no
