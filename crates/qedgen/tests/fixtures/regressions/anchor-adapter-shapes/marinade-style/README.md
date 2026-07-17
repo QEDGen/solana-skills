@@ -23,8 +23,10 @@ The adapter:
 Method-shape handlers seal end-to-end, the same as free-fn shapes —
 the proc-macro tries `syn::ItemFn` first and falls back to
 `syn::ImplItemFn`, so `#[qed]` works in either position. Run
-`qedgen adapt --program <path> --spec <stake.qedspec>` to get the
-sealed attribute lines for paste, including the `accounts_*` triplet.
+`qedgen stamp --program <path> --spec <stake.qedspec>` (formerly
+`qedgen adapt --spec`, now deprecated; `stamp` additionally gates on
+`.qed/verify-evidence.json`) to get the sealed attribute lines for
+paste, including the `accounts_*` triplet.
 
 ## Reproduce
 

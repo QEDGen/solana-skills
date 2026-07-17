@@ -106,6 +106,11 @@ $QEDGEN interface --idl target/idl/jupiter.json --vendor
 | `--vendor` | bool | false | Drop into `.qed/interfaces/<program>.qedspec`. Requires a discoverable `.qed/` ancestor. |
 
 ### `spec`
+**DEPRECATED (slated for v3.0 removal).** The IDL is now an evidence
+*source* for `qedgen probe` — the hypothesizer consumes IDL signer flags
+and `has_one` relations directly and offers confirmable clauses instead
+of a TODO shell. Remains functional in v2.x with a runtime warning.
+
 Scaffold a `.qedspec` from an Anchor IDL JSON. (For Tier-0 interface
 scaffolding from an IDL — program ID + handler signatures only — prefer
 `interface`, which is more focused.) v2.10 dropped the SPEC.md
@@ -124,6 +129,14 @@ $QEDGEN spec --idl target/idl/program.json --output-dir ./formal_verification
 | `--output-dir` | Path | `./formal_verification` | Output directory; `<idl-stem>.qedspec` is written inside |
 
 ### `adapt`
+**DEPRECATED (slated for v3.0 removal).** `adapt` bundled two unrelated
+jobs and both now have honest homes: scaffold mode is subsumed by
+`qedgen probe --emit-spec-candidates --audit-dir` (elicitation-first —
+confirmable, evidence-anchored hypotheses instead of TODO stubs, and the
+same skeleton written as a byproduct), and attribute mode is
+[`stamp`](#stamp) (same emission plus the recorded-verification gate).
+Both modes remain functional in v2.x with a runtime warning.
+
 Brownfield adapter for existing Anchor programs. Two modes:
 
 - **Scaffold mode** (`--program <c>` only): parses `<c>/src/lib.rs`, finds
@@ -165,6 +178,45 @@ $QEDGEN adapt --program ./programs/my_program \
 | `--spec` | Path | - | Existing `.qedspec`. Switches to attribute-emit mode |
 | `--out` | Path | stdout | Output path. In scaffold mode writes a `.qedspec`; in attribute mode writes a `// === handler … ===` report |
 | `--handler` | `NAME=PATH` | - | Manually point an unrecognized handler at its actual implementation. Format: `<handler>=<rust_path>` where path is `module::sub::function` or just `function`. Repeatable. Wins over the classifier's choice for any outcome (Inline / FreeFn / Method / Unrecognized) |
+
+### `stamp`
+v2.44 — stamp `#[qed(verified, …)]` drift attributes for an
+already-verified spec: the post-verification half of the old `adapt`,
+under a name that says what it does. Emits one attribute per handler
+(body hash + spec-block hash, plus the Accounts-struct seal when the
+`Context<X>` struct is found) to paste above each `pub fn`; the
+`qedgen-macros` proc macro recomputes both at compile time and fires
+`compile_error!` on drift. Anchor-only (it round-trips through the
+Anchor project parser to locate each handler body).
+
+`stamp` runs **after** verification and proves nothing itself. Its one
+new behavior over `adapt --spec` is the gate: it requires recorded
+implementation-verified evidence — `.qed/verify-evidence.json`, written
+by every `qedgen verify` run — with (a) a `spec_hash` matching the spec
+being stamped byte-for-byte, (b) a `program_hash` matching the current
+program source tree, and (c) at least one passing **implementation-bound**
+backend (miri or a `kani_impl*.rs` harness). Checking/model-tested results
+and bug-oriented `--probe-repros` are not eligible; an edited spec or
+program invalidates the evidence until re-verified. So
+the division of labor is: a source-bound backend establishes the
+implementation claim, `stamp` freezes it, the compiler guards the
+freeze.
+
+```bash
+# 1. verify with an implementation-bound backend (records evidence)
+$QEDGEN verify --spec my_program.qedspec --program programs/my_program --kani --kani-path programs/my_program/src/kani_impl.rs
+
+# 2. stamp — refuses unless the recorded evidence matches and is impl-bound
+$QEDGEN stamp --program programs/my_program --spec my_program.qedspec
+```
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--program` | Path | required | Program crate (directory holding `Cargo.toml`, with `src/lib.rs` inside) |
+| `--spec` | Path | required | The verified `.qedspec` to stamp against |
+| `--out` | Path | stdout | Output path for the `// === handler … ===` attribute report |
+| `--handler` | `NAME=PATH` | - | Manually point an unrecognized handler at its implementation (same semantics as `adapt`) |
+| `--evidence` | Path | `<spec_dir>/.qed/verify-evidence.json` | Override the verification-evidence path |
 
 ### `check`
 Validate a spec — lint, coverage, drift, and verification report. Default
@@ -306,6 +358,16 @@ flags, runs every backend whose artifact is present on disk
 `./formal_verification/`). Use `--proptest` / `--kani` / `--lean` to
 target one backend.
 
+v2.44 — every run also records its evidence to
+`<spec_dir>/.qed/verify-evidence.json` (spec hash, optional program-source
+hash, per-backend status, and whether an **implementation-bound** backend
+passed: miri, or Kani only when the `--kani-path` file is a
+`kani_impl*.rs` harness). Plain proptest/Kani/Lean exercise the spec model,
+while `--probe-repros` confirms bug findings; neither category counts. This
+record is what [`stamp`](#stamp) gates
+on; it is written on pass and fail alike (a failed run is still evidence
+of what ran) and a failed write never turns a green verify red.
+
 ```bash
 # Auto-detect: every backend whose artifact exists on disk
 $QEDGEN verify --spec my_program.qedspec
@@ -333,6 +395,7 @@ $QEDGEN verify --spec my_program.qedspec --check-upstream --upstream-stale-ok
 | Flag | Type | Default | Description |
 |---|---|---|---|
 | `--spec` | Path | required | Spec file (`.qedspec`) |
+| `--program` | Path | none | Program crate to hash into implementation-bound evidence; required before `stamp` can consume that evidence |
 | `--proptest` | bool | false | Run proptest harnesses (`cargo test --release`) |
 | `--proptest-path` | Path | `./programs/tests/proptest.rs` | Proptest harness file |
 | `--kani` | bool | false | Run Kani BMC harnesses (`cargo kani --tests`) |
@@ -418,6 +481,51 @@ so it is a candidate, never a reproducer-backed finding; the
 of the unguarded path, not a dead-variant floor). No `#[error_code]` enum →
 no candidates (clean no-op, not a false positive).
 
+v2.44 adds **spec elicitation** (design:
+`docs/design/spec-elicitation-prd.md`) to every spec-less envelope,
+default-on (no flag):
+
+- `run_id` — stable per-run identifier (`run-<program>-<unix-secs>`),
+  threaded through the audit working set so `ratify` outputs join back to
+  the probe run (funnel conversion, time-to-first-check).
+- `hypotheses[]` — evidence-anchored, confirmable invariant hypotheses
+  about *this* program from the deterministic hypothesizer
+  (`probe/hypothesize.rs`). Seven classes: `authorization` (a single
+  unambiguous IDL signer plus a stored-authority binding — body
+  key-comparison / assert helper, an IDL `has_one` relation naming the
+  signer, or an authority-named enforced signer); `lifecycle_init_once`
+  (an init-shaped handler plus an init guard in the body or an Anchor
+  `#[account(init, …)]` constraint; `init_if_needed` does not count);
+  `arithmetic_bound` (a bound check the body already enforces —
+  `require!(param <= X, Err)` or the if-return-Err shape — lifted into a
+  question; never guessed from a type width or name); `conservation` (a
+  paired forward/reverse operation — deposit/withdraw etc. — with no
+  supply-changing flow anywhere in the scan; abstains the moment any
+  issuance/destruction flow exists); `cpi_integrity` (a pinned SPL-token
+  callee plus a resolved `Transfer { from, to, authority }` role
+  mapping; abstains when either is unresolved); `unwired_guard` (a #240
+  dead-guard candidate flipped into "you named this check but never
+  wired it — should it hold?"; `accept` routes to a missing-enforcement
+  finding, `reject` records a dead variant); and `state_machine` (an IDL
+  status enum carried by a state struct field — exactly one, else the
+  representation is ambiguous and it abstains — lifted into the spec's
+  `type State`). Precision rule: **no evidence anchor
+  → no hypothesis** — a handler name alone never fires. Each record
+  carries `id` (`h-<8hex>-<class>-<handler>`, stable across runs),
+  `claim`, `evidence[]` (`{kind, detail, source}`), `payoff`, `backend`,
+  `assurance` (always `checking` at emission — §3.1 assurance contract),
+  `confidence`, and an optional `lowering` recipe `ratify` executes on
+  accept.
+- `spec_readiness` — `{hypotheses_total, by_class, by_confidence,
+  lowerable}` supply counts.
+- A ranked human-readable hypothesis summary (claim + evidence + payoff +
+  backend + id) prints on **stderr**; stdout JSON stays the agent
+  surface.
+
+Deep cross-procedure hypothesis formation (state-machine completeness,
+conservation across paths) remains the agent's job; the binary owns only
+the deterministic, evidence-anchored classes.
+
 ```bash
 # Spec-aware
 $QEDGEN probe --spec my_program.qedspec
@@ -482,7 +590,7 @@ $QEDGEN probe --fuzz 300 --crucible-mode domain \
 | `--program` | Path | optional | Program audit mode entry point. Auto-routes via `Cargo.toml` detection to the runtime's dedicated extractor: Pinocchio → site catalogue + SAFETY metadata (v2.19), Anchor/Quasar → anchor extractor (scaffold-to-spec interview), native/qedgen-codegen → native extractor; runtimes without an extractor fall back to the generic bootstrap envelope. Static engine only: conflicts with `--spec`, `--bootstrap`, `--root`, and `--fuzz` (fuzz brownfield targets via `--fuzz <budget> --root <path>`; merge the two JSON outputs to combine engines). |
 | `--runtime` | enum | auto | Override runtime detection. Values: `pinocchio`, `anchor`, `quasar`, `native`, `sbpf`. Pinocchio, Anchor/Quasar, and native each have a dedicated extractor under `--program`. `sbpf` identifies the target and returns generic metadata only; it does not make assembly auditable by the source auditor. |
 | `--emit-spec-candidates` | bool | false | Lift probe evidence into candidate spec clauses in `clusters[]` for the scaffold-to-spec interview. This field is additive within the schema-v3 envelope and is distinct from `candidates[]`: clusters are proto-spec clauses; candidates are unconfirmed security leads. |
-| `--audit-dir` | Path | optional | When paired with `--emit-spec-candidates`, write the resumable audit working set: `interview.md`, `clusters.json`, `skeleton.qedspec`, `domain-dossier.{json,md}`, `domain-interview.{json,md}`, and `run-manifest.json`. `qedgen ratify --audit-dir <path>` consumes this directory and adds the ratified handoff/sequence artifacts. Conventionally `.qed/audit/<timestamp>/`. |
+| `--audit-dir` | Path | optional | When paired with `--emit-spec-candidates`, write the resumable audit working set: `hypotheses.json` (run_id + the elicitation hypothesis set — ratify's lowering input), `clusters.json`, `skeleton.qedspec`, `domain-dossier.{json,md}`, `domain-interview.{json,md}`, `run-manifest.json` (carries `run_id` + `spec_readiness`), and the legacy `interview.md`. `qedgen ratify --audit-dir <path>` consumes this directory and adds the ratified handoff/sequence artifacts. Conventionally `.qed/audit/<timestamp>/`. |
 | `--fuzz` | u64 | none | Wall-clock seconds. Runs the coverage-guided fuzz engine INSTEAD of the pattern-match predicates for that invocation (run `probe --spec` separately and merge the JSON to combine engines). Requires `--spec <path>` (spec-driven invariants) OR `--root <project-path>` (brownfield protocol-mode); passing both layers spec invariants on top of protocol guards. Findings come back in the same `findings[]` with a `Reproducer::Crucible`. Each minimized crash is replayed and classified from the harness's `[FUZZ_FINDING]` marker rather than a last-action heuristic: the reproducer carries the named `invariant_id` when replay identified one, `category_tag` reflects the evidence (`invariant_violation`, `property_violation`, a protocol guard, `assertion_failure`, or `unclassified_crash`), non-reproducing crashes are dropped, and `coverage.replay_success` reports replay health. Budget `0` emits the selected harness and returns `outcome: dry_run` without building or fuzzing. |
 | `--harness-dir` | Path | `./fuzz/<prog>/` | Crucible harness directory. Matches `codegen --crucible` output. An existing harness is reused, never regenerated (agent-filled `todo!()` account literals survive re-runs); delete it to pick up spec or binding changes. When the directory leaf differs from the program name it is treated as a parent and the `<prog>` leaf is appended. |
 | `--no-smoke` | bool | false | Skip the 30s smoke pre-flight that stops early on high-rate duplicate findings. |
@@ -494,33 +602,61 @@ $QEDGEN probe --fuzz 300 --crucible-mode domain \
 | `--execute-repros` | bool | false | **#228** — build and run generated reproducer harnesses, promoting a candidate to a finding only when its harness actually reproduces. **Off by default**: the default `probe --spec` only *generates* harnesses under `target/qedgen-repros/<category>/<handler>/` and leaves each candidate carrying a `repro_harness` pointer (path + exact `rustc … && ./repro` invocation + `failing_input`) for the agent/CI to run — so the default path performs no builds and no execution (agent-authored-repros default preserved). Currently wired for `ArithmeticOverflowWrapping` (`+=?` / `-=?`): the harness is a deterministic boundary-value program that exits 0 iff the wrap reproduces. On promotion the finding carries a `Reproducer::BoundaryValue`. A `reproducers` engine run reports counts (generated / executed / reproduced / build errors); `blocked` when generated-not-run. Requires `rustc` on PATH (soft dependency). |
 
 ### `ratify`
-v2.19 — consume the working set emitted by `qedgen probe
---emit-spec-candidates --audit-dir <path>` (an `interview.md` checked
-by the user, a `clusters.json`, and a `skeleton.qedspec`) and produce
-the final `.qedspec`. Decisions on `interview.md` route as follows:
+Consume the working set emitted by `qedgen probe --emit-spec-candidates
+--audit-dir <path>` and produce the final `.qedspec`. Since v2.44 the
+primary answer surface is **structured**: the in-harness interview's
+answers land in `<audit_dir>/answers.json` —
+`{"run_id": …, "answers": [{"id", "decision", "note"}]}` — addressing
+elicitation hypotheses (`h-…`, from `hypotheses.json`) and scaffold
+clusters (`c-…`, from `clusters.json`) uniformly. When `answers.json`
+resolves, the legacy user-edited `interview.md` is not consulted (and not
+required); audit dirs from older probes keep working through the
+`interview.md` path unchanged.
 
-- `[x] accept` → cluster's candidate clause merged into the handler
-  body or top-level invariant set of the output `.qedspec`.
-- `[x] narrow` → clause emitted per-handler instead of program-wide.
-- `[x] reject` → cluster dropped from the spec, but appended to
-  `<project_root>/.qed/plan/scoping.md` with the user's rationale
-  (the rejected-decision log).
-- `[x] bug` → emitted as a finding file under
-  `<project_root>/.qed/findings/scaffold-to-spec-<id>.md`. Used when
-  the implicit precondition the cluster surfaced is a real
-  missing-enforcement bug, not a spec gap.
+Decisions route as follows:
+
+- `accept` → cluster clauses merge as before; **confirmed hypotheses are
+  lowered to executable clauses** (authorization → `auth <signer>`
+  injected into the handler body; lifecycle → an init-shaped
+  `: State.<pre> -> State.<post>` transition resolved against the
+  skeleton's own `type State` variants, rewriting placeholder
+  self-loops). Each lowering commits only if the spec still parses and
+  introduces no new Error-severity lints; otherwise the hypothesis is
+  reported **`confirmed, not executable`** and stays in the dossier —
+  never inserted as a placeholder comment.
+- `narrow` → clusters only; clause emitted per-handler instead of
+  program-wide.
+- `reject` → appended to `<project_root>/.qed/plan/scoping.md` with the
+  rationale (clusters and hypotheses alike).
+- `bug` → a finding file: clusters →
+  `.qed/findings/scaffold-to-spec-<id>.md`, hypotheses →
+  `.qed/findings/elicitation-<id>.md` (the invariant is intended but
+  unenforced — elicitation doubling as a bug-catcher).
+
+The check gate is mandatory: the ratified spec **must parse** (hard
+error otherwise) and completeness-lint counts are printed beside the
+result with its assurance level (`checking`). Ratify also writes
+`elicitation-outcome.json` (`run_id`, per-hypothesis outcomes,
+`time_to_ratify_seconds`, check counts) into the audit dir — the
+conversion half of the Phase-0 funnel instrumentation.
 
 ```bash
-$QEDGEN ratify --audit-dir .qed/audit/2026-05-16 \
+# Structured answers (in-harness interview; the agent writes answers.json)
+$QEDGEN ratify --audit-dir .qed/audit/2026-07-17 \
               --out my_program.qedspec
+
+# Also generate the spec-model proptest harness from the ratified spec
+$QEDGEN ratify --audit-dir .qed/audit/2026-07-17 --proptest
 ```
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
-| `--audit-dir` | Path | required | Directory previously written by `probe --emit-spec-candidates --audit-dir`. Must contain `interview.md`, `clusters.json`, `skeleton.qedspec`. |
+| `--audit-dir` | Path | required | Directory previously written by `probe --emit-spec-candidates --audit-dir`. Must contain `clusters.json` and `skeleton.qedspec`, plus either `answers.json` (structured) or the legacy `interview.md`. |
 | `--out` | Path | derived | Output path for the generated `.qedspec`. Defaults to `<project_root>/<project_name>.qedspec`, derived from the audit-dir grandparent. |
-| `--scoping-out` | Path | `<project_root>/.qed/plan/scoping.md` | Override the rejected-cluster scoping-notes path (append-on-write). |
-| `--findings-dir` | Path | `<project_root>/.qed/findings/` | Override the directory bug-flagged cluster findings are written to. |
+| `--scoping-out` | Path | `<project_root>/.qed/plan/scoping.md` | Override the rejected-answer scoping-notes path (append-on-write). |
+| `--findings-dir` | Path | `<project_root>/.qed/findings/` | Override the directory bug-flagged findings are written to. |
+| `--answers` | Path | `<audit_dir>/answers.json` if present | Structured answer set. When resolved, `interview.md` is ignored. |
+| `--proptest` | bool | false | Also generate the spec-model proptest harness at `<audit_dir>/model-proptest.rs`. Generation is `checking`-level evidence that the spec lowers; **running** the harness (`qedgen verify --proptest` in a scaffolded project) is what earns the `model-tested` label — never conflate the two. |
 
 ## Code generation
 

@@ -6,7 +6,7 @@
       "name": "initialize",
       "accounts": [
         { "name": "admin", "signer": true, "writable": true },
-        { "name": "vault", "writable": true }
+        { "name": "vault", "writable": true, "relations": ["admin"] }
       ],
       "args": [ { "name": "cap", "type": "u64" } ]
     },

@@ -1,7 +1,11 @@
 # `qedgen adapt` — brownfield demo
 
 Worked example of pulling a `.qedspec` skeleton out of an existing
-Anchor program. Pairs with `qedgen adapt` (v2.9 M4.3).
+Anchor program. Pairs with `qedgen adapt` (v2.9 M4.3). Note:
+`qedgen adapt --program` is deprecated (v2.x warning, v3.0 removal) —
+the current brownfield front door is `qedgen probe --emit-spec-candidates`
+→ `answers.json` → `qedgen ratify`; this fixture pins the deprecated
+path's output for as long as it ships.
 
 ## Layout
 

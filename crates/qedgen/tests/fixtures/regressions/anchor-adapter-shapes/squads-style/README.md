@@ -23,8 +23,9 @@ The adapter:
 
 Same shape as the Marinade-style fixture: method-shape handlers seal
 end-to-end via the proc-macro's `ItemFn`/`ImplItemFn` fallback.
-`qedgen adapt --spec` emits sealed attributes ready to paste above
-the impl methods.
+`qedgen stamp` (formerly `qedgen adapt --spec`, now deprecated;
+`stamp` additionally gates on `.qed/verify-evidence.json`) emits
+sealed attributes ready to paste above the impl methods.
 
 ## Reproduce
 

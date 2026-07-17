@@ -430,8 +430,10 @@ What lands downstream:
   sighash + AccountMeta synthesis.
 - **First-class Anchor support** — `#[qed]` on existing Anchor handlers
   (free-fn, type-associated, accounts-method, and inline shapes),
-  brownfield `qedgen adapt` and `qedgen check --anchor-project`. v2.9
-  headline. Anchor, Quasar, and Pinocchio all emit a full program
+  brownfield `qedgen adapt` (since deprecated — spec elicitation via
+  `qedgen probe --emit-spec-candidates` → `answers.json` → `qedgen ratify`
+  is the current front door; v3.0 removes `adapt`) and
+  `qedgen check --anchor-project`. v2.9 headline. Anchor, Quasar, and Pinocchio all emit a full program
   scaffold (Pinocchio: `#![no_std]` + zeropod state + SPL Token CPIs).
   Imported account-type mirrors are not yet emitted for Pinocchio (a
   clean error, not a panic).

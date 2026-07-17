@@ -210,7 +210,17 @@ Bash: qedgen probe --program <root> \
         --audit-dir .qed/audit/<ts>/
 ```
 
-Writes eight files to the audit dir:
+Every spec-less probe run also carries, additively in the schema-v3
+envelope on stdout: `run_id` (stable per-run identifier for funnel
+joins), `hypotheses[]` (evidence-anchored `InvariantHypothesis`
+records: claim + evidence + payoff + backend + confidence), and
+`spec_readiness` (counts by class/confidence + lowerable). A ranked
+human-readable hypothesis summary prints on stderr by default.
+
+Writes nine files to the audit dir:
+- `hypotheses.json` — `{schema_version, run_id, generated_at_unix,
+  spec_readiness, hypotheses}`: the binary's evidence-anchored
+  hypothesis records (authorization, lifecycle_init_once, arithmetic_bound, conservation, cpi_integrity, unwired_guard, state_machine).
 - `interview.md` — markdown checkboxes, one section per cluster.
 - `clusters.json` — full schema-v3 envelope.
 - `skeleton.qedspec` — pre-interview structural skeleton (handler
@@ -222,8 +232,30 @@ Writes eight files to the audit dir:
 - `domain-interview.json` — deterministic stable-ID questions and the canonical
   answer array consumed by `qedgen ratify`.
 - `domain-interview.md` — readable rendering for file-driven review.
-- `run-manifest.json` — initial lane status; ordinary probe is complete and
-later verification lanes are resumable.
+- `run-manifest.json` — initial lane status plus `run_id`,
+  `spec_readiness`, and an `artifacts.hypotheses` entry; ordinary probe is
+  complete and later verification lanes are resumable.
+
+`qedgen ratify --audit-dir <dir>` consumes `<dir>/answers.json` (or
+`--answers <path>`): `{"run_id": …, "answers": [{"id": "<h-… or c-…>",
+"decision": "accept|narrow|reject|bug", "note": "…"}]}` — hypothesis and
+legacy cluster IDs addressed uniformly. When `answers.json` is present,
+`interview.md` is neither consulted nor required; the legacy interview.md
+path still works when it is absent. On `accept`, ratify lowers hypotheses
+to real executable clauses (auth → `auth <signer>` in the handler body;
+lifecycle → a `: State.<pre> -> State.<post>` transition annotation
+resolved against the skeleton's State ADT). Each lowering is committed
+only if the spec still parses and adds no new Error-severity lints;
+otherwise the hypothesis is reported `confirmed, not executable` and kept
+in the dossier. The final spec must parse (hard gate); lint counts are
+printed. `reject` → `.qed/plan/scoping.md`; `bug` →
+`.qed/findings/elicitation-<id>.md`. Ratify writes
+`elicitation-outcome.json` (`run_id`, per-hypothesis outcomes,
+time-to-ratify, check error/warning counts) into the audit dir.
+`ratify --proptest` additionally generates the spec-model proptest
+harness at `<dir>/model-proptest.rs` — generation is `checking`-level
+evidence only; *running* the harness is what earns `model-tested`, and
+never render model-tested as "proved on your program".
 
 `qedgen ratify` additionally writes `spec-handoff.json`, separating emitted
 structural clauses, ratified domain facts that still need authoring, regression
@@ -249,13 +281,16 @@ generated harness first and records the deterministic account overlay; only
 then may it omit those compiled bindings from the seed bytes. Conflicting or
 unknown fixture targets stop replay rather than being silently discarded.
 
-### Step 2 — auto-ratify *high-confidence* clusters
+### Step 2 — auto-ratify *high-confidence* entries
 
-Agent edits `skeleton.qedspec` in place, merging only high-confidence
-clusters into handler bodies / top-level invariants. **Do not prompt
-the user here** — Phase 2 hasn't fired yet.
+In this headless (pre-Phase-2) mode, write `<audit-dir>/answers.json`
+accepting only literal, source-anchored high-confidence entries
+(hypothesis `h-…` or cluster `c-…` IDs), then run
+`qedgen ratify --audit-dir <dir>` to apply them to `skeleton.qedspec`.
+Everything else stays deferred in the envelope. **Do not prompt the
+user here** — Phase 2 hasn't fired yet.
 
-**High-confidence = the cluster has an explicit code anchor.**
+**High-confidence = the entry has an explicit code anchor.**
 Specifically:
 
 - `account_signer_check` — cluster names a specific account binding

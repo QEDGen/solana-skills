@@ -221,6 +221,78 @@ fn anchor_idl_overlay_enriches_narrows_and_reports_drift() {
     );
 }
 
+/// Spec elicitation (PRD Phases 0–1): every spec-less envelope carries a
+/// `run_id` + `spec_readiness`, and the hypothesizer fires only on
+/// evidence-anchored claims — `initialize` gets an authorization
+/// hypothesis (single authority-named enforced signer) and a
+/// lifecycle_init_once hypothesis (Anchor `init` constraint), while the
+/// permissionless `crank` and the evidence-free `emergency_withdraw`
+/// yield nothing (precision rule: no anchor → no hypothesis).
+#[test]
+fn specless_envelope_carries_evidence_anchored_hypotheses() {
+    let env = probe(&["--bootstrap", "--root", &specless_root("anchor-idl")]);
+
+    let run_id = env.get("run_id").and_then(Value::as_str).unwrap();
+    assert!(run_id.starts_with("run-"), "run_id: {run_id}");
+
+    let readiness = env.get("spec_readiness").expect("spec_readiness present");
+    assert_eq!(readiness["hypotheses_total"], 3, "{readiness:#}");
+    assert_eq!(readiness["lowerable"], 3);
+    assert_eq!(readiness["by_class"]["authorization"], 1);
+    assert_eq!(readiness["by_class"]["lifecycle_init_once"], 1);
+    assert_eq!(readiness["by_class"]["arithmetic_bound"], 1);
+
+    let hypotheses = env
+        .get("hypotheses")
+        .and_then(Value::as_array)
+        .expect("hypotheses present");
+    let auth = hypotheses
+        .iter()
+        .find(|h| h["class"] == "authorization")
+        .expect("authorization hypothesis");
+    assert_eq!(auth["handler"], "initialize");
+    assert_eq!(auth["lowering"]["kind"], "auth_clause");
+    assert_eq!(auth["lowering"]["signer_account"], "admin");
+    assert!(auth["id"].as_str().unwrap().starts_with("h-"));
+    // Phase 4: the IDL `has_one` relation (vault → admin) is a
+    // stored-authority binding, lifting confidence to high.
+    assert!(auth["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["kind"] == "idl_has_one_binding"));
+    assert_eq!(auth["confidence"], "high");
+
+    let lifecycle = hypotheses
+        .iter()
+        .find(|h| h["class"] == "lifecycle_init_once")
+        .expect("lifecycle hypothesis");
+    assert_eq!(lifecycle["handler"], "initialize");
+    assert!(lifecycle["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["kind"] == "anchor_init_constraint"));
+
+    // Phase 5: the held `require!(cap <= 1_000_000, …)` bound lifts into
+    // an executable arithmetic_bound hypothesis.
+    let arith = hypotheses
+        .iter()
+        .find(|h| h["class"] == "arithmetic_bound")
+        .expect("arithmetic_bound hypothesis");
+    assert_eq!(arith["handler"], "initialize");
+    assert_eq!(arith["lowering"]["kind"], "requires_bound");
+    assert_eq!(arith["lowering"]["param"], "cap");
+    assert_eq!(arith["lowering"]["bound"], "1000000");
+    assert_eq!(arith["lowering"]["error"], "CapTooHigh");
+
+    // Precision: no hypothesis for the permissionless or evidence-free
+    // handlers.
+    assert!(hypotheses
+        .iter()
+        .all(|h| h["handler"] != "crank" && h["handler"] != "emergency_withdraw"));
+}
+
 /// Pinocchio: source discovery yields no handlers, so the Codama IDL fills
 /// `handlers[]` (each `discovered_via: "idl"`, `source_file` = the IDL).
 #[test]

@@ -55,12 +55,15 @@ pub struct ProbeReproReport {
 }
 
 impl ProbeReproReport {
-    /// True if no repro was `Silent`. `BuildError` = no verdict (doesn't fail
-    /// the check); `NoRepros` is vacuously true.
-    pub fn all_fired_or_inconclusive(&self) -> bool {
-        self.results
-            .iter()
-            .all(|r| !matches!(r.status, ReproStatus::Silent))
+    /// A successful repro-verification run must have executed at least one
+    /// reproducer and every result must have fired. No repros and build
+    /// errors are inconclusive, never vacuous success.
+    pub fn all_fired(&self) -> bool {
+        !self.results.is_empty()
+            && self
+                .results
+                .iter()
+                .all(|r| matches!(r.status, ReproStatus::Fired))
     }
 }
 
@@ -136,18 +139,36 @@ fn run_shared_crate(repros_dir: &Path, start: Instant) -> ProbeReproReport {
             let stderr = String::from_utf8_lossy(&out.stderr);
             // TODO(D3): parse libtest per-test lines (`test probe_<id> ... ok|FAILED`)
             // for per-finding results; until then surface a coarse verdict in `note`.
-            let note = if out.status.success() {
-                Some("shared-crate repros all passed — per-finding parsing pending D3".to_string())
+            let (status, note) = if out.status.success() {
+                (
+                    ReproStatus::Fired,
+                    Some(
+                        "shared-crate repros all passed — per-finding parsing pending D3"
+                            .to_string(),
+                    ),
+                )
             } else {
-                Some(format!(
-                    "shared-crate repros had failures — per-finding parsing pending D3:\n{}\n{}",
-                    tail(&stdout, 20),
-                    tail(&stderr, 10)
-                ))
+                let status = if looks_like_build_error(&stderr) {
+                    ReproStatus::BuildError
+                } else {
+                    ReproStatus::Silent
+                };
+                (
+                    status,
+                    Some(format!(
+                        "shared-crate repros had failures — per-finding parsing pending D3:\n{}\n{}",
+                        tail(&stdout, 20),
+                        tail(&stderr, 10)
+                    )),
+                )
             };
             ProbeReproReport {
                 repros_dir: repros_dir.to_path_buf(),
-                results: Vec::new(),
+                results: vec![ReproResult {
+                    finding_id: "shared-crate".to_string(),
+                    status,
+                    log_excerpt: None,
+                }],
                 duration_ms,
                 note,
             }
@@ -285,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn all_fired_or_inconclusive_lets_build_errors_through() {
+    fn all_fired_rejects_build_errors() {
         let report = ProbeReproReport {
             repros_dir: PathBuf::from("/tmp"),
             results: vec![
@@ -303,11 +324,11 @@ mod tests {
             duration_ms: 0,
             note: None,
         };
-        assert!(report.all_fired_or_inconclusive());
+        assert!(!report.all_fired());
     }
 
     #[test]
-    fn all_fired_or_inconclusive_fails_on_silent() {
+    fn all_fired_fails_on_silent() {
         let report = ProbeReproReport {
             repros_dir: PathBuf::from("/tmp"),
             results: vec![ReproResult {
@@ -318,6 +339,17 @@ mod tests {
             duration_ms: 0,
             note: None,
         };
-        assert!(!report.all_fired_or_inconclusive());
+        assert!(!report.all_fired());
+    }
+
+    #[test]
+    fn all_fired_requires_at_least_one_reproducer() {
+        let report = ProbeReproReport {
+            repros_dir: PathBuf::from("/tmp"),
+            results: Vec::new(),
+            duration_ms: 0,
+            note: Some("no repros".to_string()),
+        };
+        assert!(!report.all_fired());
     }
 }

@@ -1138,6 +1138,7 @@ end Outer
 }
 
 pub(crate) mod drift;
+pub(crate) mod evidence;
 pub(crate) mod miri_verify;
 pub(crate) mod ratchet;
 pub(crate) mod regen_drift;

@@ -22,10 +22,10 @@ sBPF assembly is selected by `pragma sbpf` in the spec, not by a `Target`.
 
 | Surface (owning module) | Anchor | Quasar | Pinocchio | Native | sBPF asm |
 |---|---|---|---|---|---|
-| IDL → spec scaffold (`spec/idl.rs` + `idl2spec`) | ✅ pre-0.30 + 0.30 | ❌ | ✅ Codama IR (#197) | ❌ | ❌ |
+| IDL → spec scaffold (`spec/idl.rs` + `idl2spec`) — *deprecated* | ✅ pre-0.30 + 0.30 | ❌ | ✅ Codama IR (#197) | ❌ | ❌ |
 | IDL → Tier-0 interface (`interface_gen`) | ✅ | ❌ | ✅ Codama IR (#197) | ❌ | ❌ |
 | IDL → brownfield fuzz (`probe/crucible_brownfield`) | ✅ 0.30 | ✅ | ⚠️ needs on-disk Codama/0.30 IDL | ❌ deferred | ❌ parked |
-| Brownfield adapt → spec skeleton (`adapt/`) | ✅ args + accounts + errors | ❌ no adapter | ⚠️ handlers-only skeleton | ⚠️ loose (no conventions) | ❌ |
+| Brownfield adapt → spec skeleton (`adapt/`) — *deprecated* | ✅ args + accounts + errors | ❌ no adapter | ⚠️ handlers-only skeleton | ⚠️ loose (no conventions) | ❌ |
 | Greenfield Rust scaffold (`codegen_mir`) | ✅ | ⚠️ generic CPI → `todo!()` | ⚠️ generic CPI → `todo!()`; imported mirrors error | n/a | n/a |
 | Kani spec-model (`kani_mir`) | ✅ | ✅ | ✅ | n/a | skip by design |
 | impl-Kani (`kani_impl`) | ✅ greenfield + state-struct (#162) + Context (#169) | ⚠️ greenfield shape only | ⚠️ own `#[repr(C)]` shape; some ix-data field types TODO | ❌ | ❌ |
@@ -37,16 +37,27 @@ sBPF assembly is selected by `pragma sbpf` in the spec, not by a `Target`.
 | Miri divergence repros (`verify/miri_verify`) | ❌ | ❌ | ✅ | ❌ | n/a |
 | Ratchet / readiness (`verify/ratchet`) | ✅ | ✅ | ❌ no ratchet crate | ❌ | ❌ |
 
+The two *deprecated* rows (`qedgen spec --idl`, `qedgen adapt --program`)
+remain functional in v2.x with a runtime warning and are removed in v3.0.
+The brownfield front door is spec elicitation: `qedgen probe --program <c>
+--emit-spec-candidates --audit-dir .qed/audit/<ts>` (writes the same spec
+skeleton as a byproduct plus `hypotheses.json`) → decisions recorded to
+`<audit-dir>/answers.json` → `qedgen ratify --audit-dir <dir>`. The IDL now
+enters as a probe evidence source (signer flags, `has_one` relations, status
+enums) via the IDL-enrichment overlay row.
+
 ## Reading the Pinocchio column
 
 Pinocchio is a first-class *audit* target (richest probe path, Miri repros,
 Codama-gated fuzz) and a full *greenfield* target, and — since #197 — its
-Codama IDL enters the same front door as Anchor's (`qedgen spec --idl`,
-`qedgen interface --idl`). Remaining real gaps:
+Codama IDL enters the same front doors as Anchor's (`qedgen interface --idl`,
+the probe IDL-enrichment overlay, and the deprecated `qedgen spec --idl`).
+Remaining real gaps:
 
-- **Brownfield spec depth** — `pinocchio_to_spec` infers handlers only;
-  account lists / param types / error enums are agent-completed (the Codama
-  path is the richer alternative when an IDL exists).
+- **Brownfield spec depth** — the deprecated `pinocchio_to_spec` skeleton
+  infers handlers only; probe elicitation (probe → answers → ratify) is the
+  current path, and the IDL overlay is the richer evidence source when an
+  IDL exists.
 - **Generic CPI mechanization** in the greenfield scaffold (SPL/System are
   mechanized; anything else is a `todo!()` breadcrumb).
 - **impl-Kani ix-data field types** — the `#[repr(C)]` profile covers the
@@ -55,10 +66,11 @@ Codama IDL enters the same front door as Anchor's (`qedgen spec --idl`,
 
 ## Reading the Quasar column
 
-Quasar is greenfield + ratchet + fuzz. It has **no brownfield adapter** and
-only the greenfield impl-Kani shape — a pre-existing Quasar program can be
-audited (probe/agnostic scanners) but not spec-skeletoned or state-struct
-harnessed.
+Quasar is greenfield + ratchet + fuzz. It never had a (now-deprecated)
+brownfield adapter and has only the greenfield impl-Kani shape — a
+pre-existing Quasar program is audited and spec-elicited through the probe
+(agnostic scanners + IDL overlay + probe → answers → ratify) but not
+state-struct harnessed.
 
 ## sBPF assembly
 

@@ -195,11 +195,20 @@ discriminator, initialization, or realloc findings.
 
 ### 3a. Ratify intent and schedule fuzzing
 
-Do not ask the user to rediscover facts already visible in code. Present
-source-cited candidates for domain invariants, lifecycle, authority capabilities,
-threats, and intentional exceptions after the first MED+ finding, or after the
-autonomous pass finishes dry or probe-blocked. Keep unratified semantic claims
-as hypotheses.
+Do not ask the user to rediscover facts already visible in code. The intent
+interview's questions are the probe envelope's `hypotheses[]` records rendered
+conversationally — ask in-harness, in the conversation, one answer per
+hypothesis (accept / reject / bug), each presented with its claim, evidence
+anchors, and payoff — plus agent-derived candidates (domain invariants,
+lifecycle, authority capabilities, threats, intentional exceptions) the binary
+abstained on. Time it after the first MED+ finding, or after the autonomous
+pass finishes dry or probe-blocked; when there is no finding to win trust with,
+the ranked hypotheses themselves become the trust-winning first deliverable.
+Write the answers to `answers.json` in the audit dir and run
+`qedgen ratify --audit-dir <dir>` to apply confirmed hypotheses as executable
+spec clauses. Keep unratified semantic claims as hypotheses. An in-harness
+confirmed invariant is `checking` until a backend runs; only impl-bound
+evidence supports `#[qed(verified)]`.
 
 Phase numbers refer to the orchestration in
 [manual review passes](references/manual-review-passes.md): Phase 1 autonomous

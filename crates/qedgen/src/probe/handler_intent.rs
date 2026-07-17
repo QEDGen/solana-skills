@@ -74,8 +74,9 @@ pub fn resolve_handler_body(entry_fn: &str, project_root: &Path) -> Option<(Path
 
 /// Recursively scan items (descending into `impl` and `mod`) for
 /// `entry_fn`. Body is rendered via `quote::ToTokens` — close enough to
-/// source for the classifier's line-pattern matching.
-fn find_fn_body_in_items(items: &[Item], entry_fn: &str) -> Option<String> {
+/// source for the classifier's line-pattern matching. `pub(crate)` for
+/// the hypothesizer, which resolves bodies from a known source file.
+pub(crate) fn find_fn_body_in_items(items: &[Item], entry_fn: &str) -> Option<String> {
     use quote::ToTokens;
     for item in items {
         match item {
@@ -139,6 +140,19 @@ pub fn classify_handler_body(handler_name: &str, body: &str) -> Option<IntentTag
         return None;
     }
     Some(IntentTag::Permissionless)
+}
+
+/// Which authority-binding rule (if any) a body matches — the citable
+/// anchor the hypothesizer needs, distinct from `classify_handler_body`
+/// which also accepts a name prior (a name alone is not evidence).
+pub(crate) fn authority_evidence(body: &str) -> Option<&'static str> {
+    if body_has_authority_comparison(body) {
+        Some("authority_comparison")
+    } else if body_has_authority_assert(body) {
+        Some("authority_assert_helper")
+    } else {
+        None
+    }
 }
 
 /// Heuristic: pubkey compared against a stored authority-like field,
