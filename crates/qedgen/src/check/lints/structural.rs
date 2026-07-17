@@ -795,11 +795,17 @@ pub(super) fn check_pubkey_state_field_unsupported(spec: &ParsedSpec) -> Vec<Com
     warnings
 }
 
-/// Rule 9: handlers with effects but zero properties.
+/// Rule 9: handlers with effects but zero properties. CPI call sites are
+/// proof surface too — every `call Iface.handler(...)` emits a
+/// per-call-site ensures theorem in Spec.lean — so a spec whose point is
+/// CPI composition (the bundled-stdlib-demo shape) has something to prove
+/// without a standalone `property`, and the lint stays silent there.
 pub(super) fn check_no_properties(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
     let has_effects = spec.handlers.iter().any(|op| op.has_effect());
-    if has_effects && spec.properties.is_empty() && spec.invariants.is_empty() {
+    let has_cpi_theorems = spec.handlers.iter().any(|op| !op.calls.is_empty());
+    if has_effects && !has_cpi_theorems && spec.properties.is_empty() && spec.invariants.is_empty()
+    {
         // Suggest conservation if paired add/sub exist on same field
         let mut modified_fields: std::collections::HashMap<&str, Vec<&str>> =
             std::collections::HashMap::new();
@@ -1552,6 +1558,34 @@ handler initialize : State.Uninitialized -> State.Active {
         assert!(
             !warnings.iter().any(|w| w.rule == "no_properties"),
             "should not fire when properties exist"
+        );
+    }
+
+    #[test]
+    fn test_no_properties_skips_with_cpi_call_sites() {
+        // A CPI-composition spec proves per-call-site ensures theorems —
+        // "verification has nothing to prove" is false there even with no
+        // standalone `property` block.
+        let mut h = make_handler("deposit");
+        h.effects = vec![ParsedEffect::from_triple("balance", "add", "amount")];
+        h.calls = vec![crate::check::ParsedCall {
+            target_interface: "Token".to_string(),
+            target_handler: "transfer".to_string(),
+            args: Vec::new(),
+            result_binding: None,
+            state_binders: Vec::new(),
+        }];
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            state_fields: vec![("balance".to_string(), "U64".to_string())],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings.iter().any(|w| w.rule == "no_properties"),
+            "CPI call-site theorems are proof surface; got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
         );
     }
 
