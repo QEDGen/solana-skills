@@ -1578,6 +1578,124 @@ handler bump (n : U64) : State.Active -> State.Active {
     );
 }
 
+// ----- v2.44: account-bound RHS lowers to the runtime key load -----
+
+const SET_ADMIN_SPEC_TEMPLATE: &str = r#"spec Vault
+program_id "11111111111111111111111111111111"
+type State | Active of { admin : Pubkey, pool : U64 }
+type Error | Unauthorized
+
+handler set_admin : State.Active -> State.Active {
+  auth admin
+  accounts {
+    admin     : signer
+    new_admin : signer
+    state     : writable
+  }
+  effect { admin := RHS }
+}
+"#;
+
+fn mechanize_set_admin(rhs: &str, target: Target) -> Option<String> {
+    let src = SET_ADMIN_SPEC_TEMPLATE.replace("RHS", rhs);
+    let spec = crate::chumsky_adapter::parse_str(&src).unwrap();
+    let handler = spec
+        .handlers
+        .iter()
+        .find(|h| h.name == "set_admin")
+        .unwrap();
+    let state_acct = find_state_account(handler).expect("state account");
+    let effect = handler.effects.first().unwrap();
+    mechanize_effect(effect, state_acct, &spec, target)
+}
+
+#[test]
+fn mechanize_effect_lowers_bare_account_rhs_to_key_load() {
+    // Pre-v2.44 this rendered the account binding bare
+    // (`self.state.admin = new_admin;`) — a free variable that doesn't
+    // exist in the handler body (E0425), and an account wrapper rather
+    // than a Pubkey even if it did (E0308).
+    let rendered = mechanize_set_admin("new_admin", Target::Anchor).expect("mechanized");
+    assert_eq!(
+        rendered,
+        "        self.state.admin = self.new_admin.key();\n"
+    );
+}
+
+#[test]
+fn mechanize_effect_lowers_account_pubkey_rhs_to_key_load() {
+    // `<acct>.pubkey` previously fell to the `todo!()` path; it means
+    // exactly the same key read and mechanizes the same way.
+    let rendered = mechanize_set_admin("new_admin.pubkey", Target::Anchor).expect("mechanized");
+    assert_eq!(
+        rendered,
+        "        self.state.admin = self.new_admin.key();\n"
+    );
+}
+
+#[test]
+fn mechanize_effect_account_key_uses_quasar_address_form() {
+    let rendered = mechanize_set_admin("new_admin", Target::Quasar).expect("mechanized");
+    assert!(
+        rendered.contains("(*self.new_admin.to_account_view().address())"),
+        "Quasar key load must go through to_account_view(); got:\n{rendered}"
+    );
+    assert!(
+        rendered.contains(".into();"),
+        "Quasar set keeps the Pod-companion .into(); got:\n{rendered}"
+    );
+}
+
+#[test]
+fn mechanize_effect_refuses_arithmetic_on_account_key() {
+    // `pool += new_admin` is a spec bug — keep it on the `todo!()` path
+    // instead of emitting checked_add over a Pubkey.
+    let src = SET_ADMIN_SPEC_TEMPLATE.replace("admin := RHS", "pool += new_admin");
+    let spec = crate::chumsky_adapter::parse_str(&src).unwrap();
+    let handler = spec
+        .handlers
+        .iter()
+        .find(|h| h.name == "set_admin")
+        .unwrap();
+    let state_acct = find_state_account(handler).expect("state account");
+    let effect = handler.effects.first().unwrap();
+    assert!(mechanize_effect(effect, state_acct, &spec, Target::Anchor).is_none());
+}
+
+#[test]
+fn mechanize_effect_destructured_lowers_account_rhs_to_key_load() {
+    // Multi-variant ADT same-variant path: the destructured binding
+    // writes through `*admin`, and the account read routes through
+    // `self.<acct>.key()` (disjoint field borrow from the match on
+    // `self.<state>.inner`).
+    let spec = crate::chumsky_adapter::parse_str(
+        r#"spec Vault
+program_id "11111111111111111111111111111111"
+type State | Active of { admin : Pubkey, pool : U64 } | Paused
+type Error | Unauthorized | WrongState
+
+handler set_admin : State.Active -> State.Active {
+  auth admin
+  accounts {
+    admin     : signer
+    new_admin : signer
+    state     : writable
+  }
+  effect { admin := new_admin }
+}
+"#,
+    )
+    .unwrap();
+    let handler = spec
+        .handlers
+        .iter()
+        .find(|h| h.name == "set_admin")
+        .unwrap();
+    let effect = handler.effects.first().unwrap();
+    let rendered = mechanize_effect_destructured(effect, &spec).expect("mechanized");
+    assert_eq!(rendered, "            *admin = self.new_admin.key();\n");
+}
+
 // ----- v2.24 §S1a/b/c: per-site override + pragma + underflow default -----
 
 fn mechanize_first_effect(src: &str, handler_name: &str) -> String {
@@ -2010,6 +2128,9 @@ edition = "2021"
 anchor-lang = "0.32.1"
 qedgen-macros = { git = "https://example.com" }
 
+[dev-dependencies]
+proptest = "1"
+
 [workspace]
 "#;
     let merged = merge_cargo_toml(existing, fresh);
@@ -2025,11 +2146,81 @@ qedgen-macros = { git = "https://example.com" }
     assert!(merged.contains("qedgen-macros"));
     // User-added `anyhow` dep is preserved.
     assert!(merged.contains("anyhow = \"1\""), "got:\n{merged}");
-    // User-added sections are preserved verbatim.
+    // qedgen-managed dev-deps merge the same way.
     assert!(merged.contains("[dev-dependencies]"));
     assert!(merged.contains("proptest = \"1\""));
+    // User-added sections are preserved verbatim.
     assert!(merged.contains("[profile.release]"));
     assert!(merged.contains("opt-level = 3"));
+}
+
+#[test]
+fn merge_cargo_toml_upserts_proptest_dev_dep_and_keeps_user_dev_deps() {
+    // v2.44: `[dev-dependencies]` is dep-merged like `[dependencies]` —
+    // qedgen upserts `proptest` (the generated tests/proptest.rs needs
+    // it to compile) while user-added dev-deps survive.
+    let existing = r#"[package]
+name = "foo"
+
+[dev-dependencies]
+proptest = "0.9"
+my-test-helper = "2.0"
+"#;
+    let fresh = r#"# ---- GENERATED BY QEDGEN ----
+
+[package]
+name = "foo"
+
+[dependencies]
+anchor-lang = "0.32.1"
+
+[dev-dependencies]
+proptest = "1"
+
+[workspace]
+"#;
+    let merged = merge_cargo_toml(existing, fresh);
+    assert!(merged.contains("proptest = \"1\""), "got:\n{merged}");
+    assert!(
+        !merged.contains("proptest = \"0.9\""),
+        "stale proptest pin must be upserted; got:\n{merged}"
+    );
+    assert!(
+        merged.contains("my-test-helper = \"2.0\""),
+        "user dev-dep must survive; got:\n{merged}"
+    );
+}
+
+#[test]
+fn merge_cargo_toml_leaves_user_proptest_in_dependencies_alone() {
+    // `proptest` is owned only inside `[dev-dependencies]` — a user who
+    // put it in `[dependencies]` keeps their line untouched even though
+    // the fresh render has no such dep there.
+    let existing = r#"[package]
+name = "foo"
+
+[dependencies]
+anchor-lang = "0.30"
+proptest = "0.9"
+"#;
+    let fresh = r#"# ---- GENERATED BY QEDGEN ----
+
+[package]
+name = "foo"
+
+[dependencies]
+anchor-lang = "0.32.1"
+
+[dev-dependencies]
+proptest = "1"
+
+[workspace]
+"#;
+    let merged = merge_cargo_toml(existing, fresh);
+    assert!(
+        merged.contains("proptest = \"0.9\""),
+        "user proptest in [dependencies] must not be dropped or upserted; got:\n{merged}"
+    );
 }
 
 #[test]

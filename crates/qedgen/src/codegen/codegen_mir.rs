@@ -258,6 +258,12 @@ fn render_cargo_toml(
         qedgen_version
     ));
 
+    // The generated proptest harness (tests/proptest.rs) imports
+    // `proptest::prelude::*` — ship the dev-dep so the crate compiles
+    // out of the box instead of failing on the first `cargo test`.
+    out.push_str("\n[dev-dependencies]\n");
+    out.push_str("proptest = \"1\"\n");
+
     // Empty [workspace] keeps the crate out of any parent workspace.
     out.push_str("\n[workspace]\n");
 
@@ -1345,6 +1351,28 @@ mod tests {
         let parsed = check::parse_spec_file(&spec_path).expect("fixture parses");
         let mir = crate::mir::lower(&parsed);
         (mir, parsed)
+    }
+
+    #[test]
+    fn cargo_toml_ships_proptest_dev_dep() {
+        // The generated tests/proptest.rs imports proptest::prelude::* —
+        // without the dev-dep the crate fails its first `cargo test`.
+        let (mir, parsed) = lower_fixture("examples/rust/escrow/escrow.qedspec");
+        let fp = crate::fingerprint::compute_fingerprint(&parsed);
+        for target in [Target::Anchor, Target::Quasar, Target::Pinocchio] {
+            let toml = render_cargo_toml(&mir, &fp, target);
+            let dev = toml.split("[dev-dependencies]").nth(1).unwrap_or_else(|| {
+                panic!(
+                    "{:?} Cargo.toml missing [dev-dependencies]:\n{toml}",
+                    target
+                )
+            });
+            assert!(
+                dev.contains("proptest = \"1\""),
+                "{:?} dev-dependencies must carry proptest; got:\n{toml}",
+                target
+            );
+        }
     }
 
     #[test]

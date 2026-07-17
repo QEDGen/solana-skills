@@ -169,6 +169,37 @@ pub(crate) fn tree_bare_rhs(tree: &crate::mir::ExprTree) -> Option<String> {
     }
 }
 
+/// Account-bound RHS shapes that mean "this account's address": bare
+/// `<acct>` and `<acct>.pubkey`. Returns the account binding name.
+/// Distinct from [`tree_bare_rhs`] because the bare render is exactly
+/// wrong here — the handler body has no free `<acct>` binding (E0425),
+/// and `self.<acct>` is an account wrapper, not a `Pubkey` (E0308);
+/// the caller must lower to the target's runtime key load instead.
+pub(crate) fn account_key_rhs(tree: &crate::mir::ExprTree) -> Option<&str> {
+    use crate::mir::expr_tree::{BindingKind, ExprTree, TreeSeg};
+    let ExprTree::Path(p) = tree else { return None };
+    if !matches!(p.binding, BindingKind::Account) {
+        return None;
+    }
+    match p.segments.as_slice() {
+        [] => Some(&p.root),
+        [TreeSeg::Field(f)] if f == "pubkey" => Some(&p.root),
+        _ => None,
+    }
+}
+
+/// The runtime key load for an account binding inside a handler `impl`
+/// body (`&mut self` receiver) — the `self.`-rooted sibling of
+/// `Surface::account_key_expr`'s `ctx.` forms.
+pub(crate) fn self_account_key_expr(target: Target, account_name: &str) -> String {
+    match target {
+        Target::Anchor => format!("self.{}.key()", account_name),
+        Target::Quasar => format!("(*self.{}.to_account_view().address())", account_name),
+        // pinocchio's AccountInfo::key() returns &Pubkey ([u8; 32]).
+        Target::Pinocchio => format!("*self.{}.key()", account_name),
+    }
+}
+
 /// Resolve the `(overflow, underflow)` error variants for a checked-arith
 /// lowering site. Three-tiered:
 ///   1. per-site `or <Variant>` override (`on_error`),
@@ -214,10 +245,21 @@ pub(crate) fn mechanize_effect(
     let tree = effect_tree(effect);
     let on_error = effect.on_error.as_deref();
 
+    // Account-bound RHS (`field := <acct>` / `<acct>.pubkey`): the spec
+    // means the account's ADDRESS, so lower to the runtime key load —
+    // the bare render `tree_bare_rhs` would produce is a miscompile
+    // (see `account_key_rhs`). Set-only: arithmetic on a key is a spec
+    // bug, so those shapes keep falling through to the `todo!()` path.
+    let acct_key = account_key_rhs(tree);
+    if acct_key.is_some() && op_kind != "set" {
+        return None;
+    }
     // Refuse complex RHS — structural on the tree (#151 Slice 3). A simple
     // param / literal / constant / bare state-field read is what's always
     // safe.
-    tree_bare_rhs(tree)?;
+    if acct_key.is_none() {
+        tree_bare_rhs(tree)?;
+    }
     // Multi-variant ADT state on Anchor: the wrapper carries only
     // `inner` + `bump`, so the flat `self.<acct>.<field>` lowering
     // doesn't apply. Bail so the per-effect path surfaces a `todo!()`
@@ -238,7 +280,9 @@ pub(crate) fn mechanize_effect(
     // One render under `Binder::SelfAcct` — name resolution already
     // happened at adapt time.
     let acct = &state_acct.name;
-    let rhs = {
+    let rhs = if let Some(account_name) = acct_key {
+        self_account_key_expr(target, account_name)
+    } else {
         use crate::rust_codegen_util::tree_render::{render_rust, Binder, RustCx};
         let receiver = format!("self.{}", acct);
         render_rust(
@@ -352,7 +396,19 @@ pub(crate) fn mechanize_effect_destructured(
     // bare-identifier RHS that names a sibling state field resolves
     // directly (no `self.<acct>.` prefix) — `tree_bare_rhs` emits exactly
     // that shape (structural gate + render in one; #151 Slice 3).
-    let rhs = tree_bare_rhs(effect_tree(effect))?;
+    // Account-bound RHS lowers to the key load instead — the match on
+    // `self.<state_acct>.inner` borrows a disjoint field, so reading
+    // `self.<acct>.key()` inside the arm is legal. This emitter is
+    // Anchor-only (see `emit_variant_state_handler_body`), so the
+    // Anchor key form is the only one needed.
+    let rhs = if let Some(account_name) = account_key_rhs(effect_tree(effect)) {
+        if op_kind != "set" {
+            return None;
+        }
+        self_account_key_expr(Target::Anchor, account_name)
+    } else {
+        tree_bare_rhs(effect_tree(effect))?
+    };
 
     let err_enum = format!("{}Error", to_pascal_case(&spec.program_name));
     let (overflow_variant, underflow_variant) = checked_arith_error_variants(spec, on_error);

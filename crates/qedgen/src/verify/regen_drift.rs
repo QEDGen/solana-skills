@@ -413,7 +413,10 @@ fn generate_existing_artifacts(root: &Path, temp_root: &Path, spec_path: &Path) 
         "programs/src/integration_tests.rs",
     ] {
         if root.join(rel).is_file() {
-            crate::integration_test::generate(spec_path, &temp_root.join(rel))?;
+            // Integration tests are emitted for Quasar targets only, so a
+            // file on disk implies a Quasar project — same file-present
+            // reasoning as the `Target::Anchor` pin on kani_impl above.
+            crate::integration_test::generate(spec_path, &temp_root.join(rel), Target::Quasar)?;
         }
     }
     if let Some((parsed, mir)) = &mir_ctx {

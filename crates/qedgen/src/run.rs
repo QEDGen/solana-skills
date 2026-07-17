@@ -1701,8 +1701,19 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                     if integration {
                         note_sbpf_skip("integration-test");
                     }
+                } else if !matches!(target, Target::Quasar) {
+                    // The integration scaffold is QuasarSVM-shaped
+                    // (quasar_svm + <name>-client imports) and doesn't
+                    // compile inside an Anchor or Pinocchio crate — skip
+                    // with a note instead of writing an artifact that
+                    // can't build.
+                    eprintln!(
+                        "note: skipping integration-test codegen for {:?} target — \
+                         the in-process SVM scaffold is Quasar-only today.",
+                        target
+                    );
                 } else {
-                    integration_test::generate(&spec, &integration_output)?;
+                    integration_test::generate(&spec, &integration_output, target)?;
                 }
             }
             if lean || all {

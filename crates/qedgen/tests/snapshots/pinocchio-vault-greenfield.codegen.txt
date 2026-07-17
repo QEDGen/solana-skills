@@ -20,6 +20,9 @@ zeropod = "0.1"
 pinocchio-token = "0.3"
 qedgen-macros = { git = "https://github.com/qedgen/solana-skills", tag = "v2.43.0" }
 
+[dev-dependencies]
+proptest = "1"
+
 [workspace]
 
 --- src/errors.rs ---
