@@ -203,10 +203,10 @@ Then fill TODOs in the `.qedspec`, validate it, and cross-check against the live
 $QEDGEN check --spec program.qedspec --anchor-project programs/my_program
 ```
 
-After the spec covers each handler AND verification has run with an implementation-bound backend (miri, a `kani_impl` harness, or `--probe-repros`), stamp source drift attributes:
+After the spec covers each handler AND verification has run with an implementation-bound backend (miri or a `kani_impl` harness), stamp source drift attributes. Probe reproducers confirm findings and cannot authorize a verified stamp:
 
 ```bash
-$QEDGEN verify --spec program.qedspec            # records .qed/verify-evidence.json
+$QEDGEN verify --spec program.qedspec --program programs/my_program --kani --kani-path programs/my_program/src/kani_impl.rs
 $QEDGEN stamp --program programs/my_program --spec program.qedspec
 ```
 

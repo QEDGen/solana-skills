@@ -114,12 +114,7 @@ pub fn run(opts: &RatifyOpts) -> Result<RatifyReport> {
         .transpose()?;
     let hypothesis_by_id: BTreeMap<&str, &InvariantHypothesis> = hypotheses_doc
         .as_ref()
-        .map(|doc| {
-            doc.hypotheses
-                .iter()
-                .map(|h| (h.id.as_str(), h))
-                .collect()
-        })
+        .map(|doc| doc.hypotheses.iter().map(|h| (h.id.as_str(), h)).collect())
         .unwrap_or_default();
 
     // Answers: structured set → split into cluster ratifications +
@@ -232,7 +227,6 @@ pub fn run(opts: &RatifyOpts) -> Result<RatifyReport> {
     // State-ADT rewrites must land before transition lowerings so
     // lifecycle edges resolve against the real variants (stable sort —
     // answer order is otherwise preserved).
-    let mut hypothesis_answers = hypothesis_answers;
     hypothesis_answers.sort_by_key(|(id, _, _)| {
         let is_state_rewrite = hypothesis_by_id
             .get(id.as_str())
@@ -285,7 +279,10 @@ pub fn run(opts: &RatifyOpts) -> Result<RatifyReport> {
                     ),
                     Some(_) if baseline_errors.is_none() => (
                         "confirmed_not_executable".to_string(),
-                        Some("skeleton spec does not parse; nothing can be lowered against it".to_string()),
+                        Some(
+                            "skeleton spec does not parse; nothing can be lowered against it"
+                                .to_string(),
+                        ),
                     ),
                     Some(lowering) => match elicit::apply_lowering(&merged, hyp, lowering) {
                         LoweringResult::Applied(candidate) => {
@@ -1749,7 +1746,10 @@ mod tests {
         Ok(())
     }
 
-    fn auth_hypothesis(handler: &str, signer: &str) -> crate::probe::hypothesize::InvariantHypothesis {
+    fn auth_hypothesis(
+        handler: &str,
+        signer: &str,
+    ) -> crate::probe::hypothesize::InvariantHypothesis {
         use crate::probe::hypothesize::*;
         InvariantHypothesis {
             id: format!("h-abc12345-authorization-{handler}"),
@@ -1863,8 +1863,7 @@ mod tests {
         let dir = tempdir()?;
         let audit = dir.path().join(".qed/audit/test");
         std::fs::create_dir_all(&audit)?;
-        let skeleton =
-            render_skeleton_from_handlers(&["set_fee".into(), "close".into()], "vault");
+        let skeleton = render_skeleton_from_handlers(&["set_fee".into(), "close".into()], "vault");
         std::fs::write(audit.join("skeleton.qedspec"), &skeleton)?;
         std::fs::write(audit.join("clusters.json"), "[]")?;
         let bug_hyp = auth_hypothesis("set_fee", "admin");

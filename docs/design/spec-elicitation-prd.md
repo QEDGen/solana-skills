@@ -7,8 +7,9 @@ Phases 0–3: `probe/hypothesize.rs` (auth + lifecycle detectors),
 mandatory ratify parse+check gate, `ratify --answers/--proptest`,
 auditor-skill §3a retarget. Phase 4: `stamp` verb (attribute emission
 gated on `.qed/verify-evidence.json`, recorded by every `qedgen verify`
-run; only implementation-bound backends — miri / `kani_impl*` / Mollusk
-probe-repros — flip `implementation_verified`); `adapt` + `spec --idl`
+run; only implementation-bound backends — miri / `kani_impl*` — flip
+`implementation_verified`, and the evidence binds the program-source hash;
+Mollusk probe repros confirm findings but not conformance); `adapt` + `spec --idl`
 soft-deprecated (v3.0 removal, `--fill` pattern); IDL `has_one`
 relations folded in as authorization-hypothesis evidence. Phase 5: the
 remaining classes — `arithmetic_bound` (held checks lifted from bodies,

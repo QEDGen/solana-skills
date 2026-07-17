@@ -460,12 +460,19 @@ pub(crate) fn write_attribute_report(rendered: &str, out: Option<&Path>) -> Resu
 /// red (the record is a convenience for `stamp`, not a verify output).
 pub(crate) fn record_verify_evidence(
     spec: &Path,
+    program: Option<&Path>,
     report: &crate::verify::VerifyReport,
     kani_impl_bound: bool,
     probe_repros_passed: Option<bool>,
 ) {
-    match crate::verify::evidence::build(spec, report, kani_impl_bound, probe_repros_passed)
-        .and_then(|e| crate::verify::evidence::record(&e, spec))
+    match crate::verify::evidence::build(
+        spec,
+        program,
+        report,
+        kani_impl_bound,
+        probe_repros_passed,
+    )
+    .and_then(|e| crate::verify::evidence::record(&e, spec))
     {
         Ok(path) => eprintln!("Recorded verification evidence at {}", path.display()),
         Err(e) => eprintln!("warning: failed to record verification evidence: {e}"),

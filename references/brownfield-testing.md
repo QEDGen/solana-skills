@@ -54,9 +54,10 @@ functional in v2.x with a warning, removed in v3.0.)
 `qedgen stamp` (formerly `qedgen adapt --spec`, deprecated) emits the
 `#[qed(verified, ...)]` attributes. It is gated on
 `.qed/verify-evidence.json` — recorded by `qedgen verify` — matching the
-spec's hash with at least one passing implementation-bound backend (Miri,
-a `kani_impl*.rs` harness, or `--probe-repros`/Mollusk); checking or
-model-tested results are not eligible.
+spec and program-source hashes with at least one passing
+implementation-bound backend (Miri or a `kani_impl*.rs` harness); checking,
+model-tested results, and bug-oriented `--probe-repros`/Mollusk runs are not
+eligible.
 
 Paste emitted `#[qed(verified, ...)]` attributes only after reviewing the
 spec and source diff. Never auto-update hashes without inspecting why they

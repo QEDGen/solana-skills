@@ -440,10 +440,10 @@ silently false-positive CI.
 
 ### Verification drift detection
 
-After verifying a function, stamp it with `#[qed(verified)]` to detect future changes — either to the function body *or* to its spec contract. `qedgen stamp` emits the attributes ready to paste, and it is gated: every `qedgen verify` run records its evidence to `.qed/verify-evidence.json`, and `stamp` refuses unless that record matches the spec being stamped and carries a passing **implementation-bound** backend (Miri, a `kani_impl` harness, or `--probe-repros`) — checking or model-tested results are not eligible for `#[qed(verified)]`:
+After verifying a function, stamp it with `#[qed(verified)]` to detect future changes — either to the function body *or* to its spec contract. `qedgen stamp` emits the attributes ready to paste, and it is gated: every `qedgen verify` run records its evidence to `.qed/verify-evidence.json`, and `stamp` refuses unless that record matches both the spec and program source being stamped and carries a passing **implementation-bound** backend (Miri or a `kani_impl` harness). Probe reproducers confirm findings rather than conformance, and checking or model-tested results are not eligible for `#[qed(verified)]`:
 
 ```bash
-qedgen verify --spec my_program.qedspec        # records .qed/verify-evidence.json
+qedgen verify --spec my_program.qedspec --program ./programs/my_program --kani --kani-path ./programs/my_program/src/kani_impl.rs
 qedgen stamp --program ./programs/my_program --spec my_program.qedspec
 ```
 

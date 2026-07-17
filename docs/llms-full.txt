@@ -106,11 +106,11 @@ Deprecated (functional in v2.x with a warning; removed in v3.0): `qedgen adapt -
 ### Stamp verified handlers (post-verification drift guard)
 
 ```bash
-qedgen verify --spec program.qedspec                    # also records .qed/verify-evidence.json
+qedgen verify --spec program.qedspec --program ./my-anchor-program --kani --kani-path ./my-anchor-program/src/kani_impl.rs
 qedgen stamp --program ./my-anchor-program --spec program.qedspec
 ```
 
-`stamp` (formerly `adapt --program --spec`) emits one `#[qed(verified, …)]` attribute per handler to paste above its `pub fn`; the proc macro recomputes the hashes at compile time and fails the build on drift. It refuses without recorded implementation-verified evidence — a passing Miri run, `kani_impl` harness, or Mollusk probe-repro whose spec hash matches — so `#[qed(verified)]` only ever freezes a claim a source-bound backend established.
+`stamp` (formerly `adapt --program --spec`) emits one `#[qed(verified, …)]` attribute per handler to paste above its `pub fn`; the proc macro recomputes the hashes at compile time and fails the build on drift. It refuses without recorded implementation-verified evidence — a passing Miri run or `kani_impl` harness whose spec and program-source hashes match. Mollusk probe reproducers confirm findings rather than conformance and cannot authorize a stamp.
 
 ### Mainnet-readiness (Anchor IDL lint + upgrade-safety diff)
 

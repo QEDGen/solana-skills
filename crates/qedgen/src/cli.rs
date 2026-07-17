@@ -199,8 +199,9 @@ pub(crate) enum Commands {
     /// Runs AFTER verification and proves nothing itself: it requires
     /// recorded implementation-verified evidence (written by
     /// `qedgen verify` to `.qed/verify-evidence.json`, with a passing
-    /// implementation-bound backend — miri, a `kani_impl` harness, or
-    /// `--probe-repros`) whose spec hash matches the spec being stamped.
+    /// implementation-bound backend — miri or a `kani_impl` harness) whose
+    /// spec and program-source hashes match what is being stamped. Probe
+    /// reproducers confirm findings and are not conformance evidence.
     /// Checking or model-tested results are not eligible.
     Stamp {
         /// Path to the program crate (the directory containing the
@@ -752,6 +753,13 @@ pub(crate) enum Commands {
         /// walking up from cwd, mirroring `check` and `codegen`.
         #[arg(long)]
         spec: Option<PathBuf>,
+
+        /// Program crate whose implementation is exercised by an
+        /// implementation-bound backend. Required for verification evidence
+        /// that can authorize `qedgen stamp`: the source-tree hash recorded
+        /// here must still match the crate passed to `stamp`.
+        #[arg(long)]
+        program: Option<PathBuf>,
 
         /// Run proptest harnesses (cargo test --release)
         #[arg(long)]

@@ -55,8 +55,8 @@ impl StructuredAnswer {
 }
 
 pub fn read_answers(path: &Path) -> Result<AnswerSet> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
 }
 
@@ -73,8 +73,8 @@ pub struct HypothesesDoc {
 }
 
 pub fn read_hypotheses(path: &Path) -> Result<HypothesesDoc> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
 }
 
@@ -213,9 +213,11 @@ fn apply_transfers_clause(
 }
 
 /// Replace the skeleton's `type State` variants with the program's real
-/// status-enum variants, rewriting existing `State.<old>` references
-/// positionally (old i-th variant → new i-th, clamped to the last) so
-/// handler annotations keep parsing. Runs before any transition lowering.
+/// status-enum variants. Existing references are preserved by exact name or
+/// by an unambiguous lifecycle-shaped mapping (`Init` → `Uninitialized`,
+/// `Active` → `Open`). Unrelated variants are never remapped by position: an
+/// ambiguous reference makes the lowering non-executable instead of silently
+/// changing the spec's meaning. Runs before any transition lowering.
 fn apply_state_adt_rewrite(spec_text: &str, variants: &[String]) -> LoweringResult {
     if variants.len() < 2 {
         return LoweringResult::NotExecutable(
@@ -230,6 +232,23 @@ fn apply_state_adt_rewrite(spec_text: &str, variants: &[String]) -> LoweringResu
     }
     if old == variants {
         return LoweringResult::AlreadyModeled;
+    }
+
+    let mut reference_map = std::collections::BTreeMap::new();
+    for old_v in &old {
+        let needle = format!("State.{old_v}");
+        if !spec_text.contains(&needle) {
+            continue;
+        }
+        let Some(new_v) = map_state_variant(old_v, variants) else {
+            return LoweringResult::NotExecutable(format!(
+                "cannot safely map existing `State.{old_v}` reference into the confirmed \
+                 variants ({}) — preserve the variant name or provide an explicit transition \
+                 mapping",
+                variants.join(" | ")
+            ));
+        };
+        reference_map.insert(old_v.clone(), new_v.to_string());
     }
 
     // Rewrite the `type State` block (same-line or multi-line form).
@@ -256,17 +275,47 @@ fn apply_state_adt_rewrite(spec_text: &str, variants: &[String]) -> LoweringResu
         out.push_str(line);
     }
 
-    // Positional reference rewrite: State.<old_i> → State.<new_min(i, last)>.
-    for (i, old_v) in old.iter().enumerate() {
-        let new_v = &variants[i.min(variants.len() - 1)];
-        if old_v == new_v {
-            continue;
-        }
-        let re = regex::Regex::new(&format!(r"State\.{}\b", regex::escape(old_v)))
-            .expect("escaped variant regex");
-        out = re.replace_all(&out, format!("State.{}", new_v)).into_owned();
-    }
+    let state_ref = regex::Regex::new(r"State\.([A-Za-z_][A-Za-z0-9_]*)\b")
+        .expect("static state reference regex");
+    out = state_ref
+        .replace_all(&out, |caps: &regex::Captures<'_>| {
+            reference_map
+                .get(&caps[1])
+                .map(|v| format!("State.{v}"))
+                .unwrap_or_else(|| caps[0].to_string())
+        })
+        .into_owned();
     LoweringResult::Applied(out)
+}
+
+fn map_state_variant<'a>(old: &str, variants: &'a [String]) -> Option<&'a str> {
+    if let Some(exact) = variants.iter().find(|v| v.as_str() == old) {
+        return Some(exact);
+    }
+    let old_lower = old.to_ascii_lowercase();
+    let class = if looks_uninitialized_variant(&old_lower) {
+        looks_uninitialized_variant as fn(&str) -> bool
+    } else if looks_active_variant(&old_lower) {
+        looks_active_variant as fn(&str) -> bool
+    } else {
+        return None;
+    };
+    let mut matches = variants.iter().filter(|v| class(&v.to_ascii_lowercase()));
+    let only = matches.next()?;
+    matches.next().is_none().then_some(only.as_str())
+}
+
+fn looks_uninitialized_variant(lower: &str) -> bool {
+    lower.contains("uninit")
+        || lower == "init"
+        || lower.contains("empty")
+        || lower.contains("created")
+}
+
+fn looks_active_variant(lower: &str) -> bool {
+    lower == "active"
+        || (lower.contains("initialized") && !lower.contains("uninitialized"))
+        || lower == "open"
 }
 
 /// Ensure `type Error` declares `variant`; append it to the existing
@@ -278,7 +327,11 @@ fn ensure_error_variant(spec_text: &str, variant: &str) -> String {
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix("type Error") {
             in_error = true;
-            if rest.split('|').skip(1).any(|p| variant_name(p).as_deref() == Some(variant)) {
+            if rest
+                .split('|')
+                .skip(1)
+                .any(|p| variant_name(p).as_deref() == Some(variant))
+            {
                 return spec_text.to_string();
             }
             continue;
@@ -405,8 +458,7 @@ fn apply_lifecycle_transition(spec_text: &str, hypothesis: &InvariantHypothesis)
     let variants = state_variants(spec_text);
     let Some((pre, post)) = resolve_init_transition(&variants) else {
         return LoweringResult::NotExecutable(
-            "spec has no `type State` ADT with two variants to anchor the transition"
-                .to_string(),
+            "spec has no `type State` ADT with two variants to anchor the transition".to_string(),
         );
     };
     let Some(brace_offset) = decl.find('{') else {
@@ -473,8 +525,8 @@ fn handler_block(spec_text: &str, name: &str) -> Option<HandlerBlock> {
             }
         } else if line.trim() == "}" {
             return Some(HandlerBlock {
-                decl_start: decl_start.unwrap(),
-                body_start: body_start.unwrap(),
+                decl_start: decl_start?,
+                body_start: body_start?,
                 body_end: offset,
             });
         }
@@ -528,22 +580,14 @@ fn resolve_init_transition(variants: &[String]) -> Option<(String, String)> {
     if variants.len() < 2 {
         return None;
     }
-    let looks_pre = |v: &str| {
-        let l = v.to_ascii_lowercase();
-        l.contains("uninit") || l == "init" || l.contains("empty") || l.contains("created")
-    };
-    let looks_post = |v: &str| {
-        let l = v.to_ascii_lowercase();
-        l.contains("active") || l.contains("initialized") || l.contains("open")
-    };
     let pre = variants
         .iter()
-        .find(|v| looks_pre(v))
+        .find(|v| looks_uninitialized_variant(&v.to_ascii_lowercase()))
         .cloned()
         .unwrap_or_else(|| variants[0].clone());
     let post = variants
         .iter()
-        .find(|v| **v != pre && looks_post(v))
+        .find(|v| **v != pre && looks_active_variant(&v.to_ascii_lowercase()))
         .cloned()
         .or_else(|| variants.iter().find(|v| **v != pre).cloned())?;
     Some((pre, post))
@@ -677,7 +721,10 @@ mod tests {
         else {
             panic!("expected Applied");
         };
-        assert!(out.contains("requires fee <= 1000000 else CapTooHigh"), "{out}");
+        assert!(
+            out.contains("requires fee <= 1000000 else CapTooHigh"),
+            "{out}"
+        );
         // The error variant was appended to the existing Error block.
         assert!(out.contains("| CapTooHigh"), "{out}");
         validate_spec_text(&out).expect("lowered spec must parse");
@@ -749,6 +796,36 @@ mod tests {
             apply_state_adt_rewrite(&out, &new),
             LoweringResult::AlreadyModeled
         ));
+    }
+
+    #[test]
+    fn state_adt_rewrite_preserves_existing_variant_by_name_not_position() {
+        let spec = "spec Demo\n\ntype State\n  | Init\n  | Active\n\ntype Error\n  | Unauthorized\n\nhandler tick : State.Active -> State.Active {\n  // x\n}\n";
+        let new: Vec<String> = ["Uninitialized", "Pending", "Active"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let LoweringResult::Applied(out) = apply_state_adt_rewrite(spec, &new) else {
+            panic!("expected Applied");
+        };
+        assert!(
+            out.contains("handler tick : State.Active -> State.Active {"),
+            "{out}"
+        );
+        assert!(!out.contains("State.Pending -> State.Pending"), "{out}");
+    }
+
+    #[test]
+    fn state_adt_rewrite_rejects_unrelated_reference_without_mapping() {
+        let spec = "spec Demo\n\ntype State\n  | Draft\n  | Live\n\ntype Error\n  | Unauthorized\n\nhandler publish : State.Draft -> State.Live {\n  // x\n}\n";
+        let new: Vec<String> = ["Pending", "Active"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let LoweringResult::NotExecutable(reason) = apply_state_adt_rewrite(spec, &new) else {
+            panic!("expected NotExecutable");
+        };
+        assert!(reason.contains("cannot safely map existing `State.Draft`"));
     }
 
     #[test]

@@ -233,9 +233,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                     eprintln!(
                         "         — the elicitation flow offers confirmable, evidence-anchored"
                     );
-                    eprintln!(
-                        "         hypotheses (and writes the same skeleton as a byproduct)."
-                    );
+                    eprintln!("         hypotheses (and writes the same skeleton as a byproduct).");
                     eprintln!("         Slated for hard-removal in v3.0; functional for now.");
                     let program_name = adapt::default_program_name(&program);
                     let adapter_config = adapt::AdapterConfig::new(&program_name, &overrides);
@@ -259,7 +257,8 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             // The gate first: `stamp` freezes an established claim, so
             // no attributes are computed (let alone emitted) without
             // matching implementation-verified evidence (§5.1).
-            let record = verify::evidence::require_stamp_evidence(&spec, evidence.as_deref())?;
+            let record =
+                verify::evidence::require_stamp_evidence(&spec, &program, evidence.as_deref())?;
             let impl_backends: Vec<&str> = record
                 .backends
                 .iter()
@@ -866,9 +865,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
 
         Commands::Spec { idl, output_dir } => {
             eprintln!("warning: `qedgen spec --idl` is deprecated.");
-            eprintln!(
-                "         The IDL is now an evidence source for `qedgen probe` — run"
-            );
+            eprintln!("         The IDL is now an evidence source for `qedgen probe` — run");
             eprintln!(
                 "         `qedgen probe --program <c> --emit-spec-candidates --audit-dir <d>`"
             );
@@ -1330,6 +1327,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
         // ==================================================================
         Commands::Verify {
             spec,
+            program,
             proptest,
             proptest_path,
             kani,
@@ -1443,21 +1441,33 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 } else {
                     verify_probe_repros::print_human(&report);
                 }
-                let passed = report.all_fired_or_inconclusive();
+                let passed = report.all_fired();
                 probe_repros_passed = Some(passed);
                 if !passed {
-                    record_verify_evidence(&spec, &verify::VerifyReport {
-                        spec: spec.clone(),
-                        backends: Vec::new(),
-                    }, false, probe_repros_passed);
+                    record_verify_evidence(
+                        &spec,
+                        None,
+                        &verify::VerifyReport {
+                            spec: spec.clone(),
+                            backends: Vec::new(),
+                        },
+                        false,
+                        probe_repros_passed,
+                    );
                     std::process::exit(1);
                 }
                 let any_backend_flag = proptest || kani || lean || miri;
                 if !any_backend_flag {
-                    record_verify_evidence(&spec, &verify::VerifyReport {
-                        spec: spec.clone(),
-                        backends: Vec::new(),
-                    }, false, probe_repros_passed);
+                    record_verify_evidence(
+                        &spec,
+                        None,
+                        &verify::VerifyReport {
+                            spec: spec.clone(),
+                            backends: Vec::new(),
+                        },
+                        false,
+                        probe_repros_passed,
+                    );
                     return Ok(());
                 }
             }
@@ -1485,6 +1495,24 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 .and_then(|s| s.to_str())
                 .map(|s| s.starts_with("kani_impl"))
                 .unwrap_or(false);
+            // A source hash is meaningful only when the implementation-bound
+            // backend is mechanically rooted in the crate being recorded.
+            // This prevents `--program unrelated-crate` from attaching an
+            // otherwise valid backend result to source it never exercised.
+            let evidence_program = program.as_deref().filter(|program| {
+                let Ok(program_root) = program.canonicalize() else {
+                    return false;
+                };
+                let kani_matches = kani_impl_bound
+                    && kani_path
+                        .canonicalize()
+                        .is_ok_and(|path| path.starts_with(&program_root));
+                let miri_matches = miri
+                    && project_root
+                        .canonicalize()
+                        .is_ok_and(|path| path == program_root);
+                kani_matches || miri_matches
+            });
             let opts = if any_flag {
                 verify::VerifyOpts {
                     spec: spec.clone(),
@@ -1539,7 +1567,19 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
 
             // Persist the evidence record `stamp` gates on — written on
             // pass AND fail (a failed run is still evidence of what ran).
-            record_verify_evidence(&spec, &report, kani_impl_bound, probe_repros_passed);
+            if program.is_some() && evidence_program.is_none() {
+                eprintln!(
+                    "warning: --program is not rooted at the implementation-bound backend \
+                     input; verification evidence will not authorize `stamp`"
+                );
+            }
+            record_verify_evidence(
+                &spec,
+                evidence_program,
+                &report,
+                kani_impl_bound,
+                probe_repros_passed,
+            );
 
             if !report.ok() {
                 std::process::exit(1);

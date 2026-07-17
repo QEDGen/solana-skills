@@ -193,17 +193,18 @@ Anchor project parser to locate each handler body).
 new behavior over `adapt --spec` is the gate: it requires recorded
 implementation-verified evidence — `.qed/verify-evidence.json`, written
 by every `qedgen verify` run — with (a) a `spec_hash` matching the spec
-being stamped byte-for-byte and (b) at least one passing
-**implementation-bound** backend (miri, a `kani_impl*.rs` harness, or
-`--probe-repros`/Mollusk). Checking or model-tested results are not
-eligible; an edited spec invalidates the evidence until re-verified. So
+being stamped byte-for-byte, (b) a `program_hash` matching the current
+program source tree, and (c) at least one passing **implementation-bound**
+backend (miri or a `kani_impl*.rs` harness). Checking/model-tested results
+and bug-oriented `--probe-repros` are not eligible; an edited spec or
+program invalidates the evidence until re-verified. So
 the division of labor is: a source-bound backend establishes the
 implementation claim, `stamp` freezes it, the compiler guards the
 freeze.
 
 ```bash
 # 1. verify with an implementation-bound backend (records evidence)
-$QEDGEN verify --spec my_program.qedspec --kani --kani-path src/kani_impl.rs
+$QEDGEN verify --spec my_program.qedspec --program programs/my_program --kani --kani-path programs/my_program/src/kani_impl.rs
 
 # 2. stamp — refuses unless the recorded evidence matches and is impl-bound
 $QEDGEN stamp --program programs/my_program --spec my_program.qedspec
@@ -358,11 +359,12 @@ flags, runs every backend whose artifact is present on disk
 target one backend.
 
 v2.44 — every run also records its evidence to
-`<spec_dir>/.qed/verify-evidence.json` (spec hash, per-backend status,
-and whether an **implementation-bound** backend passed: miri and
-`--probe-repros` by construction; Kani only when the `--kani-path` file
-is a `kani_impl*.rs` harness — plain proptest/Kani/Lean exercise the
-spec model and never count). This record is what [`stamp`](#stamp) gates
+`<spec_dir>/.qed/verify-evidence.json` (spec hash, optional program-source
+hash, per-backend status, and whether an **implementation-bound** backend
+passed: miri, or Kani only when the `--kani-path` file is a
+`kani_impl*.rs` harness). Plain proptest/Kani/Lean exercise the spec model,
+while `--probe-repros` confirms bug findings; neither category counts. This
+record is what [`stamp`](#stamp) gates
 on; it is written on pass and fail alike (a failed run is still evidence
 of what ran) and a failed write never turns a green verify red.
 
@@ -393,6 +395,7 @@ $QEDGEN verify --spec my_program.qedspec --check-upstream --upstream-stale-ok
 | Flag | Type | Default | Description |
 |---|---|---|---|
 | `--spec` | Path | required | Spec file (`.qedspec`) |
+| `--program` | Path | none | Program crate to hash into implementation-bound evidence; required before `stamp` can consume that evidence |
 | `--proptest` | bool | false | Run proptest harnesses (`cargo test --release`) |
 | `--proptest-path` | Path | `./programs/tests/proptest.rs` | Proptest harness file |
 | `--kani` | bool | false | Run Kani BMC harnesses (`cargo kani --tests`) |

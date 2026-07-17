@@ -293,7 +293,13 @@ pub fn render_summary(hypotheses: &[InvariantHypothesis]) -> String {
             HypothesisClass::UnwiredGuard => "GUARD    ",
             HypothesisClass::StateMachine => "STATEMACH",
         };
-        s.push_str(&format!("  H{} {} · {} {}\n", i + 1, class_label, conf, h.claim));
+        s.push_str(&format!(
+            "  H{} {} · {} {}\n",
+            i + 1,
+            class_label,
+            conf,
+            h.claim
+        ));
         for e in &h.evidence {
             let src = e
                 .source
@@ -316,6 +322,7 @@ pub fn render_summary(hypotheses: &[InvariantHypothesis]) -> String {
 
 /// Deterministic hypothesis ID: `h-<8hex>-<class>-<handler>`. Hashes class
 /// + handler only — evidence details change as the program evolves, the
+///
 /// hypothesis *identity* does not (same contract as cluster IDs).
 fn hypothesis_id(class: HypothesisClass, handler: &str) -> String {
     use sha2::{Digest, Sha256};
@@ -428,7 +435,9 @@ fn detect_authorization(
         _ => return None,
     };
 
-    let subject = signer.clone().unwrap_or_else(|| "the authority".to_string());
+    let subject = signer
+        .clone()
+        .unwrap_or_else(|| "the authority".to_string());
     let claim = format!(
         "`{}` requires the caller to be the stored authority (signer: {}).",
         handler.name, subject
@@ -563,9 +572,10 @@ fn detect_arithmetic_bound(
     let (path, body) = resolve_body(project_root, handler)?;
     let unspaced: String = body.chars().filter(|c| !c.is_whitespace()).collect();
 
-    let re_require =
-        regex::Regex::new(r"require!\(([A-Za-z_][A-Za-z0-9_]*)(<=|<)([A-Za-z0-9_.:]+),([A-Za-z0-9_:]+)\)")
-            .expect("static regex");
+    let re_require = regex::Regex::new(
+        r"require!\(([A-Za-z_][A-Za-z0-9_]*)(<=|<)([A-Za-z0-9_.:]+),([A-Za-z0-9_:]+)\)",
+    )
+    .expect("static regex");
     let re_if = regex::Regex::new(r"if([A-Za-z_][A-Za-z0-9_]*)>([A-Za-z0-9_.:]+)\{returnErr")
         .expect("static regex");
 
@@ -575,7 +585,13 @@ fn detect_arithmetic_bound(
         .find(|c| args.contains(&c[1].to_string()))
         .map(|c| {
             let err = c[4].rsplit("::").next().unwrap_or(&c[4]).to_string();
-            (c[1].to_string(), c[2].to_string(), c[3].to_string(), err, "require!")
+            (
+                c[1].to_string(),
+                c[2].to_string(),
+                c[3].to_string(),
+                err,
+                "require!",
+            )
         })
         .or_else(|| {
             re_if
@@ -658,7 +674,8 @@ fn detect_conservation(project_root: &Path) -> Vec<InvariantHypothesis> {
     let supply_changing = facts.asset_flows.iter().any(|f| {
         matches!(
             f.flow_shape,
-            super::domain_extract::FlowShape::Issuance | super::domain_extract::FlowShape::Destruction
+            super::domain_extract::FlowShape::Issuance
+                | super::domain_extract::FlowShape::Destruction
         )
     });
     if supply_changing {
@@ -783,7 +800,10 @@ fn detect_cpi_integrity(
                 ')' if depth == 0 => {
                     let arg = &rest[last_arg_start..j];
                     return (arg.chars().all(|c| c.is_alphanumeric() || c == '_')
-                        && arg.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_'))
+                        && arg
+                            .chars()
+                            .next()
+                            .is_some_and(|c| c.is_alphabetic() || c == '_'))
                     .then(|| arg.to_string());
                 }
                 ')' => depth -= 1,
@@ -882,8 +902,7 @@ fn unwired_guard_hypotheses(candidates: &[super::Candidate]) -> Vec<InvariantHyp
             payoff: "confirming files a missing-enforcement finding at the unguarded \
                      path's impact ceiling; rejecting records a dead variant to delete"
                 .to_string(),
-            backend: "source-bound reproducer once the unguarded path is identified"
-                .to_string(),
+            backend: "source-bound reproducer once the unguarded path is identified".to_string(),
             assurance: "checking".to_string(),
             confidence: Confidence::Medium,
             lowering: None,
@@ -899,7 +918,9 @@ fn unwired_guard_hypotheses(candidates: &[super::Candidate]) -> Vec<InvariantHyp
 /// when exactly ONE such enum exists (ambiguous state representation →
 /// abstain, per the lifecycle rules).
 fn detect_state_machine(project_root: &Path) -> Option<InvariantHypothesis> {
-    let (idl_path, _) = super::idl_overlay::discover_idl(project_root).ok().flatten()?;
+    let (idl_path, _) = super::idl_overlay::discover_idl(project_root)
+        .ok()
+        .flatten()?;
     let (idl, _) = crate::idl::parse_idl(&idl_path).ok()?;
     let referenced: Vec<(&str, Vec<String>)> = idl
         .types
@@ -908,9 +929,10 @@ fn detect_state_machine(project_root: &Path) -> Option<InvariantHypothesis> {
         .filter(|e| {
             idl.types.iter().any(|t| {
                 t.ty.kind == "struct"
-                    && t.ty.fields.iter().any(|f| {
-                        f.ty.to_string().contains(&format!("\"{}\"", e.name))
-                    })
+                    && t.ty
+                        .fields
+                        .iter()
+                        .any(|f| f.ty.to_string().contains(&format!("\"{}\"", e.name)))
             })
         })
         .map(|e| {
@@ -967,7 +989,7 @@ fn detect_state_machine(project_root: &Path) -> Option<InvariantHypothesis> {
 /// may come through `quote`-rendered token streams).
 fn init_guard_in_body(body: &str) -> Option<&'static str> {
     let unspaced: String = body.chars().filter(|c| !c.is_whitespace()).collect();
-    for needle in [
+    [
         "is_initialized",
         "AccountAlreadyInitialized",
         "already_initialized",
@@ -975,12 +997,9 @@ fn init_guard_in_body(body: &str) -> Option<&'static str> {
         "AlreadyInitialized",
         "discriminator",
         "discriminant",
-    ] {
-        if unspaced.contains(needle) {
-            return Some(needle);
-        }
-    }
-    None
+    ]
+    .into_iter()
+    .find(|needle| unspaced.contains(needle))
 }
 
 /// Does the file defining this handler carry an Anchor `#[account(init,
@@ -1306,7 +1325,9 @@ pub fn initialize(ctx: Context<Initialize>) -> Result<()> { Ok(()) }
         h.idl_args = Some(vec![arg("cap")]);
         let hyps = hypothesize(&root, &[h], &[]);
         assert!(
-            !hyps.iter().any(|h| h.class == HypothesisClass::ArithmeticBound),
+            !hyps
+                .iter()
+                .any(|h| h.class == HypothesisClass::ArithmeticBound),
             "{hyps:?}"
         );
         let _ = std::fs::remove_dir_all(&root);
@@ -1390,7 +1411,9 @@ pub fn initialize(ctx: Context<Initialize>) -> Result<()> { Ok(()) }
         );
         let hyps = hypothesize(&root, &[handler("payout")], &[]);
         assert!(
-            !hyps.iter().any(|h| h.class == HypothesisClass::CpiIntegrity),
+            !hyps
+                .iter()
+                .any(|h| h.class == HypothesisClass::CpiIntegrity),
             "{hyps:?}"
         );
         let _ = std::fs::remove_dir_all(&root);
@@ -1503,7 +1526,9 @@ pub fn process_withdraw(amount: u64) -> Result<(), ()> {
         .unwrap();
         let hyps = hypothesize(&root, &[], &[]);
         assert!(
-            !hyps.iter().any(|h| h.class == HypothesisClass::StateMachine),
+            !hyps
+                .iter()
+                .any(|h| h.class == HypothesisClass::StateMachine),
             "{hyps:?}"
         );
         let _ = std::fs::remove_dir_all(&root);
