@@ -1,0 +1,19 @@
+{
+  "address": "Foo1111111111111111111111111111111111111111",
+  "metadata": { "name": "foo", "version": "0.1.0", "spec": "0.1.0" },
+  "instructions": [
+    {
+      "name": "initialize",
+      "accounts": [
+        { "name": "admin", "signer": true, "writable": true },
+        { "name": "vault", "writable": true }
+      ],
+      "args": [ { "name": "cap", "type": "u64" } ]
+    },
+    {
+      "name": "crank",
+      "accounts": [ { "name": "vault", "writable": true } ],
+      "args": []
+    }
+  ]
+}
