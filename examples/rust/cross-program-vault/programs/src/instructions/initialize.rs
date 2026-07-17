@@ -11,7 +11,7 @@ use crate::state::VaultAccountInner;
 use crate::{Initialize, InitializeBumps};
 
 impl<'info> Initialize<'info> {
-    #[qed(verified, spec = "../vault.qedspec", handler = "initialize", hash = "116b9e8c13801ca8", spec_hash = "a1d5fd30fecf1ae6")]
+    #[qed(verified, spec = "../vault.qedspec", handler = "initialize", hash = "116b9e8c13801ca8", spec_hash = "08b5ccd111b6d5eb")]
     #[inline(always)]
     pub fn handler(&mut self, bumps: &InitializeBumps) -> Result<()> {
         guards::initialize(self)?;

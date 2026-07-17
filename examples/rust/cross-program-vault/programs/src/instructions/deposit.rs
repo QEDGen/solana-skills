@@ -12,7 +12,7 @@ use crate::state::VaultAccountInner;
 use crate::Deposit;
 
 impl<'info> Deposit<'info> {
-    #[qed(verified, spec = "../vault.qedspec", handler = "deposit", hash = "ba56825b97e00c86", spec_hash = "0c65c0fd1863230e")]
+    #[qed(verified, spec = "../vault.qedspec", handler = "deposit", hash = "ba56825b97e00c86", spec_hash = "1fa96b38d214b3c3")]
     #[inline(always)]
     pub fn handler(&mut self, amount: u64) -> Result<()> {
         guards::deposit(self, amount)?;
