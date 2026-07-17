@@ -169,6 +169,28 @@ pub(crate) fn tree_bare_rhs(tree: &crate::mir::ExprTree) -> Option<String> {
     }
 }
 
+/// Fields needing a `pre_<field>` snapshot in this handler's generated
+/// body under PARALLEL effect semantics: an effect RHS that reads a
+/// field the same block writes means the PRE-state value — the
+/// semantics the Lean model's record update and the Kani conformance
+/// `pre_<field>` assertions encode. Without the snapshot, spec-ordered
+/// emission lets later reads observe earlier writes (the v2.43
+/// read-after-write divergence: a sequential implementation stamped
+/// verified against a parallel model).
+pub(crate) fn parallel_pre_fields_for_handler(
+    handler: &ParsedHandler,
+    spec: &ParsedSpec,
+) -> Vec<String> {
+    let mut written: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut read: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for eff in &handler.effects {
+        let stripped = strip_variant_prefix(&eff.field, spec);
+        written.insert(strip_array_index_suffix(&stripped));
+        crate::rust_codegen_util::state_field_reads(effect_tree(eff), &mut read);
+    }
+    written.intersection(&read).cloned().collect()
+}
+
 /// Resolve the `(overflow, underflow)` error variants for a checked-arith
 /// lowering site. Three-tiered:
 ///   1. per-site `or <Variant>` override (`on_error`),
@@ -209,6 +231,7 @@ pub(crate) fn mechanize_effect(
     state_acct: &crate::check::ParsedHandlerAccount,
     spec: &ParsedSpec,
     target: Target,
+    pre_fields: &[String],
 ) -> Option<String> {
     let (field, op_kind) = (&effect.field, &effect.op);
     let tree = effect_tree(effect);
@@ -241,10 +264,16 @@ pub(crate) fn mechanize_effect(
     let rhs = {
         use crate::rust_codegen_util::tree_render::{render_rust, Binder, RustCx};
         let receiver = format!("self.{}", acct);
-        render_rust(
+        let rendered = render_rust(
             tree,
             RustCx::native().with_binder(Binder::SelfAcct(&receiver)),
-        )
+        );
+        // Parallel effect semantics: RHS reads of block-written fields
+        // route through the `pre_<field>` snapshots the caller binds
+        // before the effect lines (`parallel_pre_fields_for_handler`).
+        // Type-neutral — `pre_<f>` has exactly the type of
+        // `self.<acct>.<f>`, so the Quasar Pod arms are unaffected.
+        crate::rust_codegen_util::substitute_pre_reads(&rendered, &receiver, pre_fields)
     };
     // Cast index expressions in the LHS path to `usize`. `render_effect`
     // emits the field as `voted[member_index]` (Lean-friendly); on the
@@ -340,6 +369,7 @@ pub(crate) fn strip_variant_prefix(lhs: &str, spec: &ParsedSpec) -> String {
 pub(crate) fn mechanize_effect_destructured(
     effect: &crate::check::ParsedEffect,
     spec: &ParsedSpec,
+    pre_fields: &[String],
 ) -> Option<String> {
     let (field_raw, op_kind) = (&effect.field, &effect.op);
     let on_error = effect.on_error.as_deref();
@@ -352,7 +382,27 @@ pub(crate) fn mechanize_effect_destructured(
     // bare-identifier RHS that names a sibling state field resolves
     // directly (no `self.<acct>.` prefix) — `tree_bare_rhs` emits exactly
     // that shape (structural gate + render in one; #151 Slice 3).
-    let rhs = tree_bare_rhs(effect_tree(effect))?;
+    // Parallel semantics: a state-field read of a block-written field
+    // routes to the `pre_<field>` local the caller binds at the top of
+    // the match arm instead of the (already-mutated) destructured
+    // binding.
+    let rhs = {
+        use crate::mir::expr_tree::{BindingKind, ExprTree, TreeSeg};
+        let tree = effect_tree(effect);
+        match tree {
+            ExprTree::Path(p)
+                if matches!(p.binding, BindingKind::StateField | BindingKind::Ghost)
+                    && matches!(p.segments.as_slice(),
+                        [TreeSeg::Field(f)] if pre_fields.iter().any(|pf| pf == f)) =>
+            {
+                match p.segments.as_slice() {
+                    [TreeSeg::Field(f)] => format!("pre_{f}"),
+                    _ => unreachable!("guarded by the match arm pattern"),
+                }
+            }
+            _ => tree_bare_rhs(tree)?,
+        }
+    };
 
     let err_enum = format!("{}Error", to_pascal_case(&spec.program_name));
     let (overflow_variant, underflow_variant) = checked_arith_error_variants(spec, on_error);
@@ -548,9 +598,23 @@ pub(crate) fn emit_variant_state_handler_body(
         "            {}::{} {{ {}, .. }} => {{\n",
         inner_name, post, destructure
     ));
-    for effect in &handler.effects {
-        let line = mechanize_effect_destructured(effect, spec)?;
-        out.push_str(&line);
+    // Parallel effect semantics: snapshot block-written fields that some
+    // RHS also reads, so those reads observe pre-state (the Lean-model
+    // meaning) instead of whatever an earlier effect line already wrote.
+    // RAW ⊆ written ⊆ destructured bindings, so `*<f>` always resolves.
+    let pre_fields = parallel_pre_fields_for_handler(handler, spec);
+    let lines: Vec<String> = handler
+        .effects
+        .iter()
+        .map(|effect| mechanize_effect_destructured(effect, spec, &pre_fields))
+        .collect::<Option<Vec<_>>>()?;
+    for f in &pre_fields {
+        if lines.iter().any(|l| l.contains(&format!("pre_{f}"))) {
+            out.push_str(&format!("                let pre_{f} = *{f};\n"));
+        }
+    }
+    for line in &lines {
+        out.push_str(line);
     }
 
     // Modifies-driven agent-fill sites inside the same match arm so the

@@ -538,3 +538,94 @@ handler bogus (amount : U64) {
     assert!(err.contains("bogus"), "should name handler: {err}");
     assert!(err.contains("phantom"), "should name field: {err}");
 }
+
+/// v2.44 parallel effect semantics — transition fns snapshot fields the
+/// block both writes and reads, and RHS reads route through the
+/// snapshot. Pre-v2.44 `effect { balance += amount, last_seen := balance }`
+/// emitted `s.last_seen = s.balance;` AFTER the add — the sequential
+/// (post-state) read — while the Lean model and the Kani conformance
+/// assertion both mean pre-state: a broken program could pass every
+/// green artifact.
+#[test]
+fn transition_fn_snapshots_read_after_write_fields() {
+    let src = r#"spec Raw
+state {
+  balance : U64,
+  last_seen : U64,
+}
+handler deposit (amount : U64) {
+  requires amount > 0
+  effect { balance += amount
+           last_seen := balance }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let mir = crate::mir::lower(&spec);
+    let op = spec.handlers.first().expect("handler");
+    let mut out = String::new();
+    emit_transition_fn(&mut out, &mir, op, &spec, false, |t| {
+        crate::codegen_shared::map_type(t, &spec)
+    })
+    .expect("emit");
+    assert!(
+        out.contains("let pre_balance = s.balance;"),
+        "snapshot bound before effects:\n{out}"
+    );
+    assert!(
+        out.contains("s.last_seen = pre_balance;"),
+        "read-after-write RHS observes pre-state:\n{out}"
+    );
+    // The checked-add self-read stays on `s.` — single write per field,
+    // so its own read is still pre-state at that statement.
+    assert!(
+        out.contains("s.balance.checked_add(amount)"),
+        "self-read of the written field unchanged:\n{out}"
+    );
+}
+
+/// A field that is read but NOT written (or written but not read) needs
+/// no snapshot — the emitted transition stays byte-identical to the
+/// pre-v2.44 form for such specs.
+#[test]
+fn transition_fn_skips_snapshot_without_read_after_write() {
+    let src = r#"spec Plain
+state {
+  balance : U64,
+  cap : U64,
+}
+handler deposit (amount : U64) {
+  requires amount <= cap
+  effect { balance += amount }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let mir = crate::mir::lower(&spec);
+    let op = spec.handlers.first().expect("handler");
+    let mut out = String::new();
+    emit_transition_fn(&mut out, &mir, op, &spec, false, |t| {
+        crate::codegen_shared::map_type(t, &spec)
+    })
+    .expect("emit");
+    assert!(
+        !out.contains("let pre_"),
+        "no snapshot for write-only / read-only fields:\n{out}"
+    );
+}
+
+/// `substitute_pre_reads` token boundaries: only exact `<receiver>.<field>`
+/// reads rewrite — longer field names, other receivers, and the write
+/// position must survive.
+#[test]
+fn substitute_pre_reads_respects_token_boundaries() {
+    let fields = vec!["balance".to_string()];
+    assert_eq!(
+        substitute_pre_reads("s.balance + s.balance_total", "s", &fields),
+        "pre_balance + s.balance_total"
+    );
+    assert_eq!(
+        substitute_pre_reads("accounts.balance + s.balance", "s", &fields),
+        "accounts.balance + pre_balance"
+    );
+    assert_eq!(
+        substitute_pre_reads("s.balance.checked_add(x)", "s", &fields),
+        "pre_balance.checked_add(x)"
+    );
+}

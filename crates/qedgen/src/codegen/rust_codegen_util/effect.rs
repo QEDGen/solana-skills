@@ -218,6 +218,81 @@ pub fn block_effect_triples_deep(
     out
 }
 
+/// State fields read anywhere in `tree` (StateField / Ghost bindings,
+/// first field segment). The read side of the parallel-semantics
+/// snapshot computation below.
+pub fn state_field_reads(
+    tree: &crate::mir::ExprTree,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    use super::tree_render::for_each_path;
+    use crate::mir::expr_tree::{BindingKind, TreeSeg};
+    for_each_path(tree, &mut |p| {
+        if matches!(p.binding, BindingKind::StateField | BindingKind::Ghost) {
+            if let Some(TreeSeg::Field(f)) = p.segments.first() {
+                out.insert(f.clone());
+            }
+        }
+    });
+}
+
+/// Fields that need a `pre_<field>` snapshot under the spec's PARALLEL
+/// effect semantics: every RHS state read in an `effect { … }` block sees
+/// the PRE-state value — the semantics the Lean model's record update
+/// (`{ s with a := …, b := s.a }`) and the Kani conformance harnesses'
+/// `pre_<field>` assertions already encode. A field needs a snapshot when
+/// the block both writes it (any effect target) and reads it (any effect
+/// RHS); emitting the transition statements in spec order would otherwise
+/// let later reads observe earlier writes (the v2.43 read-after-write
+/// soundness divergence — a sequential implementation verified against a
+/// parallel model).
+///
+/// Takes the exact triple stream the caller will emit (post pubkey-skip
+/// filtering), so every snapshot is referenced by an emitted statement.
+pub fn parallel_snapshot_fields(
+    triples: &[(String, &'static str, &crate::mir::Expr)],
+    spec: &ParsedSpec,
+) -> Vec<String> {
+    let mut written: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut read: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for (field, _, value) in triples {
+        let flat = strip_variant_prefix_for_flat_state(field, spec);
+        written.insert(effect_target_base(&flat).to_string());
+        state_field_reads(mir_expr_tree(value), &mut read);
+    }
+    written.intersection(&read).cloned().collect()
+}
+
+/// Boundary-safe rewrite of `<receiver>.<field>` reads to `pre_<field>`
+/// in a rendered Rust expression — the substitution half of the parallel
+/// snapshot. Token boundaries on both sides: `accounts.balance` and
+/// `s.balance_total` survive a `balance` rewrite.
+pub fn substitute_pre_reads(expr: &str, receiver: &str, fields: &[String]) -> String {
+    let mut out = expr.to_string();
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    for f in fields {
+        let needle = format!("{receiver}.{f}");
+        let replacement = format!("pre_{f}");
+        let mut rebuilt = String::with_capacity(out.len());
+        let mut rest = out.as_str();
+        while let Some(i) = rest.find(&needle) {
+            let before_ok = i == 0 || !rest[..i].chars().next_back().is_some_and(is_ident);
+            let after = &rest[i + needle.len()..];
+            let after_ok = !after.chars().next().is_some_and(is_ident);
+            rebuilt.push_str(&rest[..i]);
+            if before_ok && after_ok {
+                rebuilt.push_str(&replacement);
+            } else {
+                rebuilt.push_str(&needle);
+            }
+            rest = after;
+        }
+        rebuilt.push_str(rest);
+        out = rebuilt;
+    }
+    out
+}
+
 /// Render a single `(field, op_kind, value)` triple into Rust at the given
 /// indent. The helper writes the trailing newline; the caller controls
 /// where the statement sits relative to its surrounding block.
@@ -230,8 +305,11 @@ pub fn emit_one_effect(
     op_kind: &str,
     value: &crate::mir::Expr,
     indent: &str,
+    pre_fields: &[String],
 ) {
-    emit_one_effect_inner(out, spec, wrapping, field, op_kind, value, indent, None);
+    emit_one_effect_inner(
+        out, spec, wrapping, field, op_kind, value, indent, None, pre_fields,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -244,6 +322,7 @@ fn emit_one_effect_inner(
     value: &crate::mir::Expr,
     indent: &str,
     account_binder: Option<&str>,
+    pre_fields: &[String],
 ) {
     use super::tree_render::{self, ArithMode, RustCx};
 
@@ -285,6 +364,12 @@ fn emit_one_effect_inner(
     } else {
         rust_value
     };
+    // Parallel effect semantics: RHS reads of fields the block also
+    // writes route through the `pre_<field>` snapshots the transition
+    // emitter binds up front (see `parallel_snapshot_fields`). RHS only —
+    // the LHS write and the checked-op self-read stay on `s.` (each field
+    // is written once, so its own read still observes pre-state).
+    let rust_value = substitute_pre_reads(&rust_value, "s", pre_fields);
     match op_kind {
         "set" => {
             out.push_str(&format!("{indent}s.{field} = {rust_value};\n"));
@@ -356,6 +441,7 @@ pub fn emit_one_effect_with_account_env(
     value: &crate::mir::Expr,
     indent: &str,
     account_binder: &str,
+    pre_fields: &[String],
 ) {
     emit_one_effect_inner(
         out,
@@ -366,6 +452,7 @@ pub fn emit_one_effect_with_account_env(
         value,
         indent,
         Some(account_binder),
+        pre_fields,
     );
 }
 
