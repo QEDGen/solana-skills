@@ -20,6 +20,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::cluster::{Cluster, ClusterScope};
+use crate::probe::elicit::{self, HypothesisOutcome, LoweringResult};
+use crate::probe::hypothesize::InvariantHypothesis;
 use crate::prompts::{read_interview_file, Choice, Ratification};
 
 /// Output destinations; `None`s fall back to convention-driven defaults
@@ -29,6 +31,14 @@ pub struct RatifyOpts {
     pub spec_out: Option<PathBuf>,
     pub scoping_out: Option<PathBuf>,
     pub findings_dir: Option<PathBuf>,
+    /// Structured answer set (`answers.json`); defaults to
+    /// `<audit_dir>/answers.json` when present. When resolved, the legacy
+    /// user-edited `interview.md` is not consulted.
+    pub answers: Option<PathBuf>,
+    /// Also generate the spec-model proptest harness from the ratified
+    /// spec (`model-proptest.rs` in the audit dir). Generation proves the
+    /// spec lowers; *running* the harness is what earns `model-tested`.
+    pub proptest: bool,
 }
 
 /// Result summary returned to the CLI for the digest line.
@@ -48,6 +58,21 @@ pub struct RatifyReport {
     /// Stateful coverage targets synthesized from ratified paired operations
     /// and lifecycle edges.
     pub domain_sequences_path: Option<PathBuf>,
+    /// Spec elicitation: run identity carried from the probe (Phase 0).
+    pub run_id: Option<String>,
+    /// Confirmed hypotheses lowered to executable clauses (incl. claims
+    /// the spec already modeled).
+    pub hypotheses_lowered: usize,
+    /// Confirmed hypotheses with no placeholder-free lowering — kept in
+    /// the dossier, reported honestly, never inserted as comments.
+    pub hypotheses_not_executable: usize,
+    /// Error-severity completeness lints on the final spec (parse success
+    /// is a hard gate; error lints are surfaced, not fatal — the skeleton
+    /// may carry pre-existing ones).
+    pub check_errors: usize,
+    pub check_warnings: usize,
+    /// Path of the generated spec-model proptest harness (`--proptest`).
+    pub model_proptest_path: Option<PathBuf>,
 }
 
 pub fn run(opts: &RatifyOpts) -> Result<RatifyReport> {
@@ -55,7 +80,23 @@ pub fn run(opts: &RatifyOpts) -> Result<RatifyReport> {
     let interview_path = opts.audit_dir.join("interview.md");
     let clusters_path = opts.audit_dir.join("clusters.json");
     let skeleton_path = opts.audit_dir.join("skeleton.qedspec");
-    for p in [&interview_path, &clusters_path, &skeleton_path] {
+    let answers_path = opts
+        .answers
+        .clone()
+        .or_else(|| {
+            let conventional = opts.audit_dir.join("answers.json");
+            conventional.exists().then_some(conventional)
+        })
+        .filter(|p| p.exists());
+    let structured = answers_path.is_some();
+
+    let mut required: Vec<&Path> = vec![&clusters_path, &skeleton_path];
+    if !structured {
+        // Legacy path only — the structured answer set replaces the
+        // user-edited interview file (PRD D4: in-harness, no file).
+        required.push(&interview_path);
+    }
+    for p in required {
         if !p.exists() {
             bail!(
                 "audit working-set file missing: {} — was the audit dir written by `qedgen probe --emit-spec-candidates --audit-dir <path>`?",
@@ -64,7 +105,55 @@ pub fn run(opts: &RatifyOpts) -> Result<RatifyReport> {
         }
     }
 
-    let ratifications = read_interview_file(&interview_path)?;
+    // Hypotheses (present for working sets written after spec elicitation
+    // landed; absent dirs stay supported).
+    let hypotheses_path = opts.audit_dir.join("hypotheses.json");
+    let hypotheses_doc = hypotheses_path
+        .exists()
+        .then(|| elicit::read_hypotheses(&hypotheses_path))
+        .transpose()?;
+    let hypothesis_by_id: BTreeMap<&str, &InvariantHypothesis> = hypotheses_doc
+        .as_ref()
+        .map(|doc| {
+            doc.hypotheses
+                .iter()
+                .map(|h| (h.id.as_str(), h))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Answers: structured set → split into cluster ratifications +
+    // hypothesis answers; legacy → parse interview.md, no hypotheses.
+    let mut hypothesis_answers: Vec<(String, Choice, String)> = Vec::new();
+    let mut answers_run_id: Option<String> = None;
+    let ratifications: Vec<Ratification> = if let Some(path) = &answers_path {
+        let set = elicit::read_answers(path)?;
+        answers_run_id = set.run_id.clone();
+        let mut cluster_answers = Vec::new();
+        for a in &set.answers {
+            let choice = a.choice();
+            if a.id.starts_with("h-") {
+                if let Some(c) = choice {
+                    hypothesis_answers.push((a.id.clone(), c, a.note.clone()));
+                } else {
+                    eprintln!(
+                        "warning: answers.json decision `{}` on {} is not accept/narrow/reject/bug — deferring",
+                        a.decision, a.id
+                    );
+                }
+            } else {
+                cluster_answers.push(Ratification {
+                    cluster_id: a.id.clone(),
+                    choice,
+                    notes: a.note.clone(),
+                });
+            }
+        }
+        cluster_answers
+    } else {
+        read_interview_file(&interview_path)?
+    };
+
     let clusters: Vec<Cluster> = serde_json::from_str(&std::fs::read_to_string(&clusters_path)?)
         .with_context(|| format!("parsing clusters.json at {}", clusters_path.display()))?;
     let skeleton = std::fs::read_to_string(&skeleton_path)?;
@@ -124,12 +213,147 @@ pub fn run(opts: &RatifyOpts) -> Result<RatifyReport> {
     }
 
     // ── Emit spec ──────────────────────────────────────────────────
-    let merged = merge_into_skeleton(
+    let mut merged = merge_into_skeleton(
         &skeleton,
         &accepted_program,
         &accepted_by_handler,
         &narrowed_by_handler,
     );
+
+    // ── Lower confirmed hypotheses (PRD §6.3) ──────────────────────
+    // User confirmation, not detector confidence, activates a clause.
+    // Each lowering is committed only if the candidate text still parses
+    // and introduces no new Error-severity completeness lints; otherwise
+    // the hypothesis stays `confirmed, not executable`.
+    let baseline_errors = elicit::validate_spec_text(&merged).ok();
+    let mut hypothesis_outcomes: Vec<HypothesisOutcome> = Vec::new();
+    let mut hyp_rejected: Vec<(&InvariantHypothesis, String)> = Vec::new();
+    let mut hyp_bugs: Vec<(&InvariantHypothesis, String)> = Vec::new();
+    // State-ADT rewrites must land before transition lowerings so
+    // lifecycle edges resolve against the real variants (stable sort —
+    // answer order is otherwise preserved).
+    let mut hypothesis_answers = hypothesis_answers;
+    hypothesis_answers.sort_by_key(|(id, _, _)| {
+        let is_state_rewrite = hypothesis_by_id
+            .get(id.as_str())
+            .map(|h| {
+                matches!(
+                    h.lowering,
+                    Some(crate::probe::hypothesize::HypothesisLowering::StateAdtRewrite { .. })
+                )
+            })
+            .unwrap_or(false);
+        !is_state_rewrite
+    });
+    for (id, choice, note) in &hypothesis_answers {
+        let Some(hyp) = hypothesis_by_id.get(id.as_str()).copied() else {
+            eprintln!(
+                "warning: answers.json references hypothesis {} not present in hypotheses.json — skipping",
+                id
+            );
+            deferred_count += 1;
+            continue;
+        };
+        match choice {
+            Choice::Accept | Choice::Narrow
+                if hyp.class == crate::probe::hypothesize::HypothesisClass::UnwiredGuard =>
+            {
+                // §6.1's sixth class: accepting an unwired guard means
+                // "the check is intended AND missing" — a
+                // missing-enforcement finding, not a spec clause.
+                let note = if note.trim().is_empty() {
+                    "Confirmed during elicitation: the guard this variant names is \
+                     intended but enforced nowhere."
+                        .to_string()
+                } else {
+                    note.clone()
+                };
+                hyp_bugs.push((hyp, note));
+                hypothesis_outcomes.push(HypothesisOutcome {
+                    id: hyp.id.clone(),
+                    handler: hyp.handler.clone(),
+                    decision: "accept".to_string(),
+                    outcome: "confirmed_unenforced".to_string(),
+                    detail: None,
+                });
+            }
+            Choice::Accept | Choice::Narrow => {
+                let (outcome, detail) = match &hyp.lowering {
+                    None => (
+                        "confirmed_not_executable".to_string(),
+                        Some("no mechanical lowering for this claim yet".to_string()),
+                    ),
+                    Some(_) if baseline_errors.is_none() => (
+                        "confirmed_not_executable".to_string(),
+                        Some("skeleton spec does not parse; nothing can be lowered against it".to_string()),
+                    ),
+                    Some(lowering) => match elicit::apply_lowering(&merged, hyp, lowering) {
+                        LoweringResult::Applied(candidate) => {
+                            match elicit::validate_spec_text(&candidate) {
+                                Ok(errors) if errors <= baseline_errors.unwrap_or(0) => {
+                                    merged = candidate;
+                                    ("lowered".to_string(), None)
+                                }
+                                Ok(errors) => (
+                                    "confirmed_not_executable".to_string(),
+                                    Some(format!(
+                                        "lowering introduced {} new error lint(s); reverted",
+                                        errors - baseline_errors.unwrap_or(0)
+                                    )),
+                                ),
+                                Err(e) => (
+                                    "confirmed_not_executable".to_string(),
+                                    Some(format!("lowered text failed to parse: {e}")),
+                                ),
+                            }
+                        }
+                        LoweringResult::AlreadyModeled => ("already_modeled".to_string(), None),
+                        LoweringResult::NotExecutable(reason) => {
+                            ("confirmed_not_executable".to_string(), Some(reason))
+                        }
+                    },
+                };
+                if outcome == "confirmed_not_executable" {
+                    eprintln!(
+                        "hypothesis {} confirmed, not executable: {}",
+                        hyp.id,
+                        detail.as_deref().unwrap_or("no lowering")
+                    );
+                }
+                hypothesis_outcomes.push(HypothesisOutcome {
+                    id: hyp.id.clone(),
+                    handler: hyp.handler.clone(),
+                    decision: "accept".to_string(),
+                    outcome,
+                    detail,
+                });
+            }
+            Choice::Reject => {
+                hyp_rejected.push((hyp, note.clone()));
+                hypothesis_outcomes.push(HypothesisOutcome {
+                    id: hyp.id.clone(),
+                    handler: hyp.handler.clone(),
+                    decision: "reject".to_string(),
+                    outcome: "rejected".to_string(),
+                    detail: None,
+                });
+            }
+            Choice::Bug => {
+                hyp_bugs.push((hyp, note.clone()));
+                hypothesis_outcomes.push(HypothesisOutcome {
+                    id: hyp.id.clone(),
+                    handler: hyp.handler.clone(),
+                    decision: "bug".to_string(),
+                    outcome: "bug".to_string(),
+                    detail: None,
+                });
+            }
+        }
+    }
+
+    // ── Mandatory check gate (PRD §6.4: `ratify --check` semantics are
+    // always on) — the final spec must parse; completeness lints are
+    // surfaced beside the result, never hidden.
     let spec_path = opts
         .spec_out
         .clone()
@@ -137,18 +361,42 @@ pub fn run(opts: &RatifyOpts) -> Result<RatifyReport> {
     if let Some(parent) = spec_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&spec_path, merged)?;
+    std::fs::write(&spec_path, &merged)?;
+    let (check_errors, check_warnings) = match crate::chumsky_adapter::parse_str(&merged) {
+        Ok(parsed) => {
+            let warnings = crate::check::check_completeness(&parsed);
+            let errors = warnings
+                .iter()
+                .filter(|w| matches!(w.severity, crate::check::Severity::Error))
+                .count();
+            (errors, warnings.len() - errors)
+        }
+        Err(e) => {
+            bail!(
+                "ratified spec at {} does not parse: {} — the working set's skeleton is \
+                 broken; fix it (or re-run the probe) and ratify again",
+                spec_path.display(),
+                e
+            );
+        }
+    };
 
     // ── Emit scoping notes ─────────────────────────────────────────
     let scoping_path = opts
         .scoping_out
         .clone()
         .unwrap_or_else(|| default_scoping_path(&opts.audit_dir));
-    if !rejected.is_empty() {
+    if !rejected.is_empty() || !hyp_rejected.is_empty() {
         if let Some(parent) = scoping_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let scoping_block = render_scoping_block(&rejected);
+        let mut scoping_block = String::new();
+        if !rejected.is_empty() {
+            scoping_block.push_str(&render_scoping_block(&rejected));
+        }
+        if !hyp_rejected.is_empty() {
+            scoping_block.push_str(&render_hypothesis_scoping_block(&hyp_rejected));
+        }
         append_or_create(&scoping_path, &scoping_block)?;
     }
 
@@ -158,11 +406,17 @@ pub fn run(opts: &RatifyOpts) -> Result<RatifyReport> {
         .clone()
         .unwrap_or_else(|| default_findings_dir(&opts.audit_dir));
     let mut findings_paths = Vec::new();
-    if !bugs.is_empty() {
+    if !bugs.is_empty() || !hyp_bugs.is_empty() {
         std::fs::create_dir_all(&findings_dir)?;
         for (cluster, ratification) in &bugs {
             let path = findings_dir.join(format!("scaffold-to-spec-{}.md", cluster.id));
             let md = render_bug_finding(cluster, ratification);
+            std::fs::write(&path, md)?;
+            findings_paths.push(path);
+        }
+        for (hyp, note) in &hyp_bugs {
+            let path = findings_dir.join(format!("elicitation-{}.md", hyp.id));
+            let md = render_hypothesis_bug_finding(hyp, note);
             std::fs::write(&path, md)?;
             findings_paths.push(path);
         }
@@ -173,19 +427,124 @@ pub fn run(opts: &RatifyOpts) -> Result<RatifyReport> {
     let spec_handoff_path = write_spec_handoff(&opts.audit_dir, &spec_path)?;
     let domain_sequences_path = write_domain_sequences(&opts.audit_dir)?;
 
+    // ── Elicitation outcome (Phase-0 conversion instrumentation) ───
+    let run_id = hypotheses_doc
+        .as_ref()
+        .and_then(|d| d.run_id.clone())
+        .or(answers_run_id)
+        .or_else(|| manifest_run_id(&opts.audit_dir));
+    let hypotheses_lowered = hypothesis_outcomes
+        .iter()
+        .filter(|o| o.outcome == "lowered" || o.outcome == "already_modeled")
+        .count();
+    let hypotheses_not_executable = hypothesis_outcomes
+        .iter()
+        .filter(|o| o.outcome == "confirmed_not_executable")
+        .count();
+    if !hypothesis_outcomes.is_empty() || run_id.is_some() {
+        write_elicitation_outcome(
+            &opts.audit_dir,
+            run_id.as_deref(),
+            hypotheses_doc.as_ref().and_then(|d| d.generated_at_unix),
+            &hypothesis_outcomes,
+            check_errors,
+            check_warnings,
+        )?;
+    }
+
+    // ── Optional model harness generation (`--proptest`) ───────────
+    // Generation is `checking`-level evidence that the spec lowers;
+    // running the harness (qedgen verify --proptest) earns `model-tested`.
+    let model_proptest_path = if opts.proptest {
+        match generate_model_proptest(&merged, &opts.audit_dir) {
+            Ok(path) => {
+                eprintln!(
+                    "model proptest harness generated at {} — running it (e.g. via \
+                     `qedgen verify --proptest --proptest-path <path>` inside a scaffolded \
+                     project) is what earns the `model-tested` label",
+                    path.display()
+                );
+                Some(path)
+            }
+            Err(e) => {
+                eprintln!("warning: model proptest generation failed: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     Ok(RatifyReport {
         accepted: accepted_program.len()
             + accepted_by_handler.values().map(|v| v.len()).sum::<usize>(),
         narrowed: narrowed_by_handler.values().map(|v| v.len()).sum::<usize>(),
-        rejected: rejected.len(),
-        flagged_as_bug: bugs.len(),
+        rejected: rejected.len() + hyp_rejected.len(),
+        flagged_as_bug: bugs.len() + hyp_bugs.len(),
         deferred: deferred_count,
         spec_path,
         scoping_path,
         findings_paths,
         spec_handoff_path,
         domain_sequences_path,
+        run_id,
+        hypotheses_lowered,
+        hypotheses_not_executable,
+        check_errors,
+        check_warnings,
+        model_proptest_path,
     })
+}
+
+/// Read the `run_id` the probe threaded into `run-manifest.json`.
+fn manifest_run_id(audit_dir: &Path) -> Option<String> {
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(audit_dir.join("run-manifest.json")).ok()?)
+            .ok()?;
+    manifest
+        .get("run_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
+/// `elicitation-outcome.json` — the ratify half of the Phase-0 funnel:
+/// joined with `hypotheses.json` on `run_id` it yields conversion and
+/// time-to-first-check.
+fn write_elicitation_outcome(
+    audit_dir: &Path,
+    run_id: Option<&str>,
+    generated_at_unix: Option<u64>,
+    outcomes: &[HypothesisOutcome],
+    check_errors: usize,
+    check_warnings: usize,
+) -> Result<()> {
+    let ratified_at_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let time_to_ratify = generated_at_unix.map(|g| ratified_at_unix.saturating_sub(g));
+    let doc = serde_json::json!({
+        "schema_version": 1,
+        "run_id": run_id,
+        "ratified_at_unix": ratified_at_unix,
+        "time_to_ratify_seconds": time_to_ratify,
+        "outcomes": outcomes,
+        "check": { "errors": check_errors, "warnings": check_warnings },
+    });
+    std::fs::write(
+        audit_dir.join("elicitation-outcome.json"),
+        format!("{}\n", serde_json::to_string_pretty(&doc)?),
+    )?;
+    Ok(())
+}
+
+/// Generate the spec-model proptest harness from the ratified spec text.
+fn generate_model_proptest(spec_text: &str, audit_dir: &Path) -> Result<PathBuf> {
+    let parsed = crate::chumsky_adapter::parse_str(spec_text)?;
+    let mir = crate::mir::lower(&parsed);
+    let path = audit_dir.join("model-proptest.rs");
+    crate::proptest_gen_mir::generate(&mir, &parsed, &path)?;
+    Ok(path)
 }
 
 fn write_domain_sequences(audit_dir: &Path) -> Result<Option<PathBuf>> {
@@ -700,6 +1059,85 @@ fn render_scoping_block(rejected: &[(&Cluster, &Ratification)]) -> String {
     s
 }
 
+/// Rejected-hypothesis log — same contract as the cluster scoping block:
+/// the evidence was real, the user judged the claim non-fit; re-evaluate
+/// on future audits.
+fn render_hypothesis_scoping_block(rejected: &[(&InvariantHypothesis, String)]) -> String {
+    let mut s = String::new();
+    let now_iso = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Iso8601::DEFAULT)
+        .unwrap_or_else(|_| "unknown".to_string());
+    s.push_str(&format!(
+        "\n## Rejected invariant hypotheses — {}\n\n",
+        now_iso
+    ));
+    for (hyp, note) in rejected {
+        s.push_str(&format!(
+            "### hypothesis `{}` — {} (handler `{}`)\n\n",
+            hyp.id,
+            hyp.class.as_str(),
+            hyp.handler
+        ));
+        s.push_str(&format!("**Claim:** {}\n\n", hyp.claim));
+        for e in &hyp.evidence {
+            s.push_str(&format!(
+                "**Evidence:** {}{}\n\n",
+                e.detail,
+                e.source
+                    .as_deref()
+                    .map(|p| format!(" ({})", p))
+                    .unwrap_or_default()
+            ));
+        }
+        if note.trim().is_empty() {
+            s.push_str("_No rationale captured._\n\n");
+        } else {
+            s.push_str("**User rationale:**\n\n");
+            for line in note.lines() {
+                s.push_str(&format!("> {}\n", line));
+            }
+            s.push('\n');
+        }
+    }
+    s
+}
+
+/// A hypothesis answered `BUG`: the user confirms the invariant is
+/// *intended* but reports the code does not enforce it — elicitation
+/// doubling as a bug-catcher (PRD §6.2).
+fn render_hypothesis_bug_finding(hyp: &InvariantHypothesis, note: &str) -> String {
+    let mut s = String::new();
+    s.push_str(&format!("# Elicitation bug flag: `{}`\n\n", hyp.id));
+    s.push_str(&format!("**Class:** `{}`\n", hyp.class.as_str()));
+    s.push_str(&format!("**Handler:** `{}`\n", hyp.handler));
+    s.push_str(&format!("**Confidence:** {:?}\n\n", hyp.confidence));
+    s.push_str(&format!("**Claim:** {}\n\n", hyp.claim));
+    s.push_str("## Evidence\n\n");
+    for e in &hyp.evidence {
+        s.push_str(&format!(
+            "- {}{}\n",
+            e.detail,
+            e.source
+                .as_deref()
+                .map(|p| format!(" ({})", p))
+                .unwrap_or_default()
+        ));
+    }
+    s.push('\n');
+    s.push_str(
+        "The user confirmed this invariant is **intended** but flagged that the \
+         code does NOT enforce it — a missing-enforcement bug, not a spec gap. \
+         Reproduce with a source-bound backend before claiming exploitability.\n",
+    );
+    if !note.trim().is_empty() {
+        s.push_str("\n## User rationale\n\n");
+        for line in note.lines() {
+            s.push_str(&format!("> {}\n", line));
+        }
+    }
+    s
+}
+
 fn append_or_create(path: &Path, content: &str) -> Result<()> {
     use std::io::Write;
     if let Some(parent) = path.parent() {
@@ -858,6 +1296,8 @@ mod tests {
             spec_out: Some(dir.path().join("ptoken.qedspec")),
             scoping_out: Some(dir.path().join(".qed/plan/scoping.md")),
             findings_dir: Some(dir.path().join(".qed/findings")),
+            answers: None,
+            proptest: false,
         };
         let report = run(&opts)?;
         assert_eq!(report.accepted, 1);
@@ -906,6 +1346,8 @@ mod tests {
             spec_out: Some(dir.path().join("p.qedspec")),
             scoping_out: Some(scoping_path.clone()),
             findings_dir: Some(dir.path().join(".qed/findings")),
+            answers: None,
+            proptest: false,
         };
         let report = run(&opts)?;
         assert_eq!(report.rejected, 1);
@@ -981,6 +1423,8 @@ mod tests {
             spec_out: Some(dir.path().join("vault.qedspec")),
             scoping_out: None,
             findings_dir: None,
+            answers: None,
+            proptest: false,
         })?;
         let dossier: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(audit.join("domain-dossier.json"))?)?;
@@ -1019,6 +1463,8 @@ mod tests {
             spec_out: Some(dir.path().join("vault.qedspec")),
             scoping_out: None,
             findings_dir: None,
+            answers: None,
+            proptest: false,
         })?;
         assert_eq!(
             std::fs::read_to_string(rerun.spec_handoff_path.expect("rerun handoff"))?,
@@ -1072,6 +1518,8 @@ mod tests {
             spec_out: Some(dir.path().join("p.qedspec")),
             scoping_out: Some(dir.path().join(".qed/plan/scoping.md")),
             findings_dir: Some(findings_dir.clone()),
+            answers: None,
+            proptest: false,
         };
         let report = run(&opts)?;
         assert_eq!(report.flagged_as_bug, 1);
@@ -1104,6 +1552,8 @@ mod tests {
             spec_out: Some(dir.path().join("p.qedspec")),
             scoping_out: Some(dir.path().join("scoping.md")),
             findings_dir: Some(dir.path().join("findings")),
+            answers: None,
+            proptest: false,
         };
         let report = run(&opts)?;
         assert_eq!(report.accepted, 1);
@@ -1146,6 +1596,8 @@ mod tests {
             spec_out: Some(dir.path().join("p.qedspec")),
             scoping_out: Some(dir.path().join("scoping.md")),
             findings_dir: Some(dir.path().join("findings")),
+            answers: None,
+            proptest: false,
         };
         let report = run(&opts)?;
         assert_eq!(report.accepted, 0);
@@ -1220,6 +1672,8 @@ mod tests {
                     spec_out: Some(out.clone()),
                     scoping_out: Some(dir.path().join("scoping.md")),
                     findings_dir: Some(dir.path().join("findings")),
+                    answers: None,
+                    proptest: false,
                 };
                 run(&opts)?;
                 let content = std::fs::read_to_string(&out)?;
@@ -1264,6 +1718,8 @@ mod tests {
             spec_out: Some(out),
             scoping_out: Some(dir.path().join("scoping.md")),
             findings_dir: Some(dir.path().join("findings")),
+            answers: None,
+            proptest: false,
         };
         run(&make_opts(out1.clone()))?;
         run(&make_opts(out2.clone()))?;
@@ -1273,6 +1729,277 @@ mod tests {
             bytes1, bytes2,
             "re-running ratify on identical audit_dir must produce identical spec bytes"
         );
+        Ok(())
+    }
+
+    fn write_hypotheses(
+        dir: &Path,
+        run_id: &str,
+        hypotheses: &[crate::probe::hypothesize::InvariantHypothesis],
+    ) -> Result<()> {
+        std::fs::write(
+            dir.join("hypotheses.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema_version": 1,
+                "run_id": run_id,
+                "generated_at_unix": 1_700_000_000u64,
+                "hypotheses": hypotheses,
+            }))?,
+        )?;
+        Ok(())
+    }
+
+    fn auth_hypothesis(handler: &str, signer: &str) -> crate::probe::hypothesize::InvariantHypothesis {
+        use crate::probe::hypothesize::*;
+        InvariantHypothesis {
+            id: format!("h-abc12345-authorization-{handler}"),
+            class: HypothesisClass::Authorization,
+            handler: handler.to_string(),
+            claim: format!("`{handler}` requires the stored authority"),
+            evidence: vec![],
+            payoff: String::new(),
+            backend: String::new(),
+            assurance: "checking".to_string(),
+            confidence: crate::cluster::Confidence::High,
+            lowering: Some(HypothesisLowering::AuthClause {
+                signer_account: signer.to_string(),
+            }),
+        }
+    }
+
+    /// Structured `answers.json` (in-harness interview): an accepted auth
+    /// hypothesis lowers to a real `auth` clause, the ratified spec
+    /// parses + checks, and the run_id carries through to the outcome
+    /// record. No `interview.md` exists — the legacy file must not be
+    /// required on this path.
+    #[test]
+    fn structured_answers_lower_auth_hypothesis() -> Result<()> {
+        let dir = tempdir()?;
+        let audit = dir.path().join(".qed/audit/test");
+        std::fs::create_dir_all(&audit)?;
+        let skeleton = render_skeleton_from_handlers(&["set_fee".into()], "vault");
+        std::fs::write(audit.join("skeleton.qedspec"), &skeleton)?;
+        std::fs::write(audit.join("clusters.json"), "[]")?;
+        let hyp = auth_hypothesis("set_fee", "admin");
+        write_hypotheses(&audit, "run-vault-123", &[hyp.clone()])?;
+        std::fs::write(
+            audit.join("answers.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "answers": [{ "id": hyp.id, "decision": "accept", "note": "yes, admin-gated" }]
+            }))?,
+        )?;
+
+        let report = run(&RatifyOpts {
+            audit_dir: audit.clone(),
+            spec_out: Some(dir.path().join("vault.qedspec")),
+            scoping_out: Some(dir.path().join("scoping.md")),
+            findings_dir: Some(dir.path().join("findings")),
+            answers: None,
+            proptest: false,
+        })?;
+        assert_eq!(report.hypotheses_lowered, 1);
+        assert_eq!(report.hypotheses_not_executable, 0);
+        assert_eq!(report.run_id.as_deref(), Some("run-vault-123"));
+        let spec = std::fs::read_to_string(&report.spec_path)?;
+        assert!(spec.contains("auth admin"), "spec:\n{spec}");
+        assert!(spec.contains(&format!("provenance: hypothesis {}", hyp.id)));
+        crate::chumsky_adapter::parse_str(&spec).expect("ratified spec parses");
+        let outcome: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
+            audit.join("elicitation-outcome.json"),
+        )?)?;
+        assert_eq!(outcome["run_id"], "run-vault-123");
+        assert_eq!(outcome["outcomes"][0]["outcome"], "lowered");
+        assert!(outcome["time_to_ratify_seconds"].is_u64());
+        Ok(())
+    }
+
+    /// A confirmed hypothesis whose handler is missing from the skeleton
+    /// is reported `confirmed, not executable` — never inserted as a
+    /// placeholder comment.
+    #[test]
+    fn structured_answers_not_executable_fallback() -> Result<()> {
+        let dir = tempdir()?;
+        let audit = dir.path().join(".qed/audit/test");
+        std::fs::create_dir_all(&audit)?;
+        let skeleton = render_skeleton_from_handlers(&["other_handler".into()], "vault");
+        std::fs::write(audit.join("skeleton.qedspec"), &skeleton)?;
+        std::fs::write(audit.join("clusters.json"), "[]")?;
+        let hyp = auth_hypothesis("set_fee", "admin");
+        write_hypotheses(&audit, "run-vault-124", &[hyp.clone()])?;
+        std::fs::write(
+            audit.join("answers.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "answers": [{ "id": hyp.id, "decision": "accept" }]
+            }))?,
+        )?;
+
+        let report = run(&RatifyOpts {
+            audit_dir: audit.clone(),
+            spec_out: Some(dir.path().join("vault.qedspec")),
+            scoping_out: Some(dir.path().join("scoping.md")),
+            findings_dir: Some(dir.path().join("findings")),
+            answers: None,
+            proptest: false,
+        })?;
+        assert_eq!(report.hypotheses_lowered, 0);
+        assert_eq!(report.hypotheses_not_executable, 1);
+        let spec = std::fs::read_to_string(&report.spec_path)?;
+        assert!(!spec.contains("auth admin"));
+        assert!(!spec.contains(&hyp.id), "no placeholder comment: {spec}");
+        let outcome: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
+            audit.join("elicitation-outcome.json"),
+        )?)?;
+        assert_eq!(
+            outcome["outcomes"][0]["outcome"],
+            "confirmed_not_executable"
+        );
+        Ok(())
+    }
+
+    /// A hypothesis answered `bug` routes to a finding file (elicitation
+    /// as bug-catcher) and a rejected one to the scoping log.
+    #[test]
+    fn structured_answers_bug_and_reject_route() -> Result<()> {
+        let dir = tempdir()?;
+        let audit = dir.path().join(".qed/audit/test");
+        std::fs::create_dir_all(&audit)?;
+        let skeleton =
+            render_skeleton_from_handlers(&["set_fee".into(), "close".into()], "vault");
+        std::fs::write(audit.join("skeleton.qedspec"), &skeleton)?;
+        std::fs::write(audit.join("clusters.json"), "[]")?;
+        let bug_hyp = auth_hypothesis("set_fee", "admin");
+        let rej_hyp = auth_hypothesis("close", "admin");
+        write_hypotheses(&audit, "run-vault-125", &[bug_hyp.clone(), rej_hyp.clone()])?;
+        std::fs::write(
+            audit.join("answers.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "answers": [
+                    { "id": bug_hyp.id, "decision": "bug", "note": "intended but unenforced" },
+                    { "id": rej_hyp.id, "decision": "reject", "note": "close is permissionless by design" }
+                ]
+            }))?,
+        )?;
+
+        let scoping = dir.path().join("scoping.md");
+        let report = run(&RatifyOpts {
+            audit_dir: audit,
+            spec_out: Some(dir.path().join("vault.qedspec")),
+            scoping_out: Some(scoping.clone()),
+            findings_dir: Some(dir.path().join("findings")),
+            answers: None,
+            proptest: false,
+        })?;
+        assert_eq!(report.flagged_as_bug, 1);
+        assert_eq!(report.rejected, 1);
+        let finding = std::fs::read_to_string(&report.findings_paths[0])?;
+        assert!(finding.contains("Elicitation bug flag"));
+        assert!(finding.contains("intended but unenforced"));
+        let scoping_text = std::fs::read_to_string(&scoping)?;
+        assert!(scoping_text.contains("Rejected invariant hypotheses"));
+        assert!(scoping_text.contains("permissionless by design"));
+        Ok(())
+    }
+
+    /// An accepted unwired-guard hypothesis is a missing-enforcement
+    /// finding, never a spec clause: accept routes to the bug path with
+    /// outcome `confirmed_unenforced` (elicitation as bug-catcher).
+    #[test]
+    fn structured_answers_unwired_guard_accept_routes_to_finding() -> Result<()> {
+        use crate::probe::hypothesize::*;
+        let dir = tempdir()?;
+        let audit = dir.path().join(".qed/audit/test");
+        std::fs::create_dir_all(&audit)?;
+        let skeleton = render_skeleton_from_handlers(&["set_fee".into()], "vault");
+        std::fs::write(audit.join("skeleton.qedspec"), &skeleton)?;
+        std::fs::write(audit.join("clusters.json"), "[]")?;
+        let hyp = InvariantHypothesis {
+            id: "h-9999aaaa-unwired_guard-CapTooHigh".to_string(),
+            class: HypothesisClass::UnwiredGuard,
+            handler: "CapTooHigh".to_string(),
+            claim: "Error variant `CapTooHigh` names a check the program never enforces"
+                .to_string(),
+            evidence: vec![],
+            payoff: String::new(),
+            backend: String::new(),
+            assurance: "checking".to_string(),
+            confidence: crate::cluster::Confidence::Medium,
+            lowering: None,
+        };
+        write_hypotheses(&audit, "run-vault-127", &[hyp.clone()])?;
+        std::fs::write(
+            audit.join("answers.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "answers": [{ "id": hyp.id, "decision": "accept" }]
+            }))?,
+        )?;
+
+        let report = run(&RatifyOpts {
+            audit_dir: audit.clone(),
+            spec_out: Some(dir.path().join("vault.qedspec")),
+            scoping_out: Some(dir.path().join("scoping.md")),
+            findings_dir: Some(dir.path().join("findings")),
+            answers: None,
+            proptest: false,
+        })?;
+        // Routed as a finding, not a lowering.
+        assert_eq!(report.flagged_as_bug, 1);
+        assert_eq!(report.hypotheses_lowered, 0);
+        let finding = std::fs::read_to_string(&report.findings_paths[0])?;
+        assert!(finding.contains("Elicitation bug flag"));
+        let outcome: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
+            audit.join("elicitation-outcome.json"),
+        )?)?;
+        assert_eq!(outcome["outcomes"][0]["outcome"], "confirmed_unenforced");
+        Ok(())
+    }
+
+    /// Lifecycle lowering annotates a bare handler with an init-shaped
+    /// transition resolved against the skeleton's own State variants.
+    #[test]
+    fn structured_answers_lower_lifecycle_transition() -> Result<()> {
+        use crate::probe::hypothesize::*;
+        let dir = tempdir()?;
+        let audit = dir.path().join(".qed/audit/test");
+        std::fs::create_dir_all(&audit)?;
+        // Bare handler (no transition annotation) — the interesting case.
+        let skeleton = "spec Vault\n\ntype State\n  | Uninitialized\n  | Active\n\ntype Error\n  | InvalidArgument\n  | Unauthorized\n\nhandler initialize {\n  // accounts, requires, effect, transfers — filled by interview\n}\n";
+        std::fs::write(audit.join("skeleton.qedspec"), skeleton)?;
+        std::fs::write(audit.join("clusters.json"), "[]")?;
+        let hyp = InvariantHypothesis {
+            id: "h-def67890-lifecycle_init_once-initialize".to_string(),
+            class: HypothesisClass::LifecycleInitOnce,
+            handler: "initialize".to_string(),
+            claim: "`initialize` runs exactly once".to_string(),
+            evidence: vec![],
+            payoff: String::new(),
+            backend: String::new(),
+            assurance: "checking".to_string(),
+            confidence: crate::cluster::Confidence::High,
+            lowering: Some(HypothesisLowering::LifecycleTransition),
+        };
+        write_hypotheses(&audit, "run-vault-126", &[hyp.clone()])?;
+        std::fs::write(
+            audit.join("answers.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "answers": [{ "id": hyp.id, "decision": "accept" }]
+            }))?,
+        )?;
+
+        let report = run(&RatifyOpts {
+            audit_dir: audit,
+            spec_out: Some(dir.path().join("vault.qedspec")),
+            scoping_out: Some(dir.path().join("scoping.md")),
+            findings_dir: Some(dir.path().join("findings")),
+            answers: None,
+            proptest: false,
+        })?;
+        assert_eq!(report.hypotheses_lowered, 1);
+        let spec = std::fs::read_to_string(&report.spec_path)?;
+        assert!(
+            spec.contains("handler initialize : State.Uninitialized -> State.Active {"),
+            "spec:\n{spec}"
+        );
+        crate::chumsky_adapter::parse_str(&spec).expect("ratified spec parses");
         Ok(())
     }
 
@@ -1286,6 +2013,8 @@ mod tests {
             spec_out: None,
             scoping_out: None,
             findings_dir: None,
+            answers: None,
+            proptest: false,
         };
         let err = run(&opts).expect_err("missing files should error");
         let msg = format!("{}", err);

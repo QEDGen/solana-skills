@@ -374,20 +374,23 @@ suppresses the intent gap, not the implementation gap.
 
 ---
 
-## Portable file-driven interview
+## Structured-answers ratification
 
-Venues without a native structured-question primitive use the v2.19
-file-driven path:
+In every interactive venue the interview happens in-harness: the agent
+renders the probe envelope's `hypotheses[]` (plus its own deeper
+candidates) as questions like the transcripts above, collects one
+answer per hypothesis (accept / narrow / reject / bug), writes them to
+`<audit-dir>/answers.json`
+(`{"run_id": …, "answers": [{"id": "<h-… or c-…>",
+"decision": "accept|narrow|reject|bug", "note": "…"}]}`), and runs
+`qedgen ratify --audit-dir <dir>`. Hypothesis IDs (`h-…`) and legacy
+cluster IDs (`c-…`) are addressed uniformly; when `answers.json` is
+present, `interview.md` is neither consulted nor required.
 
-1. Agent runs the producer that emits cluster cards (the existing
-   `qedgen probe --emit-spec-candidates` flow).
-2. CLI writes `.qed/interview/interview.md` with one section per
-   cluster + a free-text invariants section at the top.
-3. Agent surfaces the file: "Open `.qed/interview/interview.md`, fill
-   the invariants section, check the cluster cards, save."
-4. Agent re-reads on completion (chat signal) and proceeds to Phase 3
-   with the parsed ratifications.
+**Legacy fallback.** Audit dirs created by older probes still support
+the file-driven path: the user edits the dir's `interview.md`, then
+`qedgen ratify` parses it. Use it only for those dirs.
 
-The file and structured-question paths must ask for the same decisions and
-produce the same ratified data. Presentation differences must not alter audit
+Whatever the surface, the same decisions must be asked and the same
+ratified data produced. Presentation differences must not alter audit
 coverage, evidence, or severity.

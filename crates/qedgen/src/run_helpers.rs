@@ -440,6 +440,38 @@ pub(crate) fn mark_ordinary_probe_blocked(
     Ok(())
 }
 
+/// Emit an attribute report to `--out` or stdout — shared by `stamp` and
+/// the deprecated `adapt --spec` alias.
+pub(crate) fn write_attribute_report(rendered: &str, out: Option<&Path>) -> Result<()> {
+    if let Some(path) = out {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, rendered)?;
+        eprintln!("Wrote {} ({} bytes)", path.display(), rendered.len());
+    } else {
+        print!("{}", rendered);
+    }
+    Ok(())
+}
+
+/// Persist the `stamp` gate's evidence record after a verify run.
+/// Best-effort by contract: a failed write must not turn a green verify
+/// red (the record is a convenience for `stamp`, not a verify output).
+pub(crate) fn record_verify_evidence(
+    spec: &Path,
+    report: &crate::verify::VerifyReport,
+    kani_impl_bound: bool,
+    probe_repros_passed: Option<bool>,
+) {
+    match crate::verify::evidence::build(spec, report, kani_impl_bound, probe_repros_passed)
+        .and_then(|e| crate::verify::evidence::record(&e, spec))
+    {
+        Ok(path) => eprintln!("Recorded verification evidence at {}", path.display()),
+        Err(e) => eprintln!("warning: failed to record verification evidence: {e}"),
+    }
+}
+
 fn stable_audit_id(program_name: &str) -> String {
     let normalized: String = program_name
         .chars()
@@ -867,7 +899,7 @@ pub(crate) fn run_anchor_probe(
 
     let engine_run = source_scan_engine_run(prog_root);
     let outcome = source_scan_outcome(&engine_run);
-    let output = probe::ProbeOutput {
+    let mut output = probe::ProbeOutput {
         project_root: Some(prog_root.display().to_string()),
         runtime: Some(runtime_final),
         handlers: handlers_opt,
@@ -881,6 +913,7 @@ pub(crate) fn run_anchor_probe(
         derivable_idl,
         ..probe::ProbeOutput::envelope(probe::Mode::SpecLess)
     };
+    probe::finalize_specless(&mut output, prog_root, audit_dir);
     println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(())
 }
@@ -958,7 +991,7 @@ pub(crate) fn run_native_probe(
 
     let engine_run = source_scan_engine_run(prog_root);
     let outcome = source_scan_outcome(&engine_run);
-    let output = probe::ProbeOutput {
+    let mut output = probe::ProbeOutput {
         project_root: Some(prog_root.display().to_string()),
         runtime: Some(runtime_final),
         handlers,
@@ -973,6 +1006,7 @@ pub(crate) fn run_native_probe(
         dispatcher_kind,
         ..probe::ProbeOutput::envelope(probe::Mode::SpecLess)
     };
+    probe::finalize_specless(&mut output, prog_root, audit_dir);
     println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(())
 }

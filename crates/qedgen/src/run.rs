@@ -87,6 +87,7 @@ pub(crate) fn command_name_of(c: &Commands) -> &'static str {
         Commands::Generate { .. } => "generate",
         Commands::FillSorry { .. } => "fill-sorry",
         Commands::Adapt { .. } => "adapt",
+        Commands::Stamp { .. } => "stamp",
         Commands::Interface { .. } => "interface",
         Commands::Probe { .. } => "probe",
         Commands::Ratify { .. } => "ratify",
@@ -209,20 +210,33 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             }
             match spec {
                 Some(spec_path) => {
+                    eprintln!("warning: `qedgen adapt --program --spec` is deprecated.");
+                    eprintln!(
+                        "         Use `qedgen stamp --program <c> --spec <s>` — same emission,"
+                    );
+                    eprintln!(
+                        "         plus the recorded-verification gate (`#[qed(verified)]` should"
+                    );
+                    eprintln!("         freeze a claim a source-bound backend established).");
+                    eprintln!("         Slated for hard-removal in v3.0; functional for now.");
                     let entries =
                         anchor_adapt::compute_attributes(&program, &spec_path, &overrides)?;
                     let rendered = anchor_adapt::render_attributes(&entries);
-                    if let Some(path) = out {
-                        if let Some(parent) = path.parent() {
-                            std::fs::create_dir_all(parent)?;
-                        }
-                        std::fs::write(&path, &rendered)?;
-                        eprintln!("Wrote {} ({} bytes)", path.display(), rendered.len());
-                    } else {
-                        print!("{}", rendered);
-                    }
+                    write_attribute_report(&rendered, out.as_deref())?;
                 }
                 None => {
+                    eprintln!("warning: `qedgen adapt --program` (scaffold) is deprecated.");
+                    eprintln!(
+                        "         Use `qedgen probe --program <c> --emit-spec-candidates \
+                         --audit-dir .qed/audit/<ts>`"
+                    );
+                    eprintln!(
+                        "         — the elicitation flow offers confirmable, evidence-anchored"
+                    );
+                    eprintln!(
+                        "         hypotheses (and writes the same skeleton as a byproduct)."
+                    );
+                    eprintln!("         Slated for hard-removal in v3.0; functional for now.");
                     let program_name = adapt::default_program_name(&program);
                     let adapter_config = adapt::AdapterConfig::new(&program_name, &overrides);
                     if let Some(path) = out {
@@ -233,6 +247,39 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                     }
                 }
             }
+        }
+
+        Commands::Stamp {
+            program,
+            spec,
+            out,
+            handler_overrides,
+            evidence,
+        } => {
+            // The gate first: `stamp` freezes an established claim, so
+            // no attributes are computed (let alone emitted) without
+            // matching implementation-verified evidence (§5.1).
+            let record = verify::evidence::require_stamp_evidence(&spec, evidence.as_deref())?;
+            let impl_backends: Vec<&str> = record
+                .backends
+                .iter()
+                .filter(|b| b.implementation_bound && b.status == "passed")
+                .map(|b| b.name.as_str())
+                .collect();
+            eprintln!(
+                "Evidence: spec hash {} implementation-verified by {} (recorded {})",
+                record.spec_hash,
+                impl_backends.join(", "),
+                record.recorded_at_unix
+            );
+            let mut overrides = std::collections::HashMap::new();
+            for raw in &handler_overrides {
+                let (name, parsed) = anchor_adapt::parse_handler_override(raw)?;
+                overrides.insert(name, parsed);
+            }
+            let entries = anchor_adapt::compute_attributes(&program, &spec, &overrides)?;
+            let rendered = anchor_adapt::render_attributes(&entries);
+            write_attribute_report(&rendered, out.as_deref())?;
         }
 
         Commands::Interface { idl, out, vendor } => {
@@ -352,7 +399,12 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                             ),
                         )?;
                     }
-                    let output = probe::run_bootstrap(prog_root)?;
+                    let mut output = probe::run_bootstrap(prog_root)?;
+                    probe::finalize_specless(
+                        &mut output,
+                        prog_root,
+                        audit_dir.as_deref().filter(|_| emit_spec_candidates),
+                    );
                     println!("{}", serde_json::to_string_pretty(&output)?);
                     return Ok(());
                 }
@@ -395,7 +447,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 }
                 let engine_run = run_helpers::source_scan_engine_run(prog_root);
                 let outcome = run_helpers::source_scan_outcome(&engine_run);
-                let output = probe::ProbeOutput {
+                let mut output = probe::ProbeOutput {
                     project_root: Some(prog_root.display().to_string()),
                     runtime: Some(probe::Runtime::Pinocchio),
                     handlers: (!idl_handlers.is_empty()).then_some(idl_handlers),
@@ -409,6 +461,11 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                     derivable_idl: overlay.derivable_idl,
                     ..probe::ProbeOutput::envelope(probe::Mode::SpecLess)
                 };
+                probe::finalize_specless(
+                    &mut output,
+                    prog_root,
+                    audit_dir.as_deref().filter(|_| emit_spec_candidates),
+                );
                 // Include the raw catalogue so the subagent has both
                 // `findings[]` and the full site list to cross-reference.
                 let mut value = serde_json::to_value(&output)?;
@@ -735,7 +792,9 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             let output = if bootstrap {
                 let root = root
                     .ok_or_else(|| anyhow::anyhow!("--bootstrap requires --root <project-path>"))?;
-                probe::run_bootstrap(&root)?
+                let mut output = probe::run_bootstrap(&root)?;
+                probe::finalize_specless(&mut output, &root, None);
+                output
             } else {
                 let spec = spec.ok_or_else(|| {
                     anyhow::anyhow!("provide --spec <path> for spec-aware mode, or --bootstrap --root <path> for spec-less")
@@ -751,12 +810,16 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             out,
             scoping_out,
             findings_dir,
+            answers,
+            proptest,
         } => {
             let opts = ratify::RatifyOpts {
                 audit_dir,
                 spec_out: out,
                 scoping_out,
                 findings_dir,
+                answers,
+                proptest,
             };
             let report = ratify::run(&opts)?;
             eprintln!(
@@ -767,6 +830,25 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 report.flagged_as_bug,
                 report.deferred,
             );
+            if report.hypotheses_lowered + report.hypotheses_not_executable > 0 {
+                eprintln!(
+                    "Hypotheses: {} lowered to executable clauses, {} confirmed-not-executable{}",
+                    report.hypotheses_lowered,
+                    report.hypotheses_not_executable,
+                    report
+                        .run_id
+                        .as_deref()
+                        .map(|r| format!(" (run {r})"))
+                        .unwrap_or_default(),
+                );
+            }
+            eprintln!(
+                "Check: spec parses; {} error lint(s), {} warning(s) — assurance level: checking",
+                report.check_errors, report.check_warnings
+            );
+            if let Some(path) = &report.model_proptest_path {
+                eprintln!("Wrote spec-model proptest harness to {}", path.display());
+            }
             eprintln!("Wrote spec to {}", report.spec_path.display());
             if let Some(path) = &report.spec_handoff_path {
                 eprintln!("Wrote specification handoff to {}", path.display());
@@ -783,6 +865,17 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
         }
 
         Commands::Spec { idl, output_dir } => {
+            eprintln!("warning: `qedgen spec --idl` is deprecated.");
+            eprintln!(
+                "         The IDL is now an evidence source for `qedgen probe` — run"
+            );
+            eprintln!(
+                "         `qedgen probe --program <c> --emit-spec-candidates --audit-dir <d>`"
+            );
+            eprintln!(
+                "         for confirmable, evidence-anchored hypotheses instead of a TODO shell."
+            );
+            eprintln!("         Slated for hard-removal in v3.0; functional for now.");
             let stem = idl
                 .file_stem()
                 .unwrap_or_default()
@@ -1339,6 +1432,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             // separate stage with its own report shape (not folded into the
             // BackendReport rollup), run first so the auditor has the
             // gating data.
+            let mut probe_repros_passed: Option<bool> = None;
             if probe_repros {
                 let project_root = spec.parent().map(Path::to_path_buf).unwrap_or_else(|| {
                     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
@@ -1349,11 +1443,21 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 } else {
                     verify_probe_repros::print_human(&report);
                 }
-                if !report.all_fired_or_inconclusive() {
+                let passed = report.all_fired_or_inconclusive();
+                probe_repros_passed = Some(passed);
+                if !passed {
+                    record_verify_evidence(&spec, &verify::VerifyReport {
+                        spec: spec.clone(),
+                        backends: Vec::new(),
+                    }, false, probe_repros_passed);
                     std::process::exit(1);
                 }
                 let any_backend_flag = proptest || kani || lean || miri;
                 if !any_backend_flag {
+                    record_verify_evidence(&spec, &verify::VerifyReport {
+                        spec: spec.clone(),
+                        backends: Vec::new(),
+                    }, false, probe_repros_passed);
                     return Ok(());
                 }
             }
@@ -1373,6 +1477,14 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 .read_dir()
                 .map(|mut it| it.next().is_none())
                 .unwrap_or(true);
+            // Evidence classification (§5.1): the verify layer can't tell a
+            // model Kani harness from an impl one; the codegen naming
+            // contract can — `--kani-impl` output is `kani_impl*.rs`.
+            let kani_impl_bound = kani_path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(|s| s.starts_with("kani_impl"))
+                .unwrap_or(false);
             let opts = if any_flag {
                 verify::VerifyOpts {
                     spec: spec.clone(),
@@ -1424,6 +1536,10 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             } else {
                 verify::print_human(&report);
             }
+
+            // Persist the evidence record `stamp` gates on — written on
+            // pass AND fail (a failed run is still evidence of what ran).
+            record_verify_evidence(&spec, &report, kani_impl_bound, probe_repros_passed);
 
             if !report.ok() {
                 std::process::exit(1);

@@ -460,29 +460,35 @@ output format in [report-and-grading.md](report-and-grading.md).
 
    Triggered automatically by the first MED+ surface, OR by Phase 1
    completing dry (framed: "Phase 1 didn't find a fired vuln; deepening
-   needs your input on intent.").
+   needs your input on intent." — the ranked hypotheses are then the
+   trust-winning first deliverable).
 
-   Present four small question groups using whatever structured-question
-   capability the venue provides. If none exists, use the file-driven path
-   below. The content and resulting ratification must be identical across
-   venues:
+   The question source is the probe envelope's `hypotheses[]` —
+   evidence-anchored `InvariantHypothesis` records the binary derives
+   deterministically (authorization, lifecycle_init_once) — plus any
+   deeper agent-derived hypotheses: the binary owns the deterministic
+   classes; the agent owns cross-procedure and ambiguous ones
+   (state-machine completeness, conservation, authority graph beyond
+   signer/owner, threat scenarios, intentional gaps). Render each
+   hypothesis conversationally with its claim, evidence, and payoff, and
+   ask in-harness in every interactive venue — one answer per hypothesis
+   (accept / narrow / reject / bug).
 
-   1. **Invariants** (multi-select, agent-derived candidates + Other,
-      `preview` field per option showing the inferred-from code excerpt)
-   2. **State machine shape** (single-select archetype, preview shows
-      struct + handler signatures)
-   3. **Authority graph** (multi-select role candidates from Signer
-      constraints / handler names)
-   4. **Threat scenarios + intentional gaps** (mixed single + multi-select)
+   Record the answers as `<audit-dir>/answers.json`
+   (`{"run_id": …, "answers": [{"id": "<h-… or c-…>",
+   "decision": "accept|narrow|reject|bug", "note": "…"}]}`) and run
+   `qedgen ratify --audit-dir <dir>`. Hypothesis IDs (`h-…`) and legacy
+   cluster IDs (`c-…`) are addressed uniformly; when `answers.json` is
+   present, `interview.md` is neither consulted nor required.
+
+   There is NO user-edited `interview.md` in the interactive flow. The
+   only interview-less path is truly headless CI, where hypotheses stay
+   deferred in the JSON envelope and only literal, source-anchored
+   high-confidence clauses may be auto-ratified. Whatever the venue, the
+   content and resulting ratification must be identical.
 
    See [interview examples](interview_examples.md) for
    three worked transcripts.
-
-   **Portable fallback.** Venues without a structured-question capability use
-   the file-driven path
-   (`qedgen probe --emit-spec-candidates` → user edits `interview.md`
-   → `qedgen ratify`). Do not treat either interaction surface as more
-   authoritative than the other.
 
    ### Phase 3 — refined second wave
 
@@ -517,8 +523,10 @@ output format in [report-and-grading.md](report-and-grading.md).
    sBPF/assembly is out of scope for the auditor (see the "NOT
    supported" note in [audit-handbook.md](audit-handbook.md)) — stop and
    redirect rather than scaffold.
-   For other exotic-but-Rust shapes, hand-walk the source
-   (`qedgen spec --idl <path>` for Anchor with IDL).
+   For other exotic-but-Rust shapes, hand-walk the source (for Anchor
+   with an IDL, the probe's IDL-enrichment overlay supplies signer
+   flags / `has_one` relations / status enums; `qedgen spec --idl` is
+   deprecated).
 
    ### Artifact emission
 

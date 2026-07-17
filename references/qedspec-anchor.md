@@ -1,15 +1,18 @@
 # Anchor brownfield workflow
 
-v2.9 makes `qedgen` work natively against existing Anchor programs.
-Three pieces:
+Three pieces make `qedgen` work natively against existing Anchor
+programs:
 
-1. `qedgen adapt --program <crate>` — discover handlers from source, emit a `.qedspec` skeleton.
-2. `qedgen adapt --program <crate> --spec <path>` — emit `#[qed]` attribute lines pinning each handler's body + spec hash.
+1. Code → spec: `qedgen probe --program <crate> --emit-spec-candidates --audit-dir <dir>` → confirm hypotheses (`answers.json`) → `qedgen ratify --audit-dir <dir>` — evidence-anchored elicitation that lowers confirmed invariants to executable clauses. (`qedgen adapt --program <crate>`, the TODO-shell scaffold this flow subsumes, is deprecated: functional in v2.x with a warning, removed in v3.0.)
+2. `qedgen stamp --program <crate> --spec <path>` — emit `#[qed]` attribute lines pinning each handler's body + spec hash, gated on recorded implementation-verified evidence from `qedgen verify` (formerly `adapt --spec`, which remains as a deprecated, ungated alias).
 3. `qedgen check --spec <path> --anchor-project <crate>` — CI gate that asserts the spec's handler set matches the program's `#[program]` mod.
 
 This document covers all three end-to-end. For the spec language itself, see `qedspec-dsl.md`. For spec composition (imports, `qed.toml`), see `qedspec-imports.md`.
 
-## What `qedgen adapt` carries forward
+## What the source extraction carries forward
+
+The same Anchor project walker feeds both the probe's skeleton and the
+deprecated `adapt` scaffold:
 
 | From the Rust source                                  | Into the `.qedspec` |
 |-------------------------------------------------------|--------------------|
@@ -51,7 +54,7 @@ The proc-macro `#[qed(verified, spec = ..., handler = ..., hash = ..., spec_hash
 
 Mismatch in any leg → `compile_error!` with an "Expected: … Actual: …" diff. All match → pass-through.
 
-`qedgen adapt --spec` precomputes every leg via the same algorithms (`spec_hash::body_hash_for_fn`, `spec_hash::body_hash_for_impl_fn`, `spec_hash::spec_hash_for_handler`, `spec_hash::accounts_struct_hash`) so the user just pastes the output. The accounts triplet is auto-included whenever the adapter can find the `Context<X>` struct in source.
+`qedgen stamp` (formerly `adapt --spec`; the new verb additionally gates on recorded implementation-verified evidence) precomputes every leg via the same algorithms (`spec_hash::body_hash_for_fn`, `spec_hash::body_hash_for_impl_fn`, `spec_hash::spec_hash_for_handler`, `spec_hash::accounts_struct_hash`) so the user just pastes the output. The accounts triplet is auto-included whenever the adapter can find the `Context<X>` struct in source.
 
 ### What edits trip drift
 
@@ -64,10 +67,11 @@ Mismatch in any leg → `compile_error!` with an "Expected: … Actual: …" dif
 ### Refresh after intentional edits
 
 ```
-qedgen adapt --program <crate> --spec <path>
+qedgen verify --spec <path>                    # re-records .qed/verify-evidence.json
+qedgen stamp --program <crate> --spec <path>
 ```
 
-Re-emits all attribute lines with current hashes. Paste in the changed handlers. Build clears.
+Re-emits all attribute lines with current hashes (stamp refuses until the re-verify records fresh implementation-verified evidence — an intentional edit invalidates the old claim). Paste in the changed handlers. Build clears.
 
 For the success path + drift demo end-to-end, see `crates/qed-drift-fixture/`. That fixture is a workspace member exercising all three legs (free-fn body, impl-method body, accounts struct), so workspace `cargo test` proves every leg of the drift loop on every CI run.
 
@@ -86,7 +90,7 @@ impl<'info> Deposit<'info> {
 }
 ```
 
-The proc-macro tries `syn::ItemFn` first and falls back to `syn::ImplItemFn`, so the same attribute syntax works in either position. `qedgen adapt --spec` emits the right line whether the resolver classifies the handler as `Inline`, `FreeFn`, or `Method`.
+The proc-macro tries `syn::ItemFn` first and falls back to `syn::ImplItemFn`, so the same attribute syntax works in either position. `qedgen stamp` emits the right line whether the resolver classifies the handler as `Inline`, `FreeFn`, or `Method`.
 
 ## CI integration
 
@@ -110,10 +114,11 @@ Output is plain stderr by default, JSON via `--json` for tools.
 Handlers whose program-mod fn body uses a custom dispatcher table
 (runtime lookup, function pointer indirection, closure-call shape)
 can't be followed by the classifier. Use the `--handler` flag to
-point the adapter at the actual implementation:
+point the adapter at the actual implementation (same flag on `stamp`
+and the deprecated `adapt`):
 
 ```
-qedgen adapt --program ./programs/dispatcher \
+qedgen stamp --program ./programs/dispatcher --spec dispatcher.qedspec \
   --handler dispatch=instructions::dispatch::handler \
   --handler ix2=instructions::ix2::run
 ```

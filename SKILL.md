@@ -176,7 +176,22 @@ $QEDGEN check --regen-drift
 
 ## Brownfield Onboarding
 
-For an existing Anchor program:
+**Preferred: elicitation-first.** Run the probe; it hypothesizes program-specific invariants from evidence it can cite (signer bindings, init constraints) and ranks them on stderr with the payoff of confirming each:
+
+```bash
+$QEDGEN probe --program programs/my_program \
+              --emit-spec-candidates --audit-dir .qed/audit/<ts>
+```
+
+Ask the user to confirm each hypothesis in the conversation (accept / reject / it's-a-BUG), write the answers to `.qed/audit/<ts>/answers.json` (`{"answers": [{"id": "h-…", "decision": "accept", "note": "…"}]}`), then:
+
+```bash
+$QEDGEN ratify --audit-dir .qed/audit/<ts> --out program.qedspec
+```
+
+Confirmed hypotheses become executable clauses (`auth <signer>`, lifecycle transitions) in a spec that is guaranteed to parse and lint — a partial-but-real starting point the user didn't author from scratch. Results are labelled with their assurance level: a ratified clause is `checking`; generated proptests that pass are `model-tested`; only source-bound backends earn `implementation-verified`. Never present a weaker level as a stronger one.
+
+**Alternative: scaffold-first.** For an existing Anchor program:
 
 ```bash
 $QEDGEN adapt --program programs/my_program --out program.qedspec
@@ -188,27 +203,22 @@ Then fill TODOs in the `.qedspec`, validate it, and cross-check against the live
 $QEDGEN check --spec program.qedspec --anchor-project programs/my_program
 ```
 
-After the spec covers each handler, stamp source drift attributes:
+After the spec covers each handler AND verification has run with an implementation-bound backend (miri, a `kani_impl` harness, or `--probe-repros`), stamp source drift attributes:
 
 ```bash
-$QEDGEN adapt --program programs/my_program --spec program.qedspec
+$QEDGEN verify --spec program.qedspec            # records .qed/verify-evidence.json
+$QEDGEN stamp --program programs/my_program --spec program.qedspec
 ```
 
-Paste the emitted `#[qed(verified, ...)]` attributes above the matching handler functions. Future handler-body, accounts-constraint, or spec edits should fail the build until the attributes are intentionally refreshed.
+`stamp` refuses without matching implementation-verified evidence — `#[qed(verified)]` freezes a claim a source-bound backend established; checking or model-tested results are not eligible. Paste the emitted `#[qed(verified, ...)]` attributes above the matching handler functions. Future handler-body, accounts-constraint, or spec edits fail the build until the attributes are intentionally refreshed (re-verify, then re-stamp). (`adapt --program --spec` is the deprecated alias without the gate.)
 
 If handler dispatch is non-standard, use explicit overrides:
 
 ```bash
-$QEDGEN adapt --program programs/my_program --handler deposit=processor::deposit
+$QEDGEN stamp --program programs/my_program --spec program.qedspec --handler deposit=processor::deposit
 ```
 
-For IDL-only onboarding:
-
-```bash
-$QEDGEN spec --idl target/idl/my_program.json
-```
-
-IDL scaffolds are shape-only. They need source review before they can express semantic guarantees.
+For IDL-only onboarding, prefer the probe (the IDL is one of its evidence sources — signer flags and `has_one` relations feed the hypotheses directly); `$QEDGEN spec --idl target/idl/my_program.json` still emits a shape-only scaffold but is deprecated.
 
 ## Codegen Ownership
 

@@ -47,7 +47,9 @@ keeps flowing into the body hash.
 
 ```bash
 # Adapter should report buy + settle as `free-fn forwarder` shape and
-# fence as `inline body in the #[program] mod`.
+# fence as `inline body in the #[program] mod`. (`qedgen adapt` is the
+# deprecated skeleton verb; attribute emission is now `qedgen stamp`,
+# which reuses this same forwarder classifier.)
 ./bin/qedgen adapt --program crates/qedgen/tests/fixtures/regressions/anchor-forwarder-multistmt/
 
 # The classifier-level repro is in

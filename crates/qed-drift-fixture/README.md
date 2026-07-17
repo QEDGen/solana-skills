@@ -13,9 +13,9 @@ shows up as a compile failure in CI.
 | Side                  | What it computes        | What it checks                     |
 |-----------------------|-------------------------|------------------------------------|
 | `qedgen-macros::content_hash` | body hash from `ItemFn` tokens | matches the `hash = "..."` in source |
-| `qedgen::spec_hash::body_hash_for_fn` | same algorithm | what `qedgen adapt --spec` would emit  |
+| `qedgen::spec_hash::body_hash_for_fn` | same algorithm | what `qedgen stamp` would emit  |
 | `qedgen-macros::spec_bind::spec_hash_for_handler` | extracted `handler { ... }` block | matches the `spec_hash = "..."` in source |
-| `qedgen::spec_hash::spec_hash_for_handler` | same algorithm | what `qedgen adapt --spec` would emit |
+| `qedgen::spec_hash::spec_hash_for_handler` | same algorithm | what `qedgen stamp` would emit |
 
 If either pair drifts, this crate stops compiling and the workspace
 test run fails.
@@ -52,5 +52,7 @@ absent. So:
 3. Paste them back in.
 4. Build again — succeeds.
 
-For real Anchor programs, `qedgen adapt --program <crate>
---spec <path>` does this in bulk.
+For real Anchor programs, `qedgen stamp --program <crate>
+--spec <path>` (formerly `qedgen adapt --spec`, now deprecated) does
+this in bulk — gated on matching `.qed/verify-evidence.json` from a
+passing implementation-bound `qedgen verify` run.

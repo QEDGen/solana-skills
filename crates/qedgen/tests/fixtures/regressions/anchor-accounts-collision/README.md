@@ -38,7 +38,9 @@ display use (the breadcrumb comment in the rendered `.qedspec`).
 
 ```bash
 # Adapter should now seal `lite` against src/a/mod.rs and `heavy`
-# against src/b/mod.rs:
+# against src/b/mod.rs. (`qedgen adapt --spec` is the deprecated alias;
+# the current verb is `qedgen stamp --program <c> --spec <s>`, which adds
+# a verify-evidence gate on top of the same accounts-struct resolution.)
 ./bin/qedgen adapt \
   --program crates/qedgen/tests/fixtures/regressions/anchor-accounts-collision/ \
   --spec crates/qedgen/tests/fixtures/regressions/anchor-accounts-collision/collision.qedspec

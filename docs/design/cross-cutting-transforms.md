@@ -118,7 +118,7 @@ For each pass: **location**, **inputs**, **outputs**, **codegens that consume it
 **Location.** `interface_gen.rs` (245 LoC).
 **Inputs.** Anchor IDL JSON.
 **Outputs.** A shape-only `interface Name { ... }` qedspec block.
-**Consumed by.** `qedgen spec --idl ...` CLI command. Not invoked by `codegen`.
+**Consumed by.** `qedgen spec --idl ...` CLI command (deprecated, v3.0 removal — the IDL is now a probe evidence source; spec elicitation runs probe → answers → ratify). Not invoked by `codegen`.
 **Classification.** **AUXILIARY.** Out of MIR scope; runs at a separate CLI command path.
 
 ### D2. Reconcile / drift detection

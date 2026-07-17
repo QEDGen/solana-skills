@@ -101,13 +101,22 @@ finding into a spec property that locks it in."_
 # that locks it in. Walk through examples/rust/brownfield-onboarding/
 # for an end-to-end demo on a real bug class.
 
-# Already have a spec sketch and want to skip the audit?
-qedgen adapt --program ./programs/my_program           # Anchor source → spec
-qedgen spec --idl target/idl/my_program.json           # Anchor IDL → spec
+# Want a spec without a full audit? The probe hypothesizes the
+# invariants your program appears to enforce (evidence-anchored:
+# signer bindings, held bound checks, init constraints, CPI roles,
+# the status enum) and ranks them for confirmation:
 qedgen probe --program ./my_program --emit-spec-candidates \
   --audit-dir .qed/audit/$(date +%F)                   # Anchor / Quasar / Pinocchio / native
+# Answer accept/reject/bug per hypothesis (the agent writes them to
+# .qed/audit/<ts>/answers.json), then apply the confirmed ones as
+# executable clauses — the result is guaranteed to parse and lint:
 qedgen ratify --audit-dir .qed/audit/$(date +%F) \
   --out my_program.qedspec
+
+# Deprecated (functional in v2.x, removed in v3.0): the TODO-shell
+# scaffolds `qedgen adapt --program` and `qedgen spec --idl` — the
+# probe flow above subsumes both (the IDL is one of its evidence
+# sources), and attribute stamping moved to `qedgen stamp`.
 ```
 
 ### B. New program (greenfield) — start from spec
@@ -166,23 +175,23 @@ The auditor surfaces fired findings under `.qed/findings/`. Each finding ships w
 
 End-to-end walkthrough on a real bug class: `examples/rust/brownfield-onboarding/`.
 
-### Brownfield — spec-sketch ingest (when you already know what you want)
+### Brownfield — spec elicitation (turn what the code already enforces into a spec)
 
-Skip the audit if you've already mapped the program's intent and just need a parseable spec to iterate on.
-
-**Anchor.** `qedgen adapt --program` is the source-driven path; `qedgen spec --idl` is the IDL-only fallback. Quasar brownfield ingest isn't wired today (Quasar greenfield via `qedgen init --target quasar` is fully supported).
+The front door for code→spec is the probe. Every spec-less run hypothesizes program-specific invariants from evidence it can cite — a single authority-bound signer, a `require!(amount <= …)` the body already enforces, an Anchor `#[account(init)]` constraint, a resolved SPL-token `Transfer { from, to, authority }`, an unwired error variant, the IDL's status enum — and prints them ranked on stderr with the payoff of confirming each. Confirmations land in `answers.json`; `ratify` lowers each confirmed hypothesis to a real, executable clause (`auth <signer>`, `requires … else …`, lifecycle transitions, `transfers { … }`) and refuses to report success unless the result parses and lints. A claim it cannot lower without placeholders is reported `confirmed, not executable` — never smuggled in as a comment.
 
 ```bash
-# From the Anchor source — walks src/lib.rs, finds #[program],
-# follows each forwarder, emits a .qedspec skeleton with handler
-# blocks plus a breadcrumb to where each body lives in your repo.
-qedgen adapt --program ./programs/my_program
+# Hypothesize + write the audit working set (skeleton, hypotheses.json, …)
+qedgen probe --program ./programs/my_program --emit-spec-candidates \
+  --audit-dir .qed/audit/$(date +%F)
 
-# IDL-only fallback when source isn't available.
-qedgen spec --idl target/idl/my_program.json
+# Confirm in conversation; the agent records {id → accept|reject|bug}
+# to .qed/audit/<ts>/answers.json, then:
+qedgen ratify --audit-dir .qed/audit/$(date +%F) --out my_program.qedspec
 ```
 
-`adapt` carries forward what it can read from source: handler names, argument types, the `Context<X>` accounts struct, and pointers to handler bodies. Lifecycle, requires, effects, and transfers stay as TODOs for you or your agent to fill in.
+Every result is labelled with its assurance level: a ratified clause is **checking**; a generated model proptest that passes is **model-tested**; only a source-bound backend (impl-Kani, Miri, Mollusk repros) earns **implementation-verified**. Answering **bug** on a hypothesis files a missing-enforcement finding instead of a clause — elicitation doubles as a bug-catcher.
+
+**Deprecated scaffolds** (functional in v2.x with a warning; removed in v3.0): `qedgen adapt --program` (TODO-shell skeleton — the probe writes the same skeleton as a byproduct and offers confirmable hypotheses on top) and `qedgen spec --idl` (the IDL is now a probe evidence source — signer flags, `has_one` relations, and status enums feed the hypotheses directly). `adapt --program --spec` (attribute emission) became [`qedgen stamp`](#verification-drift-detection). Quasar brownfield ingest isn't wired today (Quasar greenfield via `qedgen init --target quasar` is fully supported).
 
 **Pinocchio / native.** The entry point is probe + ratify. `qedgen probe --program <root>` runtime-detects from `Cargo.toml` (`pinocchio` dep → Pinocchio mode; native programs use the native extractor or generic bootstrap envelope). Override with `--runtime pinocchio|native` when detection misses. `--runtime sbpf` can identify the target, but the source auditor deliberately declines assembly audits; use `qedgen asm2lean` or a `.qedspec` instead.
 
@@ -431,7 +440,12 @@ silently false-positive CI.
 
 ### Verification drift detection
 
-After verifying a function, stamp it with `#[qed(verified)]` to detect future changes — either to the function body *or* to its spec contract:
+After verifying a function, stamp it with `#[qed(verified)]` to detect future changes — either to the function body *or* to its spec contract. `qedgen stamp` emits the attributes ready to paste, and it is gated: every `qedgen verify` run records its evidence to `.qed/verify-evidence.json`, and `stamp` refuses unless that record matches the spec being stamped and carries a passing **implementation-bound** backend (Miri, a `kani_impl` harness, or `--probe-repros`) — checking or model-tested results are not eligible for `#[qed(verified)]`:
+
+```bash
+qedgen verify --spec my_program.qedspec        # records .qed/verify-evidence.json
+qedgen stamp --program ./programs/my_program --spec my_program.qedspec
+```
 
 ```rust
 use qedgen_macros::qed;
