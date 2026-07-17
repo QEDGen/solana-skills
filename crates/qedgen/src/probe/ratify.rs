@@ -1781,7 +1781,7 @@ mod tests {
         std::fs::write(audit.join("skeleton.qedspec"), &skeleton)?;
         std::fs::write(audit.join("clusters.json"), "[]")?;
         let hyp = auth_hypothesis("set_fee", "admin");
-        write_hypotheses(&audit, "run-vault-123", &[hyp.clone()])?;
+        write_hypotheses(&audit, "run-vault-123", std::slice::from_ref(&hyp))?;
         std::fs::write(
             audit.join("answers.json"),
             serde_json::to_string_pretty(&serde_json::json!({
@@ -1825,7 +1825,7 @@ mod tests {
         std::fs::write(audit.join("skeleton.qedspec"), &skeleton)?;
         std::fs::write(audit.join("clusters.json"), "[]")?;
         let hyp = auth_hypothesis("set_fee", "admin");
-        write_hypotheses(&audit, "run-vault-124", &[hyp.clone()])?;
+        write_hypotheses(&audit, "run-vault-124", std::slice::from_ref(&hyp))?;
         std::fs::write(
             audit.join("answers.json"),
             serde_json::to_string_pretty(&serde_json::json!({
@@ -1924,7 +1924,7 @@ mod tests {
             confidence: crate::cluster::Confidence::Medium,
             lowering: None,
         };
-        write_hypotheses(&audit, "run-vault-127", &[hyp.clone()])?;
+        write_hypotheses(&audit, "run-vault-127", std::slice::from_ref(&hyp))?;
         std::fs::write(
             audit.join("answers.json"),
             serde_json::to_string_pretty(&serde_json::json!({
@@ -1976,7 +1976,7 @@ mod tests {
             confidence: crate::cluster::Confidence::High,
             lowering: Some(HypothesisLowering::LifecycleTransition),
         };
-        write_hypotheses(&audit, "run-vault-126", &[hyp.clone()])?;
+        write_hypotheses(&audit, "run-vault-126", std::slice::from_ref(&hyp))?;
         std::fs::write(
             audit.join("answers.json"),
             serde_json::to_string_pretty(&serde_json::json!({
