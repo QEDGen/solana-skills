@@ -188,6 +188,39 @@ pub(crate) fn account_key_rhs(tree: &crate::mir::ExprTree) -> Option<&str> {
     }
 }
 
+/// Is the effect's destination field declared `Pubkey`? Account-key
+/// lowering (`field := <acct>`) is only sound when it does — assigning an
+/// address into a `U64`/other slot (`pool : U64; pool := new_admin`)
+/// would emit `self.state.pool = self.new_admin.key()`, an E0308
+/// type mismatch. Resolves a variant-prefixed (`Active.admin`), bare
+/// (`admin`), or flat state-field name across every declaration site;
+/// conservative (`false` when the field isn't found or isn't `Pubkey`),
+/// so a non-Pubkey / unknown destination falls back to the `todo!()`
+/// path instead of a miscompile.
+pub(crate) fn effect_dest_is_pubkey(
+    field: &str,
+    handler: &ParsedHandler,
+    spec: &ParsedSpec,
+) -> bool {
+    // Precise path: handles flat `state_fields`, `on_account`
+    // disambiguation for multi-account specs, and `Variant.field` forms.
+    if crate::rust_codegen_util::field_type_is_pubkey(field, handler, spec) {
+        return true;
+    }
+    // Bare field naming a multi-variant ADT payload: fields live in the
+    // variants, not flat `state_fields`, so `field_type_is_pubkey`'s
+    // flat lookup misses them. Scan variant payloads directly.
+    if !field.contains('.') {
+        let base = strip_array_index_suffix(field);
+        return spec.account_types.iter().any(|a| {
+            a.variants
+                .iter()
+                .any(|v| v.fields.iter().any(|(n, t)| *n == base && t == "Pubkey"))
+        });
+    }
+    false
+}
+
 /// The runtime key load for an account binding inside a handler `impl`
 /// body (`&mut self` receiver) — the `self.`-rooted sibling of
 /// `Surface::account_key_expr`'s `ctx.` forms.
@@ -240,6 +273,7 @@ pub(crate) fn mechanize_effect(
     state_acct: &crate::check::ParsedHandlerAccount,
     spec: &ParsedSpec,
     target: Target,
+    handler: &ParsedHandler,
 ) -> Option<String> {
     let (field, op_kind) = (&effect.field, &effect.op);
     let tree = effect_tree(effect);
@@ -248,10 +282,14 @@ pub(crate) fn mechanize_effect(
     // Account-bound RHS (`field := <acct>` / `<acct>.pubkey`): the spec
     // means the account's ADDRESS, so lower to the runtime key load —
     // the bare render `tree_bare_rhs` would produce is a miscompile
-    // (see `account_key_rhs`). Set-only: arithmetic on a key is a spec
-    // bug, so those shapes keep falling through to the `todo!()` path.
+    // (see `account_key_rhs`). Two guards keep it sound:
+    //   - set-only: arithmetic on a key (`pool += new_admin`) is a spec
+    //     bug;
+    //   - Pubkey destination only: `pool : U64; pool := new_admin` would
+    //     assign a `[u8; 32]` into a scalar (E0308).
+    // Either mismatch falls through to the `todo!()` path.
     let acct_key = account_key_rhs(tree);
-    if acct_key.is_some() && op_kind != "set" {
+    if acct_key.is_some() && (op_kind != "set" || !effect_dest_is_pubkey(field, handler, spec)) {
         return None;
     }
     // Refuse complex RHS — structural on the tree (#151 Slice 3). A simple
@@ -384,6 +422,7 @@ pub(crate) fn strip_variant_prefix(lhs: &str, spec: &ParsedSpec) -> String {
 pub(crate) fn mechanize_effect_destructured(
     effect: &crate::check::ParsedEffect,
     spec: &ParsedSpec,
+    handler: &ParsedHandler,
 ) -> Option<String> {
     let (field_raw, op_kind) = (&effect.field, &effect.op);
     let on_error = effect.on_error.as_deref();
@@ -400,9 +439,10 @@ pub(crate) fn mechanize_effect_destructured(
     // `self.<state_acct>.inner` borrows a disjoint field, so reading
     // `self.<acct>.key()` inside the arm is legal. This emitter is
     // Anchor-only (see `emit_variant_state_handler_body`), so the
-    // Anchor key form is the only one needed.
+    // Anchor key form is the only one needed. Set-only + Pubkey
+    // destination, same soundness gate as `mechanize_effect`.
     let rhs = if let Some(account_name) = account_key_rhs(effect_tree(effect)) {
-        if op_kind != "set" {
+        if op_kind != "set" || !effect_dest_is_pubkey(field_raw, handler, spec) {
             return None;
         }
         self_account_key_expr(Target::Anchor, account_name)
@@ -605,7 +645,7 @@ pub(crate) fn emit_variant_state_handler_body(
         inner_name, post, destructure
     ));
     for effect in &handler.effects {
-        let line = mechanize_effect_destructured(effect, spec)?;
+        let line = mechanize_effect_destructured(effect, spec, handler)?;
         out.push_str(&line);
     }
 
@@ -670,20 +710,40 @@ pub(crate) fn emit_variant_state_handler_body(
 /// Render an effect RHS for the cross-variant promotion emitter. Legal
 /// shapes (deterministically lowerable only):
 ///
+///   - account address (`<account>` / `<account>.pubkey`) →
+///     `self.<account>.key()` — resolved off the typed `ExprTree` via
+///     [`account_key_rhs`], so the bare and `.pubkey` spellings lower
+///     identically; only fires into a `Pubkey` destination field
+///     (`dest_is_pubkey`)
 ///   - bare param / bare const / integer literal → bare identifier
-///   - `<account>.pubkey` (account bound on the handler) →
-///     `self.<account>.key()`
 ///   - bare pre-variant field name → bare identifier (the destructure
 ///     preamble binds it as a local)
 ///
 /// Anything else returns `None`, bailing the whole cross-variant emitter
 /// back to the per-effect `todo!()` path instead of a silent miscompile.
 pub(crate) fn resolve_cross_variant_rhs(
-    raw: &str,
+    eff: &crate::check::ParsedEffect,
     handler: &ParsedHandler,
     spec: &ParsedSpec,
     pre_fields: &[String],
+    dest_is_pubkey: bool,
 ) -> Option<String> {
+    // Account address (bare `<acct>` or `<acct>.pubkey`): resolved off
+    // the binding, so both spellings unify. Only sound when the post
+    // field is `Pubkey` — the same gate `mechanize_effect` applies (an
+    // address into a scalar is E0308).
+    if let Some(tree) = eff.tree.as_ref() {
+        if let Some(account_name) = account_key_rhs(tree) {
+            if !dest_is_pubkey {
+                return None;
+            }
+            // Anchor-only emitter (cross-variant lives on the Anchor
+            // path), so the Anchor key form is the only one needed.
+            return Some(self_account_key_expr(Target::Anchor, account_name));
+        }
+    }
+
+    let raw = eff.value.as_str();
     if raw.is_empty() {
         return None;
     }
@@ -709,13 +769,6 @@ pub(crate) fn resolve_cross_variant_rhs(
         // Unknown bare ident — possibly a param shadowed by a state
         // field; bail rather than guess.
         return None;
-    }
-    // `<account>.pubkey` shape — map to the Anchor key() accessor on
-    // the handler's account binding.
-    if let Some(account_name) = raw.strip_suffix(".pubkey") {
-        if handler.accounts.iter().any(|a| a.name == account_name) {
-            return Some(format!("self.{}.key()", account_name));
-        }
     }
     None
 }
@@ -754,17 +807,17 @@ pub(crate) fn emit_cross_variant_promotion(
     let mut field_rhs: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
     for eff in &handler.effects {
-        let (lhs, rhs) = (&eff.field, &eff.value);
+        // Cross-variant only accepts `:=` ("set").
         if eff.op != "set" {
             return None;
         }
-        let stripped = strip_variant_prefix(lhs, spec);
+        let stripped = strip_variant_prefix(&eff.field, spec);
         let bare = strip_array_index_suffix(&stripped);
         // Field must live on the post variant.
-        if !post_variant.fields.iter().any(|(n, _)| n == &bare) {
-            return None;
-        }
-        let resolved = resolve_cross_variant_rhs(rhs, handler, spec, &pre_field_names)?;
+        let (_, dest_ty) = post_variant.fields.iter().find(|(n, _)| n == &bare)?;
+        let dest_is_pubkey = dest_ty == "Pubkey";
+        let resolved =
+            resolve_cross_variant_rhs(eff, handler, spec, &pre_field_names, dest_is_pubkey)?;
         field_rhs.insert(bare, resolved);
     }
 

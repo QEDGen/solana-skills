@@ -91,6 +91,76 @@ pub(super) fn check_unknown_error_variant(spec: &ParsedSpec) -> Vec<Completeness
     warnings
 }
 
+/// `effect_type_mismatch`: an effect assigns an account address
+/// (`field := <acct>` / `<acct>.pubkey`) into a field that isn't declared
+/// `Pubkey`. The RHS lowers to `<acct>.key()` (a `[u8; 32]`), so a scalar
+/// destination (`pool : U64; pool := new_admin`) is an E0308 type
+/// mismatch. Codegen keeps such sites on the `todo!()` fill path rather
+/// than miscompile; this surfaces the mismatch at check time so the
+/// author fixes the spec instead of hitting an opaque fill site.
+pub(super) fn check_effect_account_key_type_mismatch(
+    spec: &ParsedSpec,
+) -> Vec<CompletenessWarning> {
+    let mut warnings = Vec::new();
+
+    // Resolve a bare field name's declared type across every site it can
+    // live: flat `state_fields`, per-account fields, and ADT variant
+    // payloads. `None` when undeclared (a separate lint owns that).
+    let field_type = |base: &str| -> Option<&str> {
+        if let Some((_, t)) = spec.state_fields.iter().find(|(n, _)| n == base) {
+            return Some(t.as_str());
+        }
+        for a in &spec.account_types {
+            if let Some((_, t)) = a.fields.iter().find(|(n, _)| n == base) {
+                return Some(t.as_str());
+            }
+            for v in &a.variants {
+                if let Some((_, t)) = v.fields.iter().find(|(n, _)| n == base) {
+                    return Some(t.as_str());
+                }
+            }
+        }
+        None
+    };
+
+    let ctx = LintCtx::new(spec);
+    for h in &spec.handlers {
+        for eff in &h.effects {
+            // Binding-resolved account-address RHS (`<acct>` / `<acct>.pubkey`).
+            let Some(tree) = eff.tree.as_ref() else {
+                continue;
+            };
+            let Some(acct) = crate::codegen_shared::account_key_rhs(tree) else {
+                continue;
+            };
+            // The RHS means "this account's address" — only coherent when
+            // assigned (`:=`) into a `Pubkey` slot.
+            let base = {
+                let normalized = ctx.normalize_lhs(&eff.field);
+                normalized
+                    .split(['[', '.'])
+                    .next()
+                    .unwrap_or(&normalized)
+                    .to_string()
+            };
+            match field_type(&base) {
+                Some("Pubkey") => {} // well-typed
+                Some(t) => {
+                    warnings.push(warn("effect_type_mismatch", Severity::Error, 1, format!(
+                        "handler '{}' assigns account `{}`'s address into field `{}` (declared `{}`, not `Pubkey`). The address lowers to `{}.key()` (a 32-byte key), so the assignment is a type mismatch — codegen leaves it as a `todo!()` fill site rather than emit non-compiling Rust.",
+                        h.name, acct, base, t, acct,
+                    )).subject(h.name.clone()).fix(format!(
+                        "Assign `{}` into a `Pubkey` field, or if `{}` is meant to hold a numeric derived from the account, compute it explicitly (an account address can't be coerced to `{}`).",
+                        acct, base, t,
+                    )));
+                }
+                None => {} // undeclared target — check_effect_targets / other lints own it
+            }
+        }
+    }
+    warnings
+}
+
 pub(super) fn check_pda_collisions(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
     let pdas = &spec.pdas;
@@ -1083,6 +1153,53 @@ mod tests {
             example.contains("type Error\n  | InvalidAmount"),
             "example should suggest pipe form, got: {}",
             example
+        );
+    }
+
+    // ----- effect_type_mismatch: account address into non-Pubkey field -----
+
+    #[test]
+    fn effect_type_mismatch_fires_when_account_key_assigned_to_scalar() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec V
+type State | Active of { admin : Pubkey, pool : U64 }
+type Error | Bad
+handler bad_set : State.Active -> State.Active {
+  auth admin
+  accounts { admin : signer, new_admin : signer, state : writable }
+  effect { pool := new_admin }
+}
+"#,
+        )
+        .unwrap();
+        let warnings = check_completeness(&spec);
+        let hit = warnings
+            .iter()
+            .find(|w| w.rule == "effect_type_mismatch")
+            .expect("effect_type_mismatch fires for U64 := account");
+        assert_eq!(hit.severity, Severity::Error);
+        assert_eq!(hit.subject.as_deref(), Some("bad_set"));
+    }
+
+    #[test]
+    fn effect_type_mismatch_silent_when_dest_is_pubkey() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec V
+type State | Active of { admin : Pubkey, pool : U64 }
+type Error | Bad
+handler good_set : State.Active -> State.Active {
+  auth admin
+  accounts { admin : signer, new_admin : signer, state : writable }
+  effect { admin := new_admin }
+}
+"#,
+        )
+        .unwrap();
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings.iter().any(|w| w.rule == "effect_type_mismatch"),
+            "well-typed `admin : Pubkey := new_admin` must not fire; got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
         );
     }
 

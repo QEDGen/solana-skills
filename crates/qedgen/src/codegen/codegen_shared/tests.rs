@@ -1564,7 +1564,8 @@ handler bump (n : U64) : State.Active -> State.Active {
     let handler = spec.handlers.iter().find(|h| h.name == "bump").unwrap();
     let state_acct = find_state_account(handler).expect("state account");
     let effect = handler.effects.first().unwrap();
-    let rendered = mechanize_effect(effect, state_acct, &spec, Target::Anchor).expect("mechanized");
+    let rendered =
+        mechanize_effect(effect, state_acct, &spec, Target::Anchor, handler).expect("mechanized");
     // Pre-F8 this said `ErrorCode::MathOverflow` (a non-existent enum).
     // F8: it now says `<ProgramName>Error::MathOverflow`, matching the
     // user's declared Error sum.
@@ -1606,7 +1607,7 @@ fn mechanize_set_admin(rhs: &str, target: Target) -> Option<String> {
         .unwrap();
     let state_acct = find_state_account(handler).expect("state account");
     let effect = handler.effects.first().unwrap();
-    mechanize_effect(effect, state_acct, &spec, target)
+    mechanize_effect(effect, state_acct, &spec, target, handler)
 }
 
 #[test]
@@ -1659,7 +1660,63 @@ fn mechanize_effect_refuses_arithmetic_on_account_key() {
         .unwrap();
     let state_acct = find_state_account(handler).expect("state account");
     let effect = handler.effects.first().unwrap();
-    assert!(mechanize_effect(effect, state_acct, &spec, Target::Anchor).is_none());
+    assert!(mechanize_effect(effect, state_acct, &spec, Target::Anchor, handler).is_none());
+}
+
+#[test]
+fn mechanize_effect_refuses_account_key_into_non_pubkey_dest() {
+    // `pool : U64; pool := new_admin` — the address lowers to a `[u8; 32]`
+    // key, which can't be assigned to a scalar (E0308). All three targets
+    // must keep the site on the `todo!()` fill path, not emit
+    // `self.state.pool = self.new_admin.key()`.
+    let src = SET_ADMIN_SPEC_TEMPLATE.replace("admin := RHS", "pool := new_admin");
+    let spec = crate::chumsky_adapter::parse_str(&src).unwrap();
+    let handler = spec
+        .handlers
+        .iter()
+        .find(|h| h.name == "set_admin")
+        .unwrap();
+    let state_acct = find_state_account(handler).expect("state account");
+    let effect = handler.effects.first().unwrap();
+    for target in [Target::Anchor, Target::Quasar, Target::Pinocchio] {
+        assert!(
+            mechanize_effect(effect, state_acct, &spec, target, handler).is_none(),
+            "{target:?}: non-Pubkey destination must not lower to a key load"
+        );
+    }
+}
+
+#[test]
+fn mechanize_effect_destructured_refuses_account_key_into_non_pubkey_dest() {
+    // Same gate on the multi-variant ADT destructured path.
+    let spec = crate::chumsky_adapter::parse_str(
+        r#"spec Vault
+program_id "11111111111111111111111111111111"
+type State | Active of { admin : Pubkey, pool : U64 } | Paused
+type Error | Unauthorized | WrongState
+
+handler bump_pool : State.Active -> State.Active {
+  auth admin
+  accounts {
+    admin     : signer
+    new_admin : signer
+    state     : writable
+  }
+  effect { pool := new_admin }
+}
+"#,
+    )
+    .unwrap();
+    let handler = spec
+        .handlers
+        .iter()
+        .find(|h| h.name == "bump_pool")
+        .unwrap();
+    let effect = handler.effects.first().unwrap();
+    assert!(
+        mechanize_effect_destructured(effect, &spec, handler).is_none(),
+        "non-Pubkey destination must not lower to a key load on the destructured path"
+    );
 }
 
 #[test]
@@ -1692,7 +1749,7 @@ handler set_admin : State.Active -> State.Active {
         .find(|h| h.name == "set_admin")
         .unwrap();
     let effect = handler.effects.first().unwrap();
-    let rendered = mechanize_effect_destructured(effect, &spec).expect("mechanized");
+    let rendered = mechanize_effect_destructured(effect, &spec, handler).expect("mechanized");
     assert_eq!(rendered, "            *admin = self.new_admin.key();\n");
 }
 
@@ -1707,7 +1764,7 @@ fn mechanize_first_effect(src: &str, handler_name: &str) -> String {
         .expect("handler not found");
     let state_acct = find_state_account(handler).expect("state account");
     let effect = handler.effects.first().expect("at least one effect");
-    mechanize_effect(effect, state_acct, &spec, Target::Anchor).expect("mechanized")
+    mechanize_effect(effect, state_acct, &spec, Target::Anchor, handler).expect("mechanized")
 }
 
 #[test]
@@ -2320,6 +2377,119 @@ handler close : State.Open -> State.Closed {
     );
 }
 
+/// v2.44 — cross-variant promotion accepts a BARE account RHS (`admin :=
+/// new_admin`), not just the `.pubkey` spelling. Both resolve off the
+/// binding to the account address, so the promotion emits
+/// `admin: self.new_admin.key()` instead of bailing to a `todo!()`.
+#[test]
+fn cross_variant_promotion_lowers_bare_account_rhs() {
+    let src = r#"spec V
+program_id "11111111111111111111111111111111"
+pragma state_repr = adt
+
+type State
+  | Empty
+  | Active of { admin : Pubkey, pool : U64 }
+
+type Error | WrongState
+
+handler initialize (seed_pool : U64) : State.Empty -> State.Active {
+  accounts {
+    creator   : signer
+    new_admin : signer
+    state     : writable
+  }
+  effect {
+    admin := new_admin
+    pool  := seed_pool
+  }
+}
+"#;
+    let spec = crate::chumsky_adapter::parse_str(src).expect("parse");
+    let handler = spec
+        .handlers
+        .iter()
+        .find(|h| h.name == "initialize")
+        .expect("initialize handler");
+    let acct = spec.account_types.first().expect("state account type");
+    let post_variant = acct
+        .variants
+        .iter()
+        .find(|v| v.name == "Active")
+        .expect("Active variant");
+    let body = emit_cross_variant_promotion(
+        handler,
+        &spec,
+        "state",
+        "Empty",
+        post_variant,
+        "VAccountInner",
+        "VError",
+    )
+    .expect("bare-account promotion must lower, not bail to todo!()");
+    assert!(
+        body.contains("admin: self.new_admin.key(),"),
+        "bare account RHS must lower to the key load; got:\n{body}"
+    );
+    assert!(
+        body.contains("pool: seed_pool,"),
+        "param RHS unchanged; got:\n{body}"
+    );
+}
+
+/// The Pubkey-destination gate applies on the cross-variant path too: a
+/// bare account assigned into a scalar post field bails the whole
+/// promotion (a zeroed/garbage default would be worse than a `todo!()`).
+#[test]
+fn cross_variant_promotion_bails_account_into_non_pubkey_field() {
+    let src = r#"spec V
+program_id "11111111111111111111111111111111"
+pragma state_repr = adt
+
+type State
+  | Empty
+  | Active of { pool : U64 }
+
+type Error | WrongState
+
+handler initialize : State.Empty -> State.Active {
+  accounts {
+    creator   : signer
+    new_admin : signer
+    state     : writable
+  }
+  effect {
+    pool := new_admin
+  }
+}
+"#;
+    let spec = crate::chumsky_adapter::parse_str(src).expect("parse");
+    let handler = spec
+        .handlers
+        .iter()
+        .find(|h| h.name == "initialize")
+        .expect("initialize handler");
+    let acct = spec.account_types.first().expect("state account type");
+    let post_variant = acct
+        .variants
+        .iter()
+        .find(|v| v.name == "Active")
+        .expect("Active variant");
+    assert!(
+        emit_cross_variant_promotion(
+            handler,
+            &spec,
+            "state",
+            "Empty",
+            post_variant,
+            "VAccountInner",
+            "VError",
+        )
+        .is_none(),
+        "account address into a U64 post field must bail the promotion"
+    );
+}
+
 /// v2.29.2 — `rewrite_state_refs_for_self` must work on handlers
 /// whose accounts block has multiple writable candidates and no
 /// PDA / `on_account` disambiguator (real-world specs frequently
@@ -2480,7 +2650,8 @@ handler set_bid : State.Active -> State.Active {
         effect.tree.is_some(),
         "adapter must carry a tree for this RHS"
     );
-    let rendered = mechanize_effect(effect, state_acct, &spec, Target::Anchor).expect("mechanized");
+    let rendered =
+        mechanize_effect(effect, state_acct, &spec, Target::Anchor, handler).expect("mechanized");
     assert_eq!(
         rendered,
         "        self.state.bid_buyer = self.state.rfp_buyer;\n"
