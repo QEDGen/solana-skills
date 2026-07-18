@@ -3,12 +3,28 @@ use std::path::Path;
 
 use crate::check::{self, ParsedHandler, ParsedHandlerAccount, ParsedSpec};
 use crate::codegen_shared::{map_type, to_pascal_case, write_generated_file};
+use crate::Target;
 
 /// Generate QuasarSVM integration test scaffolds: tests run the compiled
 /// binary in an in-process Solana VM, exercising the full instruction flow
 /// (account validation, deserialization, handler execution, state
 /// persistence) — unlike unit tests, which run effects on a plain struct.
-pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
+///
+/// The scaffold is QuasarSVM-shaped end-to-end (`quasar_svm` +
+/// `<name>-client` imports, `#![no_std]`-style `extern crate std`
+/// preamble) and does not compile inside an Anchor or Pinocchio crate —
+/// `generate` refuses non-Quasar targets so `--target anchor` can't
+/// silently drop a broken artifact into the crate.
+pub fn generate(spec_path: &Path, output_path: &Path, target: Target) -> Result<()> {
+    if !matches!(target, Target::Quasar) {
+        anyhow::bail!(
+            "Integration-test codegen is Quasar-only today — the scaffold \
+             imports quasar_svm and the generated <name>-client crate, which \
+             don't compile for a {:?} program.",
+            target
+        );
+    }
+
     let spec = check::parse_spec_file(spec_path)?;
 
     if spec.is_assembly_target() {
@@ -643,7 +659,7 @@ mod tests {
             "spec Test\n\npragma sbpf {}\n\ntype State | Idle\n\nhandler noop : State.Idle -> State.Idle { }\n",
         )
         .unwrap();
-        let result = generate(&spec_path, &out_path);
+        let result = generate(&spec_path, &out_path, Target::Quasar);
         assert!(
             result.is_err(),
             "expected error for assembly target, got Ok"
@@ -654,6 +670,37 @@ mod tests {
             "unexpected error: {}",
             err_msg
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn integration_test_rejects_non_quasar_targets() {
+        // The scaffold imports quasar_svm + <name>-client — refusing
+        // Anchor/Pinocchio up front (before parsing the spec) is what
+        // keeps `codegen --all --target anchor` from dropping a
+        // non-compiling test file into an Anchor crate.
+        let dir = std::env::temp_dir().join("qedgen_integration_test_target_gate");
+        std::fs::create_dir_all(&dir).unwrap();
+        let spec_path = dir.join("test.qedspec");
+        let out_path = dir.join("out.rs");
+        std::fs::write(&spec_path, "spec Test\n").unwrap();
+        for target in [Target::Anchor, Target::Pinocchio] {
+            let result = generate(&spec_path, &out_path, target);
+            let err_msg = result
+                .expect_err("non-Quasar target must be refused")
+                .to_string();
+            assert!(
+                err_msg.contains("Quasar-only"),
+                "unexpected error for {:?}: {}",
+                target,
+                err_msg
+            );
+            assert!(
+                !out_path.exists(),
+                "no artifact may be written for {:?}",
+                target
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

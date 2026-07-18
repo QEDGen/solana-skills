@@ -818,15 +818,21 @@ pub(crate) fn infer_state_name(
 
 /// Sections of `Cargo.toml` that qedgen owns and rewrites on every
 /// `qedgen codegen` run. Sections outside this set (e.g.,
-/// `[dev-dependencies]`, `[profile.release]`, custom feature flags) are
-/// preserved verbatim when the file already exists — see
-/// [`merge_cargo_toml`] / PRD-v2.21 §S2.3.
+/// `[profile.release]`, custom feature flags) are preserved verbatim
+/// when the file already exists — see [`merge_cargo_toml`] /
+/// PRD-v2.21 §S2.3.
 ///
-/// `[dependencies]` is qedgen-owned but with a sub-table preserve pass
-/// inside [`merge_cargo_toml`] (any user-added crate stays; qedgen-owned
-/// crates are upserted).
-pub(crate) const QEDGEN_OWNED_SECTIONS: &[&str] =
-    &["package", "lib", "features", "dependencies", "workspace"];
+/// `[dependencies]` / `[dev-dependencies]` are qedgen-owned but with a
+/// sub-table preserve pass inside [`merge_cargo_toml`] (any user-added
+/// crate stays; qedgen-owned crates are upserted).
+pub(crate) const QEDGEN_OWNED_SECTIONS: &[&str] = &[
+    "package",
+    "lib",
+    "features",
+    "dependencies",
+    "dev-dependencies",
+    "workspace",
+];
 
 /// Crates qedgen manages inside `[dependencies]`. Other crates the user
 /// adds to that section are preserved by [`merge_cargo_toml`].
@@ -841,3 +847,8 @@ pub(crate) const QEDGEN_OWNED_DEPS: &[&str] = &[
     "zeropod",
     "qedgen-macros",
 ];
+
+/// Crates qedgen manages inside `[dev-dependencies]` — kept separate
+/// from [`QEDGEN_OWNED_DEPS`] so a user-added `proptest` line in
+/// `[dependencies]` is never treated as qedgen-owned (and vice versa).
+pub(crate) const QEDGEN_OWNED_DEV_DEPS: &[&str] = &["proptest"];

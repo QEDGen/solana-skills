@@ -364,7 +364,8 @@ pub(crate) fn render_handler_scaffold(
             .effects
             .iter()
             .map(|effect| {
-                state_acct.and_then(|sa| mechanize_effect(effect, sa, spec, target, &pre_fields))
+                state_acct
+                    .and_then(|sa| mechanize_effect(effect, sa, spec, target, handler, &pre_fields))
             })
             .collect();
         if let Some(sa) = state_acct {

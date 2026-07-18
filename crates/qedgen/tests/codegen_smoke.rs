@@ -129,16 +129,14 @@ fn smoke_anchor_scaffold_with_proptest(example: &str) {
         .arg(output_dir.join("tests/proptest.rs"))
         .current_dir(temp.path()));
 
-    // proptest is a dev-dependency on the test crate; the generator
-    // emits Cargo.toml without dev-deps because production Anchor
-    // builds don't need it. Append it for the smoke run, and (see
-    // `smoke_anchor_scaffold`) rewrite the qedgen-macros git dep to a
-    // path dep so the unreleased tag doesn't fail to resolve.
+    // The generator ships `[dev-dependencies] proptest` in Cargo.toml
+    // (v2.44 — the harness needs it to compile out of the box), so no
+    // manual append here; appending again would be a duplicate-key
+    // manifest error. Still rewrite the qedgen-macros git dep to a
+    // path dep (see `smoke_anchor_scaffold`) so the unreleased tag
+    // doesn't fail to resolve.
     let cargo_toml = output_dir.join("Cargo.toml");
     redirect_macros_to_path(&cargo_toml);
-    let mut manifest = std::fs::read_to_string(&cargo_toml).expect("read Cargo.toml");
-    manifest.push_str("\n[dev-dependencies]\nproptest = \"1\"\n");
-    std::fs::write(&cargo_toml, manifest).expect("rewrite Cargo.toml");
 
     run(Command::new("cargo")
         .arg("test")

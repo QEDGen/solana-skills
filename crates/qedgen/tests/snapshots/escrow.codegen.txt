@@ -587,6 +587,10 @@ qedgen-macros = { git = "https://github.com/qedgen/solana-skills", tag = "v2.44.
 anchor-lang = "0.32.1"
 anchor-spl = "0.32.1"
 
+[dev-dependencies]
+proptest = "1"
+
+
 [workspace]
 
 
