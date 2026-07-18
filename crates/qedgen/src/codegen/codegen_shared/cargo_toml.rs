@@ -29,8 +29,12 @@ pub(crate) fn merge_cargo_toml(existing: &str, fresh: &str) -> String {
     let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for (name, existing_body) in &existing_sections.sections {
         let body = if QEDGEN_OWNED_SECTIONS.contains(&name.as_str()) {
-            if name == "dependencies" {
-                merge_dependencies_section(existing_body, lookup_section(&fresh_sections, name))
+            if let Some(owned) = owned_deps_for_section(name) {
+                merge_dependencies_section(
+                    existing_body,
+                    lookup_section(&fresh_sections, name),
+                    owned,
+                )
             } else {
                 lookup_section(&fresh_sections, name).to_string()
             }
@@ -68,7 +72,21 @@ pub(crate) fn push_section(out: &mut String, name: &str, body: &str) {
     out.push('\n');
 }
 
-pub(crate) fn merge_dependencies_section(existing: &str, fresh: &str) -> String {
+/// The qedgen-owned dep list for a dependency-shaped section, `None`
+/// for sections replaced wholesale.
+pub(crate) fn owned_deps_for_section(name: &str) -> Option<&'static [&'static str]> {
+    match name {
+        "dependencies" => Some(QEDGEN_OWNED_DEPS),
+        "dev-dependencies" => Some(QEDGEN_OWNED_DEV_DEPS),
+        _ => None,
+    }
+}
+
+pub(crate) fn merge_dependencies_section(
+    existing: &str,
+    fresh: &str,
+    owned_deps: &[&str],
+) -> String {
     let fresh_lines: Vec<&str> = fresh.lines().filter(|l| !l.trim().is_empty()).collect();
     let mut out = String::new();
     let mut managed_emitted: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
@@ -88,7 +106,7 @@ pub(crate) fn merge_dependencies_section(existing: &str, fresh: &str) -> String 
             .map(|s| s.trim())
             .unwrap_or("")
             .trim_matches('"');
-        if let Some(owned) = QEDGEN_OWNED_DEPS.iter().find(|d| **d == dep_name) {
+        if let Some(owned) = owned_deps.iter().find(|d| **d == dep_name) {
             if let Some(fresh_line) = fresh_lines
                 .iter()
                 .find(|fl| fl.trim_start().starts_with(&format!("{owned} =")))
@@ -107,7 +125,7 @@ pub(crate) fn merge_dependencies_section(existing: &str, fresh: &str) -> String 
     }
     // Pass 2: append qedgen-owned deps that didn't appear in the existing
     // file (greenfield deps).
-    for owned in QEDGEN_OWNED_DEPS {
+    for owned in owned_deps {
         if managed_emitted.contains(*owned) {
             continue;
         }

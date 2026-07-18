@@ -55,6 +55,9 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     // Rule 3: add effect without explicit overflow bound.
     warnings.extend(check_unguarded_arithmetic(spec));
 
+    // Account-address RHS assigned into a non-Pubkey field.
+    warnings.extend(check_effect_account_key_type_mismatch(spec));
+
     // Rule 6: handler has no when/then lifecycle.
     warnings.extend(check_no_lifecycle(spec));
 
