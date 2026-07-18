@@ -690,7 +690,7 @@ $QEDGEN codegen --ci
 | Flag | Type | Default | Description |
 |---|---|---|---|
 | `--spec` | Path | optional | Spec file or directory. Defaults to `.qed/config.json spec` |
-| `--target` | enum | `anchor` | Framework target for the Rust program crate. Values: `anchor` (Anchor-compatible, default); `quasar` (Blueshift `quasar_lang`); `pinocchio` (Pinocchio `#![no_std]` — `entrypoint!` + byte-discriminant dispatch, zeropod zero-copy state, `&AccountInfo` account structs with `.handler()` methods, checked effects, SPL Token CPIs). All three targets emit the full program scaffold. The verification backends (`--kani` / `--proptest` / `--lean` / `--integration` / `--ci`) are spec-driven and target-agnostic — they run for any target (see the comment at the top of any generated `tests/kani.rs`). |
+| `--target` | enum | `anchor` | Framework target for the Rust program crate. Values: `anchor` (Anchor-compatible, default); `quasar` (Blueshift `quasar_lang`); `pinocchio` (Pinocchio `#![no_std]` — `entrypoint!` + byte-discriminant dispatch, zeropod zero-copy state, `&AccountInfo` account structs with `.handler()` methods, checked effects, SPL Token CPIs). All three targets emit the full program scaffold. The verification backends (`--kani` / `--proptest` / `--lean` / `--ci`) are spec-driven and target-agnostic — they run for any target (see the comment at the top of any generated `tests/kani.rs`). Exception: `--integration` is Quasar-only — the in-process SVM scaffold imports `quasar_svm` and the generated `<name>-client` crate, which don't compile for other targets; non-Quasar targets skip it with a note. |
 | `--output-dir` | Path | `./programs` | Output directory for Rust skeleton |
 | `--all` | bool | false | Generate all artifacts |
 | `--lean` | bool | false | Generate Lean 4 proofs |
@@ -707,7 +707,7 @@ $QEDGEN codegen --ci
 | `--proptest-output` | Path | `./programs/tests/proptest.rs` | Proptest output path. Lives inside the program package (see `--kani-output`). |
 | `--crucible` | bool | false | Generate a coverage-guided fuzz harness (v2.18). Anchor target only; sBPF specs are skipped with a note (assembly is Lean-verified); Pinocchio specs error early. Output is a self-contained `fuzz/<prog>/` directory with `Cargo.toml`, `src/main.rs` (the harness), and `idls/`. Action-body `accounts::X { ... }` literals emit as `todo!()` for agent-fill (same as handler bodies). |
 | `--crucible-output` | Path | `./fuzz` | Parent directory for the generated harness. Final tree lives at `<dir>/<prog>/`. |
-| `--integration` | bool | false | Generate in-process SVM integration tests |
+| `--integration` | bool | false | Generate in-process SVM integration tests. Quasar targets only — skipped with a note on `anchor` / `pinocchio` (the scaffold's `quasar_svm` + client-crate imports don't compile there) |
 | `--integration-output` | Path | `./programs/tests/integration_tests.rs` | Integration test output path |
 | `--ci` | bool | false | Generate GitHub Actions CI workflow |
 | `--ci-output` | Path | `.github/workflows/verify.yml` | CI workflow output path |

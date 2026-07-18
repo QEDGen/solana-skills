@@ -16,4 +16,7 @@ debug = []
 quasar-lang = { version = "0.0.0" }
 qedgen-macros = { git = "https://github.com/qedgen/solana-skills", tag = "v2.44.0" }
 
+[dev-dependencies]
+proptest = "1"
+
 [workspace]

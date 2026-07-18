@@ -783,6 +783,30 @@ Values on the RHS may be integer literals, qualified paths, arithmetic
 expressions, constructor applications (`.Variant payload`), record literals,
 record updates, `match … with`, or built-in helpers like `mul_div_floor`.
 
+#### Effect semantics: parallel (pre-state) reads
+
+An `effect { … }` block is a single atomic transition, not a statement
+sequence: **every state-field read on an RHS observes the PRE-state
+value**, regardless of the effect's position in the block. This is the
+semantics of the Lean model's record update (`{ s with balance :=
+s.balance + amount, last_seen := s.balance }` — `last_seen` gets the
+*old* balance), and as of v2.44 every generated artifact agrees:
+handler bodies, Kani/proptest transition models, and unit-test apply
+helpers all snapshot block-written fields (`let pre_balance = …;`)
+before mutating, so a read-after-write never silently observes the
+sequential (post-state) value.
+
+For sequential dataflow — compute a value, then use it in a later
+update — bind it with a handler-level `let` before the effect block:
+
+```fsharp
+let fee = mul_div_floor amount rate 10000
+effect {
+  collected += fee
+  balance   -= fee
+}
+```
+
 #### Effect arithmetic
 
 As of v2.7, `+=` / `-=` default to **checked** semantics *in both the

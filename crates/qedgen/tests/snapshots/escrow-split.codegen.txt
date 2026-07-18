@@ -18,6 +18,9 @@ anchor-lang = "0.32.1"
 anchor-spl = "0.32.1"
 qedgen-macros = { git = "https://github.com/qedgen/solana-skills", tag = "v2.44.0" }
 
+[dev-dependencies]
+proptest = "1"
+
 [workspace]
 
 --- src/errors.rs ---
