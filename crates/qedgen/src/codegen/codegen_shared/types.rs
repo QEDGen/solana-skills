@@ -795,6 +795,14 @@ pub(crate) fn default_value_for_type(dsl_type: &str, spec: &ParsedSpec) -> Optio
     if dsl_type == "Bytes64" {
         return Some("[0u8; 64]".to_string());
     }
+    // `Bool` lowers to a Rust `bool`, so its default is `false` — the
+    // numeric `"0"` fallback below produces `field: 0` which fails to
+    // compile (E0308). The unit-test seeder special-cased this locally;
+    // the proptest/kani seeders route through here, so fix it at the
+    // shared source.
+    if dsl_type == "Bool" {
+        return Some("false".to_string());
+    }
 
     Some("0".to_string())
 }

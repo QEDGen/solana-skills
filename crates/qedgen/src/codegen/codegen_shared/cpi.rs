@@ -412,6 +412,14 @@ pub(crate) fn emit_anchor_builder_cpi(
         None => None,
     };
 
+    // When the CPI's `authority` is a PDA of THIS program, the program
+    // must sign for it with `invoke_signed` — i.e.
+    // `CpiContext::new_with_signer(.., signer_seeds)`. Plain `new` fails
+    // at runtime with a missing-signer / privilege error. The seeds are
+    // the same ones the PDA account's `#[account(seeds = …, bump)]`
+    // constraint uses, so codegen can assemble them deterministically.
+    let signer = anchor_pda_signer_seeds(call, field_to_arg, handler);
+
     let mut out = String::new();
     out.push_str("        {\n");
     out.push_str(&format!(
@@ -430,19 +438,99 @@ pub(crate) fn emit_anchor_builder_cpi(
         "            let cpi_program = self.{}.to_account_info();\n",
         program_account
     ));
+    let cpi_ctx = match &signer {
+        Some(sig) => {
+            out.push_str(&sig.preamble);
+            format!(
+                "CpiContext::new_with_signer(cpi_program, cpi_accounts, {})",
+                sig.signer_var
+            )
+        }
+        None => "CpiContext::new(cpi_program, cpi_accounts)".to_string(),
+    };
     let invocation = match scalar_rhs {
         Some(rhs) => format!(
-            "            {}::{}(CpiContext::new(cpi_program, cpi_accounts), {})?;\n",
-            module_alias, fn_name, rhs
+            "            {}::{}({}, {})?;\n",
+            module_alias, fn_name, cpi_ctx, rhs
         ),
-        None => format!(
-            "            {}::{}(CpiContext::new(cpi_program, cpi_accounts))?;\n",
-            module_alias, fn_name
-        ),
+        None => format!("            {}::{}({})?;\n", module_alias, fn_name, cpi_ctx),
     };
     out.push_str(&invocation);
     out.push_str("        }\n");
     Some(out)
+}
+
+/// Assembled `invoke_signed` seeds for a CPI whose `authority` is a
+/// program PDA: the `let … = …;` preamble to place before the call and
+/// the name of the `&[&[&[u8]]]` signer-seeds binding.
+pub(crate) struct PdaSignerSeeds {
+    pub(crate) preamble: String,
+    pub(crate) signer_var: String,
+}
+
+/// If the call's `authority` argument names a handler account that is a
+/// program PDA, assemble its `invoke_signed` signer seeds (same seeds as
+/// the account's `#[account(seeds = …, bump)]` constraint, plus its
+/// bump). `None` when there's no authority arg, it isn't a PDA, or a seed
+/// has a shape we can't render safely (the caller then keeps plain
+/// `CpiContext::new` rather than emit wrong seeds).
+fn anchor_pda_signer_seeds(
+    call: &crate::check::ParsedCall,
+    field_to_arg: &[(&str, &str)],
+    handler: &ParsedHandler,
+) -> Option<PdaSignerSeeds> {
+    // Resolve the account bound to the `authority` anchor field.
+    let (_, authority_arg) = field_to_arg
+        .iter()
+        .find(|(field, _)| *field == "authority")?;
+    let arg = call.args.iter().find(|a| a.name == *authority_arg)?;
+    let authority_name = arg.rust_expr.as_str();
+    let acct = handler.accounts.iter().find(|a| a.name == authority_name)?;
+    let seeds = acct.pda_seeds.as_ref()?;
+
+    let bound_account_names: std::collections::HashSet<&str> =
+        handler.accounts.iter().map(|a| a.name.as_str()).collect();
+
+    // Render each seed into an `&[u8]` expression, binding account-key
+    // locals up front (the impl body reads accounts as `self.<name>`,
+    // and `self.<name>.key()` is an owned `Pubkey` temporary that must be
+    // bound before `.as_ref()` borrows it — otherwise E0716).
+    let mut preamble = String::new();
+    let mut seed_exprs: Vec<String> = Vec::new();
+    let mut bound_keys: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for seed in seeds {
+        if let Some(inner) = seed.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+            seed_exprs.push(format!("b\"{}\"", inner));
+        } else if bound_account_names.contains(seed.as_str()) {
+            let local = format!("__{}_key", seed);
+            if bound_keys.insert(seed.clone()) {
+                preamble.push_str(&format!(
+                    "            let {} = self.{}.key();\n",
+                    local, seed
+                ));
+            }
+            seed_exprs.push(format!("{}.as_ref()", local));
+        } else {
+            // State-field or otherwise non-account seed — assembling it
+            // safely here isn't reliable; bail so the caller keeps plain
+            // `new` (a compile-clean fallback) rather than emit wrong
+            // seeds.
+            return None;
+        }
+    }
+
+    let signer_var = format!("__{}_signer_seeds", authority_name);
+    preamble.push_str(&format!(
+        "            let {}: &[&[&[u8]]] = &[&[{}, &[bumps.{}]]];\n",
+        signer_var,
+        seed_exprs.join(", "),
+        authority_name
+    ));
+
+    Some(PdaSignerSeeds {
+        preamble,
+        signer_var,
+    })
 }
 
 /// Anchor System Program dispatcher. `transfer` gets the idiomatic

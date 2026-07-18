@@ -4,6 +4,27 @@ fn empty_spec() -> ParsedSpec {
     ParsedSpec::default()
 }
 
+/// v2.46 (Bug 1) — `Bool` defaults to `false`, not the numeric `"0"`
+/// fallback. The proptest/kani seeders route through this shared function
+/// and previously emitted `field: 0` for bool fields (E0308).
+#[test]
+fn default_value_for_bool_is_false_not_zero() {
+    let spec = empty_spec();
+    assert_eq!(
+        default_value_for_type("Bool", &spec).as_deref(),
+        Some("false")
+    );
+    // A `Map[N] Bool` composes the bool default.
+    let spec2 = ParsedSpec {
+        constants: vec![("N".to_string(), "3".to_string())],
+        ..ParsedSpec::default()
+    };
+    assert_eq!(
+        default_value_for_type("Map[N] Bool", &spec2).as_deref(),
+        Some("[false; 3]")
+    );
+}
+
 fn spec_with_constants(pairs: &[(&str, &str)]) -> ParsedSpec {
     ParsedSpec {
         constants: pairs
@@ -612,6 +633,124 @@ handler send (n : U64) : State.Active -> State.Active {
     assert!(
         rendered.contains("token::transfer(CpiContext::new(cpi_program, cpi_accounts), n)"),
         "amount arg `n` is a handler param and should pass through bare; got:\n{rendered}"
+    );
+}
+
+/// v2.46 — when the transfer `authority` is a program PDA, the CPI must
+/// sign for it: `CpiContext::new_with_signer(.., signer_seeds)` with the
+/// account's own seeds + bump, and the account keys bound to locals first
+/// (borrow-safety). A non-PDA authority keeps plain `new`.
+#[test]
+fn cpi_uses_new_with_signer_for_pda_authority() {
+    let spec = crate::chumsky_adapter::parse_str(
+        r#"spec Vault
+program_id "11111111111111111111111111111111"
+
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+  handler transfer (amount : U64) {
+    discriminant "0x03"
+    accounts {
+      from      : writable
+      to        : writable
+      authority : signer
+    }
+    requires amount > 0
+    ensures  amount > 0
+  }
+}
+
+type State | Active of { admin : Pubkey, balance : U64 }
+type Error | E
+
+handler payout (amount : U64) : State.Active -> State.Active {
+  auth admin
+  accounts {
+    admin         : signer
+    vault         : writable, pda ["vault", admin]
+    vault_ta      : writable, type token, authority vault
+    dest_ta       : writable, type token
+    token_program : program
+  }
+  call Token.transfer(from = vault_ta, to = dest_ta, amount = amount, authority = vault)
+}
+"#,
+    )
+    .unwrap();
+    let handler = spec.handlers.iter().find(|h| h.name == "payout").unwrap();
+    let call = handler.calls.first().expect("call site");
+    let rendered =
+        try_emit_cpi(call, handler, &spec, Target::Anchor).expect("should emit Anchor CPI");
+    // Key bound to a local before use (avoids borrowing a temporary Pubkey).
+    assert!(
+        rendered.contains("let __admin_key = self.admin.key();"),
+        "must bind the seed account key to a local; got:\n{rendered}"
+    );
+    // Signer seeds match the account's `#[account(seeds = …, bump)]`.
+    assert!(
+        rendered.contains(
+            "let __vault_signer_seeds: &[&[&[u8]]] = &[&[b\"vault\", __admin_key.as_ref(), &[bumps.vault]]];"
+        ),
+        "signer seeds must mirror the PDA account's seeds + bump; got:\n{rendered}"
+    );
+    assert!(
+        rendered.contains(
+            "CpiContext::new_with_signer(cpi_program, cpi_accounts, __vault_signer_seeds)"
+        ),
+        "PDA authority must sign via new_with_signer; got:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("CpiContext::new(cpi_program"),
+        "PDA authority must NOT use plain new; got:\n{rendered}"
+    );
+}
+
+/// A non-PDA authority (a plain signer) keeps `CpiContext::new` — the
+/// signer-seeds path must not fire.
+#[test]
+fn cpi_keeps_plain_new_for_signer_authority() {
+    let spec = crate::chumsky_adapter::parse_str(
+        r#"spec Caller
+program_id "11111111111111111111111111111111"
+
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+  handler transfer (amount : U64) {
+    discriminant "0x03"
+    accounts { from : writable to : writable authority : signer }
+    requires amount > 0
+    ensures  amount > 0
+  }
+}
+
+type State | Active of { balance : U64 }
+type Error | E
+
+handler send (n : U64) : State.Active -> State.Active {
+  permissionless
+  accounts {
+    state : writable
+    src   : writable
+    dst   : writable
+    auth  : signer
+    token_program : program
+  }
+  call Token.transfer(from = src, to = dst, amount = n, authority = auth)
+}
+"#,
+    )
+    .unwrap();
+    let handler = spec.handlers.iter().find(|h| h.name == "send").unwrap();
+    let call = handler.calls.first().expect("call site");
+    let rendered =
+        try_emit_cpi(call, handler, &spec, Target::Anchor).expect("should emit Anchor CPI");
+    assert!(
+        rendered.contains("CpiContext::new(cpi_program, cpi_accounts)"),
+        "signer authority keeps plain new; got:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("new_with_signer"),
+        "signer authority must not assemble PDA seeds; got:\n{rendered}"
     );
 }
 

@@ -86,8 +86,8 @@ mod tests {
             taker_amount: 100,
             escrow_token_account: [1u8; 32],
         };
-        let deposit_amount: u64 = 100;
-        let receive_amount: u64 = 100;
+        let deposit_amount: u64 = 1;
+        let receive_amount: u64 = 1;
         assert!(guard_initialize(&state, deposit_amount, receive_amount));
     }
 
