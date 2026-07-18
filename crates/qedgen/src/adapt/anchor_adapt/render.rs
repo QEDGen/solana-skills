@@ -13,10 +13,37 @@ pub(super) fn render_spec(model: &ProgramModel) -> String {
     }
     s.push_str(&format!("spec {}\n\n", to_pascal_case(&model.name)));
 
-    s.push_str("// TODO: replace with the actual lifecycle of your program.\n");
-    s.push_str("type State\n");
-    s.push_str("  | Init\n");
-    s.push_str("  | Active\n\n");
+    match model.state.as_ref() {
+        Some(st) => {
+            let src = st
+                .source_path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "<unknown>".to_string());
+            s.push_str(&format!(
+                "// Lifecycle variants derived from `{}.{}: {}` ({}).\n",
+                st.account_struct, st.field_name, st.enum_name, src,
+            ));
+            s.push_str(
+                "// `Init` is the pre-existence placeholder; wire the real transitions\n\
+                 // (each handler's `State.<from> -> State.<to>`) among these variants.\n",
+            );
+            s.push_str("type State\n");
+            s.push_str("  | Init\n");
+            for variant in &st.variants {
+                if variant != "Init" {
+                    s.push_str(&format!("  | {}\n", variant));
+                }
+            }
+            s.push('\n');
+        }
+        None => {
+            s.push_str("// TODO: replace with the actual lifecycle of your program.\n");
+            s.push_str("type State\n");
+            s.push_str("  | Init\n");
+            s.push_str("  | Active\n\n");
+        }
+    }
 
     match model.errors.as_ref() {
         Some(info) if !info.variants.is_empty() => {
@@ -136,8 +163,39 @@ fn render_handler(s: &mut String, entry: &HandlerModel) {
                 .join(", "),
         ));
     }
-    s.push_str("  // TODO: auth <signer>\n");
-    s.push_str("  // TODO: accounts { ... }\n");
+    // Accounts block: the mechanically-derived signer/writable/program/type
+    // facts, always emitted when the `#[derive(Accounts)]` struct resolved.
+    // The `auth` *binding* — which signer authorizes, against which stored
+    // field — is a semantic decision, so it's surfaced as a hint rather than a
+    // live `auth` clause that would trip the `unbound_auth` lint on a fresh
+    // skeleton. The signer fact itself is already recorded in the block.
+    if entry.accounts.is_empty() {
+        s.push_str("  // TODO: auth <signer>\n");
+        s.push_str("  // TODO: accounts { ... }\n");
+    } else {
+        let signers: Vec<&str> = entry
+            .accounts
+            .iter()
+            .filter(|a| a.is_signer)
+            .map(|a| a.name.as_str())
+            .collect();
+        match signers.as_slice() {
+            [] => s.push_str("  // TODO: auth <signer> (no `Signer` in the accounts struct)\n"),
+            [single] => s.push_str(&format!(
+                "  // TODO: auth {} — declared signer; add `auth {}` once bound to a state field (has_one), or mark permissionless\n",
+                single, single
+            )),
+            many => s.push_str(&format!(
+                "  // TODO: auth <signer> — declared signers: {}\n",
+                many.join(", ")
+            )),
+        }
+        s.push_str("  accounts {\n");
+        for acct in &entry.accounts {
+            s.push_str(&format!("    {} : {}\n", acct.name, acct.attrs.join(", ")));
+        }
+        s.push_str("  }\n");
+    }
     s.push_str("  // TODO: requires\n");
     s.push_str("  // TODO: effect { ... }\n");
     s.push_str("}\n");

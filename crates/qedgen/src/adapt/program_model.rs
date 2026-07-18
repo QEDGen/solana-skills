@@ -28,6 +28,11 @@ pub struct ProgramModel {
     pub entry_module: Option<String>,
     pub handlers: Vec<HandlerModel>,
     pub errors: Option<ErrorModel>,
+    /// Lifecycle state machine derived from an `#[account]` struct's status-enum
+    /// field (e.g. `Proposal.status: ProposalStatus`). `None` when no account
+    /// carries a program-defined enum field — the renderer then emits the flat
+    /// `Init | Active` placeholder.
+    pub state: Option<StateModel>,
 }
 
 impl ProgramModel {
@@ -39,6 +44,7 @@ impl ProgramModel {
             entry_module: None,
             handlers: Vec::new(),
             errors: None,
+            state: None,
         }
     }
 }
@@ -48,8 +54,25 @@ pub struct HandlerModel {
     pub name: String,
     pub args: Vec<HandlerArgModel>,
     pub accounts_type: Option<String>,
+    /// Per-account roles resolved from the handler's `#[derive(Accounts)]`
+    /// struct (signer / writable / program / typed). Empty when the struct
+    /// couldn't be resolved — the renderer then falls back to a `TODO`.
+    pub accounts: Vec<AccountRoleModel>,
     pub source_path: Option<PathBuf>,
     pub shape: HandlerShape,
+}
+
+/// One account field of a handler's `#[derive(Accounts)]` struct, reduced to
+/// the qedspec `accounts { }` attributes mechanically derivable from its Anchor
+/// type + `#[account(...)]` constraints. `attrs` are already rendered as
+/// DSL tokens (`signer`, `writable`, `program`, `type <T>`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountRoleModel {
+    pub name: String,
+    pub attrs: Vec<String>,
+    /// True when this field is an Anchor `Signer<'info>` — used to seed the
+    /// handler's `auth` clause when there is exactly one signer.
+    pub is_signer: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,6 +97,21 @@ pub struct ErrorModel {
     pub source_path: Option<PathBuf>,
     pub enum_name: String,
     pub variants: Vec<String>,
+}
+
+/// A program-defined status enum carried by an `#[account]` struct field — the
+/// mechanically-derivable seed for the skeleton's `type State`. The transition
+/// *edges* still need the impl, so only the variant *set* is derived here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateModel {
+    pub source_path: Option<PathBuf>,
+    /// The enum type (e.g. `ProposalStatus`).
+    pub enum_name: String,
+    pub variants: Vec<String>,
+    /// The `#[account]` struct and field the enum was found on
+    /// (e.g. `Proposal` / `status`) — for the provenance comment.
+    pub account_struct: String,
+    pub field_name: String,
 }
 
 pub trait ProgramAdapter {

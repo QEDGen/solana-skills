@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use crate::anchor_project::{parse_anchor_project, Instruction};
 use crate::anchor_resolver::{resolve_handler, HandlerLocation};
 use crate::program_model::{
-    ErrorModel, HandlerArgModel, HandlerModel, HandlerShape, ProgramAdapter, ProgramFramework,
-    ProgramModel,
+    AccountRoleModel, ErrorModel, HandlerArgModel, HandlerModel, HandlerShape, ProgramAdapter,
+    ProgramFramework, ProgramModel, StateModel,
 };
 
 mod adapter;

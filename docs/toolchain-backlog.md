@@ -897,3 +897,98 @@ runtime-agnostic scanners).
 
 It is source-only today. Folded into #235 as a drive-by (fix the comment or make
 it true).
+
+---
+
+## Session: auditor skill run — spec-less audit → interview → ratify → Kani (2026-07-17)
+
+Source: a full `qedgen-auditor` run on an Anchor multisig audit target (39 handlers,
+~14.7k LOC): bootstrap probe → 4 review passes → Phase-2 intent interview →
+`qedgen ratify` → codegen a `--kani` model harness → `cargo kani`. Friction below is
+reproducible against current source; sanitized (no target identity). Ordered
+most-leverage first.
+
+### 🐞 B5 — `qedgen ratify` is unreachable from the spec-less bootstrap lane
+
+The auditor SKILL and the bootstrap probe's own stderr both instruct "write
+`answers.json`, run `qedgen ratify --audit-dir <dir>`". But `ratify` hard-errors
+`audit working-set file missing: <dir>/clusters.json`, and
+`probe --bootstrap --emit-spec-candidates --audit-dir <dir>` is a **silent no-op**
+(re-emits the bootstrap envelope, writes no `clusters.json`/`skeleton.qedspec`).
+Only `probe --program … --emit-spec-candidates --audit-dir` (anchor scaffold-to-spec
+pipeline) materializes the working set — so the bootstrap-auditor hypotheses lane
+and the scaffold-to-spec clusters lane are disjoint and `ratify` bridges neither
+from bootstrap. Also folds in the **h-… vs c-… loose-join**: ratify lowers the
+`h-…` auth hypotheses to clauses AND processes `c-…` clusters, but only the
+structural `c-…` clusters live in `clusters.json`; agent-derived IDs warn
+`… not present in clusters.json — skipping`.
+- **Evidence:** `probe --bootstrap … --emit-spec-candidates --audit-dir X` (no
+  clusters.json) then `qedgen ratify --audit-dir X` (the error); vs
+  `probe --program … --emit-spec-candidates` (writes clusters.json + skeleton).
+- **Proposed:** (a) make `probe --bootstrap --emit-spec-candidates` materialize a
+  clusters/skeleton working-set from `hypotheses[]`; or (b) fix the skill + probe
+  stderr to instruct `probe --program … --emit-spec-candidates` before ratify; or
+  (c) teach ratify to accept an auditor hypotheses+answers working-set directly.
+- **Verdict:** FILE (bug). **Issue:** #248
+
+### 🐞 B7 — auditor domain-artifact validator crashes with an opaque jq error on a type-wrong field
+
+`scripts/check-domain-artifacts.sh` aborts with `jq: error … Cannot index string
+with string "name"` (and exits 0) when a dossier's `handlers[].args` are strings.
+The schema (`schemas/domain-dossier.schema.json`, `$defs.handlerFact.args`) only
+says `type: array` with no item shape, but the checker (~L55-60) requires each arg
+be an object with a string `.name` — a dossier that conforms to the schema still
+fails, silently.
+- **Evidence:** schema `$defs.handlerFact` vs checker lines ~55-60; the exit-0
+  masks the failure.
+- **Proposed:** tighten `handlerFact.args.items` in the schema to `{name, ty?}` and
+  make the jq validation failure fatal (non-zero) with a schema-path message.
+- **Verdict:** FILE (bug). **Issue:** #250
+
+### 🩹 B6 — `qedgen ratify` writes to a doubled `.qed/.qed` path from a relative `--audit-dir`
+
+`qedgen ratify --audit-dir <root>/.qed/audit/<ts>` wrote the spec to
+`<root>/.qed/.qed.qedspec` and scoping to `<root>/.qed/.qed/plan/scoping.md` —
+project_root/name derived from the audit-dir grandparent (`.qed`).
+- **Evidence:** ratify stdout `Wrote spec to .qed/.qed.qedspec`.
+- **Proposed:** resolve project_root from the audit-dir's recorded target/manifest,
+  normalize an absolute audit-dir, or honor a sane `--out` default.
+- **Verdict:** FILE (friction). **Issue:** #249
+
+### 🩹 F4 — `probe --bootstrap` rejects `--json` though it emits JSON unconditionally
+
+`probe --bootstrap --root <p> --json` → `error: unexpected argument '--json' found`.
+`probe` has no `--json` flag yet writes JSON to stdout, and `--json` IS accepted on
+`verify --probe-repros`, so authors reach for it.
+- **Evidence:** the command above.
+- **Proposed:** accept-and-ignore `--json` on `probe` (or document that bootstrap
+  emits raw JSON).
+- **Verdict:** FILE (friction). **Issue:** #251
+
+### 🧩 E1 — scaffold skeleton drops IDL-derivable accounts + signer flags (renders them as TODO)
+
+`qedgen adapt` / `probe --program --emit-spec-candidates` emits `// TODO: accounts { ... }`
+and `// TODO: auth <signer>` for every handler, though the Anchor IDL (and the
+`#[derive(Accounts)]` struct) declares every account with `isMut`/`isSigner`/`pda`.
+Mechanically derivable → should be filled, not TODO.
+- **Evidence:** `adapt/anchor_adapt/render.rs:106-111` keeps only the accounts-struct
+  NAME (doc comment); `render.rs:139-140` emits static TODOs; `anchor_extractor.rs`
+  doesn't thread per-account flags.
+- **Proposed:** extractor captures the account list; render.rs emits the real
+  `accounts { … }` block + seeds `auth` from the declared signer.
+- **Verdict:** FILE (enhancement). **Issue:** #257
+
+### 🧩 E2 — scaffold skeleton emits flat `State.Init -> State.Init` though IDL account structs carry status enums
+
+`render.rs:128` hardcodes `: State.Init -> State.Init` and a flat `Init | Active`
+placeholder State, even though account structs carry status-enum fields (e.g.
+`Proposal.status : ProposalStatus`, 7 variants). The state-machine variants are
+IDL-derivable; only the per-handler transition edge needs the impl.
+- **Evidence:** `render.rs:128`; IDL `types[]` has the enum + `accounts[]` has the
+  status-typed field.
+- **Proposed:** extractor reads account status-enum fields/variants; skeleton emits a
+  real multi-variant `type State` and a `State.? -> State.?  // one of: …` edge TODO.
+- **Verdict:** FILE (enhancement). **Issue:** #258
+
+_Both surfaced from the same principle raised while reviewing IDL handler coverage:
+anything mechanically derivable from the IDL should not be a `TODO` in the skeleton._

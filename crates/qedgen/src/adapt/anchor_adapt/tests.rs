@@ -826,3 +826,230 @@ fn to_pascal_case_handles_snake_and_already_pascal() {
     assert_eq!(to_pascal_case("escrow"), "Escrow");
     assert_eq!(to_pascal_case("AlreadyPascal"), "AlreadyPascal");
 }
+
+#[test]
+fn adapt_renders_accounts_block_from_derive_accounts() {
+    // #257: the skeleton fills `accounts { }` mechanically from the handler's
+    // `#[derive(Accounts)]` struct — signer / writable / program / typed —
+    // instead of a bare `// TODO: accounts`. Covers Box + InterfaceAccount +
+    // Program + read-only-typed classification that the snapshot fixtures don't.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = write_project(
+        &tmp,
+        &[(
+            "src/lib.rs",
+            r#"
+            use anchor_lang::prelude::*;
+
+            #[program]
+            pub mod bank {
+                use super::*;
+                pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
+                    Ok(())
+                }
+            }
+
+            #[derive(Accounts)]
+            pub struct Deposit<'info> {
+                #[account(mut)]
+                pub authority: Signer<'info>,
+                #[account(mut)]
+                pub vault: Account<'info, Vault>,
+                pub config: Box<Account<'info, Config>>,
+                pub mint: InterfaceAccount<'info, Mint>,
+                pub token_program: Program<'info, Token>,
+            }
+
+            #[account]
+            pub struct Vault { pub total: u64 }
+            #[account]
+            pub struct Config { pub fee: u64 }
+            "#,
+        )],
+    );
+
+    let rendered = adapt(&root, &HashMap::new()).unwrap();
+
+    // The mechanically-derived block replaced the TODO.
+    assert!(
+        !rendered.contains("// TODO: accounts { ... }"),
+        "accounts TODO should be gone:\n{}",
+        rendered
+    );
+    assert!(rendered.contains("accounts {"), "rendered:\n{}", rendered);
+    assert!(rendered.contains("authority : signer, writable"));
+    assert!(rendered.contains("vault : writable"));
+    assert!(
+        rendered.contains("config : type Config"),
+        "rendered:\n{}",
+        rendered
+    );
+    assert!(rendered.contains("mint : type Mint"));
+    assert!(rendered.contains("token_program : program"));
+    // Lone signer surfaced as an auth hint, not a live (unbound) `auth` clause.
+    assert!(rendered.contains("// TODO: auth authority — declared signer"));
+    // adapt() enforces round-trip parseability internally, so a well-formed
+    // accounts block is also proven to parse.
+}
+
+#[test]
+fn adapt_accounts_respects_qualified_accounts_path() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/regressions/anchor-accounts-collision");
+
+    let rendered = adapt(&root, &HashMap::new()).unwrap();
+    let lite = rendered
+        .split("handler lite")
+        .nth(1)
+        .and_then(|rest| rest.split("handler heavy").next())
+        .unwrap();
+    let heavy = rendered.split("handler heavy").nth(1).unwrap();
+
+    assert!(lite.contains("user : signer"), "rendered:\n{rendered}");
+    assert!(!lite.contains("vault : writable"), "rendered:\n{rendered}");
+    assert!(heavy.contains("vault : writable"), "rendered:\n{rendered}");
+    assert!(
+        heavy.contains("authority : signer"),
+        "rendered:\n{rendered}"
+    );
+    assert!(!heavy.contains("user : signer"), "rendered:\n{rendered}");
+}
+
+#[test]
+fn adapt_recognizes_account_signer_constraints() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = write_project(
+        &tmp,
+        &[(
+            "src/lib.rs",
+            r#"
+            use anchor_lang::prelude::*;
+
+            #[program]
+            pub mod constrained_signers {
+                use super::*;
+                pub fn act(ctx: Context<Act>) -> Result<()> { Ok(()) }
+            }
+
+            #[derive(Accounts)]
+            pub struct Act<'info> {
+                #[account(signer)]
+                pub authority: UncheckedAccount<'info>,
+                #[account(mut, signer)]
+                pub payer: AccountInfo<'info>,
+            }
+            "#,
+        )],
+    );
+
+    let rendered = adapt(&root, &HashMap::new()).unwrap();
+    assert!(
+        rendered.contains("authority : signer"),
+        "rendered:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("payer : signer, writable"),
+        "rendered:\n{rendered}"
+    );
+}
+
+#[test]
+fn derives_state_from_account_status_enum() {
+    // #258: the skeleton seeds `type State` from an `#[account]` struct's
+    // status-enum field, preferring a `status`/`state` field and the richest
+    // enum, instead of the flat `Init | Active` placeholder.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = write_project(
+        &tmp,
+        &[(
+            "src/lib.rs",
+            r#"
+            use anchor_lang::prelude::*;
+
+            #[program]
+            pub mod gov {
+                use super::*;
+                pub fn vote(ctx: Context<Vote>) -> Result<()> { Ok(()) }
+            }
+
+            #[derive(Accounts)]
+            pub struct Vote<'info> {
+                #[account(mut)]
+                pub proposal: Account<'info, Proposal>,
+                pub voter: Signer<'info>,
+            }
+
+            #[account]
+            pub struct Proposal {
+                pub status: ProposalStatus,
+            }
+
+            // A second, poorer enum candidate that must NOT win (fewer variants,
+            // non-status field name).
+            #[account]
+            pub struct Config {
+                pub mode: Mode,
+            }
+
+            pub enum ProposalStatus { Draft, Active, Approved, Executed, Cancelled }
+            pub enum Mode { A, B }
+            "#,
+        )],
+    );
+
+    let rendered = adapt(&root, &HashMap::new()).unwrap();
+
+    assert!(
+        rendered.contains("derived from `Proposal.status: ProposalStatus`"),
+        "rendered:\n{}",
+        rendered
+    );
+    for v in ["Draft", "Active", "Approved", "Executed", "Cancelled"] {
+        assert!(
+            rendered.contains(&format!("  | {}", v)),
+            "missing {v}:\n{rendered}"
+        );
+    }
+    // Init placeholder retained so `State.Init -> State.Init` transitions stay valid.
+    assert!(rendered.contains("  | Init"));
+    // The poorer `Mode` enum did not become the State.
+    assert!(!rendered.contains("derived from `Config.mode"));
+    // Flat placeholder replaced.
+    assert!(!rendered.contains("// TODO: replace with the actual lifecycle"));
+}
+
+#[test]
+fn falls_back_to_placeholder_state_when_no_status_enum() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = write_project(
+        &tmp,
+        &[(
+            "src/lib.rs",
+            r#"
+            use anchor_lang::prelude::*;
+
+            #[program]
+            pub mod bank {
+                use super::*;
+                pub fn deposit(ctx: Context<Deposit>) -> Result<()> { Ok(()) }
+            }
+
+            #[derive(Accounts)]
+            pub struct Deposit<'info> {
+                pub authority: Signer<'info>,
+            }
+
+            #[account]
+            pub struct Vault { pub total: u64 }
+            "#,
+        )],
+    );
+
+    let rendered = adapt(&root, &HashMap::new()).unwrap();
+    assert!(
+        rendered.contains("// TODO: replace with the actual lifecycle"),
+        "rendered:\n{}",
+        rendered
+    );
+    assert!(rendered.contains("  | Active"));
+}

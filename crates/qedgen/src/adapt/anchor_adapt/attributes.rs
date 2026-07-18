@@ -193,7 +193,7 @@ fn accounts_struct_for_handler(
 /// Drop a leading `crate`/`self` segment. `super` is left in place — the walk
 /// won't match and falls through to the whole-tree pass; resolving it would
 /// need the program-mod fn's source position.
-fn normalize_module_prefix(prefix: &[String]) -> Vec<String> {
+pub(super) fn normalize_module_prefix(prefix: &[String]) -> Vec<String> {
     let mut out: Vec<String> = prefix.to_vec();
     if matches!(
         out.first().map(String::as_str),
@@ -206,7 +206,7 @@ fn normalize_module_prefix(prefix: &[String]) -> Vec<String> {
 
 /// Files matching `module_prefix` first, rest in original order. Empty
 /// prefix is a no-op (preserves first-match-wins).
-fn prioritize_candidates(
+pub(super) fn prioritize_candidates(
     candidates: &[PathBuf],
     src_dir: &Path,
     module_prefix: &[String],
