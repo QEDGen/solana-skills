@@ -893,6 +893,67 @@ fn adapt_renders_accounts_block_from_derive_accounts() {
 }
 
 #[test]
+fn adapt_accounts_respects_qualified_accounts_path() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/regressions/anchor-accounts-collision");
+
+    let rendered = adapt(&root, &HashMap::new()).unwrap();
+    let lite = rendered
+        .split("handler lite")
+        .nth(1)
+        .and_then(|rest| rest.split("handler heavy").next())
+        .unwrap();
+    let heavy = rendered.split("handler heavy").nth(1).unwrap();
+
+    assert!(lite.contains("user : signer"), "rendered:\n{rendered}");
+    assert!(!lite.contains("vault : writable"), "rendered:\n{rendered}");
+    assert!(heavy.contains("vault : writable"), "rendered:\n{rendered}");
+    assert!(
+        heavy.contains("authority : signer"),
+        "rendered:\n{rendered}"
+    );
+    assert!(!heavy.contains("user : signer"), "rendered:\n{rendered}");
+}
+
+#[test]
+fn adapt_recognizes_account_signer_constraints() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = write_project(
+        &tmp,
+        &[(
+            "src/lib.rs",
+            r#"
+            use anchor_lang::prelude::*;
+
+            #[program]
+            pub mod constrained_signers {
+                use super::*;
+                pub fn act(ctx: Context<Act>) -> Result<()> { Ok(()) }
+            }
+
+            #[derive(Accounts)]
+            pub struct Act<'info> {
+                #[account(signer)]
+                pub authority: UncheckedAccount<'info>,
+                #[account(mut, signer)]
+                pub payer: AccountInfo<'info>,
+            }
+            "#,
+        )],
+    );
+
+    let rendered = adapt(&root, &HashMap::new()).unwrap();
+    assert!(
+        rendered.contains("authority : signer"),
+        "rendered:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("payer : signer, writable"),
+        "rendered:\n{rendered}"
+    );
+}
+
+#[test]
 fn derives_state_from_account_status_enum() {
     // #258: the skeleton seeds `type State` from an `#[account]` struct's
     // status-enum field, preferring a `status`/`state` field and the richest

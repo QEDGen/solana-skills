@@ -54,20 +54,27 @@ pub(super) fn handler_model_from_anchor(
 /// Resolve the handler's `#[derive(Accounts)]` struct fields into qedspec
 /// `accounts { }` roles. Mechanically derivable from Anchor types + `#[account]`
 /// constraints; empty when the struct can't be located/parsed (renderer then
-/// falls back to a `TODO`). Best-effort first-match-by-name across `src/`.
+/// falls back to a `TODO`). Qualified `Context<crate::a::Shared>` paths
+/// prioritize the matching source module so duplicate struct names do not
+/// silently select the wrong account layout.
 fn resolve_account_roles(program_fn: &syn::ItemFn, program_root: &Path) -> Vec<AccountRoleModel> {
-    let Some(struct_name) = extract_accounts_type(program_fn) else {
+    let Some(segments) = extract_accounts_path(program_fn) else {
         return Vec::new();
     };
+    let Some(struct_name) = segments.last() else {
+        return Vec::new();
+    };
+    let module_prefix = normalize_module_prefix(&segments[..segments.len() - 1]);
     let src_dir = program_root.join("src");
-    for path in walk_rust_files(&src_dir) {
+    let candidates = walk_rust_files(&src_dir);
+    for path in prioritize_candidates(&candidates, &src_dir, &module_prefix) {
         let Ok(source) = std::fs::read_to_string(&path) else {
             continue;
         };
         let Ok(file) = syn::parse_file(&source) else {
             continue;
         };
-        if let Some(item_struct) = find_struct_in_items(&file.items, &struct_name) {
+        if let Some(item_struct) = find_struct_in_items(&file.items, struct_name) {
             return item_struct
                 .fields
                 .iter()
@@ -104,7 +111,8 @@ fn find_struct_in_items<'a>(items: &'a [syn::Item], name: &str) -> Option<&'a sy
 fn field_account_role(field: &syn::Field) -> Option<AccountRoleModel> {
     let name = field.ident.as_ref()?.to_string();
     let is_mut = account_attr_has_word(&field.attrs, "mut");
-    let (is_signer, is_program, inner_ty) = classify_account_type(&field.ty);
+    let (is_signer_type, is_program, inner_ty) = classify_account_type(&field.ty);
+    let is_signer = is_signer_type || account_attr_has_word(&field.attrs, "signer");
 
     let mut attrs = Vec::new();
     if is_signer {
@@ -119,10 +127,8 @@ fn field_account_role(field: &syn::Field) -> Option<AccountRoleModel> {
     if attrs.is_empty() {
         // Read-only, non-signer, non-program: describe by its data type when
         // known (`type <T>`); otherwise there's no valid single-attr form.
-        match inner_ty {
-            Some(ty) => attrs.push(format!("type {}", ty)),
-            None => return None,
-        }
+        let ty = inner_ty?;
+        attrs.push(format!("type {}", ty));
     }
     Some(AccountRoleModel {
         name,
