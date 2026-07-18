@@ -102,6 +102,7 @@ pub fn program_model_from_handlers(
             name: name.clone(),
             args: Vec::new(),
             accounts_type: None,
+            accounts: Vec::new(),
             source_path: None,
             shape: HandlerShape::SourceWalk,
         })

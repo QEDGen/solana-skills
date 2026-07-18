@@ -18,8 +18,11 @@ type Error
 /// discovered at: src/lib.rs
 /// accounts struct: `MultisigCreate` (see `#[derive(Accounts)]`)
 handler multisig_create (threshold : U16) : State.Init -> State.Init {
-  // TODO: auth <signer>
-  // TODO: accounts { ... }
+  // TODO: auth creator — declared signer; add `auth creator` once bound to a state field (has_one), or mark permissionless
+  accounts {
+    multisig : writable
+    creator : signer, writable
+  }
   // TODO: requires
   // TODO: effect { ... }
 }
@@ -28,8 +31,11 @@ handler multisig_create (threshold : U16) : State.Init -> State.Init {
 /// discovered at: src/lib.rs
 /// accounts struct: `ProposalApprove` (see `#[derive(Accounts)]`)
 handler proposal_approve : State.Init -> State.Init {
-  // TODO: auth <signer>
-  // TODO: accounts { ... }
+  // TODO: auth member — declared signer; add `auth member` once bound to a state field (has_one), or mark permissionless
+  accounts {
+    multisig : writable
+    member : signer
+  }
   // TODO: requires
   // TODO: effect { ... }
 }

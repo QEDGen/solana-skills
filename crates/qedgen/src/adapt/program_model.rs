@@ -48,8 +48,25 @@ pub struct HandlerModel {
     pub name: String,
     pub args: Vec<HandlerArgModel>,
     pub accounts_type: Option<String>,
+    /// Per-account roles resolved from the handler's `#[derive(Accounts)]`
+    /// struct (signer / writable / program / typed). Empty when the struct
+    /// couldn't be resolved — the renderer then falls back to a `TODO`.
+    pub accounts: Vec<AccountRoleModel>,
     pub source_path: Option<PathBuf>,
     pub shape: HandlerShape,
+}
+
+/// One account field of a handler's `#[derive(Accounts)]` struct, reduced to
+/// the qedspec `accounts { }` attributes mechanically derivable from its Anchor
+/// type + `#[account(...)]` constraints. `attrs` are already rendered as
+/// DSL tokens (`signer`, `writable`, `program`, `type <T>`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountRoleModel {
+    pub name: String,
+    pub attrs: Vec<String>,
+    /// True when this field is an Anchor `Signer<'info>` — used to seed the
+    /// handler's `auth` clause when there is exactly one signer.
+    pub is_signer: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

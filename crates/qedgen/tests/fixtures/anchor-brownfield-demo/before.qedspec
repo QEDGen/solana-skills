@@ -16,8 +16,12 @@ type Error
 /// discovered at: src/instructions/initialize.rs
 /// accounts struct: `Initialize` (see `#[derive(Accounts)]`)
 handler initialize (start : U64) : State.Init -> State.Init {
-  // TODO: auth <signer>
-  // TODO: accounts { ... }
+  // TODO: auth authority — declared signer; add `auth authority` once bound to a state field (has_one), or mark permissionless
+  accounts {
+    counter : type Counter
+    authority : signer, writable
+    system_program : program
+  }
   // TODO: requires
   // TODO: effect { ... }
 }
@@ -26,8 +30,11 @@ handler initialize (start : U64) : State.Init -> State.Init {
 /// discovered at: src/instructions/increment.rs
 /// accounts struct: `Increment` (see `#[derive(Accounts)]`)
 handler increment (delta : U64) : State.Init -> State.Init {
-  // TODO: auth <signer>
-  // TODO: accounts { ... }
+  // TODO: auth authority — declared signer; add `auth authority` once bound to a state field (has_one), or mark permissionless
+  accounts {
+    counter : writable
+    authority : signer
+  }
   // TODO: requires
   // TODO: effect { ... }
 }

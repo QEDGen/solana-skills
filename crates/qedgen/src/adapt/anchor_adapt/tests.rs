@@ -826,3 +826,68 @@ fn to_pascal_case_handles_snake_and_already_pascal() {
     assert_eq!(to_pascal_case("escrow"), "Escrow");
     assert_eq!(to_pascal_case("AlreadyPascal"), "AlreadyPascal");
 }
+
+#[test]
+fn adapt_renders_accounts_block_from_derive_accounts() {
+    // #257: the skeleton fills `accounts { }` mechanically from the handler's
+    // `#[derive(Accounts)]` struct — signer / writable / program / typed —
+    // instead of a bare `// TODO: accounts`. Covers Box + InterfaceAccount +
+    // Program + read-only-typed classification that the snapshot fixtures don't.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = write_project(
+        &tmp,
+        &[(
+            "src/lib.rs",
+            r#"
+            use anchor_lang::prelude::*;
+
+            #[program]
+            pub mod bank {
+                use super::*;
+                pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
+                    Ok(())
+                }
+            }
+
+            #[derive(Accounts)]
+            pub struct Deposit<'info> {
+                #[account(mut)]
+                pub authority: Signer<'info>,
+                #[account(mut)]
+                pub vault: Account<'info, Vault>,
+                pub config: Box<Account<'info, Config>>,
+                pub mint: InterfaceAccount<'info, Mint>,
+                pub token_program: Program<'info, Token>,
+            }
+
+            #[account]
+            pub struct Vault { pub total: u64 }
+            #[account]
+            pub struct Config { pub fee: u64 }
+            "#,
+        )],
+    );
+
+    let rendered = adapt(&root, &HashMap::new()).unwrap();
+
+    // The mechanically-derived block replaced the TODO.
+    assert!(
+        !rendered.contains("// TODO: accounts { ... }"),
+        "accounts TODO should be gone:\n{}",
+        rendered
+    );
+    assert!(rendered.contains("accounts {"), "rendered:\n{}", rendered);
+    assert!(rendered.contains("authority : signer, writable"));
+    assert!(rendered.contains("vault : writable"));
+    assert!(
+        rendered.contains("config : type Config"),
+        "rendered:\n{}",
+        rendered
+    );
+    assert!(rendered.contains("mint : type Mint"));
+    assert!(rendered.contains("token_program : program"));
+    // Lone signer surfaced as an auth hint, not a live (unbound) `auth` clause.
+    assert!(rendered.contains("// TODO: auth authority — declared signer"));
+    // adapt() enforces round-trip parseability internally, so a well-formed
+    // accounts block is also proven to parse.
+}

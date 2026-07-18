@@ -17,8 +17,11 @@ type Error
 /// discovered at: src/instructions/deposit.rs
 /// accounts struct: `Deposit` (see `#[derive(Accounts)]`)
 handler deposit (lamports : U64) : State.Init -> State.Init {
-  // TODO: auth <signer>
-  // TODO: accounts { ... }
+  // TODO: auth depositor — declared signer; add `auth depositor` once bound to a state field (has_one), or mark permissionless
+  accounts {
+    state : writable
+    depositor : signer, writable
+  }
   // TODO: requires
   // TODO: effect { ... }
 }
@@ -27,8 +30,11 @@ handler deposit (lamports : U64) : State.Init -> State.Init {
 /// discovered at: src/instructions/liquid_unstake.rs
 /// accounts struct: `LiquidUnstake` (see `#[derive(Accounts)]`)
 handler liquid_unstake (shares : U64) : State.Init -> State.Init {
-  // TODO: auth <signer>
-  // TODO: accounts { ... }
+  // TODO: auth holder — declared signer; add `auth holder` once bound to a state field (has_one), or mark permissionless
+  accounts {
+    state : writable
+    holder : signer, writable
+  }
   // TODO: requires
   // TODO: effect { ... }
 }

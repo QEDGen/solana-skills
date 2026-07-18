@@ -136,8 +136,39 @@ fn render_handler(s: &mut String, entry: &HandlerModel) {
                 .join(", "),
         ));
     }
-    s.push_str("  // TODO: auth <signer>\n");
-    s.push_str("  // TODO: accounts { ... }\n");
+    // Accounts block: the mechanically-derived signer/writable/program/type
+    // facts, always emitted when the `#[derive(Accounts)]` struct resolved.
+    // The `auth` *binding* — which signer authorizes, against which stored
+    // field — is a semantic decision, so it's surfaced as a hint rather than a
+    // live `auth` clause that would trip the `unbound_auth` lint on a fresh
+    // skeleton. The signer fact itself is already recorded in the block.
+    if entry.accounts.is_empty() {
+        s.push_str("  // TODO: auth <signer>\n");
+        s.push_str("  // TODO: accounts { ... }\n");
+    } else {
+        let signers: Vec<&str> = entry
+            .accounts
+            .iter()
+            .filter(|a| a.is_signer)
+            .map(|a| a.name.as_str())
+            .collect();
+        match signers.as_slice() {
+            [] => s.push_str("  // TODO: auth <signer> (no `Signer` in the accounts struct)\n"),
+            [single] => s.push_str(&format!(
+                "  // TODO: auth {} — declared signer; add `auth {}` once bound to a state field (has_one), or mark permissionless\n",
+                single, single
+            )),
+            many => s.push_str(&format!(
+                "  // TODO: auth <signer> — declared signers: {}\n",
+                many.join(", ")
+            )),
+        }
+        s.push_str("  accounts {\n");
+        for acct in &entry.accounts {
+            s.push_str(&format!("    {} : {}\n", acct.name, acct.attrs.join(", ")));
+        }
+        s.push_str("  }\n");
+    }
     s.push_str("  // TODO: requires\n");
     s.push_str("  // TODO: effect { ... }\n");
     s.push_str("}\n");
