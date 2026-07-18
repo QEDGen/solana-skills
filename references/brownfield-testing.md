@@ -31,15 +31,33 @@ Good brownfield additions:
 - Indexed mutations affect only the selected account.
 - Lifecycle handlers reject invalid pre-status values.
 
-## Anchor Adapter Loop
+## Anchor Spec-Elicitation Loop
 
 For Anchor source:
 
 ```bash
-qedgen adapt --program programs/my_program --out program.qedspec
+qedgen probe --program programs/my_program --emit-spec-candidates --audit-dir .qed/audit/<ts>
+# review <audit-dir>/hypotheses.json; record decisions in <audit-dir>/answers.json
+qedgen ratify --audit-dir .qed/audit/<ts>
 qedgen check --spec program.qedspec --anchor-project programs/my_program
-qedgen adapt --program programs/my_program --spec program.qedspec
+qedgen verify --spec program.qedspec
+qedgen stamp --program programs/my_program --spec program.qedspec
 ```
+
+The probe hypothesizes evidence-anchored invariants (authorization,
+lifecycle/init-once, arithmetic-bound, conservation, CPI-integrity,
+unwired-guard, state-machine) and writes a spec skeleton plus
+`hypotheses.json`; `ratify` lowers the confirmed hypotheses to executable
+clauses, gated on parse + lint. (`qedgen adapt --program` is deprecated:
+functional in v2.x with a warning, removed in v3.0.)
+
+`qedgen stamp` (formerly `qedgen adapt --spec`, deprecated) emits the
+`#[qed(verified, ...)]` attributes. It is gated on
+`.qed/verify-evidence.json` — recorded by `qedgen verify` — matching the
+spec and program-source hashes with at least one passing
+implementation-bound backend (Miri or a `kani_impl*.rs` harness); checking,
+model-tested results, and bug-oriented `--probe-repros`/Mollusk runs are not
+eligible.
 
 Paste emitted `#[qed(verified, ...)]` attributes only after reviewing the
 spec and source diff. Never auto-update hashes without inspecting why they

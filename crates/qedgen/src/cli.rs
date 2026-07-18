@@ -141,7 +141,13 @@ pub(crate) enum Commands {
         escalate: bool,
     },
 
-    /// Brownfield adapter for existing Solana programs. Two modes:
+    /// DEPRECATED (slated for v3.0 removal): "adapt" bundled two
+    /// unrelated jobs and both now have honest homes — scaffold mode is
+    /// subsumed by `qedgen probe --emit-spec-candidates --audit-dir`
+    /// (elicitation-first: confirmable hypotheses instead of TODO
+    /// stubs), and attribute mode is `qedgen stamp` (same emission plus
+    /// the recorded-verification gate). Both modes remain functional in
+    /// v2.x to avoid breaking existing scripts.
     ///
     /// `--program <c>` (scaffold): detects the framework — Anchor (an
     /// `anchor-lang` dep or a `#[program]` mod), else Pinocchio
@@ -181,6 +187,46 @@ pub(crate) enum Commands {
         /// dispatcher is the canonical use case.
         #[arg(long = "handler", value_name = "NAME=PATH")]
         handler_overrides: Vec<String>,
+    },
+
+    /// Stamp `#[qed(verified, …)]` drift attributes for an
+    /// already-verified spec (Anchor-only; the post-verification half of
+    /// the old `adapt`). Emits one attribute per handler — body hash +
+    /// spec-block hash (+ Accounts-struct seal) — to paste above each
+    /// `pub fn`; the proc macro recomputes both at compile time and fires
+    /// `compile_error!` on drift.
+    ///
+    /// Runs AFTER verification and proves nothing itself: it requires
+    /// recorded implementation-verified evidence (written by
+    /// `qedgen verify` to `.qed/verify-evidence.json`, with a passing
+    /// implementation-bound backend — miri or a `kani_impl` harness) whose
+    /// spec and program-source hashes match what is being stamped. Probe
+    /// reproducers confirm findings and are not conformance evidence.
+    /// Checking or model-tested results are not eligible.
+    Stamp {
+        /// Path to the program crate (the directory containing the
+        /// program's own `Cargo.toml`, with `src/lib.rs` inside).
+        #[arg(long)]
+        program: PathBuf,
+
+        /// The verified `.qedspec` to stamp against.
+        #[arg(long)]
+        spec: PathBuf,
+
+        /// Path to write the attribute report. Without this flag,
+        /// prints to stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
+
+        /// Manually point an unrecognized handler at its actual
+        /// implementation. Format: `<handler>=<rust_path>`. Repeatable.
+        #[arg(long = "handler", value_name = "NAME=PATH")]
+        handler_overrides: Vec<String>,
+
+        /// Override the verification-evidence path (default:
+        /// `<spec_dir>/.qed/verify-evidence.json`).
+        #[arg(long)]
+        evidence: Option<PathBuf>,
     },
 
     /// Generate a Tier-0 .qedspec interface block from an Anchor IDL.
@@ -382,8 +428,10 @@ pub(crate) enum Commands {
     ///   coverage targets with unresolved accounts and arguments made explicit.
     Ratify {
         /// Audit working-set directory (the one passed to `probe
-        /// --audit-dir`). Must contain `interview.md`, `clusters.json`,
-        /// and `skeleton.qedspec`.
+        /// --audit-dir`). Must contain `clusters.json` and
+        /// `skeleton.qedspec`, plus either a structured `answers.json`
+        /// (the in-harness interview's answer set) or the legacy
+        /// `interview.md`.
         #[arg(long)]
         audit_dir: PathBuf,
 
@@ -402,8 +450,29 @@ pub(crate) enum Commands {
         /// `<project_root>/.qed/findings/`.
         #[arg(long)]
         findings_dir: Option<PathBuf>,
+
+        /// Structured answer set (`{id → accept|reject|bug + note}`,
+        /// hypothesis and cluster IDs alike). Defaults to
+        /// `<audit_dir>/answers.json` when present; when resolved, the
+        /// legacy `interview.md` is not consulted.
+        #[arg(long)]
+        answers: Option<PathBuf>,
+
+        /// Also generate the spec-model proptest harness
+        /// (`<audit_dir>/model-proptest.rs`) from the ratified spec.
+        /// Generation is `checking`-level evidence; *running* the harness
+        /// earns `model-tested`.
+        #[arg(long, default_value_t = false)]
+        proptest: bool,
     },
 
+    /// DEPRECATED (slated for v3.0 removal): the IDL is now an evidence
+    /// source for `qedgen probe` (the spec-elicitation front door) rather
+    /// than a standalone shell emitter — probe's hypothesizer consumes
+    /// IDL signer flags and `has_one` relations directly and offers
+    /// confirmable clauses instead of a TODO shell. Remains functional in
+    /// v2.x to avoid breaking existing scripts.
+    ///
     /// Scaffold a .qedspec from an Anchor IDL JSON file.
     ///
     /// v2.10 cleanup: this subcommand previously also generated SPEC.md
@@ -684,6 +753,13 @@ pub(crate) enum Commands {
         /// walking up from cwd, mirroring `check` and `codegen`.
         #[arg(long)]
         spec: Option<PathBuf>,
+
+        /// Program crate whose implementation is exercised by an
+        /// implementation-bound backend. Required for verification evidence
+        /// that can authorize `qedgen stamp`: the source-tree hash recorded
+        /// here must still match the crate passed to `stamp`.
+        #[arg(long)]
+        program: Option<PathBuf>,
 
         /// Run proptest harnesses (cargo test --release)
         #[arg(long)]

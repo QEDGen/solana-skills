@@ -39,6 +39,18 @@ into new IDs merely because the confidence or ratification state changes.
 outcomes back onto those same candidates. Unanswered candidates remain
 `pending`; rejected and bug outcomes retain the interview rationale.
 
+The binary's hypothesizer now pre-seeds seven classes as evidence-anchored
+`hypotheses[]` in the probe envelope (deterministic, precision-first: no
+evidence anchor, no hypothesis): authorization, lifecycle/init-once,
+arithmetic-bound (held checks lifted from bodies), conservation (paired
+operations, no supply-changing flows), CPI-integrity (pinned callee +
+resolved transfer roles), unwired-guard (dead error variants as
+confirm/deny questions), and state-machine (the IDL status enum lifted
+into `type State`). Verify and extend those records rather than
+re-deriving them; the agent owns everything the binary abstained on —
+ambiguous cases and the deep cross-procedure classes in the sections
+above.
+
 Maintain `.qed/audit/<timestamp>/run-manifest.json` against
 `../schemas/audit-run-manifest.schema.json`. It is the canonical status of
 source review, ordinary probe, compilation, Mollusk, Miri, and each Crucible

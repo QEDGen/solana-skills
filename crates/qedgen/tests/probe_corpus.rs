@@ -20,8 +20,9 @@
 //! - `specless/<scenario>/` — brownfield project trees exercising the #235
 //!   IDL-enrichment overlay end to end (enrich, framework-enforced
 //!   narrowing, source/IDL drift, Pinocchio handler fill, derivable-IDL
-//!   hint on a marker-without-IDL and on an unbuilt framework checkout, and
-//!   the #240 dead-guard / unwired-error-variant sweep).
+//!   hint on a marker-without-IDL and on an unbuilt framework checkout,
+//!   the #240 dead-guard / unwired-error-variant sweep, and the #241
+//!   workspace-member ancestor walk to a repo-root `idl/`).
 //!
 //! These are pass/fail *regression* tests, not a metric: they pin that a
 //! shipped predicate keeps firing on its vuln fixture and stays silent on
@@ -221,6 +222,78 @@ fn anchor_idl_overlay_enriches_narrows_and_reports_drift() {
     );
 }
 
+/// Spec elicitation (PRD Phases 0–1): every spec-less envelope carries a
+/// `run_id` + `spec_readiness`, and the hypothesizer fires only on
+/// evidence-anchored claims — `initialize` gets an authorization
+/// hypothesis (single authority-named enforced signer) and a
+/// lifecycle_init_once hypothesis (Anchor `init` constraint), while the
+/// permissionless `crank` and the evidence-free `emergency_withdraw`
+/// yield nothing (precision rule: no anchor → no hypothesis).
+#[test]
+fn specless_envelope_carries_evidence_anchored_hypotheses() {
+    let env = probe(&["--bootstrap", "--root", &specless_root("anchor-idl")]);
+
+    let run_id = env.get("run_id").and_then(Value::as_str).unwrap();
+    assert!(run_id.starts_with("run-"), "run_id: {run_id}");
+
+    let readiness = env.get("spec_readiness").expect("spec_readiness present");
+    assert_eq!(readiness["hypotheses_total"], 3, "{readiness:#}");
+    assert_eq!(readiness["lowerable"], 3);
+    assert_eq!(readiness["by_class"]["authorization"], 1);
+    assert_eq!(readiness["by_class"]["lifecycle_init_once"], 1);
+    assert_eq!(readiness["by_class"]["arithmetic_bound"], 1);
+
+    let hypotheses = env
+        .get("hypotheses")
+        .and_then(Value::as_array)
+        .expect("hypotheses present");
+    let auth = hypotheses
+        .iter()
+        .find(|h| h["class"] == "authorization")
+        .expect("authorization hypothesis");
+    assert_eq!(auth["handler"], "initialize");
+    assert_eq!(auth["lowering"]["kind"], "auth_clause");
+    assert_eq!(auth["lowering"]["signer_account"], "admin");
+    assert!(auth["id"].as_str().unwrap().starts_with("h-"));
+    // Phase 4: the IDL `has_one` relation (vault → admin) is a
+    // stored-authority binding, lifting confidence to high.
+    assert!(auth["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["kind"] == "idl_has_one_binding"));
+    assert_eq!(auth["confidence"], "high");
+
+    let lifecycle = hypotheses
+        .iter()
+        .find(|h| h["class"] == "lifecycle_init_once")
+        .expect("lifecycle hypothesis");
+    assert_eq!(lifecycle["handler"], "initialize");
+    assert!(lifecycle["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["kind"] == "anchor_init_constraint"));
+
+    // Phase 5: the held `require!(cap <= 1_000_000, …)` bound lifts into
+    // an executable arithmetic_bound hypothesis.
+    let arith = hypotheses
+        .iter()
+        .find(|h| h["class"] == "arithmetic_bound")
+        .expect("arithmetic_bound hypothesis");
+    assert_eq!(arith["handler"], "initialize");
+    assert_eq!(arith["lowering"]["kind"], "requires_bound");
+    assert_eq!(arith["lowering"]["param"], "cap");
+    assert_eq!(arith["lowering"]["bound"], "1000000");
+    assert_eq!(arith["lowering"]["error"], "CapTooHigh");
+
+    // Precision: no hypothesis for the permissionless or evidence-free
+    // handlers.
+    assert!(hypotheses
+        .iter()
+        .all(|h| h["handler"] != "crank" && h["handler"] != "emergency_withdraw"));
+}
+
 /// Pinocchio: source discovery yields no handlers, so the Codama IDL fills
 /// `handlers[]` (each `discovered_via: "idl"`, `source_file` = the IDL).
 #[test]
@@ -251,6 +324,49 @@ fn pinocchio_codama_overlay_fills_handlers_from_idl() {
             h.get("name")
         );
     }
+}
+
+/// #241: a workspace member probed at program-dir granularity
+/// (`--root programs/foo`) with its IDL at the *repo* root (`idl/foo.json`)
+/// still resolves `idl_path` via the ancestor walk and applies the overlay —
+/// previously this cwd reported `derivable_idl: "anchor"` with no `idl_path`
+/// while probing the repo root enriched fine.
+#[test]
+fn workspace_member_program_root_finds_repo_root_idl() {
+    let program_root = PathBuf::from(specless_root("anchor-workspace-member"))
+        .join("programs")
+        .join("foo")
+        .display()
+        .to_string();
+    let env = probe(&["--bootstrap", "--root", &program_root]);
+
+    assert_eq!(env.get("runtime").and_then(Value::as_str), Some("anchor"));
+    let idl_path = env
+        .get("idl_path")
+        .and_then(Value::as_str)
+        .expect("idl_path must resolve from the workspace root");
+    assert!(
+        idl_path.ends_with("idl/foo.json"),
+        "unexpected idl_path: {idl_path}"
+    );
+    assert!(
+        env.get("derivable_idl").is_none(),
+        "a consumed IDL must suppress the derivable hint"
+    );
+
+    // The overlay applies as if the IDL were local: enrichment + narrowing.
+    let init = handler(&env, "initialize");
+    assert_eq!(
+        init.get("intent_tag").and_then(Value::as_str),
+        Some("authority_gated")
+    );
+    assert!(init.get("idl_accounts").is_some());
+    assert_eq!(
+        handler(&env, "crank")
+            .get("intent_tag")
+            .and_then(Value::as_str),
+        Some("permissionless")
+    );
 }
 
 /// A `shank` dep with no on-disk IDL reports `derivable_idl: "shank"` and no

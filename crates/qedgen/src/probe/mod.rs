@@ -29,7 +29,9 @@ pub(crate) mod domain_interview;
 pub(crate) mod domain_sequence;
 pub(crate) mod domain_sequence_binding;
 pub(crate) mod domain_sequence_seed;
+pub(crate) mod elicit;
 pub(crate) mod handler_intent;
+pub(crate) mod hypothesize;
 pub(crate) mod idl_overlay;
 pub(crate) mod lifecycle_probe;
 pub(crate) mod paired_validator_probe;
@@ -757,6 +759,21 @@ pub struct ProbeOutput {
     /// `"shank_central_match"` is emitted; other runtimes leave it absent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dispatcher_kind: Option<String>,
+    /// Spec elicitation (PRD Phase 0): stable per-run identifier, carried
+    /// through the audit working set into `qedgen ratify` outputs so
+    /// funnel conversion and time-to-first-check are joinable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    /// Spec elicitation (PRD Phase 1): evidence-anchored, confirmable
+    /// invariant hypotheses about *this* program. Spec-less mode only;
+    /// always computed (not gated behind a flag) — the ranked summary on
+    /// stderr is the default tail of every spec-less probe run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hypotheses: Option<Vec<hypothesize::InvariantHypothesis>>,
+    /// Spec elicitation (PRD Phase 0): hypothesis supply counts by class
+    /// and confidence — the funnel's supply-side instrumentation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spec_readiness: Option<hypothesize::SpecReadiness>,
 }
 
 impl ProbeOutput {
@@ -784,8 +801,106 @@ impl ProbeOutput {
             idl_path: None,
             derivable_idl: None,
             dispatcher_kind: None,
+            run_id: None,
+            hypotheses: None,
+            spec_readiness: None,
         }
     }
+}
+
+/// Spec-elicitation finalizer for spec-less envelopes — the one seam every
+/// spec-less print site calls right before serializing (PRD §6.1/§6.4):
+/// stamps a per-run `run_id`, runs the hypothesizer over the discovered
+/// handlers, records `spec_readiness`, and prints the ranked hypothesis
+/// summary to stderr (stdout JSON stays the agent surface). When an audit
+/// working set exists, also persists `hypotheses.json` and threads the
+/// `run_id` into `run-manifest.json` so `ratify` can carry it through.
+pub fn finalize_specless(output: &mut ProbeOutput, project_root: &Path, audit_dir: Option<&Path>) {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // Canonicalize so `--program .` still yields the directory's real
+    // name in the run tag.
+    let canonical = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf());
+    let root_tag: String = canonical
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("program")
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let run_id = format!("run-{}-{}", root_tag.trim_matches('_'), secs);
+    output.run_id = Some(run_id.clone());
+
+    let hypotheses = hypothesize::hypothesize(
+        project_root,
+        output.handlers.as_deref().unwrap_or(&[]),
+        &output.candidates,
+    );
+    output.spec_readiness = Some(hypothesize::spec_readiness(&hypotheses));
+    if !hypotheses.is_empty() {
+        eprint!("{}", hypothesize::render_summary(&hypotheses));
+    }
+    output.hypotheses = Some(hypotheses);
+
+    if let Some(dir) = audit_dir {
+        if let Err(e) = write_elicitation_artifacts(dir, output, secs) {
+            eprintln!(
+                "warning: failed to write elicitation artifacts to {}: {}",
+                dir.display(),
+                e
+            );
+        }
+    }
+}
+
+/// Persist the hypothesis set + run identity into the audit working set:
+/// `hypotheses.json` (ratify's lowering input) and a `run_id` +
+/// `spec_readiness` patch on `run-manifest.json` (Phase-0 funnel joins).
+fn write_elicitation_artifacts(
+    audit_dir: &Path,
+    output: &ProbeOutput,
+    generated_at_unix: u64,
+) -> Result<()> {
+    if !audit_dir.exists() {
+        return Ok(());
+    }
+    let doc = serde_json::json!({
+        "schema_version": 1,
+        "run_id": output.run_id,
+        "generated_at_unix": generated_at_unix,
+        "spec_readiness": output.spec_readiness,
+        "hypotheses": output.hypotheses.as_deref().unwrap_or_default(),
+    });
+    std::fs::write(
+        audit_dir.join("hypotheses.json"),
+        format!("{}\n", serde_json::to_string_pretty(&doc)?),
+    )?;
+
+    let manifest_path = audit_dir.join("run-manifest.json");
+    if manifest_path.exists() {
+        let mut manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_path)?)?;
+        manifest["run_id"] = serde_json::to_value(&output.run_id)?;
+        manifest["spec_readiness"] = serde_json::to_value(&output.spec_readiness)?;
+        if let Some(artifacts) = manifest.get_mut("artifacts") {
+            artifacts["hypotheses"] = serde_json::Value::String("hypotheses.json".to_string());
+        }
+        std::fs::write(
+            &manifest_path,
+            format!("{}\n", serde_json::to_string_pretty(&manifest)?),
+        )?;
+    }
+    Ok(())
 }
 
 impl Candidate {

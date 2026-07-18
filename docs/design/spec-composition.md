@@ -385,9 +385,10 @@ re-verification gap.
   official-team ownership; QEDGen only ships what it itself verifies.
 - **Not** versioning specs by program ID alone. Spec version ≠ program
   version; a pinned `spec_hash` is authoritative.
-- **Not** inferring interfaces from IDL. `qedgen spec --idl` already does
-  scaffold generation; composition assumes the human-authored interface is
-  the source of truth.
+- **Not** inferring interfaces from IDL. IDL-driven scaffolding already
+  exists (historically `qedgen spec --idl`, deprecated for v3.0 removal;
+  today the IDL feeds `qedgen probe`'s enrichment overlay); composition
+  assumes the human-authored interface is the source of truth.
 
 ### The strategic play
 

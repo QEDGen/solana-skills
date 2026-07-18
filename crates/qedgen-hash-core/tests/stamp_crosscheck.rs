@@ -94,7 +94,10 @@ const STAMPS: &[Stamp] = &[
         spec: Some((
             "examples/rust/cross-program-vault/vault.qedspec",
             "deposit",
-            "0c65c0fd1863230e",
+            // Re-pinned when `deposit` gained the explicit `permissionless`
+            // marker (post-v2.44.0 lint cleanup); CLI `--update-hashes` and
+            // hash-core agreed on this value at the re-stamp.
+            "1fa96b38d214b3c3",
         )),
     },
 ];

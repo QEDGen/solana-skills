@@ -48,6 +48,9 @@ type Error
   | MathOverflow
 
 handler initialize : State.Uninitialized -> State.Active {
+  // One-shot by lifecycle (Uninitialized -> Active) and PDA-bound to the
+  // payer; open to any first caller by design.
+  permissionless
   accounts {
     payer           : signer, writable
     vault           : writable, pda ["vault", payer]
@@ -59,8 +62,11 @@ handler initialize : State.Uninitialized -> State.Active {
   }
 }
 
-// User deposit — SPL Token CPI + own-state update.
+// User deposit — SPL Token CPI + own-state update. Depositors move their
+// own tokens (the transfer authority is `user`), so the handler is
+// deliberately open.
 handler deposit (amount : U64) : State.Active -> State.Active {
+  permissionless
   accounts {
     user             : signer
     vault            : writable

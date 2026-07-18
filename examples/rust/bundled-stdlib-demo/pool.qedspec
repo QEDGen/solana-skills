@@ -25,15 +25,22 @@ type State
 type Error
   | InvalidAmount
   | WrongState
+  | MathOverflow
 
+// One-shot by lifecycle (Uninitialized -> Open); no privileged caller in
+// this demo, so the open-to-anyone surface is declared, not accidental.
 handler initialize (initial : U64) : State.Uninitialized -> State.Open {
+  permissionless
   requires initial > 0 else InvalidAmount
   effect {
     pool_balance := initial
   }
 }
 
+// Depositors move their own tokens — the Token.transfer authority is the
+// depositor, so there is no vault-side gate to declare.
 handler deposit (amount : U64) : State.Open -> State.Open {
+  permissionless
   requires amount > 0 else InvalidAmount
   modifies [pool_balance]
   effect {

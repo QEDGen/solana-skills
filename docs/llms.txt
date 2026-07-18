@@ -1,6 +1,6 @@
 # QEDGen
 
-> Describe what your Solana program must guarantee in `.qedspec`. QEDGen finds the bugs your tests miss, then generates the proofs, property tests, and CI to keep them fixed. Supports Anchor, Quasar, Pinocchio, and native sBPF assembly — and audits existing programs without a spec (`qedgen adapt`, `qedgen probe`). Install with `npx skills add qedgen/solana-skills`. Works with any coding agent supporting the Agent Skills spec.
+> Describe what your Solana program must guarantee in `.qedspec`. QEDGen finds the bugs your tests miss, then generates the proofs, property tests, and CI to keep them fixed. Supports Anchor, Quasar, Pinocchio, and native sBPF assembly — and audits existing programs without a spec: `qedgen probe` hypothesizes the invariants the code appears to enforce, and `qedgen ratify` turns confirmed ones into an executable spec (`qedgen adapt` / `qedgen spec --idl` are deprecated in favor of this flow). Install with `npx skills add qedgen/solana-skills`. Works with any coding agent supporting the Agent Skills spec.
 
 A `.qedspec` is the single source of truth. It can live in one file or span multiple files with upstream spec dependencies. From it, QEDGen generates program code, property tests, Kani harnesses, Lean 4 proofs, and CI workflows.
 

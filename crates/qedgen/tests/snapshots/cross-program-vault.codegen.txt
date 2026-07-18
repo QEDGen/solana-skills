@@ -19,7 +19,7 @@ debug = []
 [dependencies]
 anchor-lang = "0.32.1"
 anchor-spl = "0.32.1"
-qedgen-macros = { git = "https://github.com/qedgen/solana-skills", tag = "v2.43.0" }
+qedgen-macros = { git = "https://github.com/qedgen/solana-skills", tag = "v2.44.0" }
 
 
 [workspace]
@@ -148,7 +148,7 @@ use crate::state::VaultAccountInner;
 use crate::Deposit;
 
 impl<'info> Deposit<'info> {
-    #[qed(verified, spec = "../vault.qedspec", handler = "deposit", hash = "ba56825b97e00c86", spec_hash = "0c65c0fd1863230e")]
+    #[qed(verified, spec = "../vault.qedspec", handler = "deposit", hash = "ba56825b97e00c86", spec_hash = "1fa96b38d214b3c3")]
     #[inline(always)]
     pub fn handler(&mut self, amount: u64) -> Result<()> {
         guards::deposit(self, amount)?;
@@ -227,7 +227,7 @@ use crate::state::VaultAccountInner;
 use crate::{Initialize, InitializeBumps};
 
 impl<'info> Initialize<'info> {
-    #[qed(verified, spec = "../vault.qedspec", handler = "initialize", hash = "116b9e8c13801ca8", spec_hash = "a1d5fd30fecf1ae6")]
+    #[qed(verified, spec = "../vault.qedspec", handler = "initialize", hash = "116b9e8c13801ca8", spec_hash = "08b5ccd111b6d5eb")]
     #[inline(always)]
     pub fn handler(&mut self, bumps: &InitializeBumps) -> Result<()> {
         guards::initialize(self)?;

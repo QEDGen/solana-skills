@@ -8,7 +8,7 @@ A developer pointed you to this document to set up QEDGen and use it on their So
 
 1. **Install.** Run `npx skills add qedgen/solana-skills`, then `qedgen --help` to confirm. If `qedgen` isn't found, the skill was cloned into your harness's skills directory but the binary hasn't been fetched yet — run `bash install.sh` from that directory: it downloads the platform binary and links it onto your `PATH` (it prints an `export PATH=…` line if your shell needs it, and is safe to re-run). No API keys are needed for the core loop.
 2. **Find out where the developer is, then act:**
-   - **Brownfield** (an existing program, no spec) → *audit first.* Run `qedgen probe --program <path>` (real bugs, each with a Kani/proptest/Mollusk reproducer, plus coverage gaps) and/or `qedgen adapt --program <path>` (draft a `.qedspec` from Anchor source). Report findings, then offer to lock them into a spec so they can't come back.
+   - **Brownfield** (an existing program, no spec) → *audit first.* Run `qedgen probe --program <path>` — it reports real bugs (each with a Kani/proptest/Mollusk reproducer), coverage gaps, and a ranked set of evidence-anchored invariant hypotheses about what the program appears to guarantee. Ask the developer to confirm each hypothesis (accept / reject / it's-a-bug), record the answers to `<audit-dir>/answers.json`, and run `qedgen ratify --audit-dir <dir>` to lower confirmed ones into an executable `.qedspec`. (`qedgen adapt --program` and `qedgen spec --idl` are deprecated TODO-shell scaffolds — this flow subsumes both.)
    - **Greenfield** (defining guarantees for new or evolving code) → write a `.qedspec`, then `qedgen check --spec …` → `qedgen codegen --spec … --all` → `qedgen verify --spec …`.
 3. **The `.qedspec` is the single source of truth.** Refine the spec rather than hand-editing generated artifacts.
 
@@ -79,8 +79,6 @@ qedgen verify --spec program.qedspec --json             # machine-readable for C
 
 ```bash
 qedgen init                                             # create .qed/ and starter .qedspec
-qedgen spec --idl target/idl/program.json \
-  --output-dir ./formal_verification                    # draft SPEC.md or .qedspec from Anchor IDL
 ```
 
 ### Drift and reconciliation
@@ -89,19 +87,30 @@ qedgen spec --idl target/idl/program.json \
 qedgen reconcile --spec program.qedspec                 # unified drift report across Rust + Lean
 ```
 
-### Brownfield: audit and adapt an existing program (no spec required)
+### Brownfield: audit an existing program and elicit its spec (no spec required)
 
 ```bash
-qedgen probe --program ./src                            # find category-coverage gaps + reproducible bugs (JSON for the auditor)
+qedgen probe --program ./src                            # bugs + coverage gaps + ranked invariant hypotheses (JSON for the auditor; summary on stderr)
 qedgen probe --fuzz 300 --root ./my-program             # Crucible coverage-guided fuzzing (protocol-invariant crash-finder, no spec required)
-qedgen adapt --program ./my-anchor-program              # draft a .qedspec from an existing Anchor program
 qedgen interface --idl target/idl/dep.json              # generate a Tier-0 interface block for a CPI dependency
 qedgen probe --program ./src --emit-spec-candidates \
-  --audit-dir .qed/audit/<id>                           # emit the scaffold-to-spec interview working set
-qedgen ratify --audit-dir .qed/audit/<id>               # turn the answered interview into a .qedspec + side-files
+  --audit-dir .qed/audit/<id>                           # write the audit working set (skeleton, hypotheses.json, …)
+# answer each hypothesis (accept / reject / bug) → .qed/audit/<id>/answers.json, then:
+qedgen ratify --audit-dir .qed/audit/<id>               # lower confirmed hypotheses to executable clauses (parse+check gated)
 ```
 
-`probe` powers the harness-native auditor subagent: it surfaces real vulnerabilities first (each paired with a Kani/proptest/Mollusk reproducer), spec-coverage gaps second. Works on Anchor, native Rust, sBPF, and Pinocchio.
+`probe` powers the harness-native auditor subagent: it surfaces real vulnerabilities first (each paired with a Kani/proptest/Mollusk reproducer), spec-coverage gaps second, and hypothesizes evidence-anchored invariants (authorization, lifecycle/init-once, held arithmetic bounds, conservation pairs, pinned CPI transfers, unwired error variants, the status-enum state machine) for confirmation. Works on Anchor, native Rust, sBPF, and Pinocchio. Ratified clauses are labelled `checking`; passing generated model proptests are `model-tested`; only source-bound backends earn `implementation-verified`.
+
+Deprecated (functional in v2.x with a warning; removed in v3.0): `qedgen adapt --program` (TODO-shell skeleton) and `qedgen spec --idl` (IDL shell) — the probe flow subsumes both, consuming the IDL as an evidence source.
+
+### Stamp verified handlers (post-verification drift guard)
+
+```bash
+qedgen verify --spec program.qedspec --program ./my-anchor-program --kani --kani-path ./my-anchor-program/src/kani_impl.rs
+qedgen stamp --program ./my-anchor-program --spec program.qedspec
+```
+
+`stamp` (formerly `adapt --program --spec`) emits one `#[qed(verified, …)]` attribute per handler to paste above its `pub fn`; the proc macro recomputes the hashes at compile time and fails the build on drift. It refuses without recorded implementation-verified evidence — a passing Miri run or `kani_impl` harness whose spec and program-source hashes match. Mollusk probe reproducers confirm findings rather than conformance and cannot authorize a stamp.
 
 ### Mainnet-readiness (Anchor IDL lint + upgrade-safety diff)
 
@@ -184,7 +193,7 @@ The skill instructs your agent to follow this workflow:
 
 Check for existing artifacts:
 1. **`.qedspec` exists.** Read it. It is the source of truth.
-2. **Anchor IDL exists.** Run `qedgen spec --idl <path>` to generate a draft.
+2. **Source (and/or an IDL) exists, no spec.** Run `qedgen probe --program <path> --emit-spec-candidates --audit-dir .qed/audit/<ts>` — the probe consumes the IDL as an evidence source and hypothesizes confirmable invariants; confirmed answers ratify into a draft spec. (`qedgen spec --idl` is the deprecated shell-only fallback.)
 3. **Neither exists.** Read source directly, ask scoping questions, then write a draft spec.
 
 ### Step 2: Write the spec

@@ -67,8 +67,10 @@ pub struct OverlayOutcome {
 
 /// Find an on-disk IDL under the canonical paths (first match wins):
 /// `idl.json`, `program/idl.json`, `target/idl/*.json`, `idl/*.json` —
-/// the same order the Crucible brownfield dispatcher documents. Returns
-/// the path alongside the text so the envelope can name its input.
+/// the same order the Crucible brownfield dispatcher documents — then,
+/// for a workspace member with no local IDL, the name-matched workspace
+/// root fallback (#241). Returns the path alongside the text so the
+/// envelope can name its input.
 /// Unreadable files fail loudly (an existing-but-broken IDL should not
 /// silently degrade to "no IDL").
 pub(crate) fn discover_idl(project_root: &Path) -> anyhow::Result<Option<(PathBuf, String)>> {
@@ -99,6 +101,45 @@ pub(crate) fn discover_idl(project_root: &Path) -> anyhow::Result<Option<(PathBu
                     .with_context(|| format!("reading {}", first.display()))?;
                 return Ok(Some((first.clone(), text)));
             }
+        }
+    }
+    // #241: a workspace member probed at program-dir granularity
+    // (`--root programs/<name>`) keeps its IDL at the *workspace* root —
+    // `anchor build` writes `target/idl/` beside `Anchor.toml`, committed
+    // copies live in a root `idl/`. Every local candidate missed, so walk
+    // up to the workspace root and retry there, name-matched to this
+    // program.
+    discover_workspace_ancestor_idl(project_root)
+}
+
+/// Ancestor-walk fallback for `discover_idl` (#241). Fires only when
+/// `project_root` looks like a workspace member: the nearest ancestor
+/// carrying an `Anchor.toml`, or whose `programs/` dir contains
+/// `project_root`, is the workspace root, and the program's IDL is looked
+/// up there via `discover_workspace_program_idl` — name-matched, so a
+/// sibling program's IDL is never consumed. The walk stops at that first
+/// marker ancestor either way: a missing IDL at the workspace root is the
+/// same graceful pre-build absence as a missing local one, not a license
+/// to scan higher directories.
+fn discover_workspace_ancestor_idl(
+    project_root: &Path,
+) -> anyhow::Result<Option<(PathBuf, String)>> {
+    // Canonicalize so the walk sees real ancestors even for a relative
+    // `--root` (e.g. `.` inside the program dir).
+    let program_root =
+        std::fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
+    let Some(fallback_name) = program_root
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(str::to_string)
+    else {
+        return Ok(None);
+    };
+    for ancestor in program_root.ancestors().skip(1) {
+        let is_workspace_root = ancestor.join("Anchor.toml").is_file()
+            || program_root.starts_with(ancestor.join("programs"));
+        if is_workspace_root {
+            return discover_workspace_program_idl(ancestor, &program_root, &fallback_name);
         }
     }
     Ok(None)
@@ -914,6 +955,102 @@ mod tests {
             handlers[1].idl_accounts.as_ref().unwrap()[0].name,
             "beta_payer"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn workspace_member_root_finds_repo_root_idl() {
+        // #241: probing at program-dir granularity (`--root programs/foo`)
+        // must find the workspace-root `idl/foo.json` and apply the overlay.
+        let root = tmp_root("workspace-member");
+        let crate_root = root.join("programs").join("foo");
+        std::fs::create_dir_all(&crate_root).unwrap();
+        std::fs::write(
+            root.join("Anchor.toml"),
+            "[programs.localnet]\nfoo = \"Foo1111111111111111111111111111111111111111\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            crate_root.join("Cargo.toml"),
+            "[package]\nname = \"foo\"\nversion = \"0.1.0\"\n\n[dependencies]\nanchor-lang = \"0.31\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("idl")).unwrap();
+        std::fs::write(root.join("idl").join("foo.json"), ANCHOR_030_IDL).unwrap();
+
+        let global = vec![
+            "missing_signer".to_string(),
+            "permissionless_state_writer".to_string(),
+        ];
+        let mut handlers = vec![mk_handler("initialize"), mk_handler("crank")];
+        let out = apply(&crate_root, &Runtime::Anchor, &mut handlers, &global);
+
+        let idl_path = out.idl_path.expect("workspace-root IDL resolved");
+        assert!(
+            idl_path.ends_with("idl/foo.json"),
+            "unexpected idl_path: {idl_path}"
+        );
+        assert!(out.derivable_idl.is_none());
+        assert!(out.drift_candidates.is_empty());
+        // Enrichment + enforced-flag narrowing apply as if the IDL were local.
+        assert!(handlers[0].idl_accounts.is_some());
+        assert_eq!(handlers[0].intent_tag.as_deref(), Some("authority_gated"));
+        assert_eq!(handlers[1].intent_tag.as_deref(), Some("permissionless"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn workspace_member_matches_target_idl_with_hyphenated_crate_name() {
+        // `foo-vault` crate → `target/idl/foo_vault.json` at the workspace
+        // root; `programs/` containment is the workspace marker (no
+        // Anchor.toml needed).
+        let root = tmp_root("workspace-member-hyphen");
+        let crate_root = root.join("programs").join("foo-vault");
+        std::fs::create_dir_all(&crate_root).unwrap();
+        std::fs::write(
+            crate_root.join("Cargo.toml"),
+            "[package]\nname = \"foo-vault\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("target/idl")).unwrap();
+        std::fs::write(root.join("target/idl/foo_vault.json"), ANCHOR_030_IDL).unwrap();
+
+        let mut handlers = vec![mk_handler("initialize"), mk_handler("crank")];
+        let out = apply(&crate_root, &Runtime::Anchor, &mut handlers, &[]);
+        let idl_path = out.idl_path.expect("workspace-root IDL resolved");
+        assert!(
+            idl_path.ends_with("target/idl/foo_vault.json"),
+            "unexpected idl_path: {idl_path}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn workspace_member_never_consumes_a_sibling_program_idl() {
+        // Only `bar.json` exists at the workspace root: `programs/foo` must
+        // not enrich from it — same graceful absence as an unbuilt checkout,
+        // so the derivable hint fires instead.
+        let root = tmp_root("workspace-member-sibling");
+        let crate_root = root.join("programs").join("foo");
+        std::fs::create_dir_all(&crate_root).unwrap();
+        std::fs::write(root.join("Anchor.toml"), "").unwrap();
+        std::fs::write(
+            crate_root.join("Cargo.toml"),
+            "[package]\nname = \"foo\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("idl")).unwrap();
+        std::fs::write(root.join("idl").join("bar.json"), ANCHOR_030_IDL).unwrap();
+
+        let mut handlers = vec![mk_handler("initialize")];
+        let out = apply(&crate_root, &Runtime::Anchor, &mut handlers, &[]);
+        assert!(
+            out.idl_path.is_none(),
+            "sibling `bar.json` must not be consumed: {:?}",
+            out.idl_path
+        );
+        assert_eq!(out.derivable_idl.as_deref(), Some("anchor"));
+        assert!(handlers[0].idl_accounts.is_none());
         let _ = std::fs::remove_dir_all(&root);
     }
 

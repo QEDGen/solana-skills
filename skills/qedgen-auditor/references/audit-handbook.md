@@ -50,10 +50,11 @@ are runtime-agnostic).
 
 **Required venue capabilities:**
 - **Read, Grep, Glob** — read source, find handlers, search for patterns
-- **Bash** — run `qedgen probe`, `qedgen spec --idl`,
+- **Bash** — run `qedgen probe`, `qedgen ratify`,
   `qedgen check`, `qedgen verify --probe-repros --json` (for the
   v2.16 D5 repro gating). `qedgen probe` always emits JSON; the
-  `--json` flag was removed in v2.16.
+  `--json` flag was removed in v2.16. (`qedgen spec --idl` is
+  deprecated — the IDL is a probe evidence source now.)
 - **Write** — write `.qedspec`, `.qed/findings/`, `.qed/probe-suppress.toml`
 
 The auditor is designed for Read+Grep+Bash+Write only. Anchor's
