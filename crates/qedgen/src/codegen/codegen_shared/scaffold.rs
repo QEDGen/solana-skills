@@ -354,11 +354,34 @@ pub(crate) fn render_handler_scaffold(
             any_unmechanized = true;
         }
     } else {
-        for effect in &handler.effects {
-            let mechanized =
-                state_acct.and_then(|sa| mechanize_effect(effect, sa, spec, target, handler));
+        // Parallel effect semantics: snapshot fields the block both
+        // writes and reads so RHS reads observe pre-state — the meaning
+        // the Lean model and Kani conformance assertions give the spec.
+        // Two-phase so snapshots bind before the first effect line, and
+        // only referenced snapshots are emitted.
+        let pre_fields = parallel_pre_fields_for_handler(handler, spec);
+        let mechanized_lines: Vec<Option<String>> = handler
+            .effects
+            .iter()
+            .map(|effect| {
+                state_acct
+                    .and_then(|sa| mechanize_effect(effect, sa, spec, target, handler, &pre_fields))
+            })
+            .collect();
+        if let Some(sa) = state_acct {
+            for f in &pre_fields {
+                let used = mechanized_lines
+                    .iter()
+                    .flatten()
+                    .any(|l| l.contains(&format!("pre_{f}")));
+                if used {
+                    out.push_str(&format!("        let pre_{f} = self.{}.{f};\n", sa.name));
+                }
+            }
+        }
+        for (effect, mechanized) in handler.effects.iter().zip(&mechanized_lines) {
             match mechanized {
-                Some(line) => out.push_str(&line),
+                Some(line) => out.push_str(line),
                 None => {
                     out.push_str(&format!(
                         "        // Spec effect (needs fill): {} {} {}\n",

@@ -1564,8 +1564,8 @@ handler bump (n : U64) : State.Active -> State.Active {
     let handler = spec.handlers.iter().find(|h| h.name == "bump").unwrap();
     let state_acct = find_state_account(handler).expect("state account");
     let effect = handler.effects.first().unwrap();
-    let rendered =
-        mechanize_effect(effect, state_acct, &spec, Target::Anchor, handler).expect("mechanized");
+    let rendered = mechanize_effect(effect, state_acct, &spec, Target::Anchor, handler, &[])
+        .expect("mechanized");
     // Pre-F8 this said `ErrorCode::MathOverflow` (a non-existent enum).
     // F8: it now says `<ProgramName>Error::MathOverflow`, matching the
     // user's declared Error sum.
@@ -1607,7 +1607,7 @@ fn mechanize_set_admin(rhs: &str, target: Target) -> Option<String> {
         .unwrap();
     let state_acct = find_state_account(handler).expect("state account");
     let effect = handler.effects.first().unwrap();
-    mechanize_effect(effect, state_acct, &spec, target, handler)
+    mechanize_effect(effect, state_acct, &spec, target, handler, &[])
 }
 
 #[test]
@@ -1660,7 +1660,7 @@ fn mechanize_effect_refuses_arithmetic_on_account_key() {
         .unwrap();
     let state_acct = find_state_account(handler).expect("state account");
     let effect = handler.effects.first().unwrap();
-    assert!(mechanize_effect(effect, state_acct, &spec, Target::Anchor, handler).is_none());
+    assert!(mechanize_effect(effect, state_acct, &spec, Target::Anchor, handler, &[]).is_none());
 }
 
 #[test]
@@ -1680,7 +1680,7 @@ fn mechanize_effect_refuses_account_key_into_non_pubkey_dest() {
     let effect = handler.effects.first().unwrap();
     for target in [Target::Anchor, Target::Quasar, Target::Pinocchio] {
         assert!(
-            mechanize_effect(effect, state_acct, &spec, target, handler).is_none(),
+            mechanize_effect(effect, state_acct, &spec, target, handler, &[]).is_none(),
             "{target:?}: non-Pubkey destination must not lower to a key load"
         );
     }
@@ -1714,7 +1714,7 @@ handler bump_pool : State.Active -> State.Active {
         .unwrap();
     let effect = handler.effects.first().unwrap();
     assert!(
-        mechanize_effect_destructured(effect, &spec, handler).is_none(),
+        mechanize_effect_destructured(effect, &spec, handler, &[]).is_none(),
         "non-Pubkey destination must not lower to a key load on the destructured path"
     );
 }
@@ -1749,7 +1749,7 @@ handler set_admin : State.Active -> State.Active {
         .find(|h| h.name == "set_admin")
         .unwrap();
     let effect = handler.effects.first().unwrap();
-    let rendered = mechanize_effect_destructured(effect, &spec, handler).expect("mechanized");
+    let rendered = mechanize_effect_destructured(effect, &spec, handler, &[]).expect("mechanized");
     assert_eq!(rendered, "            *admin = self.new_admin.key();\n");
 }
 
@@ -1764,7 +1764,7 @@ fn mechanize_first_effect(src: &str, handler_name: &str) -> String {
         .expect("handler not found");
     let state_acct = find_state_account(handler).expect("state account");
     let effect = handler.effects.first().expect("at least one effect");
-    mechanize_effect(effect, state_acct, &spec, Target::Anchor, handler).expect("mechanized")
+    mechanize_effect(effect, state_acct, &spec, Target::Anchor, handler, &[]).expect("mechanized")
 }
 
 #[test]
@@ -2650,8 +2650,8 @@ handler set_bid : State.Active -> State.Active {
         effect.tree.is_some(),
         "adapter must carry a tree for this RHS"
     );
-    let rendered =
-        mechanize_effect(effect, state_acct, &spec, Target::Anchor, handler).expect("mechanized");
+    let rendered = mechanize_effect(effect, state_acct, &spec, Target::Anchor, handler, &[])
+        .expect("mechanized");
     assert_eq!(
         rendered,
         "        self.state.bid_buyer = self.state.rfp_buyer;\n"
@@ -2668,4 +2668,58 @@ fn compact(s: &str) -> String {
         .replace(",)", ")")
         .replace(",]", "]")
         .replace(",}", "}")
+}
+
+/// v2.44 parallel effect semantics on the handler-impl mechanize path:
+/// the scaffold snapshots block-written+read fields and the mechanized
+/// RHS reads route through `pre_<field>` — matching the Lean model
+/// instead of the emission order.
+#[test]
+fn mechanize_effect_substitutes_parallel_pre_snapshot() {
+    let spec = crate::chumsky_adapter::parse_str(
+        r#"spec Raw
+program_id "11111111111111111111111111111111"
+type State | Active of { balance : U64, last_seen : U64 }
+type Error | MathOverflow
+
+handler deposit (amount : U64) : State.Active -> State.Active {
+  permissionless
+  accounts { state : writable }
+  effect { balance += amount
+           last_seen := balance }
+}
+"#,
+    )
+    .unwrap();
+    let handler = spec.handlers.iter().find(|h| h.name == "deposit").unwrap();
+    let state_acct = find_state_account(handler).expect("state account");
+
+    let pre_fields = parallel_pre_fields_for_handler(handler, &spec);
+    assert_eq!(pre_fields, vec!["balance".to_string()]);
+
+    let set_effect = handler
+        .effects
+        .iter()
+        .find(|e| e.field == "last_seen")
+        .unwrap();
+    let rendered = mechanize_effect(
+        set_effect,
+        state_acct,
+        &spec,
+        Target::Anchor,
+        handler,
+        &pre_fields,
+    )
+    .expect("mechanized");
+    assert_eq!(rendered, "        self.state.last_seen = pre_balance;\n");
+
+    // Without a snapshot list the read stays on the receiver (the shape
+    // non-RAW specs keep).
+    let rendered_plain =
+        mechanize_effect(set_effect, state_acct, &spec, Target::Anchor, handler, &[])
+            .expect("mechanized");
+    assert_eq!(
+        rendered_plain,
+        "        self.state.last_seen = self.state.balance;\n"
+    );
 }

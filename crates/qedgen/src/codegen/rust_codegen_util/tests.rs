@@ -538,3 +538,149 @@ handler bogus (amount : U64) {
     assert!(err.contains("bogus"), "should name handler: {err}");
     assert!(err.contains("phantom"), "should name field: {err}");
 }
+
+#[test]
+fn check_effect_targets_rejects_duplicate_target_in_one_block() {
+    // `b += 1; b += 2` diverges under parallel semantics (Lean keeps the
+    // last write → 2; sequential Rust accumulates → 3). Codegen must
+    // refuse rather than emit two contradictory artifacts.
+    let src = r#"spec T
+state { b : U64 }
+handler bump {
+  effect { b += 1
+           b += 2 }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let err = check_effect_targets(&spec).unwrap_err().to_string();
+    assert!(err.contains("bump"), "should name handler: {err}");
+    assert!(
+        err.contains("more than once"),
+        "should explain the dup: {err}"
+    );
+}
+
+#[test]
+fn check_effect_targets_allows_same_field_in_distinct_match_arms() {
+    // Writes to `b` in mutually-exclusive arms are NOT duplicates.
+    let src = r#"spec T
+state { b : U64 }
+handler pick (mode : U8) {
+  effect {
+    match mode {
+      0 => b += 1,
+      _ => b += 2,
+    }
+  }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    assert!(
+        check_effect_targets(&spec).is_ok(),
+        "same field in different arms must not be flagged as a duplicate"
+    );
+}
+
+#[test]
+fn duplicate_effect_targets_reports_normalized_paths_once() {
+    let src = r#"spec T
+state { a : U64, b : U64 }
+handler h {
+  effect { a += 1
+           b := 5
+           a += 2 }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let h = spec.handlers.first().unwrap();
+    let dups = duplicate_effect_targets(&h.effects, &spec);
+    assert_eq!(dups, vec!["a".to_string()], "only `a` is written twice");
+}
+
+/// v2.44 parallel effect semantics — transition fns snapshot fields the
+/// block both writes and reads, and RHS reads route through the
+/// snapshot. Pre-v2.44 `effect { balance += amount, last_seen := balance }`
+/// emitted `s.last_seen = s.balance;` AFTER the add — the sequential
+/// (post-state) read — while the Lean model and the Kani conformance
+/// assertion both mean pre-state: a broken program could pass every
+/// green artifact.
+#[test]
+fn transition_fn_snapshots_read_after_write_fields() {
+    let src = r#"spec Raw
+state {
+  balance : U64,
+  last_seen : U64,
+}
+handler deposit (amount : U64) {
+  requires amount > 0
+  effect { balance += amount
+           last_seen := balance }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let mir = crate::mir::lower(&spec);
+    let op = spec.handlers.first().expect("handler");
+    let mut out = String::new();
+    emit_transition_fn(&mut out, &mir, op, &spec, false, |t| {
+        crate::codegen_shared::map_type(t, &spec)
+    })
+    .expect("emit");
+    assert!(
+        out.contains("let pre_balance = s.balance;"),
+        "snapshot bound before effects:\n{out}"
+    );
+    assert!(
+        out.contains("s.last_seen = pre_balance;"),
+        "read-after-write RHS observes pre-state:\n{out}"
+    );
+    // The checked-add self-read stays on `s.` — single write per field,
+    // so its own read is still pre-state at that statement.
+    assert!(
+        out.contains("s.balance.checked_add(amount)"),
+        "self-read of the written field unchanged:\n{out}"
+    );
+}
+
+/// A field that is read but NOT written (or written but not read) needs
+/// no snapshot — the emitted transition stays byte-identical to the
+/// pre-v2.44 form for such specs.
+#[test]
+fn transition_fn_skips_snapshot_without_read_after_write() {
+    let src = r#"spec Plain
+state {
+  balance : U64,
+  cap : U64,
+}
+handler deposit (amount : U64) {
+  requires amount <= cap
+  effect { balance += amount }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let mir = crate::mir::lower(&spec);
+    let op = spec.handlers.first().expect("handler");
+    let mut out = String::new();
+    emit_transition_fn(&mut out, &mir, op, &spec, false, |t| {
+        crate::codegen_shared::map_type(t, &spec)
+    })
+    .expect("emit");
+    assert!(
+        !out.contains("let pre_"),
+        "no snapshot for write-only / read-only fields:\n{out}"
+    );
+}
+
+/// `substitute_pre_reads` token boundaries: only exact `<receiver>.<field>`
+/// reads rewrite — longer field names, other receivers, and the write
+/// position must survive.
+#[test]
+fn substitute_pre_reads_respects_token_boundaries() {
+    let fields = vec!["balance".to_string()];
+    assert_eq!(
+        substitute_pre_reads("s.balance + s.balance_total", "s", &fields),
+        "pre_balance + s.balance_total"
+    );
+    assert_eq!(
+        substitute_pre_reads("accounts.balance + s.balance", "s", &fields),
+        "accounts.balance + pre_balance"
+    );
+    assert_eq!(
+        substitute_pre_reads("s.balance.checked_add(x)", "s", &fields),
+        "pre_balance.checked_add(x)"
+    );
+}

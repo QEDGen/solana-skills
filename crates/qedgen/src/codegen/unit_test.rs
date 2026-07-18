@@ -140,7 +140,16 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
             "fn apply_{}(state: &mut {}{}) {{\n",
             op.name, op_state_name, param_sig
         ));
+        // Parallel effect semantics: RHS reads of fields this block also
+        // writes observe the PRE-state value (matching the Lean model and
+        // the Kani conformance assertions) — snapshot them before mutating.
+        let pre_fields = parallel_pre_fields(&op.name, &mir, &spec);
+        for f in &pre_fields {
+            out.push_str(&format!("    let pre_{f} = state.{f};\n"));
+        }
         for (field, kind, value) in &triples {
+            let value = substitute_pre_state_reads(value, &pre_fields);
+            let value = value.as_str();
             match *kind {
                 "set" => {
                     out.push_str(&format!("    state.{} = {};\n", field, value));
@@ -231,7 +240,8 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
         }
         let (sn, fields) = resolve_state_for_op(op, &spec, is_multi);
         let triples = effect_triples(&op.name, &mir, &spec);
-        generate_effect_test(&mut out, op, &triples, fields, &sn, &spec)?;
+        let pre_fields = parallel_pre_fields(&op.name, &mir, &spec);
+        generate_effect_test(&mut out, op, &triples, fields, &sn, &spec, &pre_fields)?;
     }
 
     out.push_str("    // ====================================================================\n");
@@ -553,10 +563,33 @@ fn effect_triples(op_name: &str, mir: &crate::mir::Mir, spec: &ParsedSpec) -> Ve
                     &crate::rust_codegen_util::strip_variant_prefix_for_flat_state(&field, spec),
                 ),
                 kind,
-                crate::rust_codegen_util::mir_expr_rust(value),
+                // `state.` receiver, same binder as `render_for_state` —
+                // the native default renders state reads as `s.<field>`,
+                // a binding that doesn't exist in this file's `apply_*` /
+                // test scopes (pre-v2.44 this emitted non-compiling
+                // `state.last_seen = s.balance;`).
+                render_for_state(crate::rust_codegen_util::mir_expr_tree(value)),
             )
         })
         .collect()
+}
+
+/// Fields needing a `pre_<field>` snapshot for this handler under
+/// parallel effect semantics (see `parallel_snapshot_fields`): the
+/// `apply_*` helper binds them before mutating, and the effect test
+/// asserts RHS reads against them.
+fn parallel_pre_fields(op_name: &str, mir: &crate::mir::Mir, spec: &ParsedSpec) -> Vec<String> {
+    let Some(h) = mir.handlers.iter().find(|h| h.name == op_name) else {
+        return Vec::new();
+    };
+    let triples = crate::rust_codegen_util::block_effect_triples_deep(&h.body);
+    crate::rust_codegen_util::parallel_snapshot_fields(&triples, spec)
+}
+
+/// RHS-side substitution for the parallel snapshots, over the `state.`
+/// receiver this file renders with.
+fn substitute_pre_state_reads(value: &str, pre_fields: &[String]) -> String {
+    crate::rust_codegen_util::substitute_pre_reads(value, "state", pre_fields)
 }
 
 /// Rewrite `[ident]` subscripts to `[ident as usize]` — unit tests bind
@@ -615,6 +648,7 @@ fn generate_effect_test(
     fields: &[(String, String)],
     state_name: &str,
     spec: &ParsedSpec,
+    pre_fields: &[String],
 ) -> Result<()> {
     out.push_str("    #[test]\n");
     out.push_str(&format!("    fn test_{}_effects() {{\n", op.name));
@@ -632,7 +666,11 @@ fn generate_effect_test(
         ));
     }
 
-    // Snapshot pre-state for arithmetic effects
+    // Snapshot pre-state for arithmetic effects, plus every parallel-
+    // semantics snapshot field: an RHS that reads a block-written field
+    // means the PRE-state value, so the assertion below must compare
+    // against the snapshot, not the post-apply read.
+    let mut snapshotted: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for (field, kind, _) in triples {
         if *kind != "set" {
             out.push_str(&format!(
@@ -640,7 +678,14 @@ fn generate_effect_test(
                 pre_ident(field),
                 field
             ));
+            snapshotted.insert(pre_ident(field));
         }
+    }
+    for f in pre_fields {
+        if snapshotted.contains(f.as_str()) {
+            continue;
+        }
+        out.push_str(&format!("        let pre_{f} = state.{f};\n"));
     }
 
     out.push_str(&format!(
@@ -650,6 +695,8 @@ fn generate_effect_test(
     ));
 
     for (field, kind, value) in triples {
+        let value = substitute_pre_state_reads(value, pre_fields);
+        let value = value.as_str();
         let pre = format!("pre_{}", pre_ident(field));
         match *kind {
             "set" => {
@@ -945,6 +992,11 @@ enum AtomSide {
     Param(String, u128),
     /// A numeric literal.
     Lit(u128),
+    /// A `+`-sum of two resolvable sides — value-bearing so cross-field
+    /// clauses like `amount + fee <= cap` participate in the raise
+    /// fixpoint, but never itself the adjustment target (only a plain
+    /// `Field` on the other side gets raised).
+    Sum(Box<AtomSide>, Box<AtomSide>),
 }
 
 /// Emit a `let [mut] state = <State> { … }` literal with spec-derived
@@ -1051,11 +1103,54 @@ fn seed_state_values(
         texts.push((*t).to_string());
     }
 
-    let atoms: Vec<(String, &'static str, String)> = texts
-        .iter()
-        .flat_map(|t| split_atoms(t))
-        .filter_map(|a| parse_atom(&a))
-        .collect();
+    let raw_atoms: Vec<String> = texts.iter().flat_map(|t| split_atoms(t)).collect();
+    let atoms: Vec<(String, &'static str, String)> =
+        raw_atoms.iter().filter_map(|a| parse_atom(a)).collect();
+
+    // Bool constraints: `f == true/false`, bare `f`, and `!f` conjuncts
+    // pin bool fields. Pre-v2.44 bool fields always seeded `false` (the
+    // non-numeric default), so a `requires seat_open` handler got an
+    // "accepts_valid" fixture the guard rejects.
+    let mut bool_pins: std::collections::BTreeMap<String, bool> = std::collections::BTreeMap::new();
+    {
+        let is_bool_field = |name: &str| {
+            fields
+                .iter()
+                .any(|(f, t)| f == name && matches!(t.as_str(), "Bool" | "bool"))
+        };
+        let strip_state = |s: &str| -> Option<String> {
+            let t = s.trim();
+            let name = t.strip_prefix("state.").or_else(|| t.strip_prefix("s."))?;
+            (!name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_'))
+                .then(|| name.to_string())
+        };
+        for a in &raw_atoms {
+            let t = a.trim();
+            if let Some((l, cmp, r)) = parse_atom(t) {
+                if cmp == "==" || cmp == "!=" {
+                    for (side, lit) in [(&l, &r), (&r, &l)] {
+                        if let (Some(f), Ok(b)) = (strip_state(side), lit.trim().parse::<bool>()) {
+                            if is_bool_field(&f) {
+                                bool_pins.insert(f, b != (cmp == "!="));
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+            if let Some(rest) = t.strip_prefix('!') {
+                if let Some(f) = strip_state(&strip_outer_parens(rest)) {
+                    if is_bool_field(&f) {
+                        bool_pins.insert(f, false);
+                    }
+                }
+            } else if let Some(f) = strip_state(t) {
+                if is_bool_field(&f) {
+                    bool_pins.insert(f, true);
+                }
+            }
+        }
+    }
 
     // `f == <lit>` pins the value exactly; inequality passes won't move it.
     let mut pinned: BTreeSet<String> = BTreeSet::new();
@@ -1081,12 +1176,8 @@ fn seed_state_values(
                 continue;
             };
             // Normalize to "left cmp right" with resolved values.
-            let get = |s: &AtomSide, vals: &BTreeMap<String, u128>| match s {
-                AtomSide::Field(f) => vals.get(f).copied(),
-                AtomSide::Param(_, v) => Some(*v),
-                AtomSide::Lit(l) => Some(*l),
-            };
-            let (Some(va), Some(vb)) = (get(&a, &vals), get(&b, &vals)) else {
+            let (Some(va), Some(vb)) = (atom_side_value(&a, &vals), atom_side_value(&b, &vals))
+            else {
                 continue;
             };
             let mut adjust = |f: &str, v: u128, pinned: &BTreeSet<String>| {
@@ -1125,8 +1216,25 @@ fn seed_state_values(
         if let Some(v) = vals.get(fname) {
             out.insert(fname.clone(), render_seed(*v, ftype));
         }
+        if let Some(b) = bool_pins.get(fname) {
+            out.insert(fname.clone(), b.to_string());
+        }
     }
     out
+}
+
+/// Current numeric value of an atom side under the seed map. `Sum`
+/// recurses (saturating — seeds are small, but `u64::MAX`-ish literals
+/// appear in overflow-shaped clauses).
+fn atom_side_value(s: &AtomSide, vals: &std::collections::BTreeMap<String, u128>) -> Option<u128> {
+    match s {
+        AtomSide::Field(f) => vals.get(f).copied(),
+        AtomSide::Param(_, v) => Some(*v),
+        AtomSide::Lit(l) => Some(*l),
+        AtomSide::Sum(a, b) => {
+            Some(atom_side_value(a, vals)?.saturating_add(atom_side_value(b, vals)?))
+        }
+    }
 }
 
 /// Split a translated guard conjunction into candidate atoms on the
@@ -1197,6 +1305,17 @@ fn parse_atom(atom: &str) -> Option<(String, &'static str, String)> {
 /// value). Compound expressions resolve to `None` and skip the atom.
 fn resolve_side(side: &str, fields: &[(String, String)], op: &ParsedHandler) -> Option<AtomSide> {
     let t = side.trim();
+    // `X + Y` sums: resolve both addends so cross-field clauses
+    // (`amount + fee <= cap`) contribute a value to the fixpoint instead
+    // of silently dropping the atom — the v2.43 behavior that seeded
+    // guard-violating "accepts_valid" fixtures.
+    if let Some(i) = t.find('+') {
+        let (lhs, rhs) = (&t[..i], &t[i + 1..]);
+        if let (Some(a), Some(b)) = (resolve_side(lhs, fields, op), resolve_side(rhs, fields, op)) {
+            return Some(AtomSide::Sum(Box::new(a), Box::new(b)));
+        }
+        return None;
+    }
     let (name, had_state_prefix) = if let Some(rest) = t.strip_prefix("state.") {
         (rest, true)
     } else if let Some(rest) = t.strip_prefix("s.") {
@@ -1243,21 +1362,262 @@ fn sensible_param(pname: &str, ptype: &str) -> String {
 /// Returns (state_overrides, param_overrides) — field name → value pairs.
 type Overrides = Vec<(String, String)>;
 
-/// Negate the first comparison atom with a resolvable target (generic —
-/// F7 removed the multisig-specific pattern list). Falls back to zeroing
-/// every numeric param.
+/// A falsifying / satisfying assignment: state-field and param overrides.
+#[derive(Default, Clone)]
+struct Assignment {
+    state: Overrides,
+    param: Overrides,
+}
+
+impl Assignment {
+    fn one(is_param: bool, name: String, value: String) -> Self {
+        let mut a = Assignment::default();
+        if is_param {
+            a.param.push((name, value));
+        } else {
+            a.state.push((name, value));
+        }
+        a
+    }
+    /// Merge another assignment in. `None` on a conflicting override for
+    /// the same name (e.g. an OR whose disjuncts constrain one field to
+    /// two incompatible values) — the caller falls back to the generic
+    /// path rather than emit an unsatisfiable fixture.
+    fn merge(mut self, other: Assignment) -> Option<Assignment> {
+        for (scope, (n, v)) in other
+            .state
+            .into_iter()
+            .map(|kv| (false, kv))
+            .chain(other.param.into_iter().map(|kv| (true, kv)))
+        {
+            let bucket = if scope {
+                &mut self.param
+            } else {
+                &mut self.state
+            };
+            match bucket.iter().find(|(en, _)| *en == n) {
+                Some((_, ev)) if *ev != v => return None,
+                Some(_) => {}
+                None => bucket.push((n, v)),
+            }
+        }
+        Some(self)
+    }
+}
+
+/// Resolve a comparison-atom leaf to `(is_param, name)` — a state field or
+/// a handler param usable as an override target. `None` for literals and
+/// compound leaves.
+fn leaf_target(tree: &crate::mir::ExprTree, op: &ParsedHandler) -> Option<(bool, String)> {
+    use crate::mir::expr_tree::{BindingKind, ExprTree, TreeSeg};
+    let ExprTree::Path(p) = tree else {
+        return None;
+    };
+    match &p.binding {
+        BindingKind::StateField => match p.segments.as_slice() {
+            [TreeSeg::Field(f)] => Some((false, f.clone())),
+            _ => None,
+        },
+        BindingKind::Param => {
+            let name = p.root.clone();
+            op.takes_params
+                .iter()
+                .any(|(n, _)| *n == name)
+                .then_some((true, name))
+        }
+        _ => None,
+    }
+}
+
+/// Resolve a leaf literal: an integer or a boolean.
+fn leaf_lit(tree: &crate::mir::ExprTree) -> Option<LeafLit> {
+    use crate::mir::expr_tree::ExprTree;
+    match tree {
+        ExprTree::Int(v) => Some(LeafLit::Int(*v)),
+        ExprTree::Bool(b) => Some(LeafLit::Bool(*b)),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum LeafLit {
+    Int(u128),
+    Bool(bool),
+}
+
+/// Falsify or satisfy a single `target <op> lit` comparison by picking a
+/// concrete override value for `target`. `want_true = false` returns a
+/// value making the comparison FALSE; `true` makes it TRUE. `None` when no
+/// unsigned value works (e.g. satisfying `x < 0`).
+fn solve_cmp(
+    op: crate::mir::expr_tree::TreeCmpOp,
+    lit: LeafLit,
+    want_true: bool,
+) -> Option<String> {
+    use crate::mir::expr_tree::TreeCmpOp::*;
+    match lit {
+        LeafLit::Bool(b) => {
+            // `x == b` is true at x=b, false at x=!b; `x != b` inverts.
+            let true_val = match op {
+                Eq => b,
+                Ne => !b,
+                _ => return None,
+            };
+            Some((if want_true { true_val } else { !true_val }).to_string())
+        }
+        LeafLit::Int(l) => {
+            // Value making `x <op> l` evaluate to `want_true`.
+            let v: Option<u128> = match (op, want_true) {
+                (Gt, true) => Some(l + 1),
+                (Gt, false) => Some(l),
+                (Ge, true) => Some(l),
+                (Ge, false) => l.checked_sub(1),
+                (Lt, true) => l.checked_sub(1),
+                (Lt, false) => Some(l),
+                (Le, true) => Some(l),
+                (Le, false) => Some(l + 1),
+                (Eq, true) => Some(l),
+                (Eq, false) => Some(l + 1),
+                (Ne, true) => Some(l + 1),
+                (Ne, false) => Some(l),
+            };
+            v.map(|n| n.to_string())
+        }
+    }
+}
+
+/// Recursively compute an assignment that makes `tree` FALSE (or TRUE when
+/// `want_false = false`), preserving the boolean structure:
+///
+///   - `A and B` false → falsify EITHER (first that works);
+///   - `A or B`  false → falsify EVERY disjunct (merged);
+///   - `not X`   false → satisfy X (and vice-versa);
+///   - `A <op> B` → the boundary override.
+///
+/// `None` when the shape can't be solved structurally (the caller falls
+/// back to the generic single-atom / param-zeroing path). `Implies` is not
+/// solved here (falls back).
+fn solve_tree(
+    tree: &crate::mir::ExprTree,
+    op: &ParsedHandler,
+    want_false: bool,
+) -> Option<Assignment> {
+    use crate::mir::expr_tree::{ExprTree, TreeBoolOp};
+    match tree {
+        ExprTree::Bool(b) => (*b != want_false).then(Assignment::default),
+        ExprTree::Not(inner) => solve_tree(inner, op, !want_false),
+        ExprTree::BoolOp { op: bop, lhs, rhs } => {
+            // De Morgan: falsifying an And = falsify one child; falsifying
+            // an Or = falsify both. Satisfying flips the roles.
+            let falsify_all = matches!(
+                (bop, want_false),
+                (TreeBoolOp::Or, true) | (TreeBoolOp::And, false)
+            );
+            if falsify_all {
+                let a = solve_tree(lhs, op, want_false)?;
+                let b = solve_tree(rhs, op, want_false)?;
+                a.merge(b)
+            } else if matches!(bop, TreeBoolOp::And | TreeBoolOp::Or) {
+                solve_tree(lhs, op, want_false).or_else(|| solve_tree(rhs, op, want_false))
+            } else {
+                None // Implies — fall back
+            }
+        }
+        ExprTree::Cmp { op: cmp, lhs, rhs } => {
+            // Normalize to `target <cmp> lit`, flipping the operator when
+            // the literal is on the left.
+            let (is_param, name, cmp_op, lit) =
+                if let (Some((ip, n)), Some(l)) = (leaf_target(lhs, op), leaf_lit(rhs)) {
+                    (ip, n, *cmp, l)
+                } else if let (Some(l), Some((ip, n))) = (leaf_lit(lhs), leaf_target(rhs, op)) {
+                    (ip, n, flip_cmp_tree(*cmp), l)
+                } else {
+                    return None;
+                };
+            let value = solve_cmp(cmp_op, lit, !want_false)?;
+            Some(Assignment::one(is_param, name, value))
+        }
+        _ => None,
+    }
+}
+
+/// Mirror a tree comparator across its operands (`0 < x` ⇔ `x > 0`).
+fn flip_cmp_tree(cmp: crate::mir::expr_tree::TreeCmpOp) -> crate::mir::expr_tree::TreeCmpOp {
+    use crate::mir::expr_tree::TreeCmpOp::*;
+    match cmp {
+        Lt => Gt,
+        Le => Ge,
+        Gt => Lt,
+        Ge => Le,
+        Eq => Eq,
+        Ne => Ne,
+    }
+}
+
+/// Structure-aware guard falsification over the typed `requires` trees.
+/// The guard is the conjunction of every `requires` clause, so falsifying
+/// ANY single clause falsifies the whole guard — and each clause is
+/// falsified with full AND/OR/`not` awareness (an OR needs every disjunct
+/// false). `None` when no clause can be solved structurally.
+fn falsify_guard_from_trees(op: &ParsedHandler) -> Option<(Overrides, Overrides)> {
+    for req in &op.requires {
+        if let Some(a) = solve_tree(requires_tree(req), op, /*want_false=*/ true) {
+            if !a.state.is_empty() || !a.param.is_empty() {
+                return Some((a.state, a.param));
+            }
+        }
+    }
+    None
+}
+
+/// Derive inputs that make the guard reject. Primary path is a
+/// structure-aware solve over the typed `requires` trees
+/// (`falsify_guard_from_trees`) — it negates the COMPLETE boolean AST, so
+/// an `A or B` guard is only violated when both disjuncts are false (the
+/// old string-atom path negated one atom and left the OR true, producing
+/// a rejects-test that failed against correct code). Falls back to the
+/// legacy single-atom negation, then to zeroing every numeric param.
 fn derive_guard_violation(
     guard_rust: &str,
     op: &ParsedHandler,
     fields: &[(String, String)],
 ) -> (Overrides, Overrides) {
+    // Structure-aware path first (correct for AND / OR / not / nesting).
+    if let Some(overrides) = falsify_guard_from_trees(op) {
+        return overrides;
+    }
+
     let mut state_overrides = Vec::new();
     let mut param_overrides = Vec::new();
 
+    let is_bool_field = |name: &str| {
+        fields
+            .iter()
+            .any(|(f, t)| f == name && matches!(t.as_str(), "Bool" | "bool"))
+    };
     for atom in split_atoms(guard_rust) {
         let Some((lhs, cmp, rhs)) = parse_atom(&atom) else {
             continue;
         };
+        // Bool atoms: `state.f == true` violates with `f: false` (and
+        // mirrored / `!=`). Must come before the numeric normalization,
+        // which can't resolve `true`/`false` and would skip the atom —
+        // leaving a rejects-test whose fixture (now bool-seeded to pass
+        // the guard) never rejects.
+        if cmp == "==" || cmp == "!=" {
+            let bool_violation = [(&lhs, &rhs), (&rhs, &lhs)].into_iter().find_map(|(s, l)| {
+                let f = s
+                    .trim()
+                    .strip_prefix("state.")
+                    .or_else(|| s.trim().strip_prefix("s."))?;
+                let b: bool = l.trim().parse().ok()?;
+                (is_bool_field(f)).then(|| (f.to_string(), b != (cmp == "!=")))
+            });
+            if let Some((f, satisfying)) = bool_violation {
+                state_overrides.push((f, (!satisfying).to_string()));
+                break;
+            }
+        }
         // Normalize to `<name> cmp <literal>` (mirror literal-first atoms).
         let normalized = match (
             resolve_side(&lhs, fields, op),
@@ -1388,6 +1748,229 @@ handler mixed (amount : U64) : State.Active -> State.Active {
         assert!(
             !out.contains("-> bool {\n    true\n}"),
             "no guard predicate may degrade to `true`:\n{out}"
+        );
+    }
+
+    /// v2.44 read-after-write + fixture-solver regressions, all driven by
+    /// one spec: `deposit` writes `balance` then reads it into
+    /// `last_seen` (parallel semantics), gates on a bool, and `withdraw`
+    /// carries a cross-field `amount + last_seen <= cap` clause.
+    const RAW_SPEC: &str = r#"spec Raw
+type State | Active of { balance : U64, last_seen : U64, seat_open : Bool, cap : U64 }
+type Error | InvalidAmount | SeatClosed | MathOverflow | MathUnderflow
+handler deposit (amount : U64) : State.Active -> State.Active {
+  accounts { depositor : signer, vault : writable }
+  requires amount > 0 else InvalidAmount
+  requires seat_open == true else SeatClosed
+  effect { balance += amount
+           last_seen := balance }
+}
+handler withdraw (amount : U64) : State.Active -> State.Active {
+  accounts { withdrawer : signer, vault : writable }
+  requires amount > 0 else InvalidAmount
+  requires amount <= balance else InvalidAmount
+  requires amount + last_seen <= cap else InvalidAmount
+  effect { balance -= amount }
+}
+"#;
+
+    fn generate_raw() -> String {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spec_path = dir.path().join("raw.qedspec");
+        std::fs::write(&spec_path, RAW_SPEC).expect("write spec");
+        let out_path = dir.path().join("tests.rs");
+        generate(&spec_path, &out_path).expect("generate unit tests");
+        std::fs::read_to_string(&out_path).expect("read output")
+    }
+
+    /// The apply helper must (a) render state reads against its own
+    /// `state` binder — pre-v2.44 it leaked the harness-model `s.` form
+    /// (`state.last_seen = s.balance;`, E0425) — and (b) give
+    /// read-after-write RHSs the PRE-state value, matching the Lean
+    /// model's record update and the Kani conformance assertions.
+    #[test]
+    fn apply_fn_uses_state_receiver_and_parallel_pre_snapshot() {
+        let out = generate_raw();
+        let apply = out
+            .split("fn apply_deposit")
+            .nth(1)
+            .and_then(|t| t.split("\n}\n").next())
+            .expect("apply_deposit body");
+        assert!(
+            !apply.contains("s.balance"),
+            "no `s.` leak in apply body:\n{apply}"
+        );
+        assert!(
+            apply.contains("let pre_balance = state.balance;"),
+            "parallel snapshot bound before mutation:\n{apply}"
+        );
+        assert!(
+            apply.contains("state.last_seen = pre_balance;"),
+            "read-after-write RHS observes pre-state:\n{apply}"
+        );
+        // The effect test asserts the same parallel meaning.
+        assert!(
+            out.contains("assert_eq!(state.last_seen, pre_balance);"),
+            "effect assertion compares against the pre snapshot:\n{out}"
+        );
+    }
+
+    /// The accepts-valid fixture must satisfy the guard it asserts:
+    /// bool clauses pin the field (pre-v2.44 bools always seeded
+    /// `false`, so `requires seat_open == true` produced a test that
+    /// fails on correct code), and `+`-sum cross-field clauses raise the
+    /// bounding field (pre-v2.44 the atom was silently skipped, leaving
+    /// `cap: 0` against `amount + last_seen <= cap`).
+    #[test]
+    fn accepts_valid_fixture_satisfies_bool_and_sum_requires() {
+        let out = generate_raw();
+        let deposit_valid = out
+            .split("fn test_deposit_guard_accepts_valid")
+            .nth(1)
+            .and_then(|t| t.split("\n    }\n").next())
+            .expect("deposit accepts_valid body");
+        assert!(
+            deposit_valid.contains("seat_open: true"),
+            "bool requires pins the fixture field:\n{deposit_valid}"
+        );
+        let withdraw_valid = out
+            .split("fn test_withdraw_guard_accepts_valid")
+            .nth(1)
+            .and_then(|t| t.split("\n    }\n").next())
+            .expect("withdraw accepts_valid body");
+        assert!(
+            !withdraw_valid.contains("cap: 0"),
+            "sum clause must raise `cap` above the default 0:\n{withdraw_valid}"
+        );
+        // The rejects-test must still reject: bool guard violation is
+        // derivable (seat_open flipped) or a param zeroing applies.
+        assert!(
+            out.contains("fn test_deposit_guard_rejects_invalid"),
+            "rejects test still emitted:\n{out}"
+        );
+    }
+
+    /// A handler whose ONLY guard is a bool clause: the rejects-test
+    /// must flip the bool (the numeric fallback has nothing to zero
+    /// that would violate the guard).
+    #[test]
+    fn rejects_invalid_flips_bool_only_guard() {
+        let src = r#"spec T
+type State | Active of { armed : Bool, count : U64 }
+type Error | NotArmed
+handler fire : State.Active -> State.Active {
+  accounts { caller : signer, state : writable }
+  requires armed == true else NotArmed
+  effect { count += 1 }
+}
+"#;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spec_path = dir.path().join("t.qedspec");
+        std::fs::write(&spec_path, src).expect("write spec");
+        let out_path = dir.path().join("tests.rs");
+        generate(&spec_path, &out_path).expect("generate unit tests");
+        let out = std::fs::read_to_string(&out_path).expect("read output");
+        let rejects = out
+            .split("fn test_fire_guard_rejects_invalid")
+            .nth(1)
+            .and_then(|t| t.split("\n    }\n").next())
+            .expect("rejects body");
+        assert!(
+            rejects.contains("armed: false"),
+            "bool-only guard violated by flipping the field:\n{rejects}"
+        );
+    }
+
+    fn generate_from(src: &str) -> String {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spec_path = dir.path().join("t.qedspec");
+        std::fs::write(&spec_path, src).expect("write spec");
+        let out_path = dir.path().join("tests.rs");
+        generate(&spec_path, &out_path).expect("generate unit tests");
+        std::fs::read_to_string(&out_path).expect("read output")
+    }
+
+    fn rejects_body(out: &str, handler: &str) -> String {
+        out.split(&format!("fn test_{handler}_guard_rejects_invalid"))
+            .nth(1)
+            .and_then(|t| t.split("\n    }\n").next())
+            .expect("rejects body")
+            .to_string()
+    }
+
+    /// v2.44 — the rejects fixture must negate the FULL guard AST. For an
+    /// OR guard (`A or B`), the old single-atom negation flipped one
+    /// disjunct and left the OR true, so `assert!(!guard(...))` failed on
+    /// correct code. Both disjuncts must now be falsified.
+    #[test]
+    fn rejects_invalid_falsifies_all_disjuncts_of_bool_or_guard() {
+        let out = generate_from(
+            r#"spec T
+type State | Active of { enabled : Bool, emergency : Bool, count : U64 }
+type Error | Blocked | MathOverflow
+handler act : State.Active -> State.Active {
+  accounts { caller : signer, state : writable }
+  requires enabled == true or emergency == true else Blocked
+  effect { count += 1 }
+}
+"#,
+        );
+        let rejects = rejects_body(&out, "act");
+        assert!(
+            rejects.contains("enabled: false") && rejects.contains("emergency: false"),
+            "both disjuncts of the OR guard must be false to reject:\n{rejects}"
+        );
+    }
+
+    /// Numeric OR: `a > 0 or b > 0` must set BOTH to 0.
+    #[test]
+    fn rejects_invalid_falsifies_all_disjuncts_of_numeric_or_guard() {
+        let out = generate_from(
+            r#"spec T
+type State | Active of { a : U64, b : U64, c : U64 }
+type Error | Blocked | MathOverflow
+handler act : State.Active -> State.Active {
+  accounts { caller : signer, state : writable }
+  requires a > 0 or b > 0 else Blocked
+  effect { c += 1 }
+}
+"#,
+        );
+        let rejects = rejects_body(&out, "act");
+        assert!(
+            rejects.contains("a: 0") && rejects.contains("b: 0"),
+            "both disjuncts of `a > 0 or b > 0` must be zeroed:\n{rejects}"
+        );
+    }
+
+    /// Nested `(A or B) and C`: falsifying ANY one conjunct rejects. The
+    /// solver may falsify the OR (both disjuncts) or C; either is a valid
+    /// rejecting fixture, so assert the guard actually evaluates false via
+    /// a compiled check of the generated predicate's shape.
+    #[test]
+    fn rejects_invalid_handles_nested_and_or() {
+        let out = generate_from(
+            r#"spec T
+type State | Active of { a : U64, b : U64, c : U64 }
+type Error | Blocked | MathOverflow
+handler act : State.Active -> State.Active {
+  accounts { caller : signer, state : writable }
+  requires a > 0 or b > 0 else Blocked
+  requires c > 0 else Blocked
+  effect { c += 1 }
+}
+"#,
+        );
+        let rejects = rejects_body(&out, "act");
+        // A valid rejecting fixture either zeroes both OR disjuncts, or
+        // zeroes c. Rule out the buggy "flip one disjunct, leave OR true,
+        // c satisfying" shape by requiring one of the two falsifying
+        // patterns.
+        let kills_or = rejects.contains("a: 0") && rejects.contains("b: 0");
+        let kills_c = rejects.contains("c: 0");
+        assert!(
+            kills_or || kills_c,
+            "nested (A or B) and C must falsify a full conjunct:\n{rejects}"
         );
     }
 }

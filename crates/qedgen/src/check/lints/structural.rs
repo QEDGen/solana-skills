@@ -91,6 +91,35 @@ pub(super) fn check_unknown_error_variant(spec: &ParsedSpec) -> Vec<Completeness
     warnings
 }
 
+/// `duplicate_effect_target`: an effect block writes the same target
+/// field twice. Under parallel effect semantics the Lean model and the
+/// generated Rust disagree on the result (last-write vs accumulated), so
+/// codegen refuses; this surfaces it at check time with a fix. Mirrors
+/// the codegen-time bail in `check_effect_targets`.
+pub(super) fn check_duplicate_effect_target(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+    let mut warnings = Vec::new();
+    for h in &spec.handlers {
+        // Per effect block — arms are mutually exclusive, so a target
+        // written in two different arms does NOT conflict.
+        let blocks: Vec<&[crate::check::ParsedEffect]> = match &h.effect_branches {
+            Some(branches) => branches.arms.iter().map(|a| a.effects.as_slice()).collect(),
+            None => vec![h.effects.as_slice()],
+        };
+        for block in blocks {
+            for dup in crate::rust_codegen_util::duplicate_effect_targets(block, spec) {
+                warnings.push(warn("duplicate_effect_target", Severity::Error, 1, format!(
+                    "handler '{}' writes effect target `{}` more than once in one effect block. Under parallel effect semantics every RHS reads the pre-state, so the two writes diverge — the Lean model keeps the last write while the generated Rust accumulates. Codegen refuses such specs.",
+                    h.name, dup,
+                )).subject(h.name.clone()).fix(format!(
+                    "Combine the writes into a single effect on `{}` (e.g. `{} += <total>`), or move them into mutually-exclusive `match` arms.",
+                    dup, dup,
+                )));
+            }
+        }
+    }
+    warnings
+}
+
 /// `effect_type_mismatch`: an effect assigns an account address
 /// (`field := <acct>` / `<acct>.pubkey`) into a field that isn't declared
 /// `Pubkey`. The RHS lowers to `<acct>.key()` (a `[u8; 32]`), so a scalar
@@ -1159,6 +1188,56 @@ mod tests {
             example.contains("type Error\n  | InvalidAmount"),
             "example should suggest pipe form, got: {}",
             example
+        );
+    }
+
+    // ----- duplicate_effect_target -----
+
+    #[test]
+    fn duplicate_effect_target_lint_fires_and_suggests_combining() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec T
+state { b : U64 }
+handler bump {
+  effect { b += 1
+           b += 2 }
+}"#,
+        )
+        .unwrap();
+        let warnings = check_completeness(&spec);
+        let hit = warnings
+            .iter()
+            .find(|w| w.rule == "duplicate_effect_target")
+            .expect("duplicate_effect_target fires");
+        assert_eq!(hit.severity, Severity::Error);
+        assert_eq!(hit.subject.as_deref(), Some("bump"));
+        assert!(
+            hit.fix.contains("+= <total>"),
+            "fix should suggest combining; got: {:?}",
+            hit.fix
+        );
+    }
+
+    #[test]
+    fn duplicate_effect_target_lint_silent_for_distinct_match_arms() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec T
+state { b : U64 }
+handler pick (mode : U8) {
+  effect {
+    match mode {
+      0 => b += 1,
+      _ => b += 2,
+    }
+  }
+}"#,
+        )
+        .unwrap();
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings.iter().any(|w| w.rule == "duplicate_effect_target"),
+            "same field in mutually-exclusive arms must not fire; got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
         );
     }
 

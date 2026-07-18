@@ -457,6 +457,24 @@ pub fn emit_transition_fn_inner(
         out.push_str(&format!("    let {} = {};\n", b.name, b.rust_expr));
     }
 
+    // Parallel effect semantics: snapshot every field the block both
+    // writes and reads, so a later statement's RHS observes the
+    // PRE-state value — matching the Lean model's record update and the
+    // conformance harnesses' `pre_<field>` assertions instead of the
+    // emission order. Computed from the exact triples emitted below
+    // (post pubkey-skip), so every snapshot is referenced.
+    let emitted_triples: Vec<(String, &'static str, &crate::mir::Expr)> =
+        block_effect_triples_deep(body)
+            .into_iter()
+            .filter(|(field, _, _)| {
+                account_env_struct.is_some() || !field_type_is_pubkey(field, op, spec)
+            })
+            .collect();
+    let pre_fields = parallel_snapshot_fields(&emitted_triples, spec);
+    for f in &pre_fields {
+        out.push_str(&format!("    let pre_{f} = s.{f};\n"));
+    }
+
     // Apply effects. Per-effect arithmetic semantics: `+=` → checked_add
     // (short-circuit via `return false`, matching deployed
     // `checked_add(..).ok_or(err)?`), `+=!` → saturating, `+=?` → wrapping
@@ -501,9 +519,19 @@ pub fn emit_transition_fn_inner(
                         value,
                         "            ",
                         "accounts",
+                        &pre_fields,
                     );
                 } else {
-                    emit_one_effect(out, spec, wrapping, field, op_kind, value, "            ");
+                    emit_one_effect(
+                        out,
+                        spec,
+                        wrapping,
+                        field,
+                        op_kind,
+                        value,
+                        "            ",
+                        &pre_fields,
+                    );
                 }
                 emit_after_store_hooks(out, &mir.hooks, field, "            ");
             }
@@ -542,10 +570,27 @@ pub fn emit_transition_fn_inner(
             }
             if account_env_struct.is_some() {
                 emit_one_effect_with_account_env(
-                    out, spec, wrapping, field, op_kind, value, "    ", "accounts",
+                    out,
+                    spec,
+                    wrapping,
+                    field,
+                    op_kind,
+                    value,
+                    "    ",
+                    "accounts",
+                    &pre_fields,
                 );
             } else {
-                emit_one_effect(out, spec, wrapping, field, op_kind, value, "    ");
+                emit_one_effect(
+                    out,
+                    spec,
+                    wrapping,
+                    field,
+                    op_kind,
+                    value,
+                    "    ",
+                    &pre_fields,
+                );
             }
             emit_after_store_hooks(out, &mir.hooks, field, "    ");
         }

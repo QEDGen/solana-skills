@@ -607,10 +607,17 @@ fn compound_effect_rhs_and_arith_predicates_render_soundly() {
         "ML application syntax leaked into the harness:\n{out}"
     );
 
-    // #144 — Rust conditional expression.
+    // #144 — Rust conditional expression. v2.44: `fee` is written earlier
+    // in the same block, so the read routes through the parallel-semantics
+    // snapshot (`pre_fee`), matching the Lean model's record update;
+    // unwritten fields (`flag`, `rate`) keep the `s.` read.
     assert!(
-        out.contains("s.cut = (if s.flag == 1 { bps_mul(s.fee, s.rate) } else { 0 });"),
-        "conditional effect RHS must lower to a Rust if-else:\n{out}"
+        out.contains("let pre_fee = s.fee;"),
+        "read-after-write field must be snapshotted:\n{out}"
+    );
+    assert!(
+        out.contains("s.cut = (if s.flag == 1 { bps_mul(pre_fee, s.rate) } else { 0 });"),
+        "conditional effect RHS must lower to a Rust if-else over pre-state:\n{out}"
     );
     assert!(
         !out.contains(" then "),
@@ -631,9 +638,10 @@ fn compound_effect_rhs_and_arith_predicates_render_soundly() {
     );
 
     // #146 — checked effect subtraction rejects instead of panicking …
+    // (v2.44: both operands are block-written, so they read pre-state.)
     assert!(
         out.contains(
-            "s.residual = match (|| -> Option<u64> { Some((s.fee).checked_sub(s.cut)?) })() \
+            "s.residual = match (|| -> Option<u64> { Some((pre_fee).checked_sub(pre_cut)?) })() \
              { Some(__rhs) => __rhs, None => return false };"
         ),
         "bare `-` in effect RHS must lower to a checked rejection:\n{out}"
