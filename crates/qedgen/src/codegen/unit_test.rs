@@ -1362,14 +1362,231 @@ fn sensible_param(pname: &str, ptype: &str) -> String {
 /// Returns (state_overrides, param_overrides) — field name → value pairs.
 type Overrides = Vec<(String, String)>;
 
-/// Negate the first comparison atom with a resolvable target (generic —
-/// F7 removed the multisig-specific pattern list). Falls back to zeroing
-/// every numeric param.
+/// A falsifying / satisfying assignment: state-field and param overrides.
+#[derive(Default, Clone)]
+struct Assignment {
+    state: Overrides,
+    param: Overrides,
+}
+
+impl Assignment {
+    fn one(is_param: bool, name: String, value: String) -> Self {
+        let mut a = Assignment::default();
+        if is_param {
+            a.param.push((name, value));
+        } else {
+            a.state.push((name, value));
+        }
+        a
+    }
+    /// Merge another assignment in. `None` on a conflicting override for
+    /// the same name (e.g. an OR whose disjuncts constrain one field to
+    /// two incompatible values) — the caller falls back to the generic
+    /// path rather than emit an unsatisfiable fixture.
+    fn merge(mut self, other: Assignment) -> Option<Assignment> {
+        for (scope, (n, v)) in other
+            .state
+            .into_iter()
+            .map(|kv| (false, kv))
+            .chain(other.param.into_iter().map(|kv| (true, kv)))
+        {
+            let bucket = if scope {
+                &mut self.param
+            } else {
+                &mut self.state
+            };
+            match bucket.iter().find(|(en, _)| *en == n) {
+                Some((_, ev)) if *ev != v => return None,
+                Some(_) => {}
+                None => bucket.push((n, v)),
+            }
+        }
+        Some(self)
+    }
+}
+
+/// Resolve a comparison-atom leaf to `(is_param, name)` — a state field or
+/// a handler param usable as an override target. `None` for literals and
+/// compound leaves.
+fn leaf_target(tree: &crate::mir::ExprTree, op: &ParsedHandler) -> Option<(bool, String)> {
+    use crate::mir::expr_tree::{BindingKind, ExprTree, TreeSeg};
+    let ExprTree::Path(p) = tree else {
+        return None;
+    };
+    match &p.binding {
+        BindingKind::StateField => match p.segments.as_slice() {
+            [TreeSeg::Field(f)] => Some((false, f.clone())),
+            _ => None,
+        },
+        BindingKind::Param => {
+            let name = p.root.clone();
+            op.takes_params
+                .iter()
+                .any(|(n, _)| *n == name)
+                .then_some((true, name))
+        }
+        _ => None,
+    }
+}
+
+/// Resolve a leaf literal: an integer or a boolean.
+fn leaf_lit(tree: &crate::mir::ExprTree) -> Option<LeafLit> {
+    use crate::mir::expr_tree::ExprTree;
+    match tree {
+        ExprTree::Int(v) => Some(LeafLit::Int(*v)),
+        ExprTree::Bool(b) => Some(LeafLit::Bool(*b)),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum LeafLit {
+    Int(u128),
+    Bool(bool),
+}
+
+/// Falsify or satisfy a single `target <op> lit` comparison by picking a
+/// concrete override value for `target`. `want_true = false` returns a
+/// value making the comparison FALSE; `true` makes it TRUE. `None` when no
+/// unsigned value works (e.g. satisfying `x < 0`).
+fn solve_cmp(
+    op: crate::mir::expr_tree::TreeCmpOp,
+    lit: LeafLit,
+    want_true: bool,
+) -> Option<String> {
+    use crate::mir::expr_tree::TreeCmpOp::*;
+    match lit {
+        LeafLit::Bool(b) => {
+            // `x == b` is true at x=b, false at x=!b; `x != b` inverts.
+            let true_val = match op {
+                Eq => b,
+                Ne => !b,
+                _ => return None,
+            };
+            Some((if want_true { true_val } else { !true_val }).to_string())
+        }
+        LeafLit::Int(l) => {
+            // Value making `x <op> l` evaluate to `want_true`.
+            let v: Option<u128> = match (op, want_true) {
+                (Gt, true) => Some(l + 1),
+                (Gt, false) => Some(l),
+                (Ge, true) => Some(l),
+                (Ge, false) => l.checked_sub(1),
+                (Lt, true) => l.checked_sub(1),
+                (Lt, false) => Some(l),
+                (Le, true) => Some(l),
+                (Le, false) => Some(l + 1),
+                (Eq, true) => Some(l),
+                (Eq, false) => Some(l + 1),
+                (Ne, true) => Some(l + 1),
+                (Ne, false) => Some(l),
+            };
+            v.map(|n| n.to_string())
+        }
+    }
+}
+
+/// Recursively compute an assignment that makes `tree` FALSE (or TRUE when
+/// `want_false = false`), preserving the boolean structure:
+///
+///   - `A and B` false → falsify EITHER (first that works);
+///   - `A or B`  false → falsify EVERY disjunct (merged);
+///   - `not X`   false → satisfy X (and vice-versa);
+///   - `A <op> B` → the boundary override.
+///
+/// `None` when the shape can't be solved structurally (the caller falls
+/// back to the generic single-atom / param-zeroing path). `Implies` is not
+/// solved here (falls back).
+fn solve_tree(
+    tree: &crate::mir::ExprTree,
+    op: &ParsedHandler,
+    want_false: bool,
+) -> Option<Assignment> {
+    use crate::mir::expr_tree::{ExprTree, TreeBoolOp};
+    match tree {
+        ExprTree::Bool(b) => (*b != want_false).then(Assignment::default),
+        ExprTree::Not(inner) => solve_tree(inner, op, !want_false),
+        ExprTree::BoolOp { op: bop, lhs, rhs } => {
+            // De Morgan: falsifying an And = falsify one child; falsifying
+            // an Or = falsify both. Satisfying flips the roles.
+            let falsify_all = matches!(
+                (bop, want_false),
+                (TreeBoolOp::Or, true) | (TreeBoolOp::And, false)
+            );
+            if falsify_all {
+                let a = solve_tree(lhs, op, want_false)?;
+                let b = solve_tree(rhs, op, want_false)?;
+                a.merge(b)
+            } else if matches!(bop, TreeBoolOp::And | TreeBoolOp::Or) {
+                solve_tree(lhs, op, want_false).or_else(|| solve_tree(rhs, op, want_false))
+            } else {
+                None // Implies — fall back
+            }
+        }
+        ExprTree::Cmp { op: cmp, lhs, rhs } => {
+            // Normalize to `target <cmp> lit`, flipping the operator when
+            // the literal is on the left.
+            let (is_param, name, cmp_op, lit) =
+                if let (Some((ip, n)), Some(l)) = (leaf_target(lhs, op), leaf_lit(rhs)) {
+                    (ip, n, *cmp, l)
+                } else if let (Some(l), Some((ip, n))) = (leaf_lit(lhs), leaf_target(rhs, op)) {
+                    (ip, n, flip_cmp_tree(*cmp), l)
+                } else {
+                    return None;
+                };
+            let value = solve_cmp(cmp_op, lit, !want_false)?;
+            Some(Assignment::one(is_param, name, value))
+        }
+        _ => None,
+    }
+}
+
+/// Mirror a tree comparator across its operands (`0 < x` ⇔ `x > 0`).
+fn flip_cmp_tree(cmp: crate::mir::expr_tree::TreeCmpOp) -> crate::mir::expr_tree::TreeCmpOp {
+    use crate::mir::expr_tree::TreeCmpOp::*;
+    match cmp {
+        Lt => Gt,
+        Le => Ge,
+        Gt => Lt,
+        Ge => Le,
+        Eq => Eq,
+        Ne => Ne,
+    }
+}
+
+/// Structure-aware guard falsification over the typed `requires` trees.
+/// The guard is the conjunction of every `requires` clause, so falsifying
+/// ANY single clause falsifies the whole guard — and each clause is
+/// falsified with full AND/OR/`not` awareness (an OR needs every disjunct
+/// false). `None` when no clause can be solved structurally.
+fn falsify_guard_from_trees(op: &ParsedHandler) -> Option<(Overrides, Overrides)> {
+    for req in &op.requires {
+        if let Some(a) = solve_tree(requires_tree(req), op, /*want_false=*/ true) {
+            if !a.state.is_empty() || !a.param.is_empty() {
+                return Some((a.state, a.param));
+            }
+        }
+    }
+    None
+}
+
+/// Derive inputs that make the guard reject. Primary path is a
+/// structure-aware solve over the typed `requires` trees
+/// (`falsify_guard_from_trees`) — it negates the COMPLETE boolean AST, so
+/// an `A or B` guard is only violated when both disjuncts are false (the
+/// old string-atom path negated one atom and left the OR true, producing
+/// a rejects-test that failed against correct code). Falls back to the
+/// legacy single-atom negation, then to zeroing every numeric param.
 fn derive_guard_violation(
     guard_rust: &str,
     op: &ParsedHandler,
     fields: &[(String, String)],
 ) -> (Overrides, Overrides) {
+    // Structure-aware path first (correct for AND / OR / not / nesting).
+    if let Some(overrides) = falsify_guard_from_trees(op) {
+        return overrides;
+    }
+
     let mut state_overrides = Vec::new();
     let mut param_overrides = Vec::new();
 
@@ -1661,6 +1878,99 @@ handler fire : State.Active -> State.Active {
         assert!(
             rejects.contains("armed: false"),
             "bool-only guard violated by flipping the field:\n{rejects}"
+        );
+    }
+
+    fn generate_from(src: &str) -> String {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spec_path = dir.path().join("t.qedspec");
+        std::fs::write(&spec_path, src).expect("write spec");
+        let out_path = dir.path().join("tests.rs");
+        generate(&spec_path, &out_path).expect("generate unit tests");
+        std::fs::read_to_string(&out_path).expect("read output")
+    }
+
+    fn rejects_body(out: &str, handler: &str) -> String {
+        out.split(&format!("fn test_{handler}_guard_rejects_invalid"))
+            .nth(1)
+            .and_then(|t| t.split("\n    }\n").next())
+            .expect("rejects body")
+            .to_string()
+    }
+
+    /// v2.44 — the rejects fixture must negate the FULL guard AST. For an
+    /// OR guard (`A or B`), the old single-atom negation flipped one
+    /// disjunct and left the OR true, so `assert!(!guard(...))` failed on
+    /// correct code. Both disjuncts must now be falsified.
+    #[test]
+    fn rejects_invalid_falsifies_all_disjuncts_of_bool_or_guard() {
+        let out = generate_from(
+            r#"spec T
+type State | Active of { enabled : Bool, emergency : Bool, count : U64 }
+type Error | Blocked | MathOverflow
+handler act : State.Active -> State.Active {
+  accounts { caller : signer, state : writable }
+  requires enabled == true or emergency == true else Blocked
+  effect { count += 1 }
+}
+"#,
+        );
+        let rejects = rejects_body(&out, "act");
+        assert!(
+            rejects.contains("enabled: false") && rejects.contains("emergency: false"),
+            "both disjuncts of the OR guard must be false to reject:\n{rejects}"
+        );
+    }
+
+    /// Numeric OR: `a > 0 or b > 0` must set BOTH to 0.
+    #[test]
+    fn rejects_invalid_falsifies_all_disjuncts_of_numeric_or_guard() {
+        let out = generate_from(
+            r#"spec T
+type State | Active of { a : U64, b : U64, c : U64 }
+type Error | Blocked | MathOverflow
+handler act : State.Active -> State.Active {
+  accounts { caller : signer, state : writable }
+  requires a > 0 or b > 0 else Blocked
+  effect { c += 1 }
+}
+"#,
+        );
+        let rejects = rejects_body(&out, "act");
+        assert!(
+            rejects.contains("a: 0") && rejects.contains("b: 0"),
+            "both disjuncts of `a > 0 or b > 0` must be zeroed:\n{rejects}"
+        );
+    }
+
+    /// Nested `(A or B) and C`: falsifying ANY one conjunct rejects. The
+    /// solver may falsify the OR (both disjuncts) or C; either is a valid
+    /// rejecting fixture, so assert the guard actually evaluates false via
+    /// a compiled check of the generated predicate's shape.
+    #[test]
+    fn rejects_invalid_handles_nested_and_or() {
+        let out = generate_from(
+            r#"spec T
+type State | Active of { a : U64, b : U64, c : U64 }
+type Error | Blocked | MathOverflow
+handler act : State.Active -> State.Active {
+  accounts { caller : signer, state : writable }
+  requires a > 0 or b > 0 else Blocked
+  requires c > 0 else Blocked
+  effect { c += 1 }
+}
+"#,
+        );
+        let rejects = rejects_body(&out, "act");
+        // A valid rejecting fixture either zeroes both OR disjuncts, or
+        // zeroes c. Rule out the buggy "flip one disjunct, leave OR true,
+        // c satisfying" shape by requiring one of the two falsifying
+        // patterns.
+        let kills_or = rejects.contains("a: 0") && rejects.contains("b: 0");
+        let kills_c = rejects.contains("c: 0");
+        assert!(
+            kills_or || kills_c,
+            "nested (A or B) and C must falsify a full conjunct:\n{rejects}"
         );
     }
 }

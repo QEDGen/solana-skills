@@ -115,6 +115,10 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     // Validate new-DSL constructs: Map[N] T fields, subscripted effect LHS.
     warnings.extend(check_map_and_subscript(spec));
 
+    // Duplicate effect target in one block: diverges under parallel
+    // effect semantics (last-write vs accumulated); codegen refuses.
+    warnings.extend(check_duplicate_effect_target(spec));
+
     // CPI tier lint: call sites whose target is Tier 0 (no ensures declared)
     // get flagged so users see the gap between "my Rust compiles" and "my
     // program is verified." See docs/design/spec-composition.md §2.

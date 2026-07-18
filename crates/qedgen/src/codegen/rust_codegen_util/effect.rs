@@ -456,11 +456,70 @@ pub fn emit_one_effect_with_account_env(
     );
 }
 
+/// Effect targets written more than once within a single effect block,
+/// as their normalized (variant-prefix-stripped) LHS paths, first-seen
+/// order, deduplicated. Under the spec's PARALLEL effect semantics every
+/// RHS reads pre-state, so two writes to the same target are ambiguous:
+/// the Lean record update keeps the last write (`b := 1, b := 2` → 2)
+/// while the sequential Rust body accumulates (`b += 1; b += 2` → 3) —
+/// a model-vs-implementation divergence. The two spellings agree only
+/// when a target is written once; a repeated target must be rewritten as
+/// a single combined effect (`b += 3`).
+///
+/// Callers pass one block's effects at a time. For a `match` handler,
+/// pass each arm's effects separately — writes in mutually-exclusive
+/// arms don't conflict — NOT the flattened union `ParsedHandler.effects`.
+pub fn duplicate_effect_targets(
+    effects: &[crate::check::ParsedEffect],
+    spec: &ParsedSpec,
+) -> Vec<String> {
+    let mut seen: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut order: Vec<String> = Vec::new();
+    for eff in effects {
+        let target = strip_variant_prefix_for_flat_state(&eff.field, spec);
+        let count = seen.entry(target.clone()).or_insert(0);
+        *count += 1;
+        if *count == 2 {
+            order.push(target);
+        }
+    }
+    order
+}
+
 /// Verify every effect-target field is declared somewhere in the state
-/// schema (`state_fields`, per-account fields, or a sum-variant payload).
-/// Errors name the handler and field — catching this at codegen time beats
-/// a `cargo check` error 1000 lines into the generated harness.
+/// schema (`state_fields`, per-account fields, or a sum-variant payload),
+/// and that no block writes the same target twice (see
+/// [`duplicate_effect_targets`] for why that diverges). Errors name the
+/// handler and field — catching this at codegen time beats a `cargo
+/// check` error 1000 lines into the generated harness.
 pub fn check_effect_targets(spec: &ParsedSpec) -> anyhow::Result<()> {
+    // Duplicate-target check, per effect block (arms are independent).
+    for handler in &spec.handlers {
+        let blocks: Vec<&[crate::check::ParsedEffect]> = match &handler.effect_branches {
+            Some(branches) => branches.arms.iter().map(|a| a.effects.as_slice()).collect(),
+            None => vec![handler.effects.as_slice()],
+        };
+        for block in blocks {
+            if let Some(dup) = duplicate_effect_targets(block, spec).into_iter().next() {
+                anyhow::bail!(
+                    "handler `{}` writes effect target `{}` more than once in one effect block. \
+                     Under parallel effect semantics each RHS reads the pre-state, so repeated \
+                     writes diverge (the Lean model keeps the last write; the generated Rust \
+                     accumulates). Combine them into a single effect (e.g. `{} += <total>`).",
+                    handler.name,
+                    dup,
+                    dup,
+                );
+            }
+        }
+    }
+
+    check_effect_targets_declared(spec)
+}
+
+/// The original declared-target check (split out so the duplicate-target
+/// guard above runs first).
+fn check_effect_targets_declared(spec: &ParsedSpec) -> anyhow::Result<()> {
     use std::collections::HashSet;
 
     // Collect every declared field name from every place fields can live.
