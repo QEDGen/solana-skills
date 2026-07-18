@@ -28,6 +28,11 @@ pub struct ProgramModel {
     pub entry_module: Option<String>,
     pub handlers: Vec<HandlerModel>,
     pub errors: Option<ErrorModel>,
+    /// Lifecycle state machine derived from an `#[account]` struct's status-enum
+    /// field (e.g. `Proposal.status: ProposalStatus`). `None` when no account
+    /// carries a program-defined enum field — the renderer then emits the flat
+    /// `Init | Active` placeholder.
+    pub state: Option<StateModel>,
 }
 
 impl ProgramModel {
@@ -39,6 +44,7 @@ impl ProgramModel {
             entry_module: None,
             handlers: Vec::new(),
             errors: None,
+            state: None,
         }
     }
 }
@@ -91,6 +97,21 @@ pub struct ErrorModel {
     pub source_path: Option<PathBuf>,
     pub enum_name: String,
     pub variants: Vec<String>,
+}
+
+/// A program-defined status enum carried by an `#[account]` struct field — the
+/// mechanically-derivable seed for the skeleton's `type State`. The transition
+/// *edges* still need the impl, so only the variant *set* is derived here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateModel {
+    pub source_path: Option<PathBuf>,
+    /// The enum type (e.g. `ProposalStatus`).
+    pub enum_name: String,
+    pub variants: Vec<String>,
+    /// The `#[account]` struct and field the enum was found on
+    /// (e.g. `Proposal` / `status`) — for the provenance comment.
+    pub account_struct: String,
+    pub field_name: String,
 }
 
 pub trait ProgramAdapter {

@@ -13,10 +13,37 @@ pub(super) fn render_spec(model: &ProgramModel) -> String {
     }
     s.push_str(&format!("spec {}\n\n", to_pascal_case(&model.name)));
 
-    s.push_str("// TODO: replace with the actual lifecycle of your program.\n");
-    s.push_str("type State\n");
-    s.push_str("  | Init\n");
-    s.push_str("  | Active\n\n");
+    match model.state.as_ref() {
+        Some(st) => {
+            let src = st
+                .source_path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "<unknown>".to_string());
+            s.push_str(&format!(
+                "// Lifecycle variants derived from `{}.{}: {}` ({}).\n",
+                st.account_struct, st.field_name, st.enum_name, src,
+            ));
+            s.push_str(
+                "// `Init` is the pre-existence placeholder; wire the real transitions\n\
+                 // (each handler's `State.<from> -> State.<to>`) among these variants.\n",
+            );
+            s.push_str("type State\n");
+            s.push_str("  | Init\n");
+            for variant in &st.variants {
+                if variant != "Init" {
+                    s.push_str(&format!("  | {}\n", variant));
+                }
+            }
+            s.push('\n');
+        }
+        None => {
+            s.push_str("// TODO: replace with the actual lifecycle of your program.\n");
+            s.push_str("type State\n");
+            s.push_str("  | Init\n");
+            s.push_str("  | Active\n\n");
+        }
+    }
 
     match model.errors.as_ref() {
         Some(info) if !info.variants.is_empty() => {

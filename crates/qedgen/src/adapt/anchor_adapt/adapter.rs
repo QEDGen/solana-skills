@@ -93,6 +93,7 @@ pub fn extract_program_model(
     }
 
     model.errors = discover_error_enum(program_root);
+    model.state = discover_state_enum(program_root);
     Ok(model)
 }
 

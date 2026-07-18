@@ -891,3 +891,104 @@ fn adapt_renders_accounts_block_from_derive_accounts() {
     // adapt() enforces round-trip parseability internally, so a well-formed
     // accounts block is also proven to parse.
 }
+
+#[test]
+fn derives_state_from_account_status_enum() {
+    // #258: the skeleton seeds `type State` from an `#[account]` struct's
+    // status-enum field, preferring a `status`/`state` field and the richest
+    // enum, instead of the flat `Init | Active` placeholder.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = write_project(
+        &tmp,
+        &[(
+            "src/lib.rs",
+            r#"
+            use anchor_lang::prelude::*;
+
+            #[program]
+            pub mod gov {
+                use super::*;
+                pub fn vote(ctx: Context<Vote>) -> Result<()> { Ok(()) }
+            }
+
+            #[derive(Accounts)]
+            pub struct Vote<'info> {
+                #[account(mut)]
+                pub proposal: Account<'info, Proposal>,
+                pub voter: Signer<'info>,
+            }
+
+            #[account]
+            pub struct Proposal {
+                pub status: ProposalStatus,
+            }
+
+            // A second, poorer enum candidate that must NOT win (fewer variants,
+            // non-status field name).
+            #[account]
+            pub struct Config {
+                pub mode: Mode,
+            }
+
+            pub enum ProposalStatus { Draft, Active, Approved, Executed, Cancelled }
+            pub enum Mode { A, B }
+            "#,
+        )],
+    );
+
+    let rendered = adapt(&root, &HashMap::new()).unwrap();
+
+    assert!(
+        rendered.contains("derived from `Proposal.status: ProposalStatus`"),
+        "rendered:\n{}",
+        rendered
+    );
+    for v in ["Draft", "Active", "Approved", "Executed", "Cancelled"] {
+        assert!(
+            rendered.contains(&format!("  | {}", v)),
+            "missing {v}:\n{rendered}"
+        );
+    }
+    // Init placeholder retained so `State.Init -> State.Init` transitions stay valid.
+    assert!(rendered.contains("  | Init"));
+    // The poorer `Mode` enum did not become the State.
+    assert!(!rendered.contains("derived from `Config.mode"));
+    // Flat placeholder replaced.
+    assert!(!rendered.contains("// TODO: replace with the actual lifecycle"));
+}
+
+#[test]
+fn falls_back_to_placeholder_state_when_no_status_enum() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = write_project(
+        &tmp,
+        &[(
+            "src/lib.rs",
+            r#"
+            use anchor_lang::prelude::*;
+
+            #[program]
+            pub mod bank {
+                use super::*;
+                pub fn deposit(ctx: Context<Deposit>) -> Result<()> { Ok(()) }
+            }
+
+            #[derive(Accounts)]
+            pub struct Deposit<'info> {
+                pub authority: Signer<'info>,
+            }
+
+            #[account]
+            pub struct Vault { pub total: u64 }
+            "#,
+        )],
+    );
+
+    let rendered = adapt(&root, &HashMap::new()).unwrap();
+    assert!(
+        rendered.contains("// TODO: replace with the actual lifecycle"),
+        "rendered:\n{}",
+        rendered
+    );
+    assert!(rendered.contains("  | Active"));
+}

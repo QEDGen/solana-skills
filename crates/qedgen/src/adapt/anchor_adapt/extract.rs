@@ -384,6 +384,142 @@ fn find_error_code_enum(items: &[syn::Item]) -> Option<(String, Vec<String>)> {
     None
 }
 
+/// Derive a lifecycle `State` from an `#[account]` struct's status-enum field
+/// (e.g. `Proposal.status: ProposalStatus`). Two passes over `src/`: collect
+/// every program-defined enum, then find the `#[account]` field typed by one —
+/// preferring a field named `status`/`state`, then the richest enum. The
+/// transition *edges* aren't derivable (they need the impl), so only the
+/// variant set is returned. `None` when nothing qualifies.
+pub(super) fn discover_state_enum(program_root: &Path) -> Option<StateModel> {
+    let src_dir = program_root.join("src");
+    let files = walk_rust_files(&src_dir);
+
+    // Pass 1: every `enum X { .. }` in the program, name -> (variants, file).
+    // First definition wins (deterministic walk order).
+    let mut enums: HashMap<String, (Vec<String>, PathBuf)> = HashMap::new();
+    for path in &files {
+        let Ok(source) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let Ok(file) = syn::parse_file(&source) else {
+            continue;
+        };
+        collect_enums(&file.items, path, &mut enums);
+    }
+    if enums.is_empty() {
+        return None;
+    }
+
+    // Pass 2: `#[account]` struct fields typed by one of those enums; keep the
+    // highest-scoring (status/state field name, then variant count).
+    let mut best: Option<(i64, StateModel)> = None;
+    for path in &files {
+        let Ok(source) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let Ok(file) = syn::parse_file(&source) else {
+            continue;
+        };
+        for (struct_name, field_name, enum_name) in account_enum_fields(&file.items, &enums) {
+            let (variants, enum_path) = &enums[&enum_name];
+            let mut score = variants.len() as i64;
+            if field_name == "status" || field_name == "state" {
+                score += 100;
+            }
+            if best.as_ref().is_none_or(|(bs, _)| score > *bs) {
+                best = Some((
+                    score,
+                    StateModel {
+                        source_path: Some(rel_to(program_root, enum_path)),
+                        enum_name: enum_name.clone(),
+                        variants: variants.clone(),
+                        account_struct: struct_name,
+                        field_name,
+                    },
+                ));
+            }
+        }
+    }
+    best.map(|(_, m)| m)
+}
+
+/// Collect every `enum` declaration (recursing into inline mods). First
+/// definition of a given name wins.
+fn collect_enums(
+    items: &[syn::Item],
+    path: &Path,
+    out: &mut HashMap<String, (Vec<String>, PathBuf)>,
+) {
+    for item in items {
+        match item {
+            syn::Item::Enum(e) => {
+                let variants = e.variants.iter().map(|v| v.ident.to_string()).collect();
+                out.entry(e.ident.to_string())
+                    .or_insert((variants, path.to_path_buf()));
+            }
+            syn::Item::Mod(m) => {
+                if let Some((_, sub)) = &m.content {
+                    collect_enums(sub, path, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// `(struct, field, enum_name)` for each `#[account]` struct field whose type
+/// is one of the program's enums. Recurses into inline mods.
+fn account_enum_fields(
+    items: &[syn::Item],
+    enums: &HashMap<String, (Vec<String>, PathBuf)>,
+) -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+    for item in items {
+        match item {
+            syn::Item::Struct(s) if has_account_attr(&s.attrs) => {
+                for field in &s.fields {
+                    let Some(fname) = field.ident.as_ref().map(|i| i.to_string()) else {
+                        continue;
+                    };
+                    if let Some(enum_name) = enum_type_name(&field.ty, enums) {
+                        out.push((s.ident.to_string(), fname, enum_name));
+                    }
+                }
+            }
+            syn::Item::Mod(m) => {
+                if let Some((_, sub)) = &m.content {
+                    out.extend(account_enum_fields(sub, enums));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// True for a struct-level `#[account]` attribute (Anchor state accounts),
+/// matched by last path segment.
+fn has_account_attr(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|a| {
+        a.path()
+            .segments
+            .last()
+            .is_some_and(|s| s.ident == "account")
+    })
+}
+
+/// The enum name when `ty`'s outermost path segment is a known program enum.
+fn enum_type_name(
+    ty: &syn::Type,
+    enums: &HashMap<String, (Vec<String>, PathBuf)>,
+) -> Option<String> {
+    let syn::Type::Path(tp) = ty else {
+        return None;
+    };
+    let ident = tp.path.segments.last()?.ident.to_string();
+    enums.contains_key(&ident).then_some(ident)
+}
+
 pub(super) fn walk_rust_files(dir: &Path) -> Vec<PathBuf> {
     crate::fs_walk::collect_rs_files(dir, crate::fs_walk::DEFAULT_SKIP_DIRS)
 }
