@@ -32,7 +32,14 @@ trait FrameworkCodegen {
     fn target(&self) -> Target;
 
     fn emit_lib(&self, ctx: &CodegenCtx<'_>) -> Result<()> {
-        emit_lib(ctx.mir, ctx.parsed, ctx.fp, ctx.output_dir, self.target())
+        emit_lib(
+            ctx.mir,
+            ctx.parsed,
+            ctx.fp,
+            ctx.output_dir,
+            self.target(),
+            ctx.spec_path,
+        )
     }
 
     fn emit_state(&self, ctx: &CodegenCtx<'_>) -> Result<()> {
@@ -276,12 +283,47 @@ fn render_cargo_toml(
 /// regeneration). Falls back to `parsed` for `program_id`, `type_aliases`
 /// (Quasar Fin params), per-handler bumps/params/accounts, and the Anchor
 /// `#[derive(Accounts)]` emission (`render_handler_accounts_struct`).
+/// #253: a skipped user-owned file goes silently stale after spec-level
+/// renames — the regenerated siblings (state.rs, guards.rs) pick up the
+/// new names while the skipped scaffold keeps the old ones, and the crate
+/// stops compiling with nothing pointing at the cause. Detect it at the
+/// skip site: generation embedded `spec_hash = "…"` stamps; any stamp not
+/// matching a current handler's spec_hash means the file predates the
+/// current spec revision.
+fn embedded_stamps_stale(existing: &str, current_hashes: &[String]) -> bool {
+    let pat = "spec_hash = \"";
+    let mut rest = existing;
+    while let Some(i) = rest.find(pat) {
+        rest = &rest[i + pat.len()..];
+        let Some(end) = rest.find('"') else { break };
+        if !current_hashes.iter().any(|c| c == &rest[..end]) {
+            return true;
+        }
+        rest = &rest[end..];
+    }
+    // A file with no stamps (fully hand-rewritten) has nothing to compare.
+    false
+}
+
+fn warn_stale_skip(what: &str, drift_root: &Path) {
+    eprintln!(
+        "WARNING: {what} was generated from a DIFFERENT spec revision — its #[qed] \
+         spec_hash stamps don't match the current spec. After a spec-level rename \
+         the regenerated files (state.rs, guards.rs, harnesses) disagree with it \
+         and the crate may not compile. Update it by hand, or delete it and re-run \
+         `qedgen codegen` to regenerate (then re-apply your handler fills); \
+         `qedgen check --drift {} ` lists per-handler drift.",
+        drift_root.display()
+    );
+}
+
 fn emit_lib(
     mir: &Mir,
     parsed: &ParsedSpec,
     fp: &crate::fingerprint::SpecFingerprint,
     output_dir: &Path,
     target: Target,
+    spec_path: &Path,
 ) -> Result<()> {
     use crate::codegen_shared::{to_pascal_case, FrameworkSurface};
 
@@ -304,6 +346,18 @@ fn emit_lib(
                 .and_then(|n| n.to_str())
                 .unwrap_or("<program>")
         );
+        // #253: escalate when the skipped file predates the current spec.
+        let spec_src = crate::check::read_spec_source(spec_path).unwrap_or_default();
+        let current: Vec<String> = parsed
+            .handlers
+            .iter()
+            .filter_map(|h| crate::spec_hash::spec_hash_for_handler(&spec_src, &h.name))
+            .collect();
+        if let Ok(existing) = std::fs::read_to_string(&lib_path) {
+            if embedded_stamps_stale(&existing, &current) {
+                warn_stale_skip(&format!("{}", lib_path.display()), output_dir);
+            }
+        }
         return Ok(());
     }
 
@@ -607,6 +661,16 @@ fn emit_instructions(
                     .unwrap_or("<program>"),
                 handler.name
             );
+            // #253: escalate when the skipped file predates the current spec.
+            let current: Vec<String> =
+                crate::spec_hash::spec_hash_for_handler(&spec_src, &handler.name)
+                    .into_iter()
+                    .collect();
+            if let Ok(existing) = std::fs::read_to_string(&handler_path) {
+                if embedded_stamps_stale(&existing, &current) {
+                    warn_stale_skip(&format!("{}", handler_path.display()), output_dir);
+                }
+            }
             continue;
         }
 
@@ -1342,6 +1406,25 @@ mod tests {
     use crate::check;
     use std::path::Path;
 
+    #[test]
+    fn embedded_stamps_stale_detects_spec_revision_drift() {
+        let current = vec!["aaaaaaaaaaaaaaaa".to_string()];
+        let fresh = r#"#[qed(scaffold, spec_hash = "aaaaaaaaaaaaaaaa")] fn h() {}"#;
+        assert!(
+            !embedded_stamps_stale(fresh, &current),
+            "matching stamp is fresh"
+        );
+        let stale = r#"#[qed(scaffold, spec_hash = "bbbbbbbbbbbbbbbb")] fn h() {}"#;
+        assert!(
+            embedded_stamps_stale(stale, &current),
+            "mismatched stamp is stale"
+        );
+        assert!(
+            !embedded_stamps_stale("fn main() {}", &current),
+            "no stamps → nothing to compare"
+        );
+    }
+
     fn lower_fixture(rel_path: &str) -> (Mir, ParsedSpec) {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -1406,7 +1489,15 @@ handler poke : State.Active -> State.Active {
         let tmp = tempfile::tempdir().expect("tempdir");
         let temp = tmp.path();
         std::fs::create_dir_all(temp.join("src")).expect("mk src");
-        emit_lib(&mir, &parsed, &fp, temp, Target::Anchor).expect("emit lib");
+        emit_lib(
+            &mir,
+            &parsed,
+            &fp,
+            temp,
+            Target::Anchor,
+            Path::new("unused.qedspec"),
+        )
+        .expect("emit lib");
         let lib = std::fs::read_to_string(temp.join("src/lib.rs")).expect("lib.rs");
         assert!(
             lib.contains(": Account<"),
@@ -1436,7 +1527,15 @@ handler poke : State.Active -> State.Active {
         let tmp = tempfile::tempdir().expect("tempdir");
         let temp = tmp.path();
         std::fs::create_dir_all(temp.join("src")).expect("mk src");
-        emit_lib(&mir, &parsed, &fp, temp, Target::Anchor).expect("emit lib");
+        emit_lib(
+            &mir,
+            &parsed,
+            &fp,
+            temp,
+            Target::Anchor,
+            Path::new("unused.qedspec"),
+        )
+        .expect("emit lib");
         let lib = std::fs::read_to_string(temp.join("src/lib.rs")).expect("lib.rs");
         assert!(
             !lib.contains("use anchor_lang::prelude::{")
