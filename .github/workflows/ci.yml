@@ -69,6 +69,14 @@ jobs:
       - name: Check example codegen drift
         run: cargo run -p qedgen-solana-skills -- check --regen-drift
 
+      # #271: the RELEASING §7/§8 gate, mechanical and on every PR — the
+      # bundled-example baseline (frozen check exit codes + summaries) and
+      # the zero-sorry sweep. Expectation table lives in the script.
+      - name: Release gate (example baseline + zero-sorry)
+        run: |
+          cargo build -p qedgen-solana-skills --bin qedgen
+          QEDGEN_BIN=target/debug/qedgen bash scripts/release-gate.sh
+
       - name: Codegen scaffold compile smoke
         run: cargo test -p qedgen-solana-skills --test codegen_smoke -- --ignored
 
