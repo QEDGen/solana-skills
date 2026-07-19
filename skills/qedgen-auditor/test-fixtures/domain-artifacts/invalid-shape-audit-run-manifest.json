@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "schema_uri": "https://qedgen.dev/schemas/auditor/audit-run-manifest-v1.schema.json",
+  "audit_id": "fee_vault_20260714",
+  "status": "tooling-blocked",
+  "target": {
+    "program_root": "programs/fee-vault",
+    "runtime": "anchor",
+    "mode": "spec-less",
+    "spec": null,
+    "source_commit": "0123456789abcdef0123456789abcdef01234567"
+  },
+  "tool_versions": {
+    "qedgen": "unavailable",
+    "auditor_skill": "2.42.0"
+  },
+  "lanes": [
+    "compile",
+    {
+      "name": "ordinary-probe",
+      "status": "blocked",
+      "reason": "qedgen executable is unavailable",
+      "resume_command": "qedgen probe --bootstrap --root programs/fee-vault",
+      "started_at": null,
+      "finished_at": null,
+      "artifact_paths": []
+    },
+    {
+      "name": "crucible-domain",
+      "status": "blocked",
+      "reason": "ratified spec and qedgen executable are unavailable",
+      "resume_command": "qedgen probe --fuzz 300 --spec .qed/audit/fee_vault_20260714/ratified.qedspec --json",
+      "started_at": null,
+      "finished_at": null,
+      "artifact_paths": []
+    }
+  ],
+  "artifacts": {
+    "domain_dossier_json": ".qed/audit/fee_vault_20260714/domain-dossier.json",
+    "domain_dossier_markdown": ".qed/audit/fee_vault_20260714/domain-dossier.md",
+    "ratified_intent": null,
+    "report": ".qed/findings/audit-fee_vault_20260714.md",
+    "suppressions": null
+  }
+}

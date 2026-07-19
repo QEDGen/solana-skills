@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "schema_uri": "https://qedgen.dev/schemas/auditor/domain-replay-report-v1.schema.json",
+  "resolved_document_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+  "account_binding_overlay_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+  "harness_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+  "records": [
+    "record"
+  ]
+}
