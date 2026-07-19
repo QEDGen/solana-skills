@@ -102,6 +102,34 @@ pub fn stage_fixture(fixture_dir: &str) -> tempfile::TempDir {
     tmp
 }
 
+/// Like [`stage_fixture`], but copies into a *named* subdirectory of
+/// the tempdir — for tests whose assertions depend on the program
+/// root's directory name (#289; a bare tempdir's name is random).
+/// Returns the tempdir guard plus the staged program root.
+pub fn stage_fixture_named(fixture_dir: &str, name: &str) -> (tempfile::TempDir, PathBuf) {
+    let tmp = tempfile::tempdir().expect("create tempdir");
+    let dest = tmp.path().join(name);
+    fs::create_dir_all(&dest).expect("create named fixture dir");
+    let src = repo_root().join(fixture_dir);
+
+    let rsync = Command::new("rsync")
+        .args([
+            "-aq",
+            "--exclude=.anchor",
+            "--exclude=target",
+            "--exclude=.lake",
+            "--exclude=node_modules",
+        ])
+        .arg(format!("{}/", src.display()))
+        .arg(format!("{}/", dest.display()))
+        .status()
+        .expect("spawn rsync");
+    assert!(rsync.success(), "rsync failed for fixture {}", fixture_dir);
+
+    git_init(&dest);
+    (tmp, dest)
+}
+
 /// Produce a unified-diff string between two multiline texts. Avoids
 /// pulling in an extra crate; the output isn't IDE-grade but suffices
 /// for test failure messages.

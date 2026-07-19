@@ -1235,7 +1235,21 @@ fn manifest_program_root(audit_dir: &Path) -> Option<PathBuf> {
         serde_json::from_str(&std::fs::read_to_string(audit_dir.join("run-manifest.json")).ok()?)
             .ok()?;
     let root = manifest.get("target")?.get("program_root")?.as_str()?;
-    (!root.is_empty()).then(|| PathBuf::from(root))
+    if root.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(root);
+    // #289: manifests written by pre-canonicalization binaries can carry
+    // a relative root (e.g. `"."`), whose `file_name()` is `None` and
+    // degrades every derived name to the `"program"` placeholder.
+    // Best-effort canonicalize against the ratify cwd; keep the raw
+    // path when resolution fails.
+    if path.is_relative() {
+        if let Ok(canonical) = path.canonicalize() {
+            return Some(canonical);
+        }
+    }
+    Some(path)
 }
 
 fn default_spec_path(audit_dir: &Path) -> PathBuf {
@@ -1936,6 +1950,36 @@ mod tests {
         assert_eq!(
             default_findings_dir(&audit),
             prog_root.join(".qed/findings")
+        );
+        Ok(())
+    }
+
+    /// #289: a relative `program_root` recorded by a pre-canonicalization
+    /// binary (`--program .`) resolves against the ratify cwd — derived
+    /// names use the real directory name, never the `program.qedspec`
+    /// placeholder that `file_name() == None` produces.
+    #[test]
+    fn default_paths_canonicalize_relative_manifest_program_root() -> Result<()> {
+        let dir = tempdir()?;
+        let audit = dir.path().join("audit");
+        std::fs::create_dir_all(&audit)?;
+        std::fs::write(
+            audit.join("run-manifest.json"),
+            r#"{ "target": { "program_root": "." } }"#,
+        )?;
+        let cwd = std::env::current_dir()?.canonicalize()?;
+        let name = cwd
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("test cwd has a name")
+            .to_string();
+        assert_eq!(
+            default_spec_path(&audit),
+            cwd.join(format!("{name}.qedspec"))
+        );
+        assert_eq!(
+            default_scoping_path(&audit),
+            cwd.join(".qed/plan/scoping.md")
         );
         Ok(())
     }
