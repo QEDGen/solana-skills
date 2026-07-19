@@ -31,6 +31,13 @@ harnesses, command logs) for **friction between intent and the toolchain**:
   (hand-tuning unwind bounds, hand-wiring stubs, dep-hell workarounds, noise).
 - **📐 methodology** — a repeatable technique that worked and should be encoded in
   the skill or a future codegen mode (de-risk-smoke-first, mutation-test-for-vacuity).
+- **📝 documented workarounds** — prose (in the session, or newly added to docs/
+  runbooks) that explains how to work *around* tool behavior: "note the exit code
+  conflates…", "run X twice because…", "distinguish by output, not exit code",
+  "ignore the warning about…". A workaround written into a doc is a bug report
+  that never reached the tracker — RELEASING.md carried #260 as a caveat for ten
+  releases this way. File the underlying defect and make the doc text link the
+  issue number (or delete the caveat if the fix is in the same session).
 
 ## The quality bar (this is the whole job)
 
