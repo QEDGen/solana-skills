@@ -118,11 +118,24 @@ fn resolve_recursive(
             resolve_builtin_dep(&imp.from, builtin)?
         } else {
             let dep = manifest.dependencies.get(&imp.from).ok_or_else(|| {
+                // Name the manifest actually searched, absolutely — a
+                // relative manifest_dir can be empty (spec at cwd), which
+                // rendered as "(looking in )" (#254).
+                let searched = manifest_dir
+                    .canonicalize()
+                    .ok()
+                    .or_else(|| {
+                        std::env::current_dir()
+                            .ok()
+                            .map(|cwd| cwd.join(manifest_dir))
+                    })
+                    .unwrap_or_else(|| manifest_dir.to_path_buf())
+                    .join("qed.toml");
                 anyhow!(
                     "import `{}` references manifest dep `{}`, but no such entry in qed.toml under [dependencies] (looking in {})",
                     imp.name,
                     imp.from,
-                    manifest_dir.display(),
+                    searched.display(),
                 )
             })?;
             match dep {
@@ -974,6 +987,12 @@ mod tests {
         assert!(
             err.contains("no such entry in qed.toml"),
             "unexpected error: {err}"
+        );
+        // #254: the searched path renders absolutely — never the empty
+        // "(looking in )" that a bare relative manifest dir produced.
+        assert!(
+            !err.contains("(looking in )") && err.contains("qed.toml)"),
+            "search path must name the manifest absolutely: {err}"
         );
     }
 
