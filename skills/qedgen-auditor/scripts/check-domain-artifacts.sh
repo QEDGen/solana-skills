@@ -30,6 +30,7 @@ done
 validate_dossier() {
   jq -e '
     def enum($values): . as $value | ($values | index($value)) != null;
+    def obj: type == "object";
     def stable_id: type == "string" and test("^[a-z][a-z0-9_-]*$");
     def structural_id: type == "string" and test("^[A-Za-z0-9][A-Za-z0-9_.:-]*$");
     def anchor:
@@ -52,14 +53,14 @@ validate_dossier() {
     (.target.program_root | type == "string" and length > 0) and
     (.target.runtime | enum(["anchor", "pinocchio", "native-rust", "quasar", "qedgen-codegen", "sbpf", "unknown"])) and
     (.target.mode | enum(["spec-aware", "spec-less"])) and
-    (.handlers | type == "array" and all(.[];
+    (.handlers | type == "array" and all(.[]; obj and
       (.name | type == "string" and length > 0) and
       ((.source_path == null) or (.source_path | type == "string" and length > 0)) and
       ((.accounts_type == null) or (.accounts_type | type == "string" and length > 0)) and
-      (.args | type == "array" and all(.[];
+      (.args | type == "array" and all(.[]; obj and
         (.name | type == "string" and length > 0) and
         ((.qedspec_type == null) or (.qedspec_type | type == "string" and length > 0)))))) and
-    (.structural_candidates | type == "array" and all(.[];
+    (.structural_candidates | type == "array" and all(.[]; obj and
       (.id | structural_id) and
       (.kind | type == "string" and length > 0) and
       (.scope | type == "string" and length > 0) and
@@ -68,7 +69,7 @@ validate_dossier() {
       (.probe_confidence | enum(["high", "medium", "low"])) and
       (.ratification | enum(["pending", "user", "rejected", "bug"])) and
       (if (.ratification == "rejected" or .ratification == "bug") then (.rationale | type == "string" and length > 0) else true end))) and
-    (.asset_flows | type == "array" and all(.[];
+    (.asset_flows | type == "array" and all(.[]; obj and
       (.id | stable_id) and
       (.handler | type == "string" and length > 0) and
       (.asset | type == "string" and length > 0) and
@@ -76,41 +77,41 @@ validate_dossier() {
       (.destination | type == "string" and length > 0) and
       (.nominal_amount | type == "string" and length > 0) and
       (.metadata | metadata))) and
-    (.quantities | type == "array" and all(.[];
+    (.quantities | type == "array" and all(.[]; obj and
       (.id | stable_id) and
       (.symbol | type == "string" and length > 0) and
       (.unit | type == "string" and length > 0) and
       (.scale | type == "string" and length > 0) and
       (.rounding | enum(["exact", "floor", "ceil", "nearest", "unknown"])) and
       (.metadata | metadata))) and
-    (.paired_operations | type == "array" and all(.[];
+    (.paired_operations | type == "array" and all(.[]; obj and
       (.id | stable_id) and
       (.left_operation | type == "string" and length > 0) and
       (.right_operation | type == "string" and length > 0) and
       (.relationship | type == "string" and length > 0) and
       (.metadata | metadata))) and
-    (.lifecycle_edges | type == "array" and all(.[];
+    (.lifecycle_edges | type == "array" and all(.[]; obj and
       (.id | stable_id) and
       (.account | type == "string" and length > 0) and
       (.handler | type == "string" and length > 0) and
       (.from | type == "string" and length > 0) and
       (.to | type == "string" and length > 0) and
       (.metadata | metadata))) and
-    (.authority_capabilities | type == "array" and all(.[];
+    (.authority_capabilities | type == "array" and all(.[]; obj and
       (.id | stable_id) and
       (.role | type == "string" and length > 0) and
       (.identity_anchor | type == "string" and length > 0) and
       (.handler | type == "string" and length > 0) and
       (.effects | type == "array" and length > 0) and
       (.metadata | metadata))) and
-    (.economic_equations | type == "array" and all(.[];
+    (.economic_equations | type == "array" and all(.[]; obj and
       (.id | stable_id) and
       (.name | type == "string" and length > 0) and
       (.expression | type == "string" and length > 0) and
       (.scope | type == "array" and length > 0) and
       (.tolerance | type == "string" and length > 0) and
       (.metadata | metadata))) and
-    (.external_assumptions | type == "array" and all(.[];
+    (.external_assumptions | type == "array" and all(.[]; obj and
       (.id | stable_id) and
       (.kind | enum(["oracle", "token", "cpi", "clock", "keeper", "governance", "dependency", "other"])) and
       (.claim | type == "string" and length > 0) and
@@ -126,6 +127,7 @@ validate_dossier() {
 validate_manifest() {
   jq -e '
     def enum($values): . as $value | ($values | index($value)) != null;
+    def obj: type == "object";
     def stable_id: type == "string" and test("^[a-z][a-z0-9_-]*$");
     .schema_version == 1 and
     .schema_uri == "https://qedgen.dev/schemas/auditor/audit-run-manifest-v1.schema.json" and
@@ -134,7 +136,7 @@ validate_manifest() {
     (.target | type == "object") and
     (.target.program_root | type == "string" and length > 0) and
     (.target.mode | enum(["spec-aware", "spec-less"])) and
-    (.lanes | type == "array" and length > 0 and all(.[];
+    (.lanes | type == "array" and length > 0 and all(.[]; obj and
       (.name | enum(["source-review", "ordinary-probe", "compile", "mollusk", "miri", "crucible-protocol", "crucible-skeleton", "crucible-domain"])) and
       (.status | enum(["not-run", "queued", "running", "passed", "failed", "blocked", "not-applicable"])) and
       (if .status == "blocked" then
@@ -151,6 +153,7 @@ validate_manifest() {
 validate_handoff() {
   jq -e '
     def enum($values): . as $value | ($values | index($value)) != null;
+    def obj: type == "object";
     def clause:
       type == "object" and
       (.candidate_id | type == "string" and length > 0) and
@@ -170,7 +173,7 @@ validate_handoff() {
     (.layers.structural | type == "array" and all(.[]; clause)) and
     (.layers.domain | type == "array" and all(.[]; clause)) and
     (.layers.regression | type == "array" and all(.[]; clause)) and
-    (.language_gaps | type == "array" and all(.[];
+    (.language_gaps | type == "array" and all(.[]; obj and
       (.candidate_id | type == "string" and length > 0) and
       (.reason | type == "string" and length > 0) and
       (.current_language_support | type == "string" and length > 0) and
@@ -181,6 +184,7 @@ validate_handoff() {
 validate_sequences() {
   jq -e '
     def enum($values): . as $value | ($values | index($value)) != null;
+    def obj: type == "object";
     def unresolved:
       type == "object" and
       (.name | type == "string" and length > 0) and
@@ -194,7 +198,7 @@ validate_sequences() {
       (.unresolved_parameters | type == "array" and all(.[]; unresolved));
     .schema_version == 1 and
     .schema_uri == "https://qedgen.dev/schemas/auditor/domain-sequences-v1.schema.json" and
-    (.plans | type == "array" and all(.[];
+    (.plans | type == "array" and all(.[]; obj and
       (.id | type == "string" and length > 0) and
       (.kind | enum(["paired_round_trip", "lifecycle_transition"])) and
       (.title | type == "string" and length > 0) and
@@ -204,7 +208,7 @@ validate_sequences() {
       (.teardown | type == "array" and all(.[]; action)) and
       (.provenance_candidate_ids | type == "array" and length > 0) and
       (.unresolved_parameters | type == "array" and all(.[]; unresolved)))) and
-    (.exclusions | type == "array" and all(.[];
+    (.exclusions | type == "array" and all(.[]; obj and
       (.candidate_id | type == "string" and length > 0) and
       (.collection | enum(["paired_operations", "lifecycle_edges"])) and
       (.ratification | enum(["auto", "user", "pending", "rejected", "bug"])) and
@@ -219,11 +223,13 @@ validate_sequence_bindings() {
     .schema_uri == "https://qedgen.dev/schemas/auditor/domain-sequence-bindings-v1.schema.json" and
     .source_sequence_schema_uri == "https://qedgen.dev/schemas/auditor/domain-sequences-v1.schema.json" and
     ((.source_audit_id == null) or (.source_audit_id | type == "string" and length > 0)) and
-    (.bindings | type == "array" and all(.[];
+    (.bindings | type == "array" and all(.[]; (type == "object") and
       (.plan_id | type == "string" and length > 0) and
       ((.action == null) or
-       ((.action.phase | IN("setup", "forward", "reverse", "teardown")) and
+       ((.action | type == "object") and
+        (.action.phase | IN("setup", "forward", "reverse", "teardown")) and
         (.action.index | type == "number" and . >= 0))) and
+      (.parameter | type == "object") and
       (.parameter.name | type == "string" and length > 0) and
       (.parameter.kind | kind)))
   ' "$1" >/dev/null
@@ -233,24 +239,27 @@ validate_resolved_sequences() {
   jq -e '
     def resolved_binding:
       type == "object" and
+      (.parameter | type == "object") and
       (.parameter.name | type == "string" and length > 0) and
+      (.provenance | type == "object") and
       .provenance.source == "user" and
       (.provenance.plan_id | type == "string" and length > 0);
     def action:
       type == "object" and
       (.handler | type == "string" and length > 0) and
       (.resolved_bindings | type == "array" and all(.[]; resolved_binding));
+    def actions: type == "array" and all(.[]; action);
     .schema_version == 1 and
     .schema_uri == "https://qedgen.dev/schemas/auditor/resolved-domain-sequences-v1.schema.json" and
     .source_sequence_schema_uri == "https://qedgen.dev/schemas/auditor/domain-sequences-v1.schema.json" and
     .source_bindings_schema_uri == "https://qedgen.dev/schemas/auditor/domain-sequence-bindings-v1.schema.json" and
-    (.plans | type == "array" and all(.[];
+    (.plans | type == "array" and all(.[]; (type == "object") and
       (.id | type == "string" and length > 0) and
-      (.setup | all(.[]; action)) and
-      (.forward | all(.[]; action)) and
-      (.reverse | all(.[]; action)) and
-      (.teardown | all(.[]; action)) and
-      (.resolved_plan_bindings | all(.[]; resolved_binding))))
+      (.setup | actions) and
+      (.forward | actions) and
+      (.reverse | actions) and
+      (.teardown | actions) and
+      (.resolved_plan_bindings | type == "array" and all(.[]; resolved_binding))))
   ' "$1" >/dev/null
 }
 
@@ -261,9 +270,10 @@ validate_account_overlay() {
     .source_resolved_sequence_schema_uri == "https://qedgen.dev/schemas/auditor/resolved-domain-sequences-v1.schema.json" and
     (.handlers | type == "object" and all(to_entries[];
       (.key | length > 0) and
+      (.value | type == "object") and
       (.value.accounts | type == "object" and all(to_entries[];
         (.key | length > 0) and
-        (.value | test("^fixture:[A-Za-z0-9_][A-Za-z0-9_.-]*$")))) and
+        (.value | type == "string" and test("^fixture:[A-Za-z0-9_][A-Za-z0-9_.-]*$")))) and
       (.value.provenance | type == "object")))
   ' "$1" >/dev/null
 }
@@ -276,7 +286,7 @@ validate_replay_report() {
     (.resolved_document_sha256 | sha256) and
     (.account_binding_overlay_sha256 | sha256) and
     (.harness_sha256 | sha256) and
-    (.records | type == "array" and length > 0 and all(.[];
+    (.records | type == "array" and length > 0 and all(.[]; (type == "object") and
       (.plan_id | type == "string" and length > 0) and
       (.seed_path | type == "string" and length > 0) and
       (.seed_sha256 | sha256) and
@@ -346,6 +356,16 @@ fi
 validate_dossier "$fixtures/valid-domain-dossier.json"
 if validate_dossier "$fixtures/invalid-domain-dossier.json"; then
   echo "invalid domain dossier fixture unexpectedly passed" >&2
+  exit 1
+fi
+
+# A type-wrong field (string args instead of objects) must be a CLEAN
+# validation failure (jq -e false → exit 1), not a jq runtime crash
+# (exit 5) — the crash was GH #250.
+rc=0
+validate_dossier "$fixtures/invalid-args-domain-dossier.json" || rc=$?
+if [[ $rc -ne 1 ]]; then
+  echo "string-typed handlers[].args fixture: expected clean invalid (exit 1), got exit $rc" >&2
   exit 1
 fi
 
