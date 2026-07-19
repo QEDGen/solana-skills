@@ -166,8 +166,15 @@ fn check_example(example: &Example, report: &mut RegenDriftReport, mode: WriteMo
     for (rel, target) in program_outputs(&example.root)? {
         let parsed = crate::check::parse_spec_file(&spec_path)?;
         let mir = crate::mir::lower(&parsed);
-        crate::codegen_mir::generate(&mir, &parsed, &spec_path, &temp_root.join(&rel), target)
-            .with_context(|| format!("regenerating {} for {}", rel.display(), example.name))?;
+        crate::codegen_mir::generate(
+            &mir,
+            &parsed,
+            &spec_path,
+            &temp_root.join(&rel),
+            target,
+            crate::codegen_mir::RegenOptions::default(),
+        )
+        .with_context(|| format!("regenerating {} for {}", rel.display(), example.name))?;
     }
 
     generate_existing_artifacts(&example.root, &temp_root, &spec_path)

@@ -6,17 +6,25 @@ use super::*;
 
 /// Pinocchio `src/lib.rs` emitter: no_std crate root + module decls +
 /// `declare_id!` + `entrypoint!` + the byte-dispatch `process_instruction`.
-/// Idempotent: a pre-existing `src/lib.rs` is left untouched (user-owned).
+/// Idempotent: a pre-existing `src/lib.rs` is left untouched (user-owned)
+/// unless `force` regenerates it (#288 — recoverability is asserted by
+/// the caller before any artifact is written).
 pub(crate) fn emit_pinocchio_program_lib(
     spec: &ParsedSpec,
     fp: &SpecFingerprint,
     output_dir: &Path,
+    force: bool,
 ) -> Result<()> {
     let surface = FrameworkSurface::for_target(Target::Pinocchio);
     let src_dir = output_dir.join("src");
     std::fs::create_dir_all(&src_dir)?;
     let lib_path = src_dir.join("lib.rs");
-    if lib_path.exists() {
+    if lib_path.exists() && force {
+        eprintln!(
+            "regenerating user-owned {} (--force) — previous version is in git history.",
+            lib_path.display()
+        );
+    } else if lib_path.exists() {
         eprintln!(
             "programs/{}/src/lib.rs already exists — skipping (user-owned). guards.rs regenerated.",
             output_dir

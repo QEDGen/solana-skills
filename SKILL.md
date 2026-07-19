@@ -114,6 +114,8 @@ cargo test --manifest-path programs/Cargo.toml
 
 **No `--fill` flag.** The agent reads the generated files, greps for `todo!()`, looks up the matching handler / accounts / effect in the `.qedspec`, and edits each body in place. The old `qedgen codegen --fill` / `--fill-tests` flags emitted structured prompts to stdout for the agent to consume — useful before agents had file tools, ceremony now. They're soft-deprecated in v2.18 (print a warning, still run) and will be removed in v3.0. Same direct-edit pattern applies to integration tests and Crucible action bodies.
 
+**Spec-level renames.** `lib.rs` and `instructions/*.rs` are user-owned, so after renaming an account, state field, or handler in the spec, a plain `codegen` regenerates their siblings (guards.rs, state.rs, harnesses) but skips them with a stale-revision WARNING. Recover with `codegen --merge-accounts` (Anchor: regenerates only the `#[derive(Accounts)]` structs, handler fills survive) or `codegen --force` (regenerates the user-owned set wholesale — re-apply fills from git history). Both refuse to run unless the affected files are committed and unmodified in git, so commit before renaming.
+
 Step 5. Verify generated backends.
 
 ```bash

@@ -1017,6 +1017,26 @@ pub(crate) enum Commands {
         #[arg(long, default_value = "./programs")]
         output_dir: PathBuf,
 
+        /// Regenerate the USER-OWNED files too (`src/lib.rs`,
+        /// `src/instructions/*.rs`) — the rename workflow where regen +
+        /// re-fill beats hand-merging (#288). Destructive: handler fills
+        /// are overwritten, so every affected file must have a committed,
+        /// unmodified git baseline (the recovery path); dirty or untracked
+        /// files abort before anything is written.
+        #[arg(long, conflicts_with = "merge_accounts")]
+        force: bool,
+
+        /// Surgical alternative to --force for spec-level renames (#288):
+        /// regenerate only the `#[derive(Accounts)]` structs inside the
+        /// user-owned `lib.rs`, preserving handler fills and everything
+        /// else (the Cargo.toml section-merge doctrine applied to Rust
+        /// items). Hand-tuned constraints inside replaced structs are
+        /// overwritten, so the same git-baseline guard applies. Structs
+        /// with no matching handler (e.g. pre-rename leftovers) are left
+        /// in place and reported. Anchor target only.
+        #[arg(long)]
+        merge_accounts: bool,
+
         /// Generate Kani proof harnesses
         #[arg(long)]
         kani: bool,
