@@ -1,0 +1,223 @@
+{
+  "schema_version": 1,
+  "schema_uri": "https://qedgen.dev/schemas/auditor/domain-dossier-v1.schema.json",
+  "audit_id": "fee_vault_20260714",
+  "target": {
+    "program_root": "programs/fee-vault",
+    "runtime": "anchor",
+    "mode": "spec-less",
+    "spec": null,
+    "source_commit": "0123456789abcdef0123456789abcdef01234567"
+  },
+  "handlers": [
+    {
+      "name": "update_fee",
+      "source_path": "programs/fee-vault/src/update_fee.rs",
+      "accounts_type": "UpdateFee",
+      "args": [
+        "fee_bps",
+        "recipient"
+      ]
+    }
+  ],
+  "structural_candidates": [
+    {
+      "id": "c-fee-authority",
+      "kind": "account_signer_check",
+      "scope": "handler:update_fee",
+      "summary": "Fee updates authenticate the stored administrator.",
+      "suggested_syntax": "auth admin",
+      "probe_confidence": "high",
+      "ratification": "pending",
+      "rationale": null,
+      "finding_ids": [
+        "finding_fee_signer"
+      ],
+      "evidence_count": 1
+    }
+  ],
+  "asset_flows": [
+    {
+      "id": "flow_deposit",
+      "handler": "deposit",
+      "asset": "underlying_mint",
+      "source": "user_token_account",
+      "destination": "vault_token_account",
+      "nominal_amount": "amount",
+      "delivered_amount": "post_balance - pre_balance",
+      "fee_expression": null,
+      "authority": "user",
+      "state_mutations": [
+        "vault.total_assets += delivered_amount"
+      ],
+      "metadata": {
+        "confidence": "literal",
+        "ratification": "auto",
+        "rationale": "Transfer and measured balance delta are explicit.",
+        "source_anchors": [
+          {
+            "path": "programs/fee-vault/src/deposit.rs",
+            "line_start": 18,
+            "line_end": 29,
+            "symbol": "deposit",
+            "excerpt": "let delivered = post.checked_sub(pre)?;"
+          }
+        ],
+        "verification_lanes": [
+          "manual",
+          "mollusk",
+          "crucible"
+        ]
+      }
+    }
+  ],
+  "quantities": [
+    {
+      "id": "qty_total_assets",
+      "symbol": "vault.total_assets",
+      "unit": "underlying atoms",
+      "scale": "mint.decimals",
+      "rounding": "exact",
+      "valid_range": "0..=u64::MAX",
+      "conversions": [],
+      "metadata": {
+        "confidence": "derived",
+        "ratification": "pending",
+        "rationale": "Field name and transfer site imply underlying atoms.",
+        "source_anchors": [
+          {
+            "path": "programs/fee-vault/src/state.rs",
+            "line_start": 9,
+            "symbol": "Vault::total_assets",
+            "excerpt": "pub total_assets: u64"
+          }
+        ],
+        "verification_lanes": [
+          "manual",
+          "mollusk"
+        ]
+      }
+    }
+  ],
+  "paired_operations": [],
+  "lifecycle_edges": [
+    {
+      "id": "edge_initialize",
+      "account": "vault",
+      "handler": "initialize",
+      "from": "Uninitialized",
+      "to": "Active",
+      "guards": [
+        "vault.is_initialized == false"
+      ],
+      "terminal": false,
+      "metadata": {
+        "confidence": "literal",
+        "ratification": "auto",
+        "rationale": "The handler reads and sets is_initialized.",
+        "source_anchors": [
+          {
+            "path": "programs/fee-vault/src/initialize.rs",
+            "line_start": 14,
+            "line_end": 18,
+            "symbol": "initialize",
+            "excerpt": "require!(!vault.is_initialized);"
+          }
+        ],
+        "verification_lanes": [
+          "manual",
+          "crucible"
+        ]
+      }
+    }
+  ],
+  "authority_capabilities": [
+    {
+      "id": "cap_admin_fee",
+      "role": "admin",
+      "identity_anchor": "vault.admin == admin.key() && admin.is_signer",
+      "handler": "update_fee",
+      "effects": [
+        "vault.fee_bps"
+      ],
+      "limits": [
+        "fee_bps <= 10000"
+      ],
+      "revocation_path": null,
+      "metadata": {
+        "confidence": "literal",
+        "ratification": "auto",
+        "rationale": "Signer and has_one constraints are explicit.",
+        "source_anchors": [
+          {
+            "path": "programs/fee-vault/src/update_fee.rs",
+            "line_start": 7,
+            "line_end": 12,
+            "symbol": "UpdateFee",
+            "excerpt": "#[account(has_one = admin)]"
+          }
+        ],
+        "verification_lanes": [
+          "manual",
+          "mollusk",
+          "crucible"
+        ]
+      }
+    }
+  ],
+  "economic_equations": [
+    {
+      "id": "eq_asset_conservation",
+      "name": "vault asset conservation",
+      "expression": "vault.total_assets == deposits - withdrawals",
+      "scope": [
+        "deposit",
+        "withdraw"
+      ],
+      "tolerance": "0 underlying atoms",
+      "unit_check": "compatible",
+      "metadata": {
+        "confidence": "semantic",
+        "ratification": "pending",
+        "rationale": "Cross-handler sum requires protocol intent.",
+        "source_anchors": [
+          {
+            "path": "programs/fee-vault/src/state.rs",
+            "line_start": 9,
+            "symbol": "Vault::total_assets",
+            "excerpt": "pub total_assets: u64"
+          }
+        ],
+        "verification_lanes": [
+          "manual",
+          "crucible"
+        ]
+      }
+    }
+  ],
+  "external_assumptions": [
+    {
+      "id": "assume_token_delivery",
+      "kind": "token",
+      "claim": "Accounting uses measured delivery for fee-bearing mints.",
+      "failure_effect": "Recorded assets can exceed the vault token balance.",
+      "metadata": {
+        "confidence": "derived",
+        "ratification": "pending",
+        "rationale": "Token interface accepts Token-2022.",
+        "source_anchors": [
+          {
+            "path": "programs/fee-vault/src/deposit.rs",
+            "line_start": 18,
+            "symbol": "deposit",
+            "excerpt": "token_interface::transfer_checked"
+          }
+        ],
+        "verification_lanes": [
+          "manual",
+          "mollusk"
+        ]
+      }
+    }
+  ]
+}
