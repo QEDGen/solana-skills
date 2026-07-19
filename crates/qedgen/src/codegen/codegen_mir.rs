@@ -14,12 +14,26 @@ use crate::fingerprint::SpecFingerprint;
 use crate::mir::Mir;
 use crate::Target;
 
+/// #288: opt-in regeneration of the user-owned file set. `force`
+/// overwrites `src/lib.rs` + `src/instructions/*.rs` wholesale (the
+/// regen + re-fill rename workflow); `merge_accounts` rewrites only the
+/// `#[derive(Accounts)]` structs inside a user-owned `lib.rs` (Anchor).
+/// Both destroy user content, so [`assert_git_recoverable`] gates them:
+/// every file they would touch needs a committed, unmodified git
+/// baseline first.
+#[derive(Clone, Copy, Default)]
+pub struct RegenOptions {
+    pub force: bool,
+    pub merge_accounts: bool,
+}
+
 struct CodegenCtx<'a> {
     mir: &'a Mir,
     parsed: &'a ParsedSpec,
     fp: &'a SpecFingerprint,
     spec_path: &'a Path,
     output_dir: &'a Path,
+    opts: RegenOptions,
 }
 
 /// Per-framework codegen. Every `emit_*` method defaults to the shared
@@ -39,6 +53,7 @@ trait FrameworkCodegen {
             ctx.output_dir,
             self.target(),
             ctx.spec_path,
+            ctx.opts,
         )
     }
 
@@ -62,6 +77,7 @@ trait FrameworkCodegen {
             ctx.spec_path,
             ctx.output_dir,
             self.target(),
+            ctx.opts.force,
         )
     }
 
@@ -130,6 +146,7 @@ pub fn generate(
     spec_path: &Path,
     output_dir: &Path,
     target: Target,
+    opts: RegenOptions,
 ) -> Result<()> {
     if parsed.handlers.is_empty() {
         anyhow::bail!("No handlers found in the spec — is this a valid qedspec file?");
@@ -144,6 +161,34 @@ pub fn generate(
         );
     }
 
+    if opts.merge_accounts && !matches!(target, Target::Anchor) {
+        anyhow::bail!(
+            "--merge-accounts is Anchor-only: on {:?} the accounts structs live in the \
+             user-owned instructions/<name>.rs files, not lib.rs. Use --force to \
+             regenerate the user-owned set wholesale.",
+            target
+        );
+    }
+
+    // #288: both destructive modes need git as the recovery path — refuse
+    // to overwrite any user-owned file that has no committed, unmodified
+    // baseline, BEFORE any sibling artifact is written.
+    if opts.force || opts.merge_accounts {
+        let mut targets = vec![output_dir.join("src").join("lib.rs")];
+        if opts.force {
+            for handler in &parsed.handlers {
+                targets.push(
+                    output_dir
+                        .join("src")
+                        .join("instructions")
+                        .join(format!("{}.rs", handler.name)),
+                );
+            }
+        }
+        targets.retain(|p| p.exists());
+        assert_git_recoverable(output_dir, &targets)?;
+    }
+
     std::fs::create_dir_all(output_dir)?;
 
     let fp = crate::fingerprint::compute_fingerprint(parsed);
@@ -153,6 +198,7 @@ pub fn generate(
         fp: &fp,
         spec_path,
         output_dir,
+        opts,
     };
 
     match target {
@@ -310,11 +356,55 @@ fn warn_stale_skip(what: &str, drift_root: &Path) {
         "WARNING: {what} was generated from a DIFFERENT spec revision — its #[qed] \
          spec_hash stamps don't match the current spec. After a spec-level rename \
          the regenerated files (state.rs, guards.rs, harnesses) disagree with it \
-         and the crate may not compile. Update it by hand, or delete it and re-run \
-         `qedgen codegen` to regenerate (then re-apply your handler fills); \
+         and the crate may not compile. Recover with `qedgen codegen --merge-accounts` \
+         (Anchor: regenerates only the #[derive(Accounts)] structs, keeping handler \
+         fills) or `qedgen codegen --force` (regenerates the user-owned set wholesale; \
+         re-apply fills from git history), or update it by hand; \
          `qedgen check --drift {} ` lists per-handler drift.",
         drift_root.display()
     );
+}
+
+/// #288: gate for the destructive regen modes. Every file they would
+/// overwrite must be recoverable from git — tracked AND unmodified —
+/// otherwise the overwrite silently destroys handler fills with no way
+/// back. `git status --porcelain` reports exactly the unrecoverable set
+/// (untracked `??`, or any staged/unstaged modification).
+fn assert_git_recoverable(output_dir: &Path, files: &[std::path::PathBuf]) -> Result<()> {
+    if files.is_empty() {
+        return Ok(());
+    }
+    let out = std::process::Command::new("git")
+        .arg("status")
+        .arg("--porcelain")
+        .arg("--untracked-files=all")
+        .arg("--")
+        .args(files)
+        .current_dir(output_dir)
+        .output();
+    let out = match out {
+        Ok(out) if out.status.success() => out,
+        _ => anyhow::bail!(
+            "--force/--merge-accounts need git history as the recovery path, but \
+             `git status` failed under {} — is this a git repository? \
+             (qedgen is git-native; run `git init` + commit first.)",
+            output_dir.display()
+        ),
+    };
+    let dirty: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.trim_end().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    if !dirty.is_empty() {
+        anyhow::bail!(
+            "refusing to overwrite user-owned files that have no committed, unmodified \
+             git baseline — the overwrite would be unrecoverable:\n  {}\n\
+             Commit or stash them first (`git add -A && git commit`), then re-run.",
+            dirty.join("\n  ")
+        );
+    }
+    Ok(())
 }
 
 fn emit_lib(
@@ -324,13 +414,16 @@ fn emit_lib(
     output_dir: &Path,
     target: Target,
     spec_path: &Path,
+    opts: RegenOptions,
 ) -> Result<()> {
     use crate::codegen_shared::{to_pascal_case, FrameworkSurface};
 
     // Pinocchio: dedicated helper emits the no_std entrypoint +
     // byte-dispatch from ParsedSpec.
     if matches!(target, Target::Pinocchio) {
-        return crate::codegen_shared::emit_pinocchio_program_lib(parsed, fp, output_dir);
+        return crate::codegen_shared::emit_pinocchio_program_lib(
+            parsed, fp, output_dir, opts.force,
+        );
     }
 
     let surface = FrameworkSurface::for_target(target);
@@ -338,7 +431,19 @@ fn emit_lib(
     std::fs::create_dir_all(&src_dir)?;
 
     let lib_path = src_dir.join("lib.rs");
-    if lib_path.exists() {
+    if lib_path.exists() && opts.force {
+        // #288: recoverability was asserted up front in `generate`.
+        eprintln!(
+            "regenerating user-owned {} (--force) — previous version is in git history; \
+             re-apply handler fills from there.",
+            lib_path.display()
+        );
+    } else if lib_path.exists() {
+        // #288: surgical rename recovery — regenerate only the
+        // `#[derive(Accounts)]` structs, keep everything else.
+        if opts.merge_accounts && matches!(target, Target::Anchor) {
+            return merge_accounts_into_lib(mir, parsed, &lib_path);
+        }
         eprintln!(
             "programs/{}/src/lib.rs already exists — skipping (user-owned). guards.rs regenerated.",
             output_dir
@@ -590,6 +695,186 @@ fn emit_lib(
     Ok(())
 }
 
+/// Where a handler's `#[derive(Accounts)]` struct sits inside a
+/// user-owned `lib.rs` — or why it can't be merged.
+enum StructLocation {
+    /// Byte range covering the struct's leading attribute/doc lines
+    /// through its closing `}` (inclusive end).
+    Found(std::ops::Range<usize>),
+    /// A same-named struct exists but doesn't derive `Accounts` —
+    /// replacing it would clobber an unrelated user type, and appending
+    /// a duplicate name wouldn't compile. Left untouched.
+    Foreign,
+    Missing,
+}
+
+/// Locate `pub struct <name>` in `text` together with its contiguous
+/// leading attribute/doc-comment lines. Only a block whose leading
+/// attributes contain `#[derive(Accounts…` qualifies as replaceable.
+fn locate_accounts_struct(text: &str, name: &str) -> StructLocation {
+    let bytes = text.as_bytes();
+    let needle = format!("pub struct {name}");
+    let mut search_from = 0usize;
+    let mut saw_foreign = false;
+    while let Some(rel) = text[search_from..].find(&needle) {
+        let at = search_from + rel;
+        search_from = at + needle.len();
+        // Name boundary: reject prefix matches (`Pause` inside `Pause2`).
+        match bytes.get(at + needle.len()) {
+            Some(b) if b.is_ascii_alphanumeric() || *b == b'_' => continue,
+            _ => {}
+        }
+        // The declaration must start its line (filters `// pub struct …`
+        // comment mentions).
+        let line_start = text[..at].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        if text[line_start..at].trim() != "" {
+            continue;
+        }
+        let Some(open_rel) = text[at..].find('{') else {
+            continue;
+        };
+        let Some(close) = qedgen_hash_core::scan_balanced_block(bytes, at + open_rel) else {
+            continue;
+        };
+        // Walk back over contiguous attribute / doc-comment lines to
+        // include `#[derive(Accounts)]` (generated struct-level attrs are
+        // single-line; a hand-introduced multi-line attr above the struct
+        // is not walked — the git-baseline guard makes any mis-merge
+        // recoverable).
+        let mut region_start = line_start;
+        // `prev_end` is the index of the '\n' terminating the previous line.
+        while let Some(prev_end) = region_start.checked_sub(1) {
+            let prev_start = text[..prev_end].rfind('\n').map(|i| i + 1).unwrap_or(0);
+            let prev = text[prev_start..prev_end].trim();
+            if prev.starts_with("#[") || prev.starts_with("//") {
+                region_start = prev_start;
+            } else {
+                break;
+            }
+        }
+        if text[region_start..line_start].contains("#[derive(Accounts") {
+            return StructLocation::Found(region_start..close + 1);
+        }
+        saw_foreign = true;
+    }
+    if saw_foreign {
+        StructLocation::Foreign
+    } else {
+        StructLocation::Missing
+    }
+}
+
+/// #288 option 3 — surgical rename recovery for a user-owned Anchor
+/// `lib.rs`: regenerate every current handler's `#[derive(Accounts)]`
+/// struct in place (the Cargo.toml section-merge doctrine applied to
+/// Rust items), preserving the `#[program]` mod, handler fills, imports,
+/// and anything else the user wrote. Structs with no matching handler
+/// (pre-rename leftovers, hand-added instructions) are left in place and
+/// reported. The caller has already asserted a clean git baseline.
+fn merge_accounts_into_lib(mir: &Mir, parsed: &ParsedSpec, lib_path: &Path) -> Result<()> {
+    use crate::codegen_shared::{to_pascal_case, FrameworkSurface};
+
+    let existing = std::fs::read_to_string(lib_path)?;
+    let surface = FrameworkSurface::for_target(Target::Anchor);
+    let is_multi = parsed.account_types.len() > 1;
+    let default_state_name = format!("{}Account", to_pascal_case(&mir.name));
+
+    let fresh: Vec<(String, String)> = parsed
+        .handlers
+        .iter()
+        .map(|h| {
+            (
+                to_pascal_case(&h.name),
+                crate::codegen_shared::render_handler_accounts_struct(
+                    h,
+                    parsed,
+                    is_multi,
+                    &default_state_name,
+                    &surface,
+                    Target::Anchor,
+                ),
+            )
+        })
+        .collect();
+
+    let mut merged = existing.clone();
+    let mut replaced: Vec<&str> = Vec::new();
+    let mut added: Vec<&str> = Vec::new();
+    let mut foreign: Vec<&str> = Vec::new();
+    for (name, render) in &fresh {
+        match locate_accounts_struct(&merged, name) {
+            StructLocation::Found(range) => {
+                merged.replace_range(range, render.trim_end());
+                replaced.push(name);
+            }
+            StructLocation::Foreign => foreign.push(name),
+            StructLocation::Missing => {
+                // New (or renamed-to) handler: append before the trailing
+                // END marker when present, else at EOF.
+                let insertion = format!("\n{}", render);
+                match merged.rfind("// ---- END GENERATED ----") {
+                    Some(marker) => merged.insert_str(marker, &insertion),
+                    None => {
+                        if !merged.ends_with('\n') {
+                            merged.push('\n');
+                        }
+                        merged.push_str(&insertion);
+                    }
+                }
+                added.push(name);
+            }
+        }
+    }
+
+    // Orphans: derive(Accounts) structs with no current handler — a
+    // renamed handler's old struct, or a hand-added instruction's. Never
+    // deleted (the latter is legitimate user code); reported so rename
+    // leftovers get cleaned up by hand.
+    let current: std::collections::HashSet<&str> = fresh.iter().map(|(n, _)| n.as_str()).collect();
+    let mut orphans: Vec<String> = Vec::new();
+    let mut from = 0usize;
+    while let Some(rel) = merged[from..].find("#[derive(Accounts") {
+        let at = from + rel;
+        from = at + 1;
+        let window_end = (at + 400).min(merged.len());
+        if let Some(srel) = merged[at..window_end].find("pub struct ") {
+            let name_start = at + srel + "pub struct ".len();
+            let name: String = merged[name_start..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if !name.is_empty() && !current.contains(name.as_str()) {
+                orphans.push(name);
+            }
+        }
+    }
+
+    if merged != existing {
+        crate::codegen_shared::write_generated_file(lib_path, &merged)?;
+    }
+    eprintln!(
+        "merged #[derive(Accounts)] structs into user-owned {} (--merge-accounts): \
+         {} replaced, {} added; handler fills untouched.",
+        lib_path.display(),
+        replaced.len(),
+        added.len()
+    );
+    if !foreign.is_empty() {
+        eprintln!(
+            "warning: not merged (same-named struct without #[derive(Accounts)]): {}",
+            foreign.join(", ")
+        );
+    }
+    if !orphans.is_empty() {
+        eprintln!(
+            "note: structs with no matching spec handler were left in place \
+             (delete by hand if they belonged to a renamed handler): {}",
+            orphans.join(", ")
+        );
+    }
+    Ok(())
+}
+
 /// Emit `src/instructions/mod.rs` + per-handler `<name>.rs` scaffolds.
 /// Per-handler files are USER-OWNED — emitted only when missing; mod.rs
 /// is always regenerated. Scaffold bodies render from the matching
@@ -601,6 +886,7 @@ fn emit_instructions(
     spec_path: &Path,
     output_dir: &Path,
     target: Target,
+    force: bool,
 ) -> Result<()> {
     use crate::codegen_shared::to_pascal_case;
 
@@ -652,7 +938,14 @@ fn emit_instructions(
             })?;
 
         let handler_path = instr_dir.join(format!("{}.rs", handler.name));
-        if handler_path.exists() {
+        if handler_path.exists() && force {
+            // #288: recoverability was asserted up front in `generate`.
+            eprintln!(
+                "regenerating user-owned {} (--force) — previous version is in git history; \
+                 re-apply the handler fill from there.",
+                handler_path.display()
+            );
+        } else if handler_path.exists() {
             eprintln!(
                 "programs/{}/src/instructions/{}.rs already exists — skipping (user-owned). guards.rs regenerated.",
                 output_dir
@@ -1425,6 +1718,166 @@ mod tests {
         );
     }
 
+    fn parse_spec(src: &str) -> (Mir, ParsedSpec) {
+        let parsed = crate::chumsky_adapter::parse_str(src).expect("parse");
+        let mir = crate::mir::lower(&parsed);
+        (mir, parsed)
+    }
+
+    fn spec_with_account(account: &str) -> String {
+        format!(
+            r#"spec Renamer
+program_id "11111111111111111111111111111111"
+type State | Active of {{ total : U64 }}
+handler poke : State.Active -> State.Active {{
+  accounts {{ {account} : writable }}
+  effect {{ Active.total += 1 }}
+}}
+"#
+        )
+    }
+
+    /// #288 --merge-accounts: an account rename regenerates the struct's
+    /// fields in place while user content elsewhere in lib.rs survives.
+    #[test]
+    fn merge_accounts_updates_renamed_fields_preserving_user_content() {
+        let (mir_a, parsed_a) = parse_spec(&spec_with_account("vault"));
+        let fp = crate::fingerprint::compute_fingerprint(&parsed_a);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let temp = tmp.path();
+        std::fs::create_dir_all(temp.join("src")).expect("mk src");
+        emit_lib(
+            &mir_a,
+            &parsed_a,
+            &fp,
+            temp,
+            Target::Anchor,
+            Path::new("unused.qedspec"),
+            RegenOptions::default(),
+        )
+        .expect("emit lib");
+
+        // Simulate user ownership: an edit outside the Accounts structs.
+        let lib_path = temp.join("src/lib.rs");
+        let lib = std::fs::read_to_string(&lib_path).expect("lib.rs");
+        assert!(lib.contains("pub vault:"), "baseline has vault field");
+        std::fs::write(
+            &lib_path,
+            lib.replace("use super::*;", "use super::*; // USER-KEPT"),
+        )
+        .expect("user edit");
+
+        // Spec-level rename vault → treasury, then merge.
+        let (mir_b, parsed_b) = parse_spec(&spec_with_account("treasury"));
+        merge_accounts_into_lib(&mir_b, &parsed_b, &lib_path).expect("merge");
+
+        let merged = std::fs::read_to_string(&lib_path).expect("merged lib.rs");
+        assert!(
+            merged.contains("pub treasury:") && !merged.contains("pub vault:"),
+            "struct fields must pick up the rename; got:\n{merged}"
+        );
+        assert!(
+            merged.contains("// USER-KEPT"),
+            "user content outside the structs must survive the merge; got:\n{merged}"
+        );
+    }
+
+    /// #288 --merge-accounts: a handler rename appends the new struct and
+    /// leaves the old one in place (reported, never deleted — it may be a
+    /// hand-added instruction's).
+    #[test]
+    fn merge_accounts_appends_new_struct_keeps_orphan() {
+        let (mir_a, parsed_a) = parse_spec(&spec_with_account("vault"));
+        let fp = crate::fingerprint::compute_fingerprint(&parsed_a);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let temp = tmp.path();
+        std::fs::create_dir_all(temp.join("src")).expect("mk src");
+        emit_lib(
+            &mir_a,
+            &parsed_a,
+            &fp,
+            temp,
+            Target::Anchor,
+            Path::new("unused.qedspec"),
+            RegenOptions::default(),
+        )
+        .expect("emit lib");
+        let lib_path = temp.join("src/lib.rs");
+
+        // Handler rename poke → jab.
+        let renamed = spec_with_account("vault").replace("poke", "jab");
+        let (mir_b, parsed_b) = parse_spec(&renamed);
+        merge_accounts_into_lib(&mir_b, &parsed_b, &lib_path).expect("merge");
+
+        let merged = std::fs::read_to_string(&lib_path).expect("merged lib.rs");
+        assert!(
+            merged.contains("pub struct Jab"),
+            "renamed handler's struct must be appended; got:\n{merged}"
+        );
+        assert!(
+            merged.contains("pub struct Poke"),
+            "orphan struct is left in place for the user to delete; got:\n{merged}"
+        );
+    }
+
+    /// A same-named struct WITHOUT #[derive(Accounts)] is user territory:
+    /// never replaced, never duplicated.
+    #[test]
+    fn locate_accounts_struct_shapes() {
+        let text = "#[derive(Accounts)]\npub struct Pause<'info> {\n    pub a: u8,\n}\n\npub struct Pause2 {\n    pub b: u8,\n}\n";
+        assert!(matches!(
+            locate_accounts_struct(text, "Pause"),
+            StructLocation::Found(_)
+        ));
+        assert!(matches!(
+            locate_accounts_struct(text, "Pause2"),
+            StructLocation::Foreign
+        ));
+        assert!(matches!(
+            locate_accounts_struct(text, "Missing"),
+            StructLocation::Missing
+        ));
+        // Comment mentions don't count as declarations.
+        let commented = "// pub struct Ghost { }\n";
+        assert!(matches!(
+            locate_accounts_struct(commented, "Ghost"),
+            StructLocation::Missing
+        ));
+    }
+
+    /// #288 --force: an existing user-owned lib.rs is regenerated instead
+    /// of skipped (the git-recoverability guard lives in `generate`, not
+    /// here).
+    #[test]
+    fn force_regenerates_existing_lib() {
+        let (mir, parsed) = parse_spec(&spec_with_account("vault"));
+        let fp = crate::fingerprint::compute_fingerprint(&parsed);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let temp = tmp.path();
+        std::fs::create_dir_all(temp.join("src")).expect("mk src");
+        let lib_path = temp.join("src/lib.rs");
+        std::fs::write(&lib_path, "// stale user-owned content\n").expect("seed lib");
+
+        emit_lib(
+            &mir,
+            &parsed,
+            &fp,
+            temp,
+            Target::Anchor,
+            Path::new("unused.qedspec"),
+            RegenOptions {
+                force: true,
+                merge_accounts: false,
+            },
+        )
+        .expect("emit lib");
+        let lib = std::fs::read_to_string(&lib_path).expect("lib.rs");
+        assert!(
+            lib.contains("#[program]") && !lib.contains("stale user-owned content"),
+            "--force must regenerate over the existing file; got:\n{lib}"
+        );
+    }
+
     fn lower_fixture(rel_path: &str) -> (Mir, ParsedSpec) {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -1496,6 +1949,7 @@ handler poke : State.Active -> State.Active {
             temp,
             Target::Anchor,
             Path::new("unused.qedspec"),
+            RegenOptions::default(),
         )
         .expect("emit lib");
         let lib = std::fs::read_to_string(temp.join("src/lib.rs")).expect("lib.rs");
@@ -1534,6 +1988,7 @@ handler poke : State.Active -> State.Active {
             temp,
             Target::Anchor,
             Path::new("unused.qedspec"),
+            RegenOptions::default(),
         )
         .expect("emit lib");
         let lib = std::fs::read_to_string(temp.join("src/lib.rs")).expect("lib.rs");

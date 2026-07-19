@@ -74,6 +74,134 @@ fn quickstart_init_check_codegen_journey() {
     }
 }
 
+/// #288 rename→recover lane (the #253 dogfooding session, mechanized):
+/// scaffold → fill → commit → spec-level account rename → `codegen`
+/// warns on the stale user-owned skip → `--merge-accounts` surgically
+/// updates the `#[derive(Accounts)]` structs (fills preserved) →
+/// `--force` refuses while user-owned files are dirty and regenerates
+/// wholesale once committed.
+#[test]
+fn rename_recover_journey() {
+    common::ensure_qedgen_built();
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    let spec = |account: &str| {
+        format!(
+            r#"spec Renamer
+program_id "11111111111111111111111111111111"
+type State | Active of {{ total : U64 }}
+handler poke : State.Active -> State.Active {{
+  accounts {{ {account} : writable }}
+  effect {{ Active.total += 1 }}
+}}
+"#
+        )
+    };
+    std::fs::write(root.join("renamer.qedspec"), spec("vault")).expect("write spec");
+    common::git_init(root);
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(["-c", "user.email=j@t", "-c", "user.name=journey"])
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("spawn git");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+
+    assert_ok(
+        "qedgen init",
+        &qedgen(
+            root,
+            &["init", "--name", "renamer", "--spec", "renamer.qedspec"],
+        ),
+    );
+    assert_ok("qedgen codegen", &qedgen(root, &["codegen"]));
+
+    // Simulate the agent fill, then commit — the recovery baseline.
+    let instr_path = root.join("programs/src/instructions/poke.rs");
+    let instr = std::fs::read_to_string(&instr_path).expect("poke.rs");
+    std::fs::write(&instr_path, format!("{instr}// FILL-MARKER\n")).expect("fill");
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "scaffold + fill"]);
+
+    // Spec-level rename: account vault → treasury.
+    std::fs::write(root.join("renamer.qedspec"), spec("treasury")).expect("rename spec");
+
+    // Plain codegen: skips the user-owned set but must WARN it's stale
+    // and name the recovery flags (#253 option 1 + #288).
+    let out = qedgen(root, &["codegen"]);
+    assert_ok("qedgen codegen (post-rename)", &out);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("DIFFERENT spec revision") && stderr.contains("--merge-accounts"),
+        "post-rename codegen must warn stale and name the recovery flags; stderr:\n{stderr}"
+    );
+    let lib_path = root.join("programs/src/lib.rs");
+    let lib = std::fs::read_to_string(&lib_path).expect("lib.rs");
+    assert!(
+        lib.contains("pub vault:"),
+        "plain codegen must not touch the user-owned lib.rs"
+    );
+
+    // Surgical recovery: structs update, fills survive.
+    assert_ok(
+        "qedgen codegen --merge-accounts",
+        &qedgen(root, &["codegen", "--merge-accounts"]),
+    );
+    let lib = std::fs::read_to_string(&lib_path).expect("lib.rs");
+    assert!(
+        lib.contains("pub treasury:") && !lib.contains("pub vault:"),
+        "--merge-accounts must regenerate the Accounts struct fields; got:\n{lib}"
+    );
+    assert!(
+        std::fs::read_to_string(&instr_path)
+            .expect("poke.rs")
+            .contains("// FILL-MARKER"),
+        "--merge-accounts must not touch instruction fills"
+    );
+
+    // --force refuses while user-owned files have uncommitted changes
+    // (the merged lib.rs is dirty; dirty the fill too).
+    let instr = std::fs::read_to_string(&instr_path).expect("poke.rs");
+    std::fs::write(&instr_path, format!("{instr}// UNCOMMITTED\n")).expect("dirty fill");
+    let out = qedgen(root, &["codegen", "--force"]);
+    assert!(
+        !out.status.success(),
+        "--force must refuse dirty user-owned files; stdout:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("Commit or stash"),
+        "refusal must point at the git recovery path; stderr:\n{stderr}"
+    );
+
+    // Committed baseline → --force regenerates the user-owned set.
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "pre-force baseline"]);
+    assert_ok(
+        "qedgen codegen --force",
+        &qedgen(root, &["codegen", "--force"]),
+    );
+    assert!(
+        !std::fs::read_to_string(&instr_path)
+            .expect("poke.rs")
+            .contains("FILL-MARKER"),
+        "--force must regenerate the instruction scaffold wholesale"
+    );
+    let lib = std::fs::read_to_string(&lib_path).expect("lib.rs");
+    assert!(
+        lib.contains("pub treasury:"),
+        "--force regen must carry the renamed account; got:\n{lib}"
+    );
+}
+
 /// Scaffold-to-spec lane: `probe --program <anchor-root>
 /// --emit-spec-candidates --audit-dir` → author `answers.json` →
 /// `ratify --audit-dir`, per the auditor guidance — the Anchor-extractor

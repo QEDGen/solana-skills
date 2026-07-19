@@ -1062,7 +1062,14 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 // `codegen` command.
                 let parsed = check::parse_spec_file(qedspec_path)?;
                 let mir = mir::lower(&parsed);
-                codegen_mir::generate(&mir, &parsed, qedspec_path, &program_dir, target)?;
+                codegen_mir::generate(
+                    &mir,
+                    &parsed,
+                    qedspec_path,
+                    &program_dir,
+                    target,
+                    codegen_mir::RegenOptions::default(),
+                )?;
 
                 // Kani harnesses are framework-neutral (pure spec-derived
                 // state model).
@@ -1735,6 +1742,8 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             spec,
             target,
             output_dir,
+            force,
+            merge_accounts,
             kani,
             kani_output,
             kani_impl,
@@ -1849,7 +1858,17 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                      — skipping greenfield Rust scaffold; the program already exists."
                 );
             } else {
-                codegen_mir::generate(&mir, &parsed, &spec, &output_dir, target)?;
+                codegen_mir::generate(
+                    &mir,
+                    &parsed,
+                    &spec,
+                    &output_dir,
+                    target,
+                    codegen_mir::RegenOptions {
+                        force,
+                        merge_accounts,
+                    },
+                )?;
             }
 
             if kani || all {
