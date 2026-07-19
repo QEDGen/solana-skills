@@ -1756,12 +1756,41 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             handler,
             fill_tests,
         } => {
-            require_git_repo()?;
             // `is_pinocchio` gates the post-regen stamped-drift scan below
             // (the Pinocchio scaffold carries no `#[qed(verified)]` stamps).
             let is_pinocchio = matches!(target, Target::Pinocchio);
             let cwd = std::env::current_dir()?;
             let spec = init::resolve_spec_path(spec.as_deref(), &cwd)?;
+            // #279: relative output paths — including every clap default —
+            // resolve against the spec's directory (the project root), not
+            // the invoker's cwd. `codegen --spec <elsewhere>/x.qedspec` from
+            // anywhere writes into <elsewhere>/, never scatters artifacts
+            // under cwd. Absolute paths pass through untouched. A directory
+            // --spec (multi-fragment project) IS the project root — taking
+            // its parent would walk out of the project.
+            let spec_dir = if spec.is_dir() {
+                spec.clone()
+            } else {
+                spec.parent()
+                    .unwrap_or_else(|| std::path::Path::new("."))
+                    .to_path_buf()
+            };
+            let against_spec = |p: PathBuf| -> PathBuf {
+                if p.is_absolute() {
+                    p
+                } else {
+                    spec_dir.join(p)
+                }
+            };
+            let output_dir = against_spec(output_dir);
+            let kani_output = against_spec(kani_output);
+            let kani_impl_output = against_spec(kani_impl_output);
+            let test_output = against_spec(test_output);
+            let proptest_output = against_spec(proptest_output);
+            let crucible_output = against_spec(crucible_output);
+            let integration_output = against_spec(integration_output);
+            let lean_output = against_spec(lean_output);
+            let ci_output = against_spec(ci_output);
             // One parse + one MIR lowering, shared by every artifact stage
             // below (the arm previously re-parsed per artifact).
             let parsed = check::parse_spec_file(&spec)?;
@@ -1771,6 +1800,33 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             // so the scaffold's handlers gate can't fire before the Lean
             // branch (#88): assembly targets emit only `--lean` and `--ci`.
             let is_assembly = parsed.is_assembly_target();
+            // #262: one preflight, every missing prerequisite in a single
+            // message — previously the git gate and the .qed gate lived in
+            // different layers and failed one round-trip at a time. The
+            // .qed/ prerequisite applies only when the greenfield Rust
+            // scaffold will run (where the gate historically lived):
+            // assembly and brownfield/mirror specs never required it.
+            let scaffold_will_run = !(is_assembly
+                || kani_impl_brownfield
+                || kani_impl_context
+                || parsed.is_struct_mirror());
+            let mut missing: Vec<String> = Vec::new();
+            if !run_helpers::has_git_repo(&cwd) {
+                missing.push("not inside a git repository — run `git init`".to_string());
+            }
+            if scaffold_will_run && init::find_qed_dir(&spec).is_none() {
+                missing.push(format!(
+                    "no .qed/ directory next to {} — run `qedgen init --name <name> --spec {}`",
+                    spec.display(),
+                    spec.display()
+                ));
+            }
+            if !missing.is_empty() {
+                anyhow::bail!(
+                    "codegen prerequisites missing:\n  - {}",
+                    missing.join("\n  - ")
+                );
+            }
             if is_assembly {
                 eprintln!(
                     "note: sBPF spec — skipping Rust scaffold (assembly programs \

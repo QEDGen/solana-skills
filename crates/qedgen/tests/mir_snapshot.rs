@@ -48,20 +48,24 @@ use std::process::Command;
 fn render_mir_spec(_fixture_dir: &str, spec_arg: &str) -> String {
     common::ensure_qedgen_built();
     let tmp = tempfile::tempdir().expect("create tempdir");
-    common::git_init(tmp.path());
-    let spec_path = common::repo_root().join(spec_arg);
+    let root = tmp.path().canonicalize().expect("canonicalize tempdir");
+    common::git_init(&root);
+    // #279: relative outputs resolve against the SPEC's project root, so
+    // stage the spec surface into the tempdir instead of pointing --spec
+    // at the real repo example (which would regenerate into the repo).
+    let staged = common::stage_spec_surface(&common::repo_root().join(spec_arg), &root);
 
     let status = Command::new(common::qedgen_bin())
         .arg("codegen")
         .arg("--spec")
-        .arg(&spec_path)
+        .arg(&staged)
         .arg("--lean")
-        .current_dir(tmp.path())
+        .current_dir(&root)
         .status()
         .expect("spawn qedgen codegen");
     assert!(status.success(), "qedgen codegen failed for {}", spec_arg);
 
-    let out = tmp.path().join("formal_verification").join("Spec.lean");
+    let out = root.join("formal_verification").join("Spec.lean");
     fs::read_to_string(&out).unwrap_or_else(|e| panic!("read {}: {e}", out.display()))
 }
 

@@ -197,3 +197,50 @@ impl SnapshotHarness {
         );
     }
 }
+
+/// Stage the spec surface (every `*.qedspec` fragment — subdirectories
+/// included — plus `qed.toml`, and an empty `.qed/`) of `spec`'s project
+/// into `out_dir`; returns the staged `--spec` argument RELATIVE to
+/// `out_dir` (run the binary with `current_dir(out_dir)` so embedded
+/// `#[qed(spec = …)]` stamps stay run-independent).
+///
+/// #279 made relative codegen outputs resolve against the spec's project
+/// root, so a test must never point `--spec` at a real repo example or
+/// fixture — the run would regenerate artifacts into the repo tree.
+pub fn stage_spec_surface(spec: &Path, out_dir: &Path) -> PathBuf {
+    let (src_dir, spec_file) = if spec.is_dir() {
+        (spec.to_path_buf(), None)
+    } else {
+        (
+            spec.parent().expect("spec has a parent").to_path_buf(),
+            Some(spec.file_name().expect("spec file name").to_owned()),
+        )
+    };
+    fn copy_surface(src: &Path, src_root: &Path, out_root: &Path) {
+        for entry in fs::read_dir(src).expect("read spec dir").flatten() {
+            let p = entry.path();
+            let name = entry.file_name();
+            if p.is_dir() {
+                // Build outputs / VCS state aren't spec surface.
+                if name != ".git" && name != "target" && name != ".lake" {
+                    copy_surface(&p, src_root, out_root);
+                }
+            } else {
+                let is_spec = name.to_string_lossy().ends_with(".qedspec");
+                if is_spec || name == "qed.toml" {
+                    let rel = p.strip_prefix(src_root).expect("under src root");
+                    let dst = out_root.join(rel);
+                    fs::create_dir_all(dst.parent().expect("dst parent")).expect("mkdir");
+                    fs::copy(&p, &dst).expect("stage spec file");
+                }
+            }
+        }
+    }
+    copy_surface(&src_dir, &src_dir, out_dir);
+    // Codegen's preflight requires a .qed/ next to the spec.
+    fs::create_dir_all(out_dir.join(".qed")).expect("create .qed");
+    match spec_file {
+        Some(name) => PathBuf::from(name),
+        None => PathBuf::from("."),
+    }
+}

@@ -54,14 +54,20 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) {
 }
 
 fn run_codegen(spec: &Path, out_dir: &Path) {
+    // Canonicalize so the scaffold's spec-path relativization works on
+    // macOS (`/var` tempdirs canonicalize to `/private/var`; a mixed
+    // form makes strip_prefix fail and the stamp fall back to the
+    // absolute — run-unique — tempdir path).
+    let out_dir = &out_dir.canonicalize().expect("canonicalize out_dir");
     common::git_init(out_dir);
+    let staged = common::stage_spec_surface(spec, out_dir);
+    // No --output-dir override: the defaults resolve against the staged
+    // spec's project root (#279), so everything lands under out_dir with
+    // the standard layout and the `#[qed(spec = …)]` stamps relativize
+    // to stable run-independent paths.
     let output = Command::new(qedgen_bin())
         .args(["codegen", "--all", "--spec"])
-        .arg(spec)
-        .arg("--output-dir")
-        .arg(out_dir)
-        // cwd-relative artifact defaults (tests/, programs/, fuzz/) must
-        // land in the tempdir, not wherever the test harness runs.
+        .arg(&staged)
         .current_dir(out_dir)
         .output()
         .expect("spawn qedgen codegen");
