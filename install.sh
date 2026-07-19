@@ -120,10 +120,23 @@ build_from_source() {
 }
 
 # ── Install qedgen binary ───────────────────────────────────────────────
-if [ -f "$QEDGEN_BIN" ] && [ -x "$QEDGEN_BIN" ] && "$QEDGEN_BIN" --version &> /dev/null; then
-    echo "✓ Pre-built qedgen binary is compatible"
+# The checkout's Cargo.toml is the source of truth for the expected
+# version. A pre-existing bin/qedgen is kept ONLY if it matches $VERSION:
+# a stale binary from an earlier install still runs, but fails on newer
+# specs with errors that look like spec bugs, not version skew.
+existing_version=""
+if [ -f "$QEDGEN_BIN" ] && [ -x "$QEDGEN_BIN" ]; then
+    existing_version="$("$QEDGEN_BIN" --version 2>/dev/null | awk '{print $2}')"
+fi
+
+if [ -n "$existing_version" ] && [ "v$existing_version" = "$VERSION" ]; then
+    echo "✓ Pre-built qedgen binary is current (${VERSION})"
 else
-    echo "Pre-built binary missing or incompatible."
+    if [ -n "$existing_version" ]; then
+        echo "Pre-built binary is v${existing_version}; this checkout expects ${VERSION} — refreshing."
+    else
+        echo "Pre-built binary missing or not runnable."
+    fi
 
     asset_name=$(detect_asset_name 2>/dev/null || true)
     installed=false
@@ -137,9 +150,24 @@ else
     fi
 
     if [ "$installed" = false ]; then
-        echo "  Release binary unavailable, falling back to source compilation..."
-        build_from_source
-        echo "✓ qedgen binary built from source"
+        if command -v cargo &> /dev/null; then
+            echo "  Release binary unavailable, falling back to source compilation..."
+            build_from_source
+            echo "✓ qedgen binary built from source"
+        elif [ -n "$existing_version" ]; then
+            # No download, no toolchain: keep the stale binary rather than
+            # leave nothing, but say so loudly (never "✓ compatible").
+            STALE_KEPT=true
+            echo ""
+            echo "  WARNING: could not refresh qedgen — keeping STALE binary v${existing_version},"
+            echo "           but this skill checkout is ${VERSION}. Newer specs may fail with"
+            echo "           confusing parse/validation errors. Install Rust (https://rustup.rs)"
+            echo "           or restore network access, then re-run install.sh."
+            echo ""
+        else
+            # No binary at all — surfaces the rustup instructions and exits.
+            build_from_source
+        fi
     fi
 fi
 
@@ -166,7 +194,11 @@ fi
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  qedgen ${VERSION} installed successfully!"
+if [ "${STALE_KEPT:-false}" = true ]; then
+    echo "  qedgen ${VERSION} NOT installed — stale v${existing_version} kept (see warning above)."
+else
+    echo "  qedgen ${VERSION} installed successfully!"
+fi
 echo ""
 if [ "${PATH_LINKED:-false}" = true ] && [ "${ON_PATH:-false}" = true ]; then
     echo "  qedgen is on your PATH — run \`qedgen --help\` to confirm."
