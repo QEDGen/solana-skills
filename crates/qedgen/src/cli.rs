@@ -408,6 +408,12 @@ pub(crate) enum Commands {
         /// `rustc` on PATH (soft dependency).
         #[arg(long)]
         execute_repros: bool,
+
+        /// Accepted for CLI consistency with sibling subcommands
+        /// (`verify --json`, `readiness --json`); probe output is
+        /// always the JSON envelope, so this flag is a no-op (#251).
+        #[arg(long)]
+        json: bool,
     },
 
     /// Ratify a scaffold-to-spec interview into a `.qedspec` + side-files.
@@ -1299,6 +1305,24 @@ pub(crate) enum AristotleCommands {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn probe_bootstrap_accepts_json_flag() {
+        // #251: probe output is always JSON, but the flag learned on
+        // sibling subcommands must parse instead of hard-erroring.
+        let cli = Cli::try_parse_from([
+            "qedgen", "probe", "--bootstrap", "--root", "p", "--json",
+        ])
+        .expect("--json must parse on probe");
+        let Commands::Probe {
+            bootstrap, json, ..
+        } = cli.command
+        else {
+            panic!("expected probe command");
+        };
+        assert!(bootstrap);
+        assert!(json);
+    }
 
     #[test]
     fn parses_explicit_domain_crucible_mode() {

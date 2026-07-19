@@ -367,6 +367,9 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             emit_spec_candidates,
             audit_dir,
             execute_repros,
+            // Output is unconditionally JSON; the flag exists only so the
+            // `--json` habit learned on sibling subcommands parses (#251).
+            json: _,
         } => {
             // --program routes through the Pinocchio site enumerator; the
             // envelope's `findings` are the site catalogue mapped 1:1. The
