@@ -13,7 +13,9 @@ use std::process::Command;
 fn bootstrap_probe_to_ratify_journey() {
     common::ensure_qedgen_built();
 
-    let tmp = common::stage_fixture("crates/qedgen/tests/fixtures/probe-corpus/specless/native-shank-marker");
+    let tmp = common::stage_fixture(
+        "crates/qedgen/tests/fixtures/probe-corpus/specless/native-shank-marker",
+    );
     let root = tmp.path();
     let audit = root.join(".qed/audit/journey-1");
 
@@ -41,7 +43,9 @@ fn bootstrap_probe_to_ratify_journey() {
             "bootstrap --emit-spec-candidates --audit-dir must materialize {artifact} (#248); \
              audit dir contents: {:?}",
             std::fs::read_dir(&audit)
-                .map(|d| d.filter_map(|e| e.ok().map(|e| e.file_name())).collect::<Vec<_>>())
+                .map(|d| d
+                    .filter_map(|e| e.ok().map(|e| e.file_name()))
+                    .collect::<Vec<_>>())
                 .unwrap_or_default()
         );
     }
@@ -64,7 +68,10 @@ fn bootstrap_probe_to_ratify_journey() {
 
     // #249: default spec path is <root>/<name>.qedspec derived from the
     // manifest's recorded program root — never <root>/.qed/.qed.qedspec.
-    let name = root.file_name().and_then(|n| n.to_str()).expect("root name");
+    let name = root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .expect("root name");
     assert!(
         root.join(format!("{name}.qedspec")).exists(),
         "ratified spec must land at <root>/{name}.qedspec; stderr: {}",

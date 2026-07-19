@@ -1933,7 +1933,10 @@ mod tests {
             default_scoping_path(&audit),
             prog_root.join(".qed/plan/scoping.md")
         );
-        assert_eq!(default_findings_dir(&audit), prog_root.join(".qed/findings"));
+        assert_eq!(
+            default_findings_dir(&audit),
+            prog_root.join(".qed/findings")
+        );
         Ok(())
     }
 

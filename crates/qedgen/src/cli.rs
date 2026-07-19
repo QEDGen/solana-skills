@@ -1310,10 +1310,8 @@ mod tests {
     fn probe_bootstrap_accepts_json_flag() {
         // #251: probe output is always JSON, but the flag learned on
         // sibling subcommands must parse instead of hard-erroring.
-        let cli = Cli::try_parse_from([
-            "qedgen", "probe", "--bootstrap", "--root", "p", "--json",
-        ])
-        .expect("--json must parse on probe");
+        let cli = Cli::try_parse_from(["qedgen", "probe", "--bootstrap", "--root", "p", "--json"])
+            .expect("--json must parse on probe");
         let Commands::Probe {
             bootstrap, json, ..
         } = cli.command
