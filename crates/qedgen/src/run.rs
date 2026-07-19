@@ -1357,26 +1357,15 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 } else if warnings.is_empty() {
                     eprintln!("Spec is complete — no issues found.");
                 } else {
-                    let errors = warnings
-                        .iter()
-                        .filter(|w| w.severity == check::Severity::Error)
-                        .count();
-                    let warns = warnings
-                        .iter()
-                        .filter(|w| w.severity == check::Severity::Warning)
-                        .count();
-                    let infos = warnings
-                        .iter()
-                        .filter(|w| w.severity == check::Severity::Info)
-                        .count();
+                    let counts = check::SeverityCounts::of(&warnings);
                     for w in &warnings {
                         eprintln!("{}\n", format_lint_warning(w));
                     }
-                    eprintln!("{} error(s), {} warning(s), {} info", errors, warns, infos);
-                    // Error ≥ Warning in the exit decision (#260): before
-                    // this, E-class lints printed but were invisible to both
-                    // the tally and the exit code.
-                    if errors > 0 || warns > 0 {
+                    eprintln!(
+                        "{} error(s), {} warning(s), {} info",
+                        counts.errors, counts.warnings, counts.infos
+                    );
+                    if counts.fails_check() {
                         has_issues = true;
                     }
                 }

@@ -410,17 +410,9 @@ pub fn check_unified(
 
 /// Print the unified drift report.
 pub fn print_unified_report(spec_name: &str, report: &UnifiedReport) {
-    // Spec completeness
-    let warns = report
-        .completeness
-        .iter()
-        .filter(|w| w.severity == Severity::Warning)
-        .count();
-    let infos = report
-        .completeness
-        .iter()
-        .filter(|w| w.severity == Severity::Info)
-        .count();
+    // Spec completeness — tally through the exhaustive-match counter so
+    // Error entries can't drop out of the summary (#260/#270).
+    let counts = SeverityCounts::of(&report.completeness);
 
     eprintln!("──── Spec Completeness ──────────────────────────────────");
     if report.completeness.is_empty() {
@@ -436,7 +428,10 @@ pub fn print_unified_report(spec_name: &str, report: &UnifiedReport) {
             eprintln!("    Fix: {}", w.fix);
         }
     }
-    eprintln!("  {} warning(s), {} info\n", warns, infos);
+    eprintln!(
+        "  {} error(s), {} warning(s), {} info\n",
+        counts.errors, counts.warnings, counts.infos
+    );
 
     // Code drift
     if let Some(ref drift) = report.code_drift {
