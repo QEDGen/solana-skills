@@ -2255,7 +2255,7 @@ dependencies = [
 
 [[package]]
 name = "qedgen-solana-skills"
-version = "2.45.0"
+version = "2.46.0"
 dependencies = [
  "anyhow",
  "chumsky",
