@@ -2,7 +2,7 @@
 
 Pre-release checklist. Run before cutting a new release or tag. (Moved out of `CLAUDE.md` so it isn't loaded into every session — it only matters at release time.)
 
-1. **Bump version** in `crates/qedgen/Cargo.toml`, `package.json`, AND `skills/qedgen-auditor/VERSION` — `install.sh` derives its version from Cargo.toml; the `check-version-consistency.sh` CI gate fails the build if the first two drift (v2.28.0 shipped with this exact mismatch; v2.28.1 hotfixed it), and `check-auditor-skill.sh` fails it if the skill VERSION drifts from package.json. Run `bash scripts/check-version-consistency.sh && bash scripts/check-auditor-skill.sh` after bumping to confirm.
+1. **Bump version** in `crates/qedgen/Cargo.toml`, `package.json`, AND `skills/qedgen-auditor/VERSION` — `install.sh` derives its version from Cargo.toml; the `check-version-consistency.sh` CI gate fails the build if the first two drift (v2.28.0 shipped with this exact mismatch; v2.28.1 hotfixed it), and `check-auditor-skill.sh` fails it if the skill VERSION drifts from package.json. After bumping the skill VERSION, sync the installed copy — `bash scripts/sync-auditor-skill.sh .claude/skills/qedgen-auditor` — or the auditor-skill gate fails on the installed-copy diff (#261: every release hit one avoidable failed gate run here). Then run `bash scripts/check-version-consistency.sh && bash scripts/check-auditor-skill.sh` to confirm.
 
 1a. **Re-stamp the version-pinned generated artifacts** — codegen stamps `qedgen-macros = { …, tag = "v<version>" }` into every generated `Cargo.toml`, so a version bump drifts BOTH the codegen snapshots AND the committed bundled examples. After bumping, run (rebuild `bin/qedgen` first): `UPDATE_SNAPSHOTS=1 cargo test --test codegen_snapshot` (refresh the 6 codegen fixtures) AND `qedgen check --regen-drift --write` (re-stamp the 8 `examples/rust/*/**/Cargo.toml` pins). Skipping this fails the `Run tests` (codegen_snapshot) + `Check example codegen drift` CI steps — v2.31 hit both in sequence. Verify each diff is *only* the tag line, then `cargo test` / `qedgen check --regen-drift` should be clean.
 
@@ -47,3 +47,12 @@ Pre-release checklist. Run before cutting a new release or tag. (Moved out of `C
    - `feedback_no_anchor_v2_mentions.md` policy: don't name external codebases as the **source of audit findings** (anchor-v2, named protocols like Marinade/Squads/Drift/Raydium/Jito) in SKILL.md, references/, RELEASE-v<version>.md, or `clap` help text — present findings as qedgen's own taxonomy. This does NOT cover frameworks we **actively integrate** as codegen / audit targets: Anchor, Quasar, and Pinocchio are first-class `--target` / `--runtime` values, so naming them (incl. `quasar_lang` / "Blueshift Quasar" in target help text) is correct and necessary. Internal-only (test fixtures, private comments) is fine.
    - `CLAUDE.md` stays slim (deep content lives in `references/` and `docs/design/`, not in CLAUDE.md). Tracked as uppercase `CLAUDE.md` since v2.35.0 — the lowercase "mirror" was a macOS case-insensitivity illusion (only one file was ever in git).
    - Module-level `//!` docstrings on files you touched in the release reflect current behavior — not the behavior pre-fix.
+
+10. **Tag AND publish the GitHub release** — a pushed tag alone builds **no** binaries: `.github/workflows/release.yml` triggers on the **release-created event** (`on: release: types: [created]`), not on tag push (#261). So:
+
+    ```bash
+    git tag v<version> && git push origin v<version>
+    gh release create v<version> --title "v<version> — <one-line theme>" --notes-file docs/prds/RELEASE-v<version>.md
+    ```
+
+    `gh release create` fires `release.yml`, which cross-compiles the `qedgen-<arch>-<os>` assets + `.sha256` checksums that `install.sh` downloads (pinned to this exact tag). Verify the assets are attached before announcing — an assetless release makes every fresh `install.sh` fall back to source builds (and the weekly `cold-start.yml` run will fail on the download path).
