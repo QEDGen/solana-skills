@@ -151,7 +151,7 @@ impl<'info> Cancel<'info> {
         spec = "..",
         handler = "cancel",
         hash = "e8b137050f206ed5",
-        spec_hash = "030f42b60ac489f1"
+        spec_hash = "3feff20168f7d7fb"
     )]
     #[inline(always)]
     pub fn handler(&mut self, bumps: &CancelBumps) -> Result<()> {
@@ -194,7 +194,7 @@ impl<'info> Exchange<'info> {
         spec = "..",
         handler = "exchange",
         hash = "9146f9898fc03101",
-        spec_hash = "b3781c2e64f2bf85"
+        spec_hash = "914eb8b51ea56c85"
     )]
     #[inline(always)]
     pub fn handler(&mut self, bumps: &ExchangeBumps) -> Result<()> {
@@ -251,7 +251,7 @@ impl<'info> Initialize<'info> {
         spec = "..",
         handler = "initialize",
         hash = "49b916ac713a5e1b",
-        spec_hash = "467f6506b9a3a3ba"
+        spec_hash = "c8861c9b9f3fcdcd"
     )]
     #[inline(always)]
     pub fn handler(
