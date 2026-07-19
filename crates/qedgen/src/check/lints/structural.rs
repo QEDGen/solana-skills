@@ -899,10 +899,16 @@ pub(super) fn check_pubkey_state_field_unsupported(spec: &ParsedSpec) -> Vec<Com
 /// per-call-site ensures theorem in Spec.lean — so a spec whose point is
 /// CPI composition (the bundled-stdlib-demo shape) has something to prove
 /// without a standalone `property`, and the lint stays silent there.
+/// `transfers { ... }` sugar lowers to the same per-call-site CPI build
+/// theorems (`build_<handler>_transfer…`), so it counts as proof surface
+/// too (the bundled escrow shape).
 pub(super) fn check_no_properties(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
     let has_effects = spec.handlers.iter().any(|op| op.has_effect());
-    let has_cpi_theorems = spec.handlers.iter().any(|op| !op.calls.is_empty());
+    let has_cpi_theorems = spec
+        .handlers
+        .iter()
+        .any(|op| !op.calls.is_empty() || !op.transfers.is_empty());
     if has_effects && !has_cpi_theorems && spec.properties.is_empty() && spec.invariants.is_empty()
     {
         // Suggest conservation if paired add/sub exist on same field
@@ -1781,6 +1787,34 @@ handler initialize : State.Uninitialized -> State.Active {
         assert!(
             !warnings.iter().any(|w| w.rule == "no_properties"),
             "CPI call-site theorems are proof surface; got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_no_properties_skips_with_transfers_sugar() {
+        // `transfers { ... }` lowers to the same per-call-site CPI build
+        // theorems as explicit `call` — the bundled escrow shape must not
+        // fire no_properties (#260 baseline fix).
+        let mut h = make_handler("cancel");
+        h.effects = vec![ParsedEffect::from_triple("balance", "add", "amount")];
+        h.transfers = vec![crate::check::ParsedTransfer {
+            from: "escrow_ta".to_string(),
+            to: "initializer_ta".to_string(),
+            amount: Some("initializer_amount".to_string()),
+            amount_tree: None,
+            authority: Some("escrow".to_string()),
+        }];
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            state_fields: vec![("balance".to_string(), "U64".to_string())],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings.iter().any(|w| w.rule == "no_properties"),
+            "transfers-sugar CPI theorems are proof surface; got: {:?}",
             warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
         );
     }
