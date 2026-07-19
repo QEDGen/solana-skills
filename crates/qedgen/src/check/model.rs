@@ -1069,6 +1069,40 @@ pub enum Severity {
     Info,
 }
 
+/// Per-severity tallies for a lint set.
+///
+/// Construct via [`SeverityCounts::of`], whose match is exhaustive by
+/// discipline (no `_` arm — see the `Stmt` enum doc in `mir.rs`): adding
+/// a `Severity` variant is a compile error here, not a silently
+/// uncounted lint. Open-coded `.filter(|w| w.severity == …)` tallies are
+/// how Error-severity lints vanished from the check summary and exit
+/// code for ten releases (#260); count through this instead (#270).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SeverityCounts {
+    pub errors: usize,
+    pub warnings: usize,
+    pub infos: usize,
+}
+
+impl SeverityCounts {
+    pub fn of(warnings: &[CompletenessWarning]) -> Self {
+        let mut counts = Self::default();
+        for w in warnings {
+            match w.severity {
+                Severity::Error => counts.errors += 1,
+                Severity::Warning => counts.warnings += 1,
+                Severity::Info => counts.infos += 1,
+            }
+        }
+        counts
+    }
+
+    /// The check exit policy: Error ≥ Warning fail; Info never does (#260).
+    pub fn fails_check(&self) -> bool {
+        self.errors > 0 || self.warnings > 0
+    }
+}
+
 /// A concrete counterexample showing how an operation breaks a property.
 /// Structured as data so the agent can reason about it and present it clearly.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1207,11 +1241,11 @@ pub struct UnifiedReport {
 
 impl UnifiedReport {
     pub fn issue_count(&self) -> usize {
-        let comp = self
-            .completeness
-            .iter()
-            .filter(|w| w.severity == Severity::Warning)
-            .count();
+        // #270: Error-severity completeness findings count as issues too —
+        // the old Warning-only filter let E-class lints through the
+        // `check --code/--kani` exit gate (#260's bug class).
+        let counts = SeverityCounts::of(&self.completeness);
+        let comp = counts.errors + counts.warnings;
         let code = self.code_drift.as_ref().map_or(0, |v| {
             v.iter().filter(|d| d.status != DriftStatus::InSync).count()
         });
@@ -1226,5 +1260,58 @@ impl UnifiedReport {
             .filter(|r| r.status != Status::Proven)
             .count();
         comp + code + kani + lean
+    }
+}
+
+#[cfg(test)]
+mod severity_counts_tests {
+    use super::*;
+
+    fn lint(severity: Severity) -> CompletenessWarning {
+        CompletenessWarning {
+            rule: "test_rule".into(),
+            severity,
+            priority: 1,
+            message: String::new(),
+            subject: None,
+            fix: String::new(),
+            example: None,
+            counterexample: None,
+            fix_options: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn tally_counts_every_severity_and_errors_fail() {
+        let counts = SeverityCounts::of(&[
+            lint(Severity::Error),
+            lint(Severity::Warning),
+            lint(Severity::Info),
+            lint(Severity::Info),
+        ]);
+        assert_eq!(
+            (counts.errors, counts.warnings, counts.infos),
+            (1, 1, 2),
+            "every variant must land in exactly one bucket"
+        );
+        assert!(counts.fails_check(), "errors must fail");
+        assert!(
+            !SeverityCounts::of(&[lint(Severity::Info)]).fails_check(),
+            "info alone must not fail"
+        );
+    }
+
+    #[test]
+    fn issue_count_includes_error_severity_completeness() {
+        // #270: an Error-only report must register as an issue — the old
+        // Warning-only filter waved E-class lints through the unified
+        // check exit gate.
+        let report = UnifiedReport {
+            completeness: vec![lint(Severity::Error)],
+            code_drift: None,
+            kani_drift: None,
+            lean_coverage: Vec::new(),
+        };
+        assert_eq!(report.issue_count(), 1);
     }
 }
