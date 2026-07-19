@@ -829,8 +829,28 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             let output = if bootstrap {
                 let root = root
                     .ok_or_else(|| anyhow::anyhow!("--bootstrap requires --root <project-path>"))?;
+                // #248: materialize the audit working set so the documented
+                // handoff (probe → answers.json → `qedgen ratify`) works
+                // from the spec-less bootstrap lane too. Previously these
+                // flags were accepted but silently dropped (`None` below),
+                // leaving the audit dir empty and ratify hard-erroring.
+                if let Some(dir) = audit_dir.as_ref().filter(|_| emit_spec_candidates) {
+                    let detected = probe::detect_runtime_public(&root);
+                    write_audit_working_set(
+                        dir,
+                        &root,
+                        &[],
+                        program_model::ProgramFramework::Native,
+                        run_helpers::dossier_runtime_label(&detected),
+                        /*lenient_skeleton=*/ true,
+                    )?;
+                }
                 let mut output = probe::run_bootstrap(&root)?;
-                probe::finalize_specless(&mut output, &root, None);
+                probe::finalize_specless(
+                    &mut output,
+                    &root,
+                    audit_dir.as_deref().filter(|_| emit_spec_candidates),
+                );
                 output
             } else {
                 let spec = spec.ok_or_else(|| {

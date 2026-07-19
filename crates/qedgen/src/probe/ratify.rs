@@ -90,7 +90,16 @@ pub fn run(opts: &RatifyOpts) -> Result<RatifyReport> {
         .filter(|p| p.exists());
     let structured = answers_path.is_some();
 
-    let mut required: Vec<&Path> = vec![&clusters_path, &skeleton_path];
+    // skeleton.qedspec is the merge base and always required.
+    // clusters.json is optional for a hypotheses-only working set (#248:
+    // the bootstrap lane materializes hypotheses without proto-clause
+    // clusters) — ratify then proceeds on the hypothesis answers alone.
+    let hypotheses_path = opts.audit_dir.join("hypotheses.json");
+    let hypotheses_only = !clusters_path.exists() && hypotheses_path.exists();
+    let mut required: Vec<&Path> = vec![&skeleton_path];
+    if !hypotheses_only {
+        required.push(&clusters_path);
+    }
     if !structured {
         // Legacy path only — the structured answer set replaces the
         // user-edited interview file (PRD D4: in-harness, no file).
@@ -107,7 +116,6 @@ pub fn run(opts: &RatifyOpts) -> Result<RatifyReport> {
 
     // Hypotheses (present for working sets written after spec elicitation
     // landed; absent dirs stay supported).
-    let hypotheses_path = opts.audit_dir.join("hypotheses.json");
     let hypotheses_doc = hypotheses_path
         .exists()
         .then(|| elicit::read_hypotheses(&hypotheses_path))
@@ -149,8 +157,12 @@ pub fn run(opts: &RatifyOpts) -> Result<RatifyReport> {
         read_interview_file(&interview_path)?
     };
 
-    let clusters: Vec<Cluster> = serde_json::from_str(&std::fs::read_to_string(&clusters_path)?)
-        .with_context(|| format!("parsing clusters.json at {}", clusters_path.display()))?;
+    let clusters: Vec<Cluster> = if hypotheses_only {
+        Vec::new()
+    } else {
+        serde_json::from_str(&std::fs::read_to_string(&clusters_path)?)
+            .with_context(|| format!("parsing clusters.json at {}", clusters_path.display()))?
+    };
     let skeleton = std::fs::read_to_string(&skeleton_path)?;
 
     let cluster_by_id: BTreeMap<&str, &Cluster> =
@@ -1197,13 +1209,37 @@ fn render_bug_finding(cluster: &Cluster, ratification: &Ratification) -> String 
 
 // ── Defaults ──────────────────────────────────────────────────────────
 
+/// Project root for default output paths (#249). Priority:
+/// 1. the working set's recorded `target.program_root`
+///    (`run-manifest.json`) — authoritative, immune to audit-dir nesting;
+/// 2. the `.qed` ancestor convention — `.qed/audit/<ts>/` (or any
+///    nesting depth) resolves to the directory *containing* `.qed`.
+///    The old two-`.parent()` arithmetic landed on `<root>/.qed` itself
+///    and produced `<root>/.qed/.qed.qedspec`;
+/// 3. cwd.
+fn project_root_of(audit_dir: &Path) -> Option<PathBuf> {
+    if let Some(root) = manifest_program_root(audit_dir) {
+        return Some(root);
+    }
+    audit_dir
+        .ancestors()
+        .find(|a| a.file_name().is_some_and(|n| n == ".qed"))
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+}
+
+/// Read the `target.program_root` the probe recorded in
+/// `run-manifest.json`.
+fn manifest_program_root(audit_dir: &Path) -> Option<PathBuf> {
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(audit_dir.join("run-manifest.json")).ok()?)
+            .ok()?;
+    let root = manifest.get("target")?.get("program_root")?.as_str()?;
+    (!root.is_empty()).then(|| PathBuf::from(root))
+}
+
 fn default_spec_path(audit_dir: &Path) -> PathBuf {
-    // <project_root>/<project_name>.qedspec; `.qed/audit/<ts>/` → project
-    // root is two levels up. Fall back to cwd if non-conforming.
-    let project_root = audit_dir
-        .parent()
-        .and_then(|p| p.parent())
-        .map(Path::to_path_buf);
+    let project_root = project_root_of(audit_dir);
     let name = project_root
         .as_ref()
         .and_then(|p| p.file_name())
@@ -1215,17 +1251,13 @@ fn default_spec_path(audit_dir: &Path) -> PathBuf {
 }
 
 fn default_scoping_path(audit_dir: &Path) -> PathBuf {
-    audit_dir
-        .parent()
-        .and_then(|p| p.parent())
+    project_root_of(audit_dir)
         .map(|root| root.join(".qed/plan/scoping.md"))
         .unwrap_or_else(|| PathBuf::from(".qed/plan/scoping.md"))
 }
 
 fn default_findings_dir(audit_dir: &Path) -> PathBuf {
-    audit_dir
-        .parent()
-        .and_then(|p| p.parent())
+    project_root_of(audit_dir)
         .map(|root| root.join(".qed/findings"))
         .unwrap_or_else(|| PathBuf::from(".qed/findings"))
 }
@@ -1810,6 +1842,98 @@ mod tests {
         assert_eq!(outcome["run_id"], "run-vault-123");
         assert_eq!(outcome["outcomes"][0]["outcome"], "lowered");
         assert!(outcome["time_to_ratify_seconds"].is_u64());
+        Ok(())
+    }
+
+    /// #248: a hypotheses-only working set (skeleton + hypotheses.json,
+    /// no clusters.json — the bootstrap lane's shape) must ratify on the
+    /// hypothesis answers alone instead of hard-requiring clusters.json.
+    #[test]
+    fn hypotheses_only_working_set_ratifies_without_clusters() -> Result<()> {
+        let dir = tempdir()?;
+        let audit = dir.path().join(".qed/audit/test");
+        std::fs::create_dir_all(&audit)?;
+        let skeleton = render_skeleton_from_handlers(&["set_fee".into()], "vault");
+        std::fs::write(audit.join("skeleton.qedspec"), &skeleton)?;
+        // NOTE: no clusters.json.
+        let hyp = auth_hypothesis("set_fee", "admin");
+        write_hypotheses(&audit, "run-vault-124", std::slice::from_ref(&hyp))?;
+        std::fs::write(
+            audit.join("answers.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "answers": [{ "id": hyp.id, "decision": "accept", "note": "" }]
+            }))?,
+        )?;
+
+        let report = run(&RatifyOpts {
+            audit_dir: audit,
+            spec_out: Some(dir.path().join("vault.qedspec")),
+            scoping_out: Some(dir.path().join("scoping.md")),
+            findings_dir: Some(dir.path().join("findings")),
+            answers: None,
+            proptest: false,
+        })?;
+        assert_eq!(report.hypotheses_lowered, 1);
+        let spec = std::fs::read_to_string(&report.spec_path)?;
+        assert!(spec.contains("auth admin"), "spec:\n{spec}");
+        Ok(())
+    }
+
+    /// #249: the conventional `.qed/audit/<ts>` audit dir must resolve
+    /// default outputs to `<root>/<name>.qedspec` and
+    /// `<root>/.qed/plan/scoping.md` — the old two-`.parent()` arithmetic
+    /// produced `<root>/.qed/.qed.qedspec`. Both relative and absolute.
+    #[test]
+    fn default_paths_resolve_qed_audit_convention() {
+        for audit in [
+            PathBuf::from("proj/.qed/audit/run-1"),
+            PathBuf::from("/abs/proj/.qed/audit/run-1"),
+        ] {
+            let spec = default_spec_path(&audit);
+            assert!(
+                spec.ends_with("proj/proj.qedspec"),
+                "audit {} -> spec {}",
+                audit.display(),
+                spec.display()
+            );
+            let scoping = default_scoping_path(&audit);
+            assert!(
+                scoping.ends_with("proj/.qed/plan/scoping.md"),
+                "audit {} -> scoping {}",
+                audit.display(),
+                scoping.display()
+            );
+            let findings = default_findings_dir(&audit);
+            assert!(
+                findings.ends_with("proj/.qed/findings"),
+                "audit {} -> findings {}",
+                audit.display(),
+                findings.display()
+            );
+        }
+    }
+
+    /// #249: `run-manifest.json`'s `target.program_root` is authoritative
+    /// over path arithmetic — non-conventional audit-dir nesting still
+    /// resolves to the recorded program root.
+    #[test]
+    fn default_paths_prefer_manifest_program_root() -> Result<()> {
+        let dir = tempdir()?;
+        let audit = dir.path().join("elsewhere/deep/audit-dir");
+        std::fs::create_dir_all(&audit)?;
+        let prog_root = dir.path().join("programs/vault");
+        std::fs::write(
+            audit.join("run-manifest.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "target": { "program_root": prog_root.display().to_string() }
+            }))?,
+        )?;
+        assert_eq!(default_spec_path(&audit), prog_root.join("vault.qedspec"));
+        assert_eq!(
+            default_scoping_path(&audit),
+            prog_root.join(".qed/plan/scoping.md")
+        );
+        assert_eq!(default_findings_dir(&audit), prog_root.join(".qed/findings"));
         Ok(())
     }
 
