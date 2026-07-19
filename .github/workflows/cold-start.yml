@@ -1,0 +1,36 @@
+# Cold-start smoke (#274): simulate the outside user — install.sh scenario
+# matrix (fresh / match / stale-refresh / stranded) plus the quickstart
+# driven with the INSTALLED binary. The #252-254 bug batch came from the
+# first external dogfooder because no in-repo flow ever ran this path.
+#
+# Path-filtered on PRs (install plumbing changes), weekly otherwise — the
+# scheduled run also catches release-asset breakage (deleted/renamed
+# assets) that no code change would surface.
+name: Cold-start smoke
+
+on:
+  pull_request:
+    paths:
+      - install.sh
+      - scripts/cold-start-smoke.sh
+      - .github/workflows/cold-start.yml
+      - crates/qedgen/Cargo.toml
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  cold-start:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Source-build fallback: right after a version bump the pinned
+      # release asset doesn't exist yet, and install.sh falls back to
+      # cargo. Scenario D strips PATH itself to exercise the no-toolchain
+      # branch regardless.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cold-start smoke
+        run: bash scripts/cold-start-smoke.sh
