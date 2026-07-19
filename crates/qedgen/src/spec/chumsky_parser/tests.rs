@@ -131,6 +131,24 @@ fn byte_offset_clamps_past_end() {
 }
 
 #[test]
+fn parse_error_names_the_enclosing_construct() {
+    // #254: a broken handler signature (comma-separated tuple form is
+    // invalid — params are curried `(name : Type)` groups) must name the
+    // construct being parsed, not just dump char-class expectations.
+    let src = "spec Demo\n\nhandler deposit(amount, to) : State.A -> State.B {\n  auth user\n}\n";
+    match parse(src) {
+        Ok(_) => panic!("expected parse to fail"),
+        Err(errs) => {
+            let msg = format_parse_error(&errs[0], src);
+            assert!(
+                msg.contains("`handler` construct"),
+                "parse error should name the enclosing construct — got: {msg}"
+            );
+        }
+    }
+}
+
+#[test]
 fn format_parse_error_prefixes_line_col() {
     // Trigger a parse error and verify the formatter attaches `line X, col Y:`.
     // Use a one-line invalid spec; the error span points into it.

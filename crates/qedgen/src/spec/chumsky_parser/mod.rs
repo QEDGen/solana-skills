@@ -196,13 +196,66 @@ fn byte_offset_to_line_col(src: &str, offset: usize) -> (usize, usize) {
     (line, col)
 }
 
+/// Coarse construct context for a parse error (#254): the nearest
+/// preceding line whose first token is a known construct keyword names
+/// what was being parsed. The raw `Rich` expected-set is token-level
+/// (char classes) and not actionable alone for spec authors.
+fn construct_context(src: &str, offset: usize) -> Option<&'static str> {
+    const CONSTRUCTS: &[&str] = &[
+        "spec",
+        "pragma",
+        "import",
+        "type",
+        "const",
+        "pda",
+        "event",
+        "errors",
+        "interface",
+        "handler",
+        "operation",
+        "instruction",
+        "accounts",
+        "requires",
+        "ensures",
+        "modifies",
+        "effect",
+        "transfers",
+        "emits",
+        "guards",
+        "match",
+        "let",
+        "abstract",
+        "ref_impl",
+        "property",
+        "invariant",
+        "cover",
+        "liveness",
+        "environment",
+        "auth",
+        "call",
+        "upstream",
+        "state_binders",
+    ];
+    let clamped = offset.min(src.len());
+    src[..clamped].lines().rev().find_map(|line| {
+        let first = line.split_whitespace().next()?;
+        CONSTRUCTS.iter().find(|k| **k == first).copied()
+    })
+}
+
 /// Render a chumsky parse error with a `line:col` prefix instead of raw
-/// byte offsets. Keeps the full `Rich` detail (expected set, reason) so
-/// users can still see which tokens were expected.
+/// byte offsets, plus the nearest construct keyword as context. Keeps
+/// the full `Rich` detail (expected set, reason) so users can still see
+/// which tokens were expected.
 pub fn format_parse_error(err: &Rich<'_, char>, src: &str) -> String {
     let span = err.span();
     let (line, col) = byte_offset_to_line_col(src, span.start);
-    format!("line {line}, col {col}: {err:?}")
+    match construct_context(src, span.start) {
+        Some(kw) => {
+            format!("line {line}, col {col} (while parsing the `{kw}` construct): {err:?}")
+        }
+        None => format!("line {line}, col {col}: {err:?}"),
+    }
 }
 
 // ----------------------------------------------------------------------------
