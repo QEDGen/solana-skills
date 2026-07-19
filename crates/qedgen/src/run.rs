@@ -374,7 +374,11 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             // --program routes through the Pinocchio site enumerator; the
             // envelope's `findings` are the site catalogue mapped 1:1. The
             // audit subagent writes the reproducers.
-            if let Some(prog_root) = &program {
+            if let Some(raw_root) = &program {
+                // #289: resolve `--program .` (and any relative root) to
+                // its real directory before anything derives a name from
+                // it — see canonicalize_program_root.
+                let prog_root = &run_helpers::canonicalize_program_root(raw_root);
                 let detected = probe::detect_runtime_public(prog_root);
                 let runtime_final = runtime
                     .map(probe::Runtime::from)
@@ -1775,13 +1779,8 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                     .unwrap_or_else(|| std::path::Path::new("."))
                     .to_path_buf()
             };
-            let against_spec = |p: PathBuf| -> PathBuf {
-                if p.is_absolute() {
-                    p
-                } else {
-                    spec_dir.join(p)
-                }
-            };
+            let against_spec =
+                |p: PathBuf| -> PathBuf { run_helpers::resolve_output_against_spec(&spec_dir, p) };
             let output_dir = against_spec(output_dir);
             let kani_output = against_spec(kani_output);
             let kani_impl_output = against_spec(kani_impl_output);

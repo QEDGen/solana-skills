@@ -48,6 +48,36 @@ pub(crate) fn note_sbpf_skip(artifact: &str) {
     );
 }
 
+/// Resolve a codegen output path against the spec's directory (#279).
+/// Relative paths — including every clap literal default like
+/// `./programs` — join onto `spec_dir`; the `Components` re-collect
+/// drops the interior `CurDir` so the resolved path never renders a
+/// literal `/./` (#290). Absolute paths pass through untouched.
+pub(crate) fn resolve_output_against_spec(spec_dir: &Path, p: PathBuf) -> PathBuf {
+    if p.is_absolute() {
+        p
+    } else {
+        spec_dir.join(p).components().collect()
+    }
+}
+
+/// Canonicalize the `--program` root once at the probe entry (#289).
+/// `--program .` is the natural invocation from inside a program root,
+/// but every downstream name — the skeleton `spec` name, the
+/// `target.program_root` recorded in the run manifest and dossier, and
+/// ratify's default `<name>.qedspec` — derives from
+/// `Path::file_name()`, which is `None` for `"."` and falls back to a
+/// `"program"` placeholder. Nonexistent paths fall back to a lexical
+/// cwd-join so downstream "not found" errors still fire on a concrete
+/// path.
+pub(crate) fn canonicalize_program_root(raw: &Path) -> PathBuf {
+    raw.canonicalize().unwrap_or_else(|_| {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(raw).components().collect())
+            .unwrap_or_else(|_| raw.to_path_buf())
+    })
+}
+
 /// Materialize the audit working set (`interview.md`, `clusters.json`,
 /// `skeleton.qedspec`, domain dossier seed, and run manifest) under `dir` —
 /// shared by the Pinocchio (run.rs),
@@ -1052,6 +1082,51 @@ mod tests {
     use crate::cluster::{cluster_protos, ClusterKind, ProtoClause};
     use crate::program_model::ProgramFramework;
     use std::path::PathBuf;
+
+    /// #290: resolved codegen output paths must never render a literal
+    /// `/./` — clap defaults are `./x` and `PathBuf::join` preserves
+    /// the `CurDir` component.
+    #[test]
+    fn resolved_output_paths_have_no_curdir_segment() {
+        let resolved = super::resolve_output_against_spec(
+            std::path::Path::new("/abs/path/to/project"),
+            PathBuf::from("./programs"),
+        );
+        assert_eq!(resolved, PathBuf::from("/abs/path/to/project/programs"));
+        assert!(
+            !resolved.display().to_string().contains("/./"),
+            "resolved path renders a literal /./: {}",
+            resolved.display()
+        );
+        // Absolute paths pass through untouched.
+        assert_eq!(
+            super::resolve_output_against_spec(
+                std::path::Path::new("/spec/dir"),
+                PathBuf::from("/elsewhere/out")
+            ),
+            PathBuf::from("/elsewhere/out")
+        );
+    }
+
+    /// #289: `--program .` resolves to a directory with a real name
+    /// (`file_name()` is no longer `None`); nonexistent roots fall back
+    /// to a lexical cwd-join that keeps the typed name.
+    #[test]
+    fn canonicalize_program_root_gives_dot_a_real_name() {
+        let root = super::canonicalize_program_root(std::path::Path::new("."));
+        assert!(root.is_absolute());
+        assert!(
+            root.file_name().is_some(),
+            "`.` must resolve to a named directory, got {}",
+            root.display()
+        );
+        let missing = super::canonicalize_program_root(std::path::Path::new("./no-such-dir-289"));
+        assert!(missing.is_absolute());
+        assert_eq!(
+            missing.file_name().and_then(|n| n.to_str()),
+            Some("no-such-dir-289")
+        );
+    }
 
     /// #196: the runtime-agnostic scanners fire on an ANCHOR-shaped crate —
     /// they used to be wired only into the Pinocchio probe branch, leaving
