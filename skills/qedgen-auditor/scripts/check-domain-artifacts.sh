@@ -359,15 +359,19 @@ if validate_dossier "$fixtures/invalid-domain-dossier.json"; then
   exit 1
 fi
 
-# A type-wrong field (string args instead of objects) must be a CLEAN
-# validation failure (jq -e false → exit 1), not a jq runtime crash
-# (exit 5) — the crash was GH #250.
-rc=0
-validate_dossier "$fixtures/invalid-args-domain-dossier.json" || rc=$?
-if [[ $rc -ne 1 ]]; then
-  echo "string-typed handlers[].args fixture: expected clean invalid (exit 1), got exit $rc" >&2
-  exit 1
-fi
+# A type-wrong (shape-wrong) field must be a CLEAN validation failure
+# (jq -e false → exit 1), never a jq runtime crash (exit 5) — the crash
+# was GH #250; one shape-wrong fixture per validator is policy (#273).
+expect_clean_invalid() {
+  local validator="$1" fixture="$2" rc=0
+  "$validator" "$fixtures/$fixture" || rc=$?
+  if [[ $rc -ne 1 ]]; then
+    echo "$fixture: expected clean invalid (exit 1) from $validator, got exit $rc" >&2
+    exit 1
+  fi
+}
+
+expect_clean_invalid validate_dossier invalid-args-domain-dossier.json
 
 validate_manifest "$fixtures/valid-audit-run-manifest.json"
 validate_manifest "$fixtures/valid-probe-failure-manifest.json"
@@ -392,5 +396,15 @@ validate_sequence_bindings "$fixtures/valid-domain-sequence-bindings.json"
 validate_resolved_sequences "$fixtures/valid-resolved-domain-sequences.json"
 validate_account_overlay "$fixtures/valid-account-binding-overlay.json"
 validate_replay_report "$fixtures/valid-domain-replay-report.json"
+
+# Shape-wrong sweep (#273): one type-confused fixture per validator, each
+# targeting a field an outside author would plausibly get wrong.
+expect_clean_invalid validate_manifest invalid-shape-audit-run-manifest.json
+expect_clean_invalid validate_handoff invalid-shape-spec-handoff.json
+expect_clean_invalid validate_sequences invalid-shape-domain-sequences.json
+expect_clean_invalid validate_sequence_bindings invalid-shape-domain-sequence-bindings.json
+expect_clean_invalid validate_resolved_sequences invalid-shape-resolved-domain-sequences.json
+expect_clean_invalid validate_account_overlay invalid-shape-account-binding-overlay.json
+expect_clean_invalid validate_replay_report invalid-shape-domain-replay-report.json
 
 echo "auditor domain artifact checks passed"

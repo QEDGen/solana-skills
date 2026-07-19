@@ -63,6 +63,12 @@ jobs:
           bash scripts/check-auditor-skill.sh
           bash scripts/test-auditor-preflight.sh
 
+      # #273: static analysis over every shipped shell script. Warning
+      # severity — info-level notes (e.g. intentional single-quoted grep
+      # patterns) don't gate.
+      - name: Shellcheck
+        run: shellcheck --severity=warning install.sh scripts/*.sh skills/qedgen-auditor/scripts/*.sh
+
       - name: Check README drift
         run: bash scripts/check-readme-drift.sh
 

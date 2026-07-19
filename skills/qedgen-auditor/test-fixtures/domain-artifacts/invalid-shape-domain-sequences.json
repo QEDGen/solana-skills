@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "schema_uri": "https://qedgen.dev/schemas/auditor/domain-sequences-v1.schema.json",
+  "audit_id": "audit_vault",
+  "source_dossier_schema_version": 1,
+  "plans": [
+    "plan"
+  ],
+  "exclusions": []
+}
