@@ -86,6 +86,54 @@ jobs:
       - name: Codegen scaffold compile smoke
         run: cargo test -p qedgen-solana-skills --test codegen_smoke -- --ignored
 
+  # #294 P0: executable generated-artifact gate. Snapshot suites prove
+  # generated text is stable; this job proves the artifacts work as
+  # software: for every bundled Anchor example it regenerates all
+  # artifacts from the spec, compiles the scaffold and every test
+  # target, runs the generated unit tests and proptests, and
+  # type-checks the generated Kani harness with ordinary rustc
+  # (`--cfg kani` + the kani-compile-stub crate — full `cargo kani`
+  # execution stays in kani.yml). Separate job so the heavy generated-
+  # crate compiles run in parallel with `test`; separate cache key so
+  # the gate's dep builds (anchor-lang under
+  # target/generated-artifact-gate) survive between runs.
+  generated-artifacts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          echo "before:"; df -h / | tail -1
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                      /usr/local/.ghcup /opt/hostedtoolcache/CodeQL \
+                      /usr/local/share/boost /usr/local/share/powershell \
+                      /usr/local/lib/node_modules
+          sudo docker image prune --all --force >/dev/null 2>&1 || true
+          echo "after:"; df -h / | tail -1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-gate-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-gate-
+            ${{ runner.os }}-cargo-
+
+      # Serial (`--test-threads=1`): the three examples share one cargo
+      # target dir for dep reuse; parallel runs would only serialize on
+      # cargo's own file lock with interleaved output.
+      - name: Generated artifact gate
+        run: cargo test -p qedgen-solana-skills --test generated_artifact_gate -- --ignored --test-threads=1
+
   # Supply-chain gate. Runs independently of `test` so an advisory
   # publish doesn't block a feature PR's other checks from reporting,
   # and so the cargo-audit / cargo-deny tool installs don't bloat the

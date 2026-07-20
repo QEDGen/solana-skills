@@ -5,6 +5,8 @@ members = [
     "crates/qedgen-macros",
     "crates/qedgen-sandbox",
     "crates/qed-drift-fixture",
+    "crates/kani-compile-stub",
+    "crates/kani-compile-stub/macros",
 ]
 exclude = [
     "examples/rust/escrow",

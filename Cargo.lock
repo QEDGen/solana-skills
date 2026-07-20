@@ -2234,6 +2234,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "qedgen-kani-compile-stub"
+version = "0.1.0"
+dependencies = [
+ "qedgen-kani-compile-stub-macros",
+]
+
+[[package]]
+name = "qedgen-kani-compile-stub-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "qedgen-macros"
 version = "0.1.0"
 dependencies = [
