@@ -237,7 +237,7 @@ Generated and always safe to regenerate:
 | `src/instructions/mod.rs` | QEDGen | Module declarations and Quasar re-exports |
 | `tests/kani.rs` | QEDGen | Kani harnesses |
 | `tests/proptest.rs` | QEDGen | Property-test harnesses |
-| `src/tests.rs` | QEDGen | Unit tests when requested |
+| `tests/unit.rs` | QEDGen | Unit tests when requested |
 | `programs/tests/integration_tests.rs` | QEDGen | Integration-test scaffold when requested |
 | `formal_verification/Spec.lean` | QEDGen | Lean model generated from `.qedspec` |
 

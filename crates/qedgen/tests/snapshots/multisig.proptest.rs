@@ -95,7 +95,7 @@ fn votes_bounded(s: &State) -> bool {
 }
 
 fn create_vault(s: &mut State, threshold: u8, member_count: u8) -> bool {
-    if !(((threshold > 0) && (threshold <= member_count)) && (member_count <= 32)) {
+    if !((threshold > 0) && (threshold <= member_count) && (member_count <= 32)) {
         return false;
     }
     if s.status != Status::Uninitialized {
@@ -120,48 +120,33 @@ fn propose(s: &mut State) -> bool {
 }
 
 fn approve(s: &mut State, member_index: u8) -> bool {
-    if !((member_index < s.member_count)
-        && (s.members[(member_index) as usize] == approver)
-        && (s.voted[(member_index) as usize] == 0))
-    {
+    if !((member_index < s.member_count) && (s.voted[(member_index) as usize] == 0)) {
         return false;
     }
     if s.status != Status::HasProposal {
         return false;
     }
-    match s.approval_count.checked_add(1) {
-        Some(__v) => s.approval_count = __v,
-        None => return false,
-    }
-    s.voted[member_index] = 1;
+    s.approval_count = s.approval_count.wrapping_add(1);
+    s.voted[member_index as usize] = 1;
     s.status = Status::HasProposal;
     true
 }
 
 fn reject(s: &mut State, member_index: u8) -> bool {
-    if !((member_index < s.member_count)
-        && (s.members[(member_index) as usize] == rejecter)
-        && (s.voted[(member_index) as usize] == 0))
-    {
+    if !((member_index < s.member_count) && (s.voted[(member_index) as usize] == 0)) {
         return false;
     }
     if s.status != Status::HasProposal {
         return false;
     }
-    match s.rejection_count.checked_add(1) {
-        Some(__v) => s.rejection_count = __v,
-        None => return false,
-    }
-    s.voted[member_index] = 1;
+    s.rejection_count = s.rejection_count.wrapping_add(1);
+    s.voted[member_index as usize] = 1;
     s.status = Status::HasProposal;
     true
 }
 
 fn execute(s: &mut State, member_index: u8) -> bool {
-    if !((member_index < s.member_count)
-        && (s.members[(member_index) as usize] == executor)
-        && (s.approval_count >= s.threshold))
-    {
+    if !((member_index < s.member_count) && (s.approval_count >= s.threshold)) {
         return false;
     }
     if s.status != Status::HasProposal {
@@ -195,22 +180,19 @@ fn add_member(s: &mut State, member_index: u8, member_pubkey: [u8; 32]) -> bool 
     if s.status != Status::Active {
         return false;
     }
-    s.members[member_index] = member_pubkey;
+    s.members[member_index as usize] = member_pubkey;
     s.status = Status::Active;
     true
 }
 
 fn remove_member(s: &mut State) -> bool {
-    if !((s.member_count > s.threshold) && ((s.approval_count == 0) && (s.rejection_count == 0))) {
+    if !((s.member_count > s.threshold) && (s.approval_count == 0) && (s.rejection_count == 0)) {
         return false;
     }
     if s.status != Status::Active {
         return false;
     }
-    match s.member_count.checked_sub(1) {
-        Some(__v) => s.member_count = __v,
-        None => return false,
-    }
+    s.member_count = s.member_count.wrapping_sub(1);
     s.status = Status::Active;
     true
 }
@@ -218,7 +200,7 @@ fn remove_member(s: &mut State) -> bool {
 proptest! {
     #![proptest_config(ProptestConfig { max_global_rejects: 65536, ..ProptestConfig::with_cases(256) })]
     #[test]
-    fn create_vault_preserves_threshold_bounded(threshold in 0u8..=u8::MAX, member_count in 0u8..=u8::MAX) {
+    fn create_vault_preserves_threshold_bounded(threshold in 0u8..=255u8, member_count in 0u8..=255u8) {
         let mut post = State {
             creator: [0u8; 32],
             threshold: 0,
@@ -255,7 +237,7 @@ proptest! {
 proptest! {
     #![proptest_config(ProptestConfig { max_global_rejects: 65536, ..ProptestConfig::with_cases(256) })]
     #[test]
-    fn approve_preserves_threshold_bounded(s in arb_state(), member_index in 0u8..=u8::MAX) {
+    fn approve_preserves_threshold_bounded(s in arb_state(), member_index in 0u8..=255u8) {
         let pre = s.clone();
         let mut post = s;
         prop_assume!(threshold_bounded(&pre));
@@ -270,7 +252,7 @@ proptest! {
 proptest! {
     #![proptest_config(ProptestConfig { max_global_rejects: 65536, ..ProptestConfig::with_cases(256) })]
     #[test]
-    fn reject_preserves_threshold_bounded(s in arb_state(), member_index in 0u8..=u8::MAX) {
+    fn reject_preserves_threshold_bounded(s in arb_state(), member_index in 0u8..=255u8) {
         let pre = s.clone();
         let mut post = s;
         prop_assume!(threshold_bounded(&pre));
@@ -286,7 +268,7 @@ proptest! {
 proptest! {
     #![proptest_config(ProptestConfig { max_global_rejects: 65536, ..ProptestConfig::with_cases(256) })]
     #[test]
-    fn execute_preserves_threshold_bounded(s in arb_state(), member_index in 0u8..=u8::MAX) {
+    fn execute_preserves_threshold_bounded(s in arb_state(), member_index in 0u8..=255u8) {
         let pre = s.clone();
         let mut post = s;
         prop_assume!(threshold_bounded(&pre));
@@ -316,7 +298,7 @@ proptest! {
 proptest! {
     #![proptest_config(ProptestConfig { max_global_rejects: 65536, ..ProptestConfig::with_cases(256) })]
     #[test]
-    fn add_member_preserves_threshold_bounded(s in arb_state(), member_index in 0u8..=u8::MAX, member_pubkey in 0[u8; 32]..=[u8; 32]::MAX) {
+    fn add_member_preserves_threshold_bounded(s in arb_state(), member_index in 0u8..=255u8, member_pubkey in prop::array::uniform32(0u8..)) {
         let pre = s.clone();
         let mut post = s;
         prop_assume!(threshold_bounded(&pre));
@@ -346,7 +328,7 @@ proptest! {
 proptest! {
     #![proptest_config(ProptestConfig { max_global_rejects: 65536, ..ProptestConfig::with_cases(256) })]
     #[test]
-    fn create_vault_preserves_votes_bounded(threshold in 0u8..=u8::MAX, member_count in 0u8..=u8::MAX) {
+    fn create_vault_preserves_votes_bounded(threshold in 0u8..=255u8, member_count in 0u8..=255u8) {
         let mut post = State {
             creator: [0u8; 32],
             threshold: 0,
@@ -383,7 +365,7 @@ proptest! {
 proptest! {
     #![proptest_config(ProptestConfig { max_global_rejects: 65536, ..ProptestConfig::with_cases(256) })]
     #[test]
-    fn execute_preserves_votes_bounded(s in arb_state(), member_index in 0u8..=u8::MAX) {
+    fn execute_preserves_votes_bounded(s in arb_state(), member_index in 0u8..=255u8) {
         let pre = s.clone();
         let mut post = s;
         prop_assume!(threshold_bounded(&pre));
@@ -430,7 +412,7 @@ proptest! {
     #[test]
     fn create_vault_rejects_invalid(s in arb_boundary_state(), threshold in prop_oneof![0u8..=3u8, 252u8..=255u8], member_count in prop_oneof![0u8..=3u8, 252u8..=255u8]) {
         let mut s = s;
-        prop_assume!(!(((threshold > 0) && (threshold <= member_count)) && (member_count <= 32)));
+        prop_assume!(!((threshold > 0) && (threshold <= member_count) && (member_count <= 32)));
         prop_assert!(!create_vault(&mut s, threshold, member_count),
             "create_vault must reject when guard is violated");
     }
@@ -441,7 +423,7 @@ proptest! {
     #[test]
     fn approve_rejects_invalid(s in arb_boundary_state(), member_index in prop_oneof![0u8..=3u8, 252u8..=255u8]) {
         let mut s = s;
-        prop_assume!(!((member_index < s.member_count) && (s.members[(member_index) as usize] == approver) && (s.voted[(member_index) as usize] == 0)));
+        prop_assume!(!((member_index < s.member_count) && (s.voted[(member_index) as usize] == 0)));
         prop_assert!(!approve(&mut s, member_index),
             "approve must reject when guard is violated");
     }
@@ -452,7 +434,7 @@ proptest! {
     #[test]
     fn reject_rejects_invalid(s in arb_boundary_state(), member_index in prop_oneof![0u8..=3u8, 252u8..=255u8]) {
         let mut s = s;
-        prop_assume!(!((member_index < s.member_count) && (s.members[(member_index) as usize] == rejecter) && (s.voted[(member_index) as usize] == 0)));
+        prop_assume!(!((member_index < s.member_count) && (s.voted[(member_index) as usize] == 0)));
         prop_assert!(!reject(&mut s, member_index),
             "reject must reject when guard is violated");
     }
@@ -463,7 +445,7 @@ proptest! {
     #[test]
     fn execute_rejects_invalid(s in arb_boundary_state(), member_index in prop_oneof![0u8..=3u8, 252u8..=255u8]) {
         let mut s = s;
-        prop_assume!(!((member_index < s.member_count) && (s.members[(member_index) as usize] == executor) && (s.approval_count >= s.threshold)));
+        prop_assume!(!((member_index < s.member_count) && (s.approval_count >= s.threshold)));
         prop_assert!(!execute(&mut s, member_index),
             "execute must reject when guard is violated");
     }
@@ -496,7 +478,7 @@ proptest! {
     #[test]
     fn remove_member_rejects_invalid(s in arb_boundary_state()) {
         let mut s = s;
-        prop_assume!(!((s.member_count > s.threshold) && ((s.approval_count == 0) && (s.rejection_count == 0))));
+        prop_assume!(!((s.member_count > s.threshold) && (s.approval_count == 0) && (s.rejection_count == 0)));
         prop_assert!(!remove_member(&mut s),
             "remove_member must reject when guard is violated");
     }
@@ -505,7 +487,7 @@ proptest! {
 proptest! {
     #![proptest_config(ProptestConfig { max_global_rejects: 65536, ..ProptestConfig::with_cases(256) })]
     #[test]
-    fn approve_no_overflow_on_approval_count(s in arb_state(), member_index in 0u8..=u8::MAX) {
+    fn approve_no_overflow_on_approval_count(s in arb_state(), member_index in 0u8..=255u8) {
         let mut s = s;
         prop_assume!(threshold_bounded(&s));
         prop_assume!(votes_bounded(&s));
@@ -521,7 +503,7 @@ proptest! {
 proptest! {
     #![proptest_config(ProptestConfig { max_global_rejects: 65536, ..ProptestConfig::with_cases(256) })]
     #[test]
-    fn reject_no_overflow_on_rejection_count(s in arb_state(), member_index in 0u8..=u8::MAX) {
+    fn reject_no_overflow_on_rejection_count(s in arb_state(), member_index in 0u8..=255u8) {
         let mut s = s;
         prop_assume!(threshold_bounded(&s));
         prop_assume!(votes_bounded(&s));
@@ -548,13 +530,15 @@ enum Op {
 
 fn arb_op() -> impl Strategy<Value = Op> {
     prop_oneof![
-        (0u8..=u8::MAX, 0u8..=u8::MAX).prop_map(|(threshold, member_count)| Op::CreateVault(threshold, member_count)),
+        (0u8..=255u8, 0u8..=255u8)
+            .prop_map(|(threshold, member_count)| Op::CreateVault(threshold, member_count)),
         Just(Op::Propose),
-        (0u8..=u8::MAX).prop_map(|v| Op::Approve(v)),
-        (0u8..=u8::MAX).prop_map(|v| Op::Reject(v)),
-        (0u8..=u8::MAX).prop_map(|v| Op::Execute(v)),
+        (0u8..=255u8).prop_map(|v| Op::Approve(v)),
+        (0u8..=255u8).prop_map(|v| Op::Reject(v)),
+        (0u8..=255u8).prop_map(|v| Op::Execute(v)),
         Just(Op::CancelProposal),
-        (0u8..=u8::MAX, 0[u8; 32]..=[u8; 32]::MAX).prop_map(|(member_index, member_pubkey)| Op::AddMember(member_index, member_pubkey)),
+        (0u8..=255u8, prop::array::uniform32(0u8..))
+            .prop_map(|(member_index, member_pubkey)| Op::AddMember(member_index, member_pubkey)),
         Just(Op::RemoveMember),
     ]
 }

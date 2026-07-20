@@ -11,5 +11,6 @@
 /.github/
 /tests/proptest.rs
 /tests/kani.rs
+/tests/unit.rs
 /src/integration_tests.rs
 /src/tests.rs
