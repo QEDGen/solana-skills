@@ -19,7 +19,7 @@ The UX is **agent-first**: the user interacts with the SKILL (`SKILL.md`) and ag
 
 **Design principles:**
 - A DSL feature that *structurally eliminates* a proof obligation beats a new proof template or a shelled-out sorry.
-- Codegen mechanizes only deterministic translation; business logic (transfers, CPI authority, events, PDA creation) stays agent-filled `todo!()`.
+- Codegen mechanizes only deterministic translation. Supported direct CPIs with transaction signers, Anchor/Quasar lifecycle account creation, and Anchor builder-shape CPIs with assemblable PDA signer seeds are complete; transfer sugar, events, unsupported calls, Pinocchio PDA creation, and every other PDA-signed CPI stay agent-filled `todo!()`. The per-target contract lives in `docs/framework-support.md`.
 - When a template can't close a case, emit `sorry` with a comment — never bury it in tactics that might spuriously close.
 - Don't pre-shell to Leanstral/Aristotle for what a local LLM can do. Escalation is for *after* you've tried, not when you expect to need to.
 - The typed MIR (`mir.rs`) exists for bug-class elimination, not LoC: matches over the closed `Stmt` enum are exhaustive by discipline (no `_` arms — see the enum doc in `mir.rs`), so a new statement kind is a compile error at every `Stmt` consumer (Lean codegen, Rust scaffold, and the Kani/proptest effect lowering via `rust_codegen_util::stmt_effect_triple`), not silent drift. Conditional `effect { match … }` bodies lower to `Stmt::Branch` (Phase 5): Rust renders a `match`, the flat-state Lean transition applies exactly one arm (per-arm bound guards); the ADT Lean path still flattens arms to their union (`stmts_with_branch_union`). Measure intrinsics by bugs eliminated, not lines saved.

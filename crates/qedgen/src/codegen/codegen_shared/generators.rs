@@ -344,8 +344,12 @@ pub(crate) fn render_pinocchio_handler_scaffold(
             param_names.join(", ")
         ));
     }
-    emit_pinocchio_effect_body(&mut out, handler, spec);
-    out.push_str("        Ok(())\n");
+    let needs_fill = emit_pinocchio_effect_body(&mut out, handler, spec);
+    if needs_fill {
+        out.push_str("        todo!(\"fill non-mechanical effects, events, transfers, calls\")\n");
+    } else {
+        out.push_str("        Ok(())\n");
+    }
     out.push_str("    }\n");
     out.push_str("}\n\n");
 
@@ -429,7 +433,7 @@ pub(crate) fn emit_pinocchio_effect_body(
     out: &mut String,
     handler: &ParsedHandler,
     spec: &ParsedSpec,
-) {
+) -> bool {
     let prog = to_pascal_case(&spec.program_name);
     let err = format!("{}Error", prog);
     let has = |n: &str| spec.error_codes.iter().any(|c| c == n);
@@ -519,30 +523,69 @@ pub(crate) fn emit_pinocchio_effect_body(
     if complex_effects {
         out.push_str("        // TODO(slice 6 4b-cont): non-scalar effects (array / nested /\n        // variant-payload writes) + multi-account state.\n");
     }
+
+    // Anchor and Quasar lifecycle init is owned by their account macros.
+    // Pinocchio has no equivalent implicit creation step: mutating the zero-copy
+    // view without first allocating/assigning the PDA would be a plausible but
+    // incomplete operation, so make the ownership boundary executable.
+    let needs_pda_creation = matches!(
+        handler.pre_status.as_deref(),
+        Some("Uninitialized" | "Empty")
+    ) && handler
+        .accounts
+        .iter()
+        .any(|a| !a.is_signer && a.pda_seeds.is_some());
+    if needs_pda_creation {
+        out.push_str(
+            "        // Lifecycle init requires PDA allocation/assignment — agent fill: create the complete signed System CPI\n",
+        );
+    }
     // Explicit `call Interface.handler(...)` sites. Non-SPL (generic
     // invoke) call sites return `None` and fall through to a breadcrumb.
     let mut any_unmechanized_call = false;
     for c in &handler.calls {
-        match try_emit_cpi(c, handler, spec, Target::Pinocchio) {
-            Some(rendered) => {
+        match plan_cpi(c, handler, spec, Target::Pinocchio) {
+            CpiPlan::Complete(rendered) => {
                 out.push_str(&format!(
                     "        // Spec call: {}.{}\n",
                     c.target_interface, c.target_handler
                 ));
                 out.push_str(&rendered);
             }
-            None => any_unmechanized_call = true,
+            CpiPlan::AgentFill(reason) => {
+                out.push_str(&format!(
+                    "        // Spec call: {}.{} — agent fill: {}\n",
+                    c.target_interface,
+                    c.target_handler,
+                    reason.render(),
+                ));
+                any_unmechanized_call = true;
+            }
         }
-    }
-    if any_unmechanized_call {
-        out.push_str("        // TODO(slice 7): generic (non-SPL) CPI call sites are not yet\n        // mechanized for Pinocchio (raw invoke_signed + Borsh).\n");
     }
 
     // `transfers { … }` stays agent-fill on every target (CPI/authority
     // business logic); events carry no payload binding in the spec.
-    if !handler.emits.is_empty() || !handler.transfers.is_empty() {
-        out.push_str("        // TODO(slice 6 4b-cont): events / transfers.\n");
+    for emit in &handler.emits {
+        out.push_str(&format!(
+            "        // Spec event: emit {} — agent fill\n",
+            emit
+        ));
     }
+    for transfer in &handler.transfers {
+        out.push_str(&format!(
+            "        // Spec transfer: {} -> {} amount={} — agent fill: assemble the complete CPI and authority\n",
+            transfer.from,
+            transfer.to,
+            transfer.amount.as_deref().unwrap_or("?"),
+        ));
+    }
+
+    complex_effects
+        || needs_pda_creation
+        || any_unmechanized_call
+        || !handler.emits.is_empty()
+        || !handler.transfers.is_empty()
 }
 
 /// `true` when the spec's state is a multi-variant ADT (≥2 variants in a

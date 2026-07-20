@@ -37,6 +37,33 @@ sBPF assembly is selected by `pragma sbpf` in the spec, not by a `Target`.
 | Miri divergence repros (`verify/miri_verify`) | ❌ | ❌ | ✅ | ❌ | n/a |
 | Ratchet / readiness (`verify/ratchet`) | ✅ | ✅ | ❌ no ratchet crate | ❌ | ❌ |
 
+## Codegen ownership contract: CPIs, PDA creation, and events
+
+“Complete” means codegen emits the whole operation required by the spec. If
+account resolution fails, a handler is unsupported, or signer seeds would have
+to be guessed, the scaffold emits a reasoned agent-fill site and a `todo!()`.
+It never emits a plausible unsigned CPI for a PDA authority.
+
+| Operation | Anchor | Quasar | Pinocchio |
+|---|---|---|---|
+| Lifecycle-created state PDA (`Uninitialized`/`Empty` → active) | ✅ account macro owns `init`, payer, space, seeds, bump | ✅ account macro owns `init`, payer, seeds, bump | ⚠️ agent fill: complete signed System allocation/assignment |
+| `transfers { ... }` sugar | ⚠️ agent fill: CPI accounts + authority | ⚠️ agent fill: CPI accounts + authority | ⚠️ agent fill: CPI accounts + authority |
+| Direct canonical SPL Token `call`, transaction signer authority | ✅ transfer, mint, burn, initialize, close | ⚠️ transfer, mint, burn, close; initialize is agent fill | ✅ transfer, mint, burn, initialize, close |
+| Direct System transfer, transaction signer authority | ✅ | ✅ | ✅ |
+| Direct System create/assign, non-PDA signer | ✅ generic invocation | ⚠️ agent fill | ⚠️ agent fill |
+| Generic interface `call`, transaction signer authority | ✅ discriminator + args + account metas | ⚠️ agent fill | ⚠️ agent fill |
+| Any direct `call` whose signer slot binds a program PDA | ✅ builder shapes (SPL Token, System transfer) sign via `new_with_signer` when seeds are the account's declared `pda [...]`; ⚠️ agent fill otherwise (generic invoke, unassemblable seeds) | ⚠️ agent fill: complete CPI with signer seeds | ⚠️ agent fill: complete CPI with signer seeds |
+| Events | ⚠️ agent fill: payload binding + framework emission | ⚠️ agent fill: payload binding + framework emission | ⚠️ agent fill: payload binding + framework emission |
+
+The executable boundary lives in `codegen_shared::cpi::CpiPlan`:
+`Complete(code)` and `AgentFill(reason)` are the only outcomes. The PDA-signer
+check is a post-condition on the emitted artifact: a call whose signer slots
+bind caller PDAs is `Complete` only if the emitted code signs for them
+(`new_with_signer` / `invoke_signed`), so an ordinary unsigned `invoke` can
+never ship for a PDA-authorized call. Pinocchio likewise turns lifecycle PDA
+creation, transfer sugar, events, and unsupported calls into a hard handler
+`todo!()` rather than returning `Ok(())` after a breadcrumb.
+
 The two *deprecated* rows (`qedgen spec --idl`, `qedgen adapt --program`)
 remain functional in v2.x with a runtime warning and are removed in v3.0.
 The brownfield front door is spec elicitation: `qedgen probe --program <c>

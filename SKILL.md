@@ -101,7 +101,7 @@ Step 3. Scaffold generated artifacts.
 $QEDGEN codegen --spec program.qedspec --target anchor --all
 ```
 
-Use `--target quasar` for Quasar or `--target pinocchio` for Pinocchio (`#![no_std]` + `entrypoint!` dispatch, zeropod zero-copy state, `&AccountInfo` account structs with `.handler()` methods, checked effects, SPL Token CPIs). All three targets emit a full program scaffold; generic (non-SPL) and PDA-signed CPIs are not yet wired for Pinocchio.
+Use `--target quasar` for Quasar or `--target pinocchio` for Pinocchio (`#![no_std]` + `entrypoint!` dispatch, zeropod zero-copy state, `&AccountInfo` account structs with `.handler()` methods, checked effects, SPL Token CPIs). All three targets emit a full program scaffold. A CPI is emitted only when the target can produce the complete invocation: Anchor signs PDA-authorized builder CPIs with `new_with_signer` when the seeds come from the account's declared `pda [...]`; every other PDA-signed CPI is an explicit agent-fill site. Generic CPIs are mechanized for Anchor (transaction signers only) and remain agent-fill on Quasar and Pinocchio. See `docs/framework-support.md` for the per-operation contract.
 
 Step 4. Fill generated Rust.
 

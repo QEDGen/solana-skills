@@ -158,7 +158,7 @@ impl<'info> Cancel<'info> {
         guards::cancel(self)?;
         let _ = bumps;
         // Spec: emit!(EscrowCancelled)
-        // Spec call: Token.transfer (Anchor CPI emitted by v2.8 G4)
+        // Spec call: Token.transfer (complete CPI emitted)
         {
             use anchor_spl::token::{self, Transfer};
             let cpi_accounts = Transfer {
@@ -196,7 +196,7 @@ impl<'info> Exchange<'info> {
         verified,
         spec = "..",
         handler = "exchange",
-        hash = "9146f9898fc03101",
+        hash = "e3c2c7a52553d8bc",
         spec_hash = "914eb8b51ea56c85"
     )]
     #[inline(always)]
@@ -204,7 +204,7 @@ impl<'info> Exchange<'info> {
         guards::exchange(self)?;
         let _ = bumps;
         // Spec: emit!(EscrowExchanged)
-        // Spec call: Token.transfer (Anchor CPI emitted by v2.8 G4)
+        // Spec call: Token.transfer (complete CPI emitted)
         {
             use anchor_spl::token::{self, Transfer};
             let cpi_accounts = Transfer {
@@ -218,20 +218,7 @@ impl<'info> Exchange<'info> {
                 self.escrow.taker_amount,
             )?;
         }
-        // Spec call: Token.transfer (Anchor CPI emitted by v2.8 G4)
-        {
-            use anchor_spl::token::{self, Transfer};
-            let cpi_accounts = Transfer {
-                from: self.escrow_ta.to_account_info(),
-                to: self.taker_ta.to_account_info(),
-                authority: self.escrow.to_account_info(),
-            };
-            let cpi_program = self.token_program.to_account_info();
-            token::transfer(
-                CpiContext::new(cpi_program, cpi_accounts),
-                self.escrow.initializer_amount,
-            )?;
-        }
+        // Spec call: Token.transfer(from=escrow_ta, to=taker_ta, amount=initializer_amount, authority=escrow) — agent fill: PDA signer authority (escrow) requires signer-seed assembly; fill the complete signed CPI
         todo!("fill non-mechanical effects, events, transfers, calls")
     }
 }
@@ -268,7 +255,7 @@ impl<'info> Initialize<'info> {
         self.escrow.initializer_amount = deposit_amount;
         self.escrow.taker_amount = receive_amount;
         // Spec: emit!(EscrowInitialized)
-        // Spec call: Token.transfer (Anchor CPI emitted by v2.8 G4)
+        // Spec call: Token.transfer (complete CPI emitted)
         {
             use anchor_spl::token::{self, Transfer};
             let cpi_accounts = Transfer {
