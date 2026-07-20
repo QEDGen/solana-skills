@@ -462,7 +462,7 @@ pub fn emit_transition_fn_inner(
         let mut pairs: Vec<(String, String)> = Vec::new();
         for (field, _, value) in block_effect_triples_deep(body) {
             field_string_subscripts(
-                &strip_variant_prefix_for_flat_state(&field, spec),
+                &strip_variant_prefix_for_flat_state(&effect_path_source(field), spec),
                 &mut pairs,
             );
             if let Some(tree) = value.tree.as_ref() {
@@ -494,11 +494,12 @@ pub fn emit_transition_fn_inner(
     // conformance harnesses' `pre_<field>` assertions instead of the
     // emission order. Computed from the exact triples emitted below
     // (post pubkey-skip), so every snapshot is referenced.
-    let emitted_triples: Vec<(String, &'static str, &crate::mir::Expr)> =
+    let emitted_triples: Vec<(&crate::mir::Path, &'static str, &crate::mir::Expr)> =
         block_effect_triples_deep(body)
             .into_iter()
             .filter(|(field, _, _)| {
-                account_env_struct.is_some() || !field_type_is_pubkey(field, op, spec)
+                account_env_struct.is_some()
+                    || !field_type_is_pubkey(&effect_path_source(field), op, spec)
             })
             .collect();
     let pre_fields = parallel_snapshot_fields(&emitted_triples, spec);
@@ -536,8 +537,8 @@ pub fn emit_transition_fn_inner(
         out.push_str(&format!("    match {} {{\n", scrutinee_rust));
         let emit_arm_block = |out: &mut String, block: &crate::mir::Block| {
             for (field, op_kind, value) in block_effect_triples(block) {
-                let field = field.as_str();
-                if account_env_struct.is_none() && field_type_is_pubkey(field, op, spec) {
+                let field_name = effect_path_source(field);
+                if account_env_struct.is_none() && field_type_is_pubkey(&field_name, op, spec) {
                     continue;
                 }
                 if account_env_struct.is_some() {
@@ -564,7 +565,7 @@ pub fn emit_transition_fn_inner(
                         &pre_fields,
                     );
                 }
-                emit_after_store_hooks(out, &mir.hooks, field, "            ");
+                emit_after_store_hooks(out, &mir.hooks, &field_name, "            ");
             }
         };
         for arm in arms {
@@ -595,8 +596,8 @@ pub fn emit_transition_fn_inner(
         // triple these templates consume (byte-identical; see its doc)
         // and skips non-effect variants in-stream without reordering.
         for (field, op_kind, value) in block_effect_triples(body) {
-            let field = field.as_str();
-            if account_env_struct.is_none() && field_type_is_pubkey(field, op, spec) {
+            let field_name = effect_path_source(field);
+            if account_env_struct.is_none() && field_type_is_pubkey(&field_name, op, spec) {
                 continue;
             }
             if account_env_struct.is_some() {
@@ -623,7 +624,7 @@ pub fn emit_transition_fn_inner(
                     &pre_fields,
                 );
             }
-            emit_after_store_hooks(out, &mir.hooks, field, "    ");
+            emit_after_store_hooks(out, &mir.hooks, &field_name, "    ");
         }
     }
 

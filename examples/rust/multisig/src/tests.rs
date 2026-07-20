@@ -54,13 +54,13 @@ fn apply_propose(state: &mut MultisigState) {
 /// Apply `approve` effects to state.
 fn apply_approve(state: &mut MultisigState, member_index: u8) {
     state.approval_count += 1;
-    state.voted[member_index as usize] = 1;
+    state.voted[(member_index) as usize] = 1;
 }
 
 /// Apply `reject` effects to state.
 fn apply_reject(state: &mut MultisigState, member_index: u8) {
     state.rejection_count += 1;
-    state.voted[member_index as usize] = 1;
+    state.voted[(member_index) as usize] = 1;
 }
 
 /// Apply `execute` effects to state.
@@ -77,7 +77,7 @@ fn apply_cancel_proposal(state: &mut MultisigState) {
 
 /// Apply `add_member` effects to state.
 fn apply_add_member(state: &mut MultisigState, member_index: u8, member_pubkey: [u8; 32]) {
-    state.members[member_index as usize] = member_pubkey;
+    state.members[(member_index) as usize] = member_pubkey;
 }
 
 /// Apply `remove_member` effects to state.
@@ -181,7 +181,7 @@ mod tests {
         let pre_approval_count = state.approval_count;
         apply_approve(&mut state, member_index);
         assert_eq!(state.approval_count, pre_approval_count + 1);
-        assert_eq!(state.voted[member_index as usize], 1);
+        assert_eq!(state.voted[(member_index) as usize], 1);
     }
 
     #[test]
@@ -199,7 +199,7 @@ mod tests {
         let pre_rejection_count = state.rejection_count;
         apply_reject(&mut state, member_index);
         assert_eq!(state.rejection_count, pre_rejection_count + 1);
-        assert_eq!(state.voted[member_index as usize], 1);
+        assert_eq!(state.voted[(member_index) as usize], 1);
     }
 
     #[test]
@@ -249,7 +249,7 @@ mod tests {
         let member_index: u8 = 0;
         let member_pubkey: [u8; 32] = [1u8; 32];
         apply_add_member(&mut state, member_index, member_pubkey);
-        assert_eq!(state.members[member_index as usize], member_pubkey);
+        assert_eq!(state.members[(member_index) as usize], member_pubkey);
     }
 
     #[test]

@@ -17,6 +17,7 @@ use super::*;
 /// RHS carrier (#151 Slice 0) — built for every shape, simple or compound.
 pub(super) struct RenderedEffect {
     pub triple: (String, String, String),
+    pub lhs: crate::mir::expr_tree::TreePath,
     pub on_error: Option<String>,
     pub value_rust: String,
     pub tree: Option<crate::mir::ExprTree>,
@@ -29,6 +30,7 @@ impl RenderedEffect {
         let (field, op, value) = self.triple;
         crate::check::ParsedEffect {
             field,
+            lhs: Some(self.lhs),
             op,
             value,
             value_rust: self.value_rust,
@@ -56,6 +58,24 @@ fn render_effect(
     // index casting is applied at the codegen.rs::mechanize_effect site
     // so the Lean output stays untouched.
     let field = stmt.lhs.to_source_string();
+    // An effect LHS is a write into state even when its bare field name
+    // collides with a handler parameter. Expression canonicalization cannot
+    // make that assumption, so root the target explicitly here.
+    let lhs_path = if stmt.lhs.root == "state" {
+        stmt.lhs.clone()
+    } else {
+        let mut segments = Vec::with_capacity(stmt.lhs.segments.len() + 1);
+        segments.push(a::PathSeg::Field(stmt.lhs.root.clone()));
+        segments.extend(stmt.lhs.segments.iter().cloned());
+        a::Path {
+            root: "state".to_string(),
+            segments,
+        }
+    };
+    let lhs_node = Node::new(a::Expr::Path(lhs_path), 0..0);
+    let crate::mir::ExprTree::Path(lhs) = build_expr_tree(&lhs_node, tcx) else {
+        unreachable!("an effect target path must build as ExprTree::Path")
+    };
     // Per-effect semantic tag:
     //   - "add" / "sub"               = checked (default)
     //   - "add_sat" / "sub_sat"       = saturating (`+=!` / `-=!`)
@@ -93,6 +113,7 @@ fn render_effect(
     };
     RenderedEffect {
         triple: (field, op.to_string(), value),
+        lhs,
         on_error,
         value_rust,
         tree,
@@ -182,6 +203,15 @@ pub(super) fn render_effect_or_expand_variant_promotion(
                                 );
                                 RenderedEffect {
                                     triple: (lhs_str, "set".to_string(), value_str),
+                                    lhs: crate::mir::expr_tree::TreePath {
+                                        root: "state".to_string(),
+                                        binding: crate::mir::expr_tree::BindingKind::StateField,
+                                        segments: vec![
+                                            crate::mir::expr_tree::TreeSeg::Field(variant.clone()),
+                                            crate::mir::expr_tree::TreeSeg::Field(fname.clone()),
+                                        ],
+                                        ty: None,
+                                    },
                                     on_error: None,
                                     value_rust,
                                     tree,

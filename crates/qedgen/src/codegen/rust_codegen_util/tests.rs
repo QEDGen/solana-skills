@@ -20,6 +20,7 @@ state {
   cap : U64,
   owner : Pubkey,
 }
+
 type Error | Overflow | Unauthorized
 handler churn (amount : U64) (who : Pubkey) {
   requires amount > 0 else Unauthorized
@@ -40,7 +41,7 @@ handler churn (amount : U64) (who : Pubkey) {
         let body = mir.handler_block(&op.name).expect("mir body");
         let got: Vec<(String, String, String)> = block_effect_triples(body)
             .into_iter()
-            .map(|(f, k, v)| (f, k.to_string(), mir_expr_rust(v)))
+            .map(|(f, k, v)| (effect_path_source(f), k.to_string(), mir_expr_rust(v)))
             .collect();
         let want: Vec<(String, String, String)> = op
             .effects
@@ -61,6 +62,27 @@ handler churn (amount : U64) (who : Pubkey) {
     assert_eq!(
         kinds,
         vec!["add", "add_sat", "add_wrap", "sub", "sub_sat", "sub_wrap", "set"]
+    );
+}
+
+#[test]
+fn effect_lhs_stays_structured_and_uses_the_canonical_rust_renderer() {
+    let src = r#"spec TypedLhs
+const CAP = 4
+type State | Active of { voted : Map[CAP] U8 }
+handler vote (member_index : U8) : State.Active -> State.Active {
+  effect { Active.voted[member_index] := 1 }
+}
+"#;
+    let spec = parse_str(src).expect("parse");
+    let mir = crate::mir::lower(&spec);
+    let body = mir.handler_block("vote").expect("MIR body");
+    let (path, _, _) = stmt_effect_triple(&body.stmts[0]).expect("effect");
+
+    assert!(path.tree.is_some(), "adapter effects retain a typed LHS");
+    assert_eq!(
+        render_effect_target(path, &spec, "s"),
+        "s.voted[(member_index) as usize]"
     );
 }
 
@@ -158,7 +180,7 @@ fn stmt_effect_triples_round_trip_bundled_examples() {
                 .unwrap_or_else(|| panic!("MIR missing `{}` in {:?}", op.name, spec_path));
             let got: Vec<(String, String, String)> = block_effect_triples(body)
                 .into_iter()
-                .map(|(f, k, v)| (f, k.to_string(), mir_expr_rust(v)))
+                .map(|(f, k, v)| (effect_path_source(f), k.to_string(), mir_expr_rust(v)))
                 .collect();
             let want: Vec<(String, String, String)> = op
                 .effects

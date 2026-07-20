@@ -426,6 +426,11 @@ pub struct ParsedErrorCode {
 pub struct ParsedEffect {
     /// Target field path (`counter`, `accounts[i].capital`, `Variant.field`).
     pub field: String,
+    /// Name-resolved, structured target path. Production effects carry this
+    /// from the adapter so MIR/codegen never need to reparse `field` or
+    /// discover subscripts with string scanning. `None` is reserved for
+    /// legacy ingest and hand-built fixtures.
+    pub lhs: Option<crate::mir::expr_tree::TreePath>,
     /// Op kind: "set" | "add" | "add_sat" | "add_wrap" | "sub" | "sub_sat" |
     /// "sub_wrap". "add"/"sub" are the checked defaults; `_sat` / `_wrap`
     /// carry the explicit opt-in from `+=!` / `+=?`.
@@ -465,6 +470,7 @@ impl ParsedEffect {
     ) -> Self {
         ParsedEffect {
             field: field.into(),
+            lhs: None,
             op: op.into(),
             value: value.into(),
             value_rust: String::new(),

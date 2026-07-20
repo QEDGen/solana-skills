@@ -141,7 +141,7 @@ fn approve(s: &mut State, member_index: u8) -> bool {
         Some(__v) => s.approval_count = __v,
         None => return false,
     }
-    s.voted[member_index as usize] = 1;
+    s.voted[(member_index) as usize] = 1;
     s.status = Status::HasProposal;
     true
 }
@@ -161,7 +161,7 @@ fn reject(s: &mut State, member_index: u8) -> bool {
         Some(__v) => s.rejection_count = __v,
         None => return false,
     }
-    s.voted[member_index as usize] = 1;
+    s.voted[(member_index) as usize] = 1;
     s.status = Status::HasProposal;
     true
 }
@@ -207,7 +207,7 @@ fn add_member(s: &mut State, member_index: u8, member_pubkey: [u8; 32]) -> bool 
     if !(((member_index) as usize) < s.members.len()) {
         return false;
     }
-    s.members[member_index as usize] = member_pubkey;
+    s.members[(member_index) as usize] = member_pubkey;
     s.status = Status::Active;
     true
 }
@@ -1067,7 +1067,7 @@ fn verify_approve_effect_voted_member_index() {
     let pre_rejection_count = s.rejection_count;
     if approve(&mut s, member_index) {
         assert!(
-            s.voted[member_index as usize] == 1,
+            s.voted[(member_index) as usize] == 1,
             "voted[member_index] must equal 1"
         );
         assert!(
@@ -1163,7 +1163,7 @@ fn verify_reject_effect_voted_member_index() {
     let pre_rejection_count = s.rejection_count;
     if reject(&mut s, member_index) {
         assert!(
-            s.voted[member_index as usize] == 1,
+            s.voted[(member_index) as usize] == 1,
             "voted[member_index] must equal 1"
         );
         assert!(
@@ -1365,7 +1365,7 @@ fn verify_add_member_effect_members_member_index() {
     let pre_rejection_count = s.rejection_count;
     if add_member(&mut s, member_index, member_pubkey) {
         assert!(
-            pubkey_eq(&s.members[member_index as usize], &member_pubkey),
+            pubkey_eq(&s.members[(member_index) as usize], &member_pubkey),
             "members[member_index] must equal member_pubkey"
         );
         assert!(
