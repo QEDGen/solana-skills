@@ -379,6 +379,7 @@ pub struct Initialize<'info> {
 use anchor_lang::prelude::*;
 
 #[account]
+#[derive(InitSpace)]
 pub struct EscrowAccount {
     pub initializer: Pubkey,
     pub taker: Pubkey,

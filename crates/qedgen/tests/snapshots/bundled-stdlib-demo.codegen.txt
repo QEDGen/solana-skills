@@ -184,6 +184,7 @@ pub struct Deposit {}
 use anchor_lang::prelude::*;
 
 #[account]
+#[derive(InitSpace)]
 pub struct PoolDemoAccount {
     pub pool_balance: u64,
     pub status: u8,

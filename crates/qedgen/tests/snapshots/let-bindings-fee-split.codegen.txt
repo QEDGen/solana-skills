@@ -223,6 +223,7 @@ pub struct State {
 }
 
 #[account]
+#[derive(InitSpace)]
 pub struct FeeSplitAccount {
     pub pool: u64,
     pub fees: u64,

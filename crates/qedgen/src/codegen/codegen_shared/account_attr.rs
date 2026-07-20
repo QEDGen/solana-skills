@@ -107,16 +107,15 @@ pub(crate) fn quasar_account_attr(
         // the canonical form is `space = 8 + <AccountStruct>::INIT_SPACE`
         // (8 = Anchor discriminator). The struct name must match what
         // `generate_state` emits.
-        let space_target = match (target, handler.on_account.as_deref()) {
-            // Multi-state spec: per-handler `on_account` names
-            // the ADT being driven. The wrapper struct is
-            // `<Name>Account`.
-            (_, Some(adt_name)) => format!("{}Account", adt_name),
-            // Single-state spec on Anchor: the wrapper is
-            // `<Program>Account` (matches `generate_state`'s
-            // non-multi branch).
-            (crate::Target::Anchor, None) => {
-                format!("{}Account", to_pascal_case(&spec.program_name))
+        let space_target = match target {
+            // Shared derivation with `generate_state` — see
+            // `state_struct_name`. Keying on `on_account` alone emitted
+            // `<Adt>Account` for single-account specs whose ADT name
+            // differs from the program name, against a struct actually
+            // named `<Program>Account` (E0433, scaffold did not
+            // compile).
+            crate::Target::Anchor => {
+                crate::codegen_shared::state_struct_name(spec, handler.on_account.as_deref())
             }
             // Quasar handles space differently — its `init`
             // analogue takes size from the typed `Account<T>`

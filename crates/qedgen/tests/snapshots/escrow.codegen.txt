@@ -4278,6 +4278,7 @@ mod escrow {
 use anchor_lang::prelude::*;
 
 #[account]
+#[derive(InitSpace)]
 pub struct EscrowAccount {
     pub initializer: Pubkey,
     pub initializer_token_account: Pubkey,
