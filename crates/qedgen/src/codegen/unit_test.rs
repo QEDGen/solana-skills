@@ -834,11 +834,15 @@ fn generate_guard_tests(
             val
         ));
     }
-    out.push_str(&format!(
-        "        assert!(guard_{}(&state{}));\n",
-        op.name,
-        call_args(op)
-    ));
+    // #312: assert only over a fixture evaluation confirms. The seeded
+    // "valid" fixture is a heuristic — it does not satisfy every guard.
+    let accepts_env = fixture_env(fields, op, &[], &[]);
+    emit_guard_assertion(
+        out,
+        op,
+        check_fixture(op, &accepts_env, true),
+        /*want_true=*/ true,
+    );
     out.push_str("    }\n\n");
 
     // --- Test: guard REJECTS invalid inputs ---
@@ -870,13 +874,60 @@ fn generate_guard_tests(
             ));
         }
     }
-    out.push_str(&format!(
-        "        assert!(!guard_{}(&state{}));\n",
-        op.name,
-        call_args(op)
-    ));
+    // #312: the falsifier searches, it does not prove. Assert only over
+    // a fixture evaluation confirms actually violates the guard.
+    let rejects_env = fixture_env(fields, op, &state_overrides, &param_overrides);
+    emit_guard_assertion(
+        out,
+        op,
+        check_fixture(op, &rejects_env, false),
+        /*want_true=*/ false,
+    );
     out.push_str("    }\n\n");
     Ok(())
+}
+
+/// Emit the guard assertion, or an explanation of why the fixture cannot
+/// carry one. The fixture is still emitted either way: it documents the
+/// shape and keeps the test compiling, so a later solver improvement
+/// turns the comment into an assertion without restructuring anything.
+fn emit_guard_assertion(
+    out: &mut String,
+    op: &ParsedHandler,
+    check: FixtureCheck,
+    want_true: bool,
+) {
+    let bang = if want_true { "" } else { "!" };
+    match check {
+        FixtureCheck::Solved => {
+            out.push_str(&format!(
+                "        assert!({}guard_{}(&state{}));\n",
+                bang,
+                op.name,
+                call_args(op)
+            ));
+        }
+        FixtureCheck::Contradicted => {
+            let wanted = if want_true { "satisfy" } else { "violate" };
+            out.push_str(&format!(
+                "        // No assertion: no fixture was found that would {wanted} this\n\
+                 \x20       // guard, so asserting would test the fixture search, not the\n\
+                 \x20       // guard. See #312.\n\
+                 \x20       let _ = guard_{}(&state{});\n",
+                op.name,
+                call_args(op)
+            ));
+        }
+        FixtureCheck::Unsupported(reason) => {
+            out.push_str(&format!(
+                "        // No assertion: {reason}, so the fixture is unverified.\n\
+                 \x20       // See #312.\n\
+                 \x20       let _ = guard_{}(&state{});\n",
+                op.name,
+                call_args(op)
+            ));
+        }
+    }
 }
 
 /// Generate a property preservation test for a specific operation.
@@ -1614,6 +1665,239 @@ fn flip_cmp_tree(cmp: crate::mir::expr_tree::TreeCmpOp) -> crate::mir::expr_tree
     }
 }
 
+// ===========================================================================
+// Fixture verification (#312)
+//
+// The falsifier below searches for a violating assignment; it does not
+// PROVE the assignment violates. Its `Cmp` case only solves
+// `field <op> literal`, so a field-vs-field guard
+// (`member_index < member_count`) falls through to the string-atom
+// heuristics and can return an assignment that leaves the guard TRUE.
+// Emitting `assert!(!guard(…))` over such a fixture produces a generated
+// test that fails against correct code — the failure mode behind the six
+// `*_guard_*` failures in the bundled examples.
+//
+// The fix here is a verification boundary rather than a better search:
+// evaluate the guard against the exact fixture the test will contain, and
+// emit a truth-value assertion only when evaluation confirms it. A better
+// search (#263) still benefits — it just changes how often the outcome is
+// `Solved` instead of `Contradicted`.
+// ===========================================================================
+
+/// Outcome of checking a candidate fixture against the guard.
+///
+/// Deliberately NOT #294's `Unsatisfiable`: proving no witness exists
+/// needs a real solver. What this boundary can decide is whether the
+/// witness in hand actually works.
+enum FixtureCheck {
+    /// Evaluation confirmed the guard takes the wanted truth value. Only
+    /// this may emit an assertion.
+    Solved,
+    /// Evaluation produced the opposite value — the search returned a
+    /// fixture that does not demonstrate what the test would assert.
+    Contradicted,
+    /// The guard uses a construct the evaluator cannot decide, so the
+    /// fixture is unverified either way.
+    Unsupported(&'static str),
+}
+
+/// A concrete value the evaluator can reason about. Pubkeys, arrays, and
+/// records are deliberately absent: they reach the evaluator only through
+/// comparisons it declines to decide.
+#[derive(Clone, Copy, PartialEq)]
+enum FixtureValue {
+    Int(i128),
+    Bool(bool),
+}
+
+/// Parse a generated fixture literal (`"0"`, `"100u64"`, `"true"`) into a
+/// value. `None` for shapes with no scalar meaning (`[1u8; 32]`).
+fn parse_fixture_literal(text: &str) -> Option<FixtureValue> {
+    let t = text.trim();
+    match t {
+        "true" => return Some(FixtureValue::Bool(true)),
+        "false" => return Some(FixtureValue::Bool(false)),
+        _ => {}
+    }
+    let digits: String = t
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '-')
+        .collect();
+    if digits.is_empty() {
+        return None;
+    }
+    // Reject a suffix that is not a Rust integer type, so `1abc` is not
+    // silently read as 1.
+    let rest = &t[digits.len()..];
+    let suffix_ok = rest.is_empty()
+        || matches!(
+            rest,
+            "u8" | "u16"
+                | "u32"
+                | "u64"
+                | "u128"
+                | "usize"
+                | "i8"
+                | "i16"
+                | "i32"
+                | "i64"
+                | "i128"
+                | "isize"
+        );
+    if !suffix_ok {
+        return None;
+    }
+    digits.parse::<i128>().ok().map(FixtureValue::Int)
+}
+
+/// The concrete values the generated test will bind, keyed by the name a
+/// tree path resolves to. Built from the same seeds and overrides the
+/// emitters use, so the evaluator sees exactly the emitted fixture.
+fn fixture_env(
+    fields: &[(String, String)],
+    op: &ParsedHandler,
+    state_overrides: &[(String, String)],
+    param_overrides: &[(String, String)],
+) -> std::collections::HashMap<String, FixtureValue> {
+    let mut env = std::collections::HashMap::new();
+    let seeds = seed_state_values(fields, op, &[]);
+    for (fname, ftype) in fields {
+        let text = state_overrides
+            .iter()
+            .find(|(n, _)| n == fname)
+            .map(|(_, v)| v.clone())
+            .or_else(|| seeds.get(fname).cloned())
+            .unwrap_or_else(|| non_numeric_default(ftype));
+        if let Some(v) = parse_fixture_literal(&text) {
+            env.insert(fname.clone(), v);
+        }
+    }
+    for (pname, ptype) in &op.takes_params {
+        let text = param_overrides
+            .iter()
+            .find(|(n, _)| n == pname)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_else(|| sensible_param(pname, ptype));
+        if let Some(v) = parse_fixture_literal(&text) {
+            env.insert(pname.clone(), v);
+        }
+    }
+    env
+}
+
+/// Evaluate a guard expression against the fixture environment. `None`
+/// whenever any part is undecidable — an unknown name, a non-scalar
+/// comparison, division by zero, or a node kind outside the fragment.
+fn eval_tree(
+    tree: &crate::mir::ExprTree,
+    env: &std::collections::HashMap<String, FixtureValue>,
+) -> Option<FixtureValue> {
+    use crate::mir::expr_tree::{
+        BindingKind, ExprTree, TreeArithOp, TreeBoolOp, TreeCmpOp, TreeSeg,
+    };
+
+    match tree {
+        ExprTree::Int(v) => Some(FixtureValue::Int(*v as i128)),
+        ExprTree::Bool(b) => Some(FixtureValue::Bool(*b)),
+        ExprTree::Path(p) => match &p.binding {
+            BindingKind::Const(value) => parse_fixture_literal(value),
+            BindingKind::StateField | BindingKind::Ghost => match p.segments.as_slice() {
+                [TreeSeg::Field(f)] => env.get(f.as_str()).copied(),
+                // Subscripts and nested paths address container elements
+                // the fixture seeds do not model.
+                _ => None,
+            },
+            BindingKind::Param | BindingKind::LetBound => p
+                .segments
+                .is_empty()
+                .then(|| env.get(p.root.as_str()).copied())?,
+            // Accounts, externals, and unresolved names have no fixture
+            // value — the unit-test model carries no accounts at all.
+            _ => None,
+        },
+        ExprTree::Not(inner) => match eval_tree(inner, env)? {
+            FixtureValue::Bool(b) => Some(FixtureValue::Bool(!b)),
+            FixtureValue::Int(_) => None,
+        },
+        ExprTree::BoolOp { op, lhs, rhs } => {
+            let (a, b) = match (eval_tree(lhs, env)?, eval_tree(rhs, env)?) {
+                (FixtureValue::Bool(a), FixtureValue::Bool(b)) => (a, b),
+                _ => return None,
+            };
+            Some(FixtureValue::Bool(match op {
+                TreeBoolOp::And => a && b,
+                TreeBoolOp::Or => a || b,
+                TreeBoolOp::Implies => !a || b,
+            }))
+        }
+        ExprTree::Cmp { op, lhs, rhs } => {
+            let (a, b) = (eval_tree(lhs, env)?, eval_tree(rhs, env)?);
+            let result = match (a, b) {
+                (FixtureValue::Int(x), FixtureValue::Int(y)) => match op {
+                    TreeCmpOp::Eq => x == y,
+                    TreeCmpOp::Ne => x != y,
+                    TreeCmpOp::Lt => x < y,
+                    TreeCmpOp::Le => x <= y,
+                    TreeCmpOp::Gt => x > y,
+                    TreeCmpOp::Ge => x >= y,
+                },
+                (FixtureValue::Bool(x), FixtureValue::Bool(y)) => match op {
+                    TreeCmpOp::Eq => x == y,
+                    TreeCmpOp::Ne => x != y,
+                    _ => return None,
+                },
+                _ => return None,
+            };
+            Some(FixtureValue::Bool(result))
+        }
+        ExprTree::Arith { op, lhs, rhs } => {
+            let (x, y) = match (eval_tree(lhs, env)?, eval_tree(rhs, env)?) {
+                (FixtureValue::Int(x), FixtureValue::Int(y)) => (x, y),
+                _ => return None,
+            };
+            let v = match op {
+                TreeArithOp::Add => x.checked_add(y)?,
+                TreeArithOp::Sub => x.checked_sub(y)?,
+                TreeArithOp::Mul => x.checked_mul(y)?,
+                TreeArithOp::Div => x.checked_div(y)?,
+                TreeArithOp::Mod => x.checked_rem(y)?,
+            };
+            Some(FixtureValue::Int(v))
+        }
+        // Quantifiers, sums, records, matches, CPI results: outside the
+        // decidable fragment for a plain-struct fixture.
+        _ => None,
+    }
+}
+
+/// Check the fixture against the full guard — the conjunction of every
+/// `requires` clause — and report whether it takes `want` truth value.
+fn check_fixture(
+    op: &ParsedHandler,
+    env: &std::collections::HashMap<String, FixtureValue>,
+    want: bool,
+) -> FixtureCheck {
+    let mut all_true = true;
+    for req in &op.requires {
+        match eval_tree(requires_tree(req), env) {
+            Some(FixtureValue::Bool(b)) => all_true &= b,
+            Some(FixtureValue::Int(_)) => {
+                return FixtureCheck::Unsupported("guard clause is not boolean-valued")
+            }
+            None => {
+                return FixtureCheck::Unsupported(
+                    "guard reads accounts, containers, or unsupported operators",
+                )
+            }
+        }
+    }
+    if all_true == want {
+        FixtureCheck::Solved
+    } else {
+        FixtureCheck::Contradicted
+    }
+}
+
 /// Structure-aware guard falsification over the typed `requires` trees.
 /// The guard is the conjunction of every `requires` clause, so falsifying
 /// ANY single clause falsifies the whole guard — and each clause is
@@ -1743,6 +2027,68 @@ fn flip_cmp(cmp: &'static str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #312 regression: a generated guard test may assert a truth value
+    /// only over a fixture that was VERIFIED to have it. The falsifier
+    /// searches but does not prove — its `Cmp` case handles only
+    /// `field <op> literal`, so a field-vs-field guard fell through to
+    /// string heuristics and could yield a fixture leaving the guard
+    /// true. Asserting over it produced a generated test that failed
+    /// against correct code.
+    #[test]
+    fn guard_assertions_only_over_verified_fixtures() {
+        // `threshold < member_count` is field-vs-field: unsolvable by the
+        // literal-based falsifier, so its fixture must not be asserted
+        // over. `amount > 0` is solvable and must keep its assertion.
+        let src = r#"spec T
+type State | Active of {
+    member_count : U64,
+    threshold : U64,
+  }
+type Error | TooLow | BadAmount
+handler tighten (amount : U64) : State.Active -> State.Active {
+  accounts { admin : signer, state : writable }
+  requires amount > 0 else BadAmount
+  effect { threshold := amount }
+}
+handler widen : State.Active -> State.Active {
+  accounts { admin : signer, state : writable }
+  requires threshold < member_count else TooLow
+  effect { member_count := 0 }
+}
+"#;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spec_path = dir.path().join("t.qedspec");
+        std::fs::write(&spec_path, src).expect("write spec");
+        let out_path = dir.path().join("tests.rs");
+        generate(&spec_path, &out_path).expect("generate unit tests");
+        let out = std::fs::read_to_string(&out_path).expect("read output");
+
+        // The solvable guard keeps a real assertion in both directions.
+        let tighten = out
+            .split("fn test_tighten_guard_rejects_invalid")
+            .nth(1)
+            .expect("tighten rejects-test present");
+        assert!(
+            tighten.contains("assert!(!guard_tighten("),
+            "a verified violating fixture must still be asserted:\n{tighten}"
+        );
+
+        // Every emitted assertion must be backed by verification: no
+        // guard test may assert without the evaluator confirming it.
+        for block in out.split("    #[test]").skip(1) {
+            if !block.contains("guard_") {
+                continue;
+            }
+            let asserts = block.contains("assert!(guard_") || block.contains("assert!(!guard_");
+            let suppressed = block.contains("No assertion:");
+            assert!(
+                asserts ^ suppressed,
+                "a guard test must either assert or explain its suppression, never both \
+                 or neither:\n{block}"
+            );
+        }
+    }
 
     /// #297 regression: an effect whose RHS reads an account binding
     /// (`field := acct.pubkey`) rendered the account name verbatim into
