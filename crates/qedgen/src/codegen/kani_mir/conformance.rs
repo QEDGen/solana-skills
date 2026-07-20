@@ -302,11 +302,20 @@ pub(crate) fn emit_one_conformance_harness(
     // compare inside an `Option` context — the harness only reaches this
     // assert when the transition returned true, so the RHS must be `Some`.
     let has_try = crate::rust_codegen_util::tree_render::contains_fallible_arith(tree);
+    // Subscripts in the effect target must be cast for the READ side of
+    // the assertion: harness params bind at their spec types (`u8`)
+    // while Rust arrays index by `usize`. The raw `field` stays in scope
+    // for type lookups and assertion messages. Same rewrite the
+    // transition emitter applies to the write side (#295 (c)); it was
+    // missing here, so `s.voted[member_index] == 1` was an E0277 that
+    // only surfaced once the Kani compile gate began to run for this
+    // example.
+    let field_read = crate::rust_codegen_util::cast_subscripts(field);
     let expected_eq = |expected: &str| -> String {
         if has_try {
-            format!("Some(s.{field}) == (|| Some({expected}))()")
+            format!("Some(s.{field_read}) == (|| Some({expected}))()")
         } else {
-            format!("s.{field} == {expected}")
+            format!("s.{field_read} == {expected}")
         }
     };
     match op_kind {
