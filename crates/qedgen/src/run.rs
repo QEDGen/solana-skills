@@ -1078,8 +1078,11 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 // its guards use them — deliver + depend if so.
                 deliver_prelude_if_referenced(&kani_path)?;
 
-                // Unit tests are framework-neutral too.
-                let test_path = program_dir.join("src/tests.rs");
+                // Unit tests are framework-neutral too. They live under
+                // `tests/` (cargo auto-discovers the target); a `src/`
+                // location would need a `mod` hook in lib.rs that the
+                // scaffold does not emit.
+                let test_path = program_dir.join("tests/unit.rs");
                 unit_test::generate(qedspec_path, &test_path)?;
             }
         }

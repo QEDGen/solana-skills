@@ -41,7 +41,7 @@ pub fn generate(spec_path: &Path, output_path: &Path, target: Target) -> Result<
     }
 
     let fp = crate::fingerprint::compute_fingerprint(&spec);
-    let hash = crate::codegen_shared::fingerprint_hash(&fp, "src/tests.rs");
+    let hash = crate::codegen_shared::fingerprint_hash(&fp, "tests/unit.rs");
 
     let out = render(&spec, &hash)?;
     write_generated_file(output_path, &out)?;
