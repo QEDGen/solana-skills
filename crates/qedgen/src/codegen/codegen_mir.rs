@@ -1449,25 +1449,19 @@ fn emit_errors(
         !pre.is_empty() && !is_init
     });
 
-    // R28: runtime PDA verification auto-adds `InvalidPda`. Shares the
-    // firing predicate with `generate_guards` so the emitted check and
-    // this enum variant can't drift apart.
-    let needs_invalid_pda = parsed.handlers.iter().any(|h| {
-        let bound: std::collections::HashSet<&str> =
-            h.accounts.iter().map(|a| a.name.as_str()).collect();
-        h.accounts.iter().any(|acct| {
-            let Some(seeds) = &acct.pda_seeds else {
-                return false;
-            };
-            if acct.is_signer {
-                return false;
-            }
-            if crate::codegen_shared::handler_is_init_for(h, &acct.name) {
-                return false;
-            }
-            crate::codegen_shared::r28_pda_check_fires(target, parsed, seeds, &bound)
-        })
-    });
+    // R28: runtime PDA verification auto-adds `InvalidPda`. Both this error
+    // declaration and guard emission consume the account plan's SeedPlan, so
+    // the variant cannot drift from the generated check.
+    let needs_invalid_pda = !matches!(target, Target::Pinocchio)
+        && parsed.handlers.iter().any(|h| {
+            let state_acct = crate::codegen_shared::resolve_handler_state_account(h, parsed);
+            h.accounts.iter().any(|acct| {
+                let is_state = state_acct.map(|sa| sa.name == acct.name).unwrap_or(false);
+                let plan =
+                    crate::codegen_shared::AccountPlan::derive(acct, h, target, parsed, is_state);
+                matches!(plan.seeds, crate::codegen_shared::SeedPlan::Runtime)
+            })
+        });
 
     let mut codes: Vec<String> = mir.errors.variants.clone();
     if needs_lifecycle && !codes.iter().any(|c| c == "InvalidLifecycle") {

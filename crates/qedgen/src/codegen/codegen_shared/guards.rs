@@ -284,16 +284,11 @@ pub(crate) fn generate_guards(
     Ok(())
 }
 
-/// R28: per-handler PDA verification. R13 suppresses
-/// `seeds = [...]` on Quasar non-init handlers when seeds
-/// reference state fields (the macro's `Bumps::seeds()` method
-/// can't auto-capture `self.<state-field>`). Owner+discriminator
-/// protects against type confusion but not wrong-PDA passing —
-/// the audit's MED-tier finding. Emit a runtime
-/// `verify_program_address` check using the stored bump for
-/// every account whose `seeds = [...]` would have been
-/// suppressed. The cost is one syscall (~544 CU on first-try
-/// bump 255) per affected handler load.
+/// R28: emit runtime PDA verification exactly when the account plan assigns
+/// seed enforcement to `SeedPlan::Runtime`. The account macro and this guard
+/// are complementary by construction; neither re-derives the other's
+/// suppression predicate. The cost is one syscall (~544 CU on first-try bump
+/// 255) per affected handler load.
 fn emit_r28_pda_checks(
     out: &mut String,
     handler: &ParsedHandler,
@@ -301,27 +296,26 @@ fn emit_r28_pda_checks(
     target: Target,
     err_enum: &str,
 ) {
+    if matches!(target, Target::Pinocchio) {
+        return; // Pinocchio has a dedicated account/guard emitter.
+    }
+    // Same state-account resolution as the scaffold's attribute emission —
+    // `derive` consults it for init detection on type-qualified
+    // single-account specs (#263), and a mismatch here would re-emit the
+    // macro-owned check at runtime.
+    let state_acct = resolve_handler_state_account(handler, spec);
     for acct in &handler.accounts {
-        let Some(ref seeds) = acct.pda_seeds else {
+        let is_state = state_acct.map(|sa| sa.name == acct.name).unwrap_or(false);
+        let plan = AccountPlan::derive(acct, handler, target, spec, is_state);
+        if !matches!(plan.seeds, SeedPlan::Runtime) {
             continue;
-        };
-        let is_init_target = handler_is_init_for(handler, &acct.name) && !acct.is_signer;
-        if is_init_target {
-            continue; // init flow already verifies via #[account(seeds=…, bump)]
         }
-        // Was R13 going to suppress on this handler? Mirror the
-        // detection logic from `quasar_account_attr`. Quasar fires on
-        // any state-field seed (its R13 suppression is broader);
-        // Anchor (v2.29 extension) only when the seed references a
-        // variant-payload field on a multi-variant ADT — the
-        // `seeds = [...]` macro can't route through the accessor, so
-        // `quasar_account_attr` suppressed it and the runtime check
-        // emits here instead.
+        let seeds = acct
+            .pda_seeds
+            .as_ref()
+            .expect("SeedPlan::Runtime requires declared PDA seeds");
         let bound_account_names: std::collections::HashSet<&str> =
             handler.accounts.iter().map(|a| a.name.as_str()).collect();
-        if !r28_pda_check_fires(target, spec, seeds, &bound_account_names) {
-            continue;
-        }
 
         let mut seed_exprs: Vec<String> = Vec::with_capacity(seeds.len() + 1);
         for seed in seeds {
@@ -763,41 +757,6 @@ pub(crate) fn handler_is_init_for(handler: &ParsedHandler, acct_name: &str) -> b
     ) && match handler.on_account.as_deref() {
         Some(adt) => account_name_matches_adt(adt, acct_name),
         None => true,
-    }
-}
-
-/// R28 firing predicate for one account's `pda_seeds`: does the runtime
-/// PDA verification emit for this (target, seeds) pair? Quasar fires on
-/// any state-field seed (non-literal, not a bound handler account);
-/// Anchor only under a multi-variant ADT state when the seed is a
-/// variant-payload field; Pinocchio never (dedicated emitter). Shared
-/// between `generate_guards` (the check emission) and
-/// `codegen_mir::emit_errors` (the `InvalidPda` variant) so the guard
-/// can't reference a variant the error enum didn't declare.
-pub(crate) fn r28_pda_check_fires(
-    target: Target,
-    spec: &ParsedSpec,
-    seeds: &[String],
-    bound_account_names: &std::collections::HashSet<&str>,
-) -> bool {
-    let is_state_seed = |seed: &String| {
-        let is_literal = seed.starts_with('"') && seed.ends_with('"');
-        !is_literal && !bound_account_names.contains(seed.as_str())
-    };
-    match target {
-        Target::Quasar => seeds.iter().any(is_state_seed),
-        Target::Anchor => {
-            is_multi_variant_adt_state(spec)
-                && seeds.iter().any(|seed| {
-                    is_state_seed(seed)
-                        && spec.account_types.iter().any(|a| {
-                            a.variants
-                                .iter()
-                                .any(|v| v.fields.iter().any(|(n, _)| n == seed))
-                        })
-                })
-        }
-        Target::Pinocchio => false,
     }
 }
 
