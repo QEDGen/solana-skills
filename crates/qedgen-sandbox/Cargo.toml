@@ -23,3 +23,11 @@ mollusk-svm = "0.12.1-agave-4.0"
 solana-account = "3"
 solana-instruction = "3"
 solana-pubkey = "4"
+
+[dev-dependencies]
+# Journey harness: regenerates the fixture program, then drives real
+# transactions. `qedgen-hash-core` supplies Anchor's instruction
+# discriminator (first 8 bytes of sha256), reusing the repo's own
+# hashing crate instead of adding a second sha2 dependency.
+qedgen-hash-core = { version = "0.1.0", path = "../qedgen-hash-core" }
+tempfile = "3"

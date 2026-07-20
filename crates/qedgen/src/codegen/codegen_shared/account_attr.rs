@@ -222,7 +222,16 @@ pub(crate) fn quasar_account_attr(
     // reach into the inner enum ("no field `owner` on `Account<…>`").
     // Skip emission there — the auth gap surfaces via a TODO line next
     // to the handler body rather than being dropped silently.
-    if is_state_account {
+    // Never on an `init` account: Anchor allocates and ZEROES the
+    // account, then evaluates constraints, so `has_one = owner`
+    // compares an all-zero field against the payer and always fails
+    // (ConstraintHasOne / 2001) — the handler body that populates the
+    // field has not run yet. The account is being created here, so
+    // there is no prior binding to check; authorization on init comes
+    // from the payer's signature and the PDA seeds. Caught by the #294
+    // runtime journey: pre-fix, every generated `init` handler whose
+    // `auth` matched a state field could never be opened at all.
+    if is_state_account && !is_init {
         if let Some(ref who) = handler.who {
             if state_account_has_field(acct, spec, who) {
                 // Suppress only on Anchor: its wrapper-struct +

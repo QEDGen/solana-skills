@@ -1,0 +1,113 @@
+// Runtime journey fixture (#294 P0 item 2).
+//
+// The shape this fixture exists to exercise is invisible to `cargo
+// check` and to the spec-model harnesses: PDA seeds, bump, payer,
+// space, and CPI signer seeds are only wrong at RUNTIME. The journey
+// test executes real transactions against this program under Mollusk
+// and asserts both the success path and the failure path (wrong bump,
+// wrong seeds, missing payer signature, re-init).
+//
+// Deliberately minimal — two handlers, one PDA, one token CPI — so a
+// journey failure points at the generated account constraints rather
+// than at business logic.
+
+spec RuntimeVault
+
+// Domain bound for the vault balance — an explicit ceiling gives the
+// deposit proof a tighter domain than codegen's implicit U64 guard.
+const MAX_TOTAL = 1000000000000000
+
+// The state field is named `owner` to match the `auth owner` actor and
+// the `owner` account: R25's `auth -> has_one` lowering only fires on a
+// name match, and without it any signer could drive these handlers
+// against any program-owned vault (lint: unbound_auth).
+type Vault
+  | Uninitialized
+  | Active of {
+      owner : Pubkey,
+      total : U64,
+    }
+
+type Error
+  | InvalidAmount
+  | InsufficientFunds
+  | Unauthorized
+  | MathOverflow
+  | MathUnderflow
+
+pda vault ["vault", owner]
+
+event VaultOpened { owner : Pubkey }
+event Withdrawn   { owner : Pubkey, amount : U64 }
+
+/// Open the vault PDA. Uninitialized -> Active: exercises init, payer,
+/// space, seeds, and bump.
+handler open : Vault.Uninitialized -> Vault.Active {
+  auth owner
+
+  accounts {
+    owner          : signer, writable
+    vault          : writable, pda ["vault", owner]
+    system_program : program
+  }
+
+  effect {
+    owner := owner.pubkey
+    total := 0
+  }
+
+  emits VaultOpened
+}
+
+/// Deposit tokens into the vault's token account. The authority is the
+/// depositor, so this is the non-PDA-signed direction.
+handler deposit (amount : U64) : Vault.Active -> Vault.Active {
+  auth owner
+
+  accounts {
+    owner         : signer, writable
+    vault         : writable, pda ["vault", owner]
+    vault_ta      : writable, type token, authority vault
+    owner_ta      : writable, type token
+    token_program : program
+  }
+
+  requires amount > 0 else InvalidAmount
+  requires total + amount <= MAX_TOTAL else MathOverflow
+
+  effect {
+    total += amount
+  }
+
+  transfers {
+    from owner_ta to vault_ta amount amount authority owner
+  }
+}
+
+/// Withdraw tokens out of the vault. The token authority is the vault
+/// PDA itself, so the CPI must carry the vault's signer seeds and bump.
+/// This is the case that only fails at runtime.
+handler withdraw (amount : U64) : Vault.Active -> Vault.Active {
+  auth owner
+
+  accounts {
+    owner         : signer, writable
+    vault         : writable, pda ["vault", owner]
+    vault_ta      : writable, type token, authority vault
+    owner_ta      : writable, type token
+    token_program : program
+  }
+
+  requires amount > 0 else InvalidAmount
+  requires total >= amount else InsufficientFunds
+
+  effect {
+    total -= amount
+  }
+
+  transfers {
+    from vault_ta to owner_ta amount amount authority vault
+  }
+
+  emits Withdrawn
+}
