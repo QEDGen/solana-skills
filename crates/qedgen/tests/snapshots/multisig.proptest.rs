@@ -129,7 +129,10 @@ fn approve(s: &mut State, member_index: u8) -> bool {
     if s.status != Status::HasProposal {
         return false;
     }
-    s.approval_count = s.approval_count.wrapping_add(1);
+    match s.approval_count.checked_add(1) {
+        Some(__v) => s.approval_count = __v,
+        None => return false,
+    }
     s.voted[member_index] = 1;
     s.status = Status::HasProposal;
     true
@@ -145,7 +148,10 @@ fn reject(s: &mut State, member_index: u8) -> bool {
     if s.status != Status::HasProposal {
         return false;
     }
-    s.rejection_count = s.rejection_count.wrapping_add(1);
+    match s.rejection_count.checked_add(1) {
+        Some(__v) => s.rejection_count = __v,
+        None => return false,
+    }
     s.voted[member_index] = 1;
     s.status = Status::HasProposal;
     true
@@ -201,7 +207,10 @@ fn remove_member(s: &mut State) -> bool {
     if s.status != Status::Active {
         return false;
     }
-    s.member_count = s.member_count.wrapping_sub(1);
+    match s.member_count.checked_sub(1) {
+        Some(__v) => s.member_count = __v,
+        None => return false,
+    }
     s.status = Status::Active;
     true
 }
