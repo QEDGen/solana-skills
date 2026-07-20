@@ -731,6 +731,14 @@ fn emit_state_strategy_inner(
 
 /// Emit transition functions. Each effect block iterates the handler's
 /// lowered MIR body (`rust_codegen_util::stmt_effect_triple`), not `op.effects`.
+///
+/// `wrapping: false` — the model must carry the spec's per-effect
+/// semantics: default `+=`/`-=` are checked (reject the transition on
+/// overflow, like the deployed `checked_add(..).ok_or(err)?`), `+=!`
+/// saturates, `+=?` wraps. The old `true` here was a leftover from the
+/// pre-checked-default era: it forced default `+=` to wrap AND report
+/// success, so every overflow test asserting "success means no wrap"
+/// failed on a correct spec (#296; the Kani lane already passed `false`).
 fn emit_transition_functions_for(
     out: &mut String,
     mir: &Mir,
@@ -738,7 +746,7 @@ fn emit_transition_functions_for(
     spec: &ParsedSpec,
 ) -> Result<()> {
     for op in handlers {
-        rust_codegen_util::emit_transition_fn(out, mir, op, spec, true, |t| map_type(t, spec))?;
+        rust_codegen_util::emit_transition_fn(out, mir, op, spec, false, |t| map_type(t, spec))?;
     }
     Ok(())
 }
@@ -1630,6 +1638,68 @@ handler vote (member_index : U8) : State.Active -> State.Active {
         assert!(
             body.contains("((member_index) as usize) < s.tally.len()"),
             "effect-only subscript gets a bounds pre-check:\n{body}"
+        );
+    }
+
+    /// #296 regression: the proptest transition model must carry the
+    /// spec's per-effect semantics. Default `+=` is checked — reject the
+    /// transition on overflow, like the deployed
+    /// `checked_add(..).ok_or(err)?` — while explicit `+=?` wraps and
+    /// `+=!` saturates. The old `wrapping: true` forced default `+=` to
+    /// wrap AND report success, so the generated
+    /// `<op>_no_overflow_on_<field>` test failed on a correct spec.
+    #[test]
+    fn default_add_is_checked_in_transition_model() {
+        let src = r#"spec MiniVault
+
+type State | Active of {
+    balance : U64,
+    lifetime : U64,
+    ticks : U64,
+  }
+
+type Error
+  | MathOverflow
+
+handler deposit (amount : U64) : State.Active -> State.Active {
+  permissionless
+  accounts {
+    vault : writable
+  }
+  requires amount > 0 else MathOverflow
+  effect {
+    Active.balance  += amount
+    Active.lifetime +=! amount
+    Active.ticks    +=? amount
+  }
+}
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let spec_path = dir.path().join("vault.qedspec");
+        let out_path = dir.path().join("tests/proptest.rs");
+        std::fs::write(&spec_path, src).unwrap();
+        let spec = crate::check::parse_spec_file(&spec_path).expect("parse");
+        let mir = crate::mir::lower(&spec);
+        generate_impl(&mir, &spec, &out_path).unwrap();
+        let body = std::fs::read_to_string(&out_path).unwrap();
+
+        // Default `+=` rejects on overflow instead of wrapping.
+        assert!(
+            body.contains("s.balance.checked_add(amount)"),
+            "default += models checked_add:\n{body}"
+        );
+        assert!(
+            !body.contains("s.balance.wrapping_add"),
+            "default += must not wrap in the model:\n{body}"
+        );
+        // Explicit tiers keep their declared semantics.
+        assert!(
+            body.contains("s.lifetime.saturating_add(amount)"),
+            "+=! models saturating_add:\n{body}"
+        );
+        assert!(
+            body.contains("s.ticks.wrapping_add(amount)"),
+            "+=? models wrapping_add:\n{body}"
         );
     }
 

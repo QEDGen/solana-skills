@@ -127,11 +127,7 @@ fn propose(s: &mut State) -> bool {
 }
 
 fn approve(s: &mut State, member_index: u8) -> bool {
-    if !(((member_index) as usize) < s.members.len()
-        && ((member_index) as usize) < s.voted.len()
-        && (member_index < s.member_count)
-        && (s.voted[(member_index) as usize] == 0))
-    {
+    if !((member_index < s.member_count) && (s.voted[(member_index) as usize] == 0)) {
         return false;
     }
     if s.status != Status::HasProposal {
@@ -147,11 +143,7 @@ fn approve(s: &mut State, member_index: u8) -> bool {
 }
 
 fn reject(s: &mut State, member_index: u8) -> bool {
-    if !(((member_index) as usize) < s.members.len()
-        && ((member_index) as usize) < s.voted.len()
-        && (member_index < s.member_count)
-        && (s.voted[(member_index) as usize] == 0))
-    {
+    if !((member_index < s.member_count) && (s.voted[(member_index) as usize] == 0)) {
         return false;
     }
     if s.status != Status::HasProposal {
@@ -167,10 +159,7 @@ fn reject(s: &mut State, member_index: u8) -> bool {
 }
 
 fn execute(s: &mut State, member_index: u8) -> bool {
-    if !(((member_index) as usize) < s.members.len()
-        && (member_index < s.member_count)
-        && (s.approval_count >= s.threshold))
-    {
+    if !((member_index < s.member_count) && (s.approval_count >= s.threshold)) {
         return false;
     }
     if s.status != Status::HasProposal {
@@ -202,9 +191,6 @@ fn add_member(s: &mut State, member_index: u8, member_pubkey: [u8; 32]) -> bool 
         return false;
     }
     if s.status != Status::Active {
-        return false;
-    }
-    if !(((member_index) as usize) < s.members.len()) {
         return false;
     }
     s.members[member_index as usize] = member_pubkey;
@@ -272,12 +258,7 @@ fn verify_approve_rejects_invalid() {
     };
     kani::assume(s.status == Status::HasProposal);
     let member_index: u8 = kani::any();
-    kani::assume(
-        !(((member_index) as usize) < s.members.len()
-            && ((member_index) as usize) < s.voted.len()
-            && (member_index < s.member_count)
-            && (s.voted[(member_index) as usize] == 0)),
-    );
+    kani::assume(!((member_index < s.member_count) && (s.voted[(member_index) as usize] == 0)));
     kani::cover!(true, "guard-violation domain is satisfiable");
     assert!(
         !approve(&mut s, member_index),
@@ -301,12 +282,7 @@ fn verify_reject_rejects_invalid() {
     };
     kani::assume(s.status == Status::HasProposal);
     let member_index: u8 = kani::any();
-    kani::assume(
-        !(((member_index) as usize) < s.members.len()
-            && ((member_index) as usize) < s.voted.len()
-            && (member_index < s.member_count)
-            && (s.voted[(member_index) as usize] == 0)),
-    );
+    kani::assume(!((member_index < s.member_count) && (s.voted[(member_index) as usize] == 0)));
     kani::cover!(true, "guard-violation domain is satisfiable");
     assert!(
         !reject(&mut s, member_index),
@@ -330,11 +306,7 @@ fn verify_execute_rejects_invalid() {
     };
     kani::assume(s.status == Status::HasProposal);
     let member_index: u8 = kani::any();
-    kani::assume(
-        !(((member_index) as usize) < s.members.len()
-            && (member_index < s.member_count)
-            && (s.approval_count >= s.threshold)),
-    );
+    kani::assume(!((member_index < s.member_count) && (s.approval_count >= s.threshold)));
     kani::cover!(true, "guard-violation domain is satisfiable");
     assert!(
         !execute(&mut s, member_index),

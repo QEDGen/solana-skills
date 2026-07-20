@@ -70,7 +70,10 @@ fn deposit(s: &mut State, amount: u64) -> bool {
     if s.status != Status::Open {
         return false;
     }
-    s.pool_balance = s.pool_balance.wrapping_add(amount);
+    match s.pool_balance.checked_add(amount) {
+        Some(__v) => s.pool_balance = __v,
+        None => return false,
+    }
     s.status = Status::Open;
     true
 }
