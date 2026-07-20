@@ -63,11 +63,11 @@ fn relative_outputs_resolve_against_spec_dir_not_cwd() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // Drive codegen from a DIFFERENT cwd (inside the repo, so the git
-    // gate passes) with an absolute --spec.
+    // Drive codegen from a DIFFERENT, non-git cwd with an absolute --spec.
+    // The spec project owns every relative output and is the repository
+    // whose recovery baseline matters.
     let elsewhere = tempfile::tempdir().expect("tempdir");
     let spec_abs = root.join("escrow.qedspec");
-    common::git_init(elsewhere.path());
     let out = qedgen_from(
         elsewhere.path(),
         &[
@@ -90,7 +90,6 @@ fn relative_outputs_resolve_against_spec_dir_not_cwd() {
     let scattered: Vec<_> = std::fs::read_dir(elsewhere.path())
         .expect("read cwd")
         .filter_map(|e| e.ok().map(|e| e.file_name()))
-        .filter(|n| n != ".git")
         .collect();
     assert!(
         scattered.is_empty(),

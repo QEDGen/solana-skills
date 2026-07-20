@@ -1819,7 +1819,12 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 || kani_impl_context
                 || parsed.is_struct_mirror());
             let mut missing: Vec<String> = Vec::new();
-            if !run_helpers::has_git_repo(&cwd) {
+            // Outputs resolve against the spec project, so the recovery
+            // prerequisite must validate that project too. Requiring an
+            // unrelated invocation cwd to be a git repo makes
+            // `codegen --spec /path/to/project/spec` fail from /tmp even
+            // though every artifact lands in the tracked project.
+            if !run_helpers::has_git_repo(&spec_dir) {
                 missing.push("not inside a git repository — run `git init`".to_string());
             }
             if scaffold_will_run && init::find_qed_dir(&spec).is_none() {

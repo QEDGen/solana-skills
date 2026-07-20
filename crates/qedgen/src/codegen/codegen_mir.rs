@@ -391,6 +391,32 @@ fn assert_git_recoverable(output_dir: &Path, files: &[std::path::PathBuf]) -> Re
             output_dir.display()
         ),
     };
+    // `git status` deliberately hides ignored paths. An ignored, untracked
+    // user-owned file would therefore produce an empty porcelain report and
+    // be overwritten even though git has no baseline to recover. Prove each
+    // target is tracked independently before treating a clean status as safe.
+    let untracked: Vec<String> = files
+        .iter()
+        .filter_map(|path| {
+            let tracked = std::process::Command::new("git")
+                .arg("ls-files")
+                .arg("--error-unmatch")
+                .arg("--")
+                .arg(path)
+                .current_dir(output_dir)
+                .output()
+                .is_ok_and(|out| out.status.success());
+            (!tracked).then(|| path.display().to_string())
+        })
+        .collect();
+    if !untracked.is_empty() {
+        anyhow::bail!(
+            "refusing to overwrite user-owned files that are not tracked by git — \
+             ignored and untracked files have no recoverable baseline:\n  {}\n\
+             Track and commit them first (`git add -f <file> && git commit`), then re-run.",
+            untracked.join("\n  ")
+        );
+    }
     let dirty: Vec<String> = String::from_utf8_lossy(&out.stdout)
         .lines()
         .map(|l| l.trim_end().to_string())
@@ -736,17 +762,17 @@ fn locate_accounts_struct(text: &str, name: &str) -> StructLocation {
         let Some(close) = qedgen_hash_core::scan_balanced_block(bytes, at + open_rel) else {
             continue;
         };
-        // Walk back over contiguous attribute / doc-comment lines to
-        // include `#[derive(Accounts)]` (generated struct-level attrs are
-        // single-line; a hand-introduced multi-line attr above the struct
-        // is not walked — the git-baseline guard makes any mis-merge
-        // recoverable).
+        // Walk back over contiguous attribute lines to include
+        // `#[derive(Accounts)]`. Deliberately stop at comments: comments are
+        // user-owned content and must survive a surgical struct replacement.
+        // A comment between the derive and declaration makes the struct
+        // ineligible for textual merging rather than risking deletion.
         let mut region_start = line_start;
         // `prev_end` is the index of the '\n' terminating the previous line.
         while let Some(prev_end) = region_start.checked_sub(1) {
             let prev_start = text[..prev_end].rfind('\n').map(|i| i + 1).unwrap_or(0);
             let prev = text[prev_start..prev_end].trim();
-            if prev.starts_with("#[") || prev.starts_with("//") {
+            if prev.starts_with("#[") {
                 region_start = prev_start;
             } else {
                 break;
@@ -1757,13 +1783,18 @@ handler poke : State.Active -> State.Active {{
         )
         .expect("emit lib");
 
-        // Simulate user ownership: an edit outside the Accounts structs.
+        // Simulate user ownership: edits outside and immediately above the
+        // Accounts struct. Both must survive the surgical replacement.
         let lib_path = temp.join("src/lib.rs");
         let lib = std::fs::read_to_string(&lib_path).expect("lib.rs");
         assert!(lib.contains("pub vault:"), "baseline has vault field");
         std::fs::write(
             &lib_path,
-            lib.replace("use super::*;", "use super::*; // USER-KEPT"),
+            lib.replace("use super::*;", "use super::*; // USER-KEPT")
+                .replace(
+                    "#[derive(Accounts)]\npub struct Poke",
+                    "// USER-STRUCT-DOC\n#[derive(Accounts)]\npub struct Poke",
+                ),
         )
         .expect("user edit");
 
@@ -1779,6 +1810,60 @@ handler poke : State.Active -> State.Active {{
         assert!(
             merged.contains("// USER-KEPT"),
             "user content outside the structs must survive the merge; got:\n{merged}"
+        );
+        assert!(
+            merged.contains("// USER-STRUCT-DOC\n#[derive(Accounts)]\npub struct Poke"),
+            "user comments adjacent to the struct must survive the merge; got:\n{merged}"
+        );
+    }
+
+    #[test]
+    fn destructive_regen_rejects_ignored_untracked_files() {
+        use std::process::Command;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("src")).expect("mk src");
+        std::fs::write(root.join(".gitignore"), "src/lib.rs\n").expect("gitignore");
+        std::fs::write(root.join("src/lib.rs"), "// user-owned fill\n").expect("lib");
+
+        assert!(Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(root)
+            .status()
+            .expect("git init")
+            .success());
+        assert!(Command::new("git")
+            .args(["add", ".gitignore"])
+            .current_dir(root)
+            .status()
+            .expect("git add")
+            .success());
+        assert!(Command::new("git")
+            .args([
+                "-c",
+                "user.name=qedgen-test",
+                "-c",
+                "user.email=qedgen@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "baseline",
+            ])
+            .current_dir(root)
+            .status()
+            .expect("git commit")
+            .success());
+
+        let err = assert_git_recoverable(root, &[root.join("src/lib.rs")])
+            .expect_err("ignored, untracked files have no git recovery baseline");
+        assert!(
+            err.to_string().contains("not tracked by git"),
+            "error must explain the missing recovery baseline: {err:#}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/lib.rs")).expect("lib survives"),
+            "// user-owned fill\n"
         );
     }
 
