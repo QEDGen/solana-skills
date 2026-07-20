@@ -451,6 +451,37 @@ pub fn emit_transition_fn_inner(
         }
     }
 
+    // Effect-subscript bounds (#298): the model state space allows count
+    // fields past a bounded container's capacity, so an effect write like
+    // `s.voted[member_index] = 1` can index out of range where deployed
+    // code would abort the transaction. Reject instead of panicking.
+    // Requires-derived subscripts are already guarded (bounds terms lead
+    // the collected guard above); only effect-only subscripts emit here.
+    {
+        let guarded = requires_bounds_pairs(op);
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        for (field, _, value) in block_effect_triples_deep(body) {
+            field_string_subscripts(
+                &strip_variant_prefix_for_flat_state(&field, spec),
+                &mut pairs,
+            );
+            if let Some(tree) = value.tree.as_ref() {
+                collect_tree_subscripts(tree, &mut pairs);
+            }
+        }
+        for term in render_bounds_terms(
+            &pairs
+                .iter()
+                .filter(|p| !guarded.contains(p))
+                .cloned()
+                .collect::<Vec<_>>(),
+        ) {
+            out.push_str(&format!("    if !({term}) {{\n"));
+            out.push_str("        return false;\n");
+            out.push_str("    }\n");
+        }
+    }
+
     // Spec-level `let` bindings emit BEFORE the effect block so effect
     // RHSs can reference them.
     for b in &op.let_bindings {
