@@ -1178,6 +1178,7 @@ mod multisig {
 use anchor_lang::prelude::*;
 
 #[account]
+#[derive(InitSpace)]
 pub struct MultisigAccount {
     pub creator: Pubkey,
     pub threshold: u8,

@@ -1030,8 +1030,7 @@ fn emit_state(
     target: Target,
 ) -> Result<()> {
     use crate::codegen_shared::{
-        is_multi_variant_adt_state, map_type_for_target, map_type_pod, to_pascal_case,
-        FrameworkSurface,
+        is_multi_variant_adt_state, map_type_for_target, map_type_pod, FrameworkSurface,
     };
 
     // Pinocchio: zeropod zero-copy state via the dedicated helper.
@@ -1137,7 +1136,9 @@ fn emit_state(
         }
     } else if is_multi_variant_adt_state(parsed) && matches!(target, Target::Anchor) {
         // Multi-variant ADT: wrapper struct + inner enum + accessors.
-        let state_name = format!("{}Account", to_pascal_case(&mir.name));
+        // Shared derivation with the `space =` reference — see
+        // `state_struct_name`.
+        let state_name = crate::codegen_shared::state_struct_name(parsed, None);
         let inner_name = format!("{}Inner", state_name);
         let acct = &parsed.account_types[0];
 
@@ -1174,15 +1175,24 @@ fn emit_state(
             /* blank_after_impl */ false,
         )?;
     } else {
-        // Flat single-account fallback.
-        let state_name = format!("{}Account", to_pascal_case(&mir.name));
+        // Flat single-account fallback. Shared derivation with the
+        // `space =` reference — see `state_struct_name`.
+        let state_name = crate::codegen_shared::state_struct_name(parsed, None);
 
         let account_attr = if surface.explicit_account_discriminator {
             "#[account(discriminator = 1)]\n"
         } else {
             "#[account]\n"
         };
-        out.push_str(&format!("{}pub struct {} {{\n", account_attr, state_name));
+        out.push_str(account_attr);
+        // `InitSpace` on every Anchor account struct, matching the
+        // multi-account and ADT branches: an `init` account renders
+        // `space = 8 + <T>::INIT_SPACE`, which does not resolve without
+        // the derive (E0599, scaffold did not compile).
+        if matches!(target, Target::Anchor) {
+            out.push_str("#[derive(InitSpace)]\n");
+        }
+        out.push_str(&format!("pub struct {} {{\n", state_name));
 
         for (fname, ftype) in &parsed.state_fields {
             out.push_str(&format!(
@@ -2273,6 +2283,99 @@ handler poke : State.Active -> State.Active {
         assert!(
             body.contains("PoolInner::balance() called on a variant without `balance`"),
             "expected panic message for missing variant; got:\n{body}"
+        );
+    }
+
+    /// #305 regression: the `space = 8 + <T>::INIT_SPACE` attribute and
+    /// the state-struct emission are rendered at different sites, and
+    /// diverged two ways on a single-account spec whose ADT name differs
+    /// from the program name:
+    /// - the space target read the ADT name (`VaultAccount`) while the
+    ///   struct was named after the program (`RuntimeVaultAccount`) —
+    ///   E0433, undeclared type;
+    /// - the flat branch emitted `#[account]` without
+    ///   `#[derive(InitSpace)]`, so `INIT_SPACE` did not resolve — E0599.
+    ///
+    /// Asserts the invariant rather than either spelling: whatever struct
+    /// `space =` names must be the struct that is emitted, and it must
+    /// carry the derive.
+    #[test]
+    fn init_space_target_matches_the_emitted_state_struct() {
+        const SRC: &str = r#"spec RuntimeVault
+
+type Vault
+  | Uninitialized
+  | Active of {
+      owner : Pubkey,
+      total : U64,
+    }
+
+type Error
+  | InvalidAmount
+
+pda vault ["vault", owner]
+
+handler open : Vault.Uninitialized -> Vault.Active {
+  auth owner
+  accounts {
+    owner          : signer, writable
+    vault          : writable, pda ["vault", owner]
+    system_program : program
+  }
+  effect {
+    owner := owner.pubkey
+    total := 0
+  }
+}
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let spec_path = dir.path().join("vault.qedspec");
+        std::fs::write(&spec_path, SRC).unwrap();
+        std::fs::create_dir_all(dir.path().join(".qed")).unwrap();
+
+        let spec = crate::check::parse_spec_file(&spec_path).expect("parse");
+        let mir = crate::mir::lower(&spec);
+        let out_dir = dir.path().join("programs");
+        generate(
+            &mir,
+            &spec,
+            &spec_path,
+            &out_dir,
+            Target::Anchor,
+            RegenOptions::default(),
+        )
+        .expect("anchor codegen should succeed");
+
+        let state = std::fs::read_to_string(out_dir.join("src/state.rs")).expect("state.rs");
+        let lib = std::fs::read_to_string(out_dir.join("src/lib.rs")).expect("lib.rs");
+
+        // Pull the struct named by `space = 8 + <T>::INIT_SPACE`.
+        let marker = "space = 8 + ";
+        let start = lib
+            .find(marker)
+            .map(|i| i + marker.len())
+            .expect("init account renders a space attribute");
+        let space_target = lib[start..]
+            .split("::INIT_SPACE")
+            .next()
+            .expect("space target is an INIT_SPACE reference")
+            .to_string();
+
+        // The named struct must be the one actually emitted...
+        assert!(
+            state.contains(&format!("pub struct {space_target} {{")),
+            "space target `{space_target}` names no emitted struct:\n{state}"
+        );
+        // ...and it must derive InitSpace, or `INIT_SPACE` does not resolve.
+        assert!(
+            state.contains("#[derive(InitSpace)]"),
+            "Anchor state struct must derive InitSpace:\n{state}"
+        );
+        // Guard the specific historical spelling too, so a regression is
+        // reported as a name mismatch rather than a bare missing struct.
+        assert_eq!(
+            space_target, "RuntimeVaultAccount",
+            "single-account spec names the wrapper after the program, not the ADT"
         );
     }
 }

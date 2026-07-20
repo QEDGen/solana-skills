@@ -560,6 +560,28 @@ pub fn is_multi_variant_adt_state(spec: &ParsedSpec) -> bool {
             .unwrap_or(false)
 }
 
+/// The generated account-wrapper struct name for the state a handler
+/// drives. Single source for the two sites that must agree: the struct
+/// `generate_state` emits, and the `space = 8 + <T>::INIT_SPACE`
+/// reference `account_attr` renders on an `init` account. When they
+/// disagree the generated scaffold does not compile.
+///
+/// Only a MULTI-account spec names the wrapper after the ADT — there is
+/// one struct per account type. A single-account spec (flat state or
+/// multi-variant ADT alike) names it after the program, so keying on
+/// `on_account` alone is wrong: a lifecycle-typed handler
+/// (`: Vault.Uninitialized -> Vault.Active`) sets `on_account` even
+/// when the spec has exactly one account type.
+pub fn state_struct_name(spec: &ParsedSpec, on_account: Option<&str>) -> String {
+    match on_account {
+        Some(adt) if spec.account_types.len() > 1 => format!("{adt}Account"),
+        _ => format!(
+            "{}Account",
+            crate::codegen_shared::to_pascal_case(&spec.program_name)
+        ),
+    }
+}
+
 /// Index an ADT account's variant fields: field name → every
 /// `(variant_name, declared_type)` occurrence, in name-sorted (BTreeMap)
 /// order. Raw view — includes fields whose type differs across variants;
