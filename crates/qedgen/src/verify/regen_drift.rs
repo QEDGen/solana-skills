@@ -419,11 +419,16 @@ fn generate_existing_artifacts(root: &Path, temp_root: &Path, spec_path: &Path) 
             )?;
         }
     }
-    if root.join("src/tests.rs").is_file() {
-        crate::unit_test::generate(spec_path, &temp_root.join("src/tests.rs"))?;
-    }
-    if root.join("programs/src/tests.rs").is_file() {
-        crate::unit_test::generate(spec_path, &temp_root.join("programs/src/tests.rs"))?;
+    // `src/` variants are the pre-v2.47 default; kept for existing projects.
+    for rel in [
+        "tests/unit.rs",
+        "programs/tests/unit.rs",
+        "src/tests.rs",
+        "programs/src/tests.rs",
+    ] {
+        if root.join(rel).is_file() {
+            crate::unit_test::generate(spec_path, &temp_root.join(rel))?;
+        }
     }
     // Integration tests are emitted for Quasar targets ONLY. A file on
     // disk does NOT imply a Quasar project — a stale generator-owned
@@ -484,6 +489,8 @@ fn comparable_paths(root: &Path, generated_root: &Path) -> Result<Vec<PathBuf>> 
         "programs/tests/kani_impl.rs",
         "tests/proptest.rs",
         "programs/tests/proptest.rs",
+        "tests/unit.rs",
+        "programs/tests/unit.rs",
         "src/tests.rs",
         "programs/src/tests.rs",
         "tests/integration_tests.rs",
