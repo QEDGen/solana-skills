@@ -128,7 +128,7 @@ fn initialize(s: &mut State, accounts: &InitializeAccounts) -> bool {
 }
 
 fn unbound_transfer(s: &mut State, accounts: &UnboundTransferAccounts, amount: u64) -> bool {
-    if !((pubkey_eq(&accounts.admin.pubkey, &s.admin_key)) && (amount > 0)) {
+    if !(pubkey_eq(&accounts.admin.pubkey, &s.admin_key) && amount > 0) {
         return false;
     }
     if s.status != Status::Active {
@@ -139,7 +139,7 @@ fn unbound_transfer(s: &mut State, accounts: &UnboundTransferAccounts, amount: u
 }
 
 fn bound_transfer(s: &mut State, accounts: &BoundTransferAccounts, amount: u64) -> bool {
-    if !((pubkey_eq(&accounts.admin.pubkey, &s.admin_key)) && (amount > 0)) {
+    if !(pubkey_eq(&accounts.admin.pubkey, &s.admin_key) && amount > 0) {
         return false;
     }
     if s.status != Status::Active {
@@ -185,7 +185,7 @@ fn stable_swap_large_guard(
     if !(pubkey_ne(&input_mint, &output_mint)) {
         return false;
     }
-    if !((pubkey_eq(&input_mint, &output_mint)) || (amount_in >= min_out)) {
+    if !(pubkey_eq(&input_mint, &output_mint) || amount_in >= min_out) {
         return false;
     }
     if mul_bps_floor_u128(amount_in, fee_bps) > amount_in {
@@ -234,7 +234,7 @@ fn verify_unbound_transfer_rejects_invalid() {
             pubkey: kani::any(),
         },
     };
-    kani::assume(!((pubkey_eq(&accounts.admin.pubkey, &s.admin_key)) && (amount > 0)));
+    kani::assume(!(pubkey_eq(&accounts.admin.pubkey, &s.admin_key) && amount > 0));
     kani::cover!(true, "guard-violation domain is satisfiable");
     assert!(
         !unbound_transfer(&mut s, &accounts, amount),
@@ -268,7 +268,7 @@ fn verify_bound_transfer_rejects_invalid() {
             pubkey: kani::any(),
         },
     };
-    kani::assume(!((pubkey_eq(&accounts.admin.pubkey, &s.admin_key)) && (amount > 0)));
+    kani::assume(!(pubkey_eq(&accounts.admin.pubkey, &s.admin_key) && amount > 0));
     kani::cover!(true, "guard-violation domain is satisfiable");
     assert!(
         !bound_transfer(&mut s, &accounts, amount),
@@ -617,7 +617,7 @@ fn verify_stable_swap_large_guard_rejects_invalid_7_pubkey_eq_input_mint_output_
     kani::assume(fee_bps <= 10000);
     kani::assume(lane < 32);
     kani::assume(pubkey_ne(&input_mint, &output_mint));
-    kani::assume(!((pubkey_eq(&input_mint, &output_mint)) || (amount_in >= min_out)));
+    kani::assume(!(pubkey_eq(&input_mint, &output_mint) || amount_in >= min_out));
     kani::cover!(true, "guard-violation domain is satisfiable");
     assert!(
         !stable_swap_large_guard(
@@ -672,7 +672,7 @@ fn verify_stable_swap_large_guard_rejects_invalid_8_mul_bps_floor_u128_amount_in
     kani::assume(fee_bps <= 10000);
     kani::assume(lane < 32);
     kani::assume(pubkey_ne(&input_mint, &output_mint));
-    kani::assume((pubkey_eq(&input_mint, &output_mint)) || (amount_in >= min_out));
+    kani::assume((pubkey_eq(&input_mint, &output_mint) || amount_in >= min_out));
     let __qed_bps_floor_1 = mul_bps_floor_u128(amount_in, fee_bps);
     kani::assume(__qed_bps_floor_1 > amount_in);
     kani::cover!(true, "guard-violation domain is satisfiable");
@@ -728,7 +728,7 @@ fn verify_stable_swap_large_guard_rejects_invalid_9_amount_in_min_out() {
     kani::assume(fee_bps <= 10000);
     kani::assume(lane < 32);
     kani::assume(pubkey_ne(&input_mint, &output_mint));
-    kani::assume((pubkey_eq(&input_mint, &output_mint)) || (amount_in >= min_out));
+    kani::assume((pubkey_eq(&input_mint, &output_mint) || amount_in >= min_out));
     let __qed_bps_floor_1 = mul_bps_floor_u128(amount_in, fee_bps);
     kani::assume(__qed_bps_floor_1 <= amount_in);
     kani::assume(amount_in < min_out);
@@ -785,7 +785,7 @@ fn verify_stable_swap_large_guard_rejects_invalid_10_amount_in_1000000000000000(
     kani::assume(fee_bps <= 10000);
     kani::assume(lane < 32);
     kani::assume(pubkey_ne(&input_mint, &output_mint));
-    kani::assume((pubkey_eq(&input_mint, &output_mint)) || (amount_in >= min_out));
+    kani::assume((pubkey_eq(&input_mint, &output_mint) || amount_in >= min_out));
     let __qed_bps_floor_1 = mul_bps_floor_u128(amount_in, fee_bps);
     kani::assume(__qed_bps_floor_1 <= amount_in);
     kani::assume(amount_in >= min_out);
@@ -840,7 +840,7 @@ fn verify_unbound_transfer_ensures_0() {
             pubkey: kani::any(),
         },
     };
-    kani::assume((pubkey_eq(&accounts.admin.pubkey, &s.admin_key)) && (amount > 0));
+    kani::assume(pubkey_eq(&accounts.admin.pubkey, &s.admin_key) && amount > 0);
     let pre = s.clone();
     if unbound_transfer(&mut s, &accounts, amount) {
         let post = &s;
@@ -880,7 +880,7 @@ fn verify_bound_transfer_ensures_0() {
             pubkey: kani::any(),
         },
     };
-    kani::assume((pubkey_eq(&accounts.admin.pubkey, &s.admin_key)) && (amount > 0));
+    kani::assume(pubkey_eq(&accounts.admin.pubkey, &s.admin_key) && amount > 0);
     let pre = s.clone();
     if bound_transfer(&mut s, &accounts, amount) {
         let post = &s;
@@ -926,16 +926,16 @@ fn verify_stable_swap_large_guard_ensures_0() {
         },
     };
     kani::assume(
-        (pubkey_eq(&accounts.admin.pubkey, &s.admin_key))
-            && (amount_in > 0)
-            && (min_out > 0)
-            && (fee_bps <= 10000)
-            && (lane < 32)
-            && (pubkey_ne(&input_mint, &output_mint))
-            && ((pubkey_eq(&input_mint, &output_mint)) || (amount_in >= min_out))
-            && (mul_bps_floor_u128(amount_in, fee_bps) <= amount_in)
-            && (amount_in >= min_out)
-            && (amount_in <= 1000000000000000),
+        pubkey_eq(&accounts.admin.pubkey, &s.admin_key)
+            && amount_in > 0
+            && min_out > 0
+            && fee_bps <= 10000
+            && lane < 32
+            && pubkey_ne(&input_mint, &output_mint)
+            && (pubkey_eq(&input_mint, &output_mint) || amount_in >= min_out)
+            && mul_bps_floor_u128(amount_in, fee_bps) <= amount_in
+            && amount_in >= min_out
+            && amount_in <= 1000000000000000,
     );
     let pre = s.clone();
     if stable_swap_large_guard(

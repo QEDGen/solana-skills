@@ -23,7 +23,7 @@ pub fn create_vault<'info>(
     member_count: u8,
 ) -> Result<(), ProgramError> {
     // requires: threshold > 0 ∧ threshold ≤ member_count
-    if !((threshold > 0) && (threshold <= member_count)) {
+    if !(threshold > 0 && threshold <= member_count) {
         return Err(ProgramError::from(MultisigError::InvalidThreshold));
     }
     // requires: member_count ≤ 32
@@ -230,7 +230,7 @@ pub fn remove_member<'info>(ctx: &mut RemoveMember<'info>) -> Result<(), Program
         return Err(ProgramError::Custom(0xFF));
     }
     // requires: s.approval_count = 0 ∧ s.rejection_count = 0
-    if !((ctx.vault.approval_count == 0) && (ctx.vault.rejection_count == 0)) {
+    if !(ctx.vault.approval_count == 0 && ctx.vault.rejection_count == 0) {
         return Err(ProgramError::Custom(0xFF));
     }
     Ok(())

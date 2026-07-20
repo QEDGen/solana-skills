@@ -98,7 +98,7 @@ prop_compose! {
 }
 
 fn collect(s: &mut State, total: u64) -> bool {
-    if !((total > 0) && (net > 0)) {
+    if !(total > 0 && net > 0) {
         return false;
     }
     let fee =
@@ -121,7 +121,7 @@ proptest! {
     #[test]
     fn collect_rejects_invalid(s in arb_boundary_state(), total in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX]) {
         let mut s = s;
-        prop_assume!(!((total > 0) && (net > 0)));
+        prop_assume!(!(total > 0 && net > 0));
         prop_assert!(!collect(&mut s, total),
             "collect must reject when guard is violated");
     }

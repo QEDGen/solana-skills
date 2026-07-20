@@ -455,7 +455,7 @@ mod tests {
         apply_create_vault(&mut state, threshold, member_count);
         // Property: threshold bounded must hold after create_vault
         assert!(
-            (state.threshold <= state.member_count) && (state.threshold > 0),
+            state.threshold <= state.member_count && state.threshold > 0,
             "threshold_bounded must hold after create_vault"
         );
     }
@@ -474,7 +474,7 @@ mod tests {
         apply_propose(&mut state);
         // Property: threshold bounded must hold after propose
         assert!(
-            (state.threshold <= state.member_count) && (state.threshold > 0),
+            state.threshold <= state.member_count && state.threshold > 0,
             "threshold_bounded must hold after propose"
         );
     }
@@ -494,7 +494,7 @@ mod tests {
         apply_approve(&mut state, member_index);
         // Property: threshold bounded must hold after approve
         assert!(
-            (state.threshold <= state.member_count) && (state.threshold > 0),
+            state.threshold <= state.member_count && state.threshold > 0,
             "threshold_bounded must hold after approve"
         );
     }
@@ -514,7 +514,7 @@ mod tests {
         apply_reject(&mut state, member_index);
         // Property: threshold bounded must hold after reject
         assert!(
-            (state.threshold <= state.member_count) && (state.threshold > 0),
+            state.threshold <= state.member_count && state.threshold > 0,
             "threshold_bounded must hold after reject"
         );
     }
@@ -534,7 +534,7 @@ mod tests {
         apply_execute(&mut state, member_index);
         // Property: threshold bounded must hold after execute
         assert!(
-            (state.threshold <= state.member_count) && (state.threshold > 0),
+            state.threshold <= state.member_count && state.threshold > 0,
             "threshold_bounded must hold after execute"
         );
     }
@@ -553,7 +553,7 @@ mod tests {
         apply_cancel_proposal(&mut state);
         // Property: threshold bounded must hold after cancel_proposal
         assert!(
-            (state.threshold <= state.member_count) && (state.threshold > 0),
+            state.threshold <= state.member_count && state.threshold > 0,
             "threshold_bounded must hold after cancel_proposal"
         );
     }
@@ -574,7 +574,7 @@ mod tests {
         apply_add_member(&mut state, member_index, member_pubkey);
         // Property: threshold bounded must hold after add_member
         assert!(
-            (state.threshold <= state.member_count) && (state.threshold > 0),
+            state.threshold <= state.member_count && state.threshold > 0,
             "threshold_bounded must hold after add_member"
         );
     }
@@ -593,7 +593,7 @@ mod tests {
         apply_remove_member(&mut state);
         // Property: threshold bounded must hold after remove_member
         assert!(
-            (state.threshold <= state.member_count) && (state.threshold > 0),
+            state.threshold <= state.member_count && state.threshold > 0,
             "threshold_bounded must hold after remove_member"
         );
     }

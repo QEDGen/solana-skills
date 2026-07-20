@@ -704,7 +704,7 @@ pub fn borrow<'info>(ctx: &mut Borrow<'info>, amount: u64, collateral: u64) -> R
         return Err(LendingError::Unauthorized.into());
     }
     // requires: amount > 0 ∧ collateral > 0
-    if !((amount > 0) && (collateral > 0)) {
+    if !(amount > 0 && collateral > 0) {
         return Err(LendingError::InvalidAmount.into());
     }
     // lifecycle: status := Active

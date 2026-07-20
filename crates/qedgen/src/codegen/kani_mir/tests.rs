@@ -566,11 +566,11 @@ fn bare_state_field_requires_reach_harness_with_receiver() {
     );
     let out = render(&mir, &parsed);
     assert!(
-        out.contains("if !((s.active == 0) && (amount > 0))"),
+        out.contains("if !(s.active == 0 && amount > 0)"),
         "transition guard must read state through `s`:\n{out}"
     );
     assert!(
-        out.contains("kani::assume(!((s.active == 0) && (amount > 0)));"),
+        out.contains("kani::assume(!(s.active == 0 && amount > 0));"),
         "guard-rejection assume must read state through `s`:\n{out}"
     );
     assert!(
@@ -676,7 +676,7 @@ fn compound_effect_rhs_and_arith_predicates_render_soundly() {
     );
     // … guard addition evaluates in u128 (matches the Lean Nat model) …
     assert!(
-        out.contains("(((now) as u128) >= ((s.start) as u128) + ((s.period) as u128))"),
+        out.contains("((now) as u128) >= ((s.start) as u128) + ((s.period) as u128)"),
         "guard arithmetic must widen to u128:\n{out}"
     );
     // … and the property predicate can't overflow while being evaluated.
