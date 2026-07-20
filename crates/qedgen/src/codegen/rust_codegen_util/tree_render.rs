@@ -1171,18 +1171,6 @@ pub fn tree_mentions_state(e: &ExprTree) -> bool {
     found
 }
 
-pub fn tree_mentions_account_pubkey(e: &ExprTree) -> bool {
-    let mut found = false;
-    for_each_path(e, &mut |p| {
-        if matches!(p.binding, BindingKind::Account)
-            && matches!(p.segments.as_slice(), [TreeSeg::Field(f)] if f == "pubkey")
-        {
-            found = true;
-        }
-    });
-    found
-}
-
 /// Walk every [`TreePath`] in `e`, pre-order. Shared spine for the
 /// path-shape predicates below (one exhaustive match instead of one per
 /// predicate).

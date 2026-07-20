@@ -731,6 +731,14 @@ fn emit_state_strategy_inner(
 
 /// Emit transition functions. Each effect block iterates the handler's
 /// lowered MIR body (`rust_codegen_util::stmt_effect_triple`), not `op.effects`.
+///
+/// `wrapping: false` — the model must carry the spec's per-effect
+/// semantics: default `+=`/`-=` are checked (reject the transition on
+/// overflow, like the deployed `checked_add(..).ok_or(err)?`), `+=!`
+/// saturates, `+=?` wraps. The old `true` here was a leftover from the
+/// pre-checked-default era: it forced default `+=` to wrap AND report
+/// success, so every overflow test asserting "success means no wrap"
+/// failed on a correct spec (#296; the Kani lane already passed `false`).
 fn emit_transition_functions_for(
     out: &mut String,
     mir: &Mir,
@@ -738,7 +746,7 @@ fn emit_transition_functions_for(
     spec: &ParsedSpec,
 ) -> Result<()> {
     for op in handlers {
-        rust_codegen_util::emit_transition_fn(out, mir, op, spec, true, |t| map_type(t, spec))?;
+        rust_codegen_util::emit_transition_fn(out, mir, op, spec, false, |t| map_type(t, spec))?;
     }
     Ok(())
 }
@@ -826,8 +834,11 @@ fn emit_preservation_tests_for(
             }
             if let Some(op) = op {
                 for (pname, ptype) in &op.takes_params {
-                    let rust_type = map_type(ptype, spec)?;
-                    param_parts.push(format!("{} in 0{}..={}::MAX", pname, rust_type, rust_type));
+                    // Type-dispatched strategy, not a numeric range format:
+                    // `0[u8; 32]..=[u8; 32]::MAX` for a Pubkey param is a
+                    // syntax error (#295).
+                    let strategy = strategy_for_field(ptype, spec, StrategyMode::Full, None)?;
+                    param_parts.push(format!("{} in {}", pname, strategy));
                 }
             }
             // Bind the forall binder when no handler param shadows it;
@@ -992,8 +1003,10 @@ fn emit_invariant_preservation_tests_for(
                 param_parts.push("s in arb_state()".to_string());
             }
             for (pname, ptype) in &op.takes_params {
-                let rust_type = map_type(ptype, spec)?;
-                param_parts.push(format!("{} in 0{}..={}::MAX", pname, rust_type, rust_type));
+                // Type-dispatched strategy — see the effect-conformance
+                // site above (#295).
+                let strategy = strategy_for_field(ptype, spec, StrategyMode::Full, None)?;
+                param_parts.push(format!("{} in {}", pname, strategy));
             }
             if param_parts.is_empty() && is_init {
                 param_parts.push("_dummy in 0u8..1u8".to_string());
@@ -1161,8 +1174,10 @@ fn emit_overflow_tests_for(
 
             let mut param_parts = vec!["s in arb_state()".to_string()];
             for (pname, ptype) in &op.takes_params {
-                let rt = map_type(ptype, spec)?;
-                param_parts.push(format!("{} in 0{}..={}::MAX", pname, rt, rt));
+                // Type-dispatched strategy — see the effect-conformance
+                // site above (#295).
+                let strategy = strategy_for_field(ptype, spec, StrategyMode::Full, None)?;
+                param_parts.push(format!("{} in {}", pname, strategy));
             }
 
             out.push_str(&format!(
@@ -1250,9 +1265,9 @@ fn emit_sequence_test_for(
             let strategies: Vec<String> = op
                 .takes_params
                 .iter()
-                .map(|(_, t)| {
-                    map_type(t, spec).map(|rust_type| format!("0{rt}..={rt}::MAX", rt = rust_type))
-                })
+                // Type-dispatched strategy — see the effect-conformance
+                // site above (#295).
+                .map(|(_, t)| strategy_for_field(t, spec, StrategyMode::Full, None))
                 .collect::<Result<Vec<_>>>()?;
             let names: Vec<&str> = op.takes_params.iter().map(|(n, _)| n.as_str()).collect();
             // proptest's tuple `Strategy` impl caps at arity 12; >12-arg
@@ -1561,6 +1576,139 @@ property balance_nonneg :
         assert!(
             !body.contains("Active.owner"),
             "variant prefix leaked into proptest body:\n{body}"
+        );
+    }
+
+    /// #296 regression: the proptest transition model must carry the
+    /// spec's per-effect semantics. Default `+=` is checked — reject the
+    /// transition on overflow, like the deployed
+    /// `checked_add(..).ok_or(err)?` — while explicit `+=?` wraps and
+    /// `+=!` saturates. The old `wrapping: true` forced default `+=` to
+    /// wrap AND report success, so the generated
+    /// `<op>_no_overflow_on_<field>` test failed on a correct spec.
+    #[test]
+    fn default_add_is_checked_in_transition_model() {
+        let src = r#"spec MiniVault
+
+type State | Active of {
+    balance : U64,
+    lifetime : U64,
+    ticks : U64,
+  }
+
+type Error
+  | MathOverflow
+
+handler deposit (amount : U64) : State.Active -> State.Active {
+  permissionless
+  accounts {
+    vault : writable
+  }
+  requires amount > 0 else MathOverflow
+  effect {
+    Active.balance  += amount
+    Active.lifetime +=! amount
+    Active.ticks    +=? amount
+  }
+}
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let spec_path = dir.path().join("vault.qedspec");
+        let out_path = dir.path().join("tests/proptest.rs");
+        std::fs::write(&spec_path, src).unwrap();
+        let spec = crate::check::parse_spec_file(&spec_path).expect("parse");
+        let mir = crate::mir::lower(&spec);
+        generate_impl(&mir, &spec, &out_path).unwrap();
+        let body = std::fs::read_to_string(&out_path).unwrap();
+
+        // Default `+=` rejects on overflow instead of wrapping.
+        assert!(
+            body.contains("s.balance.checked_add(amount)"),
+            "default += models checked_add:\n{body}"
+        );
+        assert!(
+            !body.contains("s.balance.wrapping_add"),
+            "default += must not wrap in the model:\n{body}"
+        );
+        // Explicit tiers keep their declared semantics.
+        assert!(
+            body.contains("s.lifetime.saturating_add(amount)"),
+            "+=! models saturating_add:\n{body}"
+        );
+        assert!(
+            body.contains("s.ticks.wrapping_add(amount)"),
+            "+=? models wrapping_add:\n{body}"
+        );
+    }
+
+    /// #295 regression: multisig-shaped specs (Pubkey handler params,
+    /// bare-account guard terms, u8-indexed Map state) generated
+    /// non-compiling proptests three ways:
+    /// (a) `member_pubkey in 0[u8; 32]..=[u8; 32]::MAX` — Pubkey params
+    ///     went through a numeric-range format string (syntax error);
+    /// (b) `s.members[i] == approver` — bare account names survived the
+    ///     pubkey-only guard suppression as free variables (E0425);
+    /// (c) `s.voted[member_index] = 1` — effect-LHS subscripts kept the
+    ///     param's u8 type (E0277; arrays index by usize).
+    #[test]
+    fn multisig_shapes_render_compiling_proptests() {
+        let src = r#"spec MiniMultisig
+const MAX_MEMBERS = 4
+
+type State | Active of {
+    members : Map[MAX_MEMBERS] Pubkey,
+    voted : Map[MAX_MEMBERS] U8,
+    member_count : U8,
+  }
+
+type Error
+  | Unauthorized
+  | AlreadyVoted
+
+handler approve (member_index : U8) (member_pubkey : Pubkey) : State.Active -> State.Active {
+  accounts {
+    approver : signer
+    state    : writable
+  }
+  requires member_index < member_count and members[member_index] == approver else Unauthorized
+  requires voted[member_index] == 0 else AlreadyVoted
+  effect {
+    Active.voted[member_index] := 1
+  }
+}
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let spec_path = dir.path().join("multisig.qedspec");
+        let out_path = dir.path().join("tests/proptest.rs");
+        std::fs::write(&spec_path, src).unwrap();
+        let spec = crate::check::parse_spec_file(&spec_path).expect("parse");
+        let mir = crate::mir::lower(&spec);
+        generate_impl(&mir, &spec, &out_path).unwrap();
+        let body = std::fs::read_to_string(&out_path).unwrap();
+
+        // (a) Pubkey param strategy is type-dispatched, never a range.
+        assert!(
+            !body.contains("0[u8; 32]"),
+            "Pubkey param must not render a numeric range strategy:\n{body}"
+        );
+        assert!(
+            body.contains("member_pubkey in prop::array::uniform32"),
+            "Pubkey param uses the array strategy:\n{body}"
+        );
+        // (b) The bare-account term is projected out; the adjacent
+        // state/param terms survive.
+        assert!(
+            !body.contains("== approver"),
+            "bare account name must not survive as a free variable:\n{body}"
+        );
+        assert!(
+            body.contains("member_index < s.member_count"),
+            "account-free conjunct survives the projection:\n{body}"
+        );
+        // (c) Effect-LHS subscript is cast to usize.
+        assert!(
+            body.contains("s.voted[member_index as usize] = 1"),
+            "effect-LHS subscript casts to usize:\n{body}"
         );
     }
 

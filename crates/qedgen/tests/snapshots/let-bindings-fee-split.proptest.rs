@@ -104,8 +104,14 @@ fn collect(s: &mut State, total: u64) -> bool {
     let fee =
         (mul_div_floor_u128(((total) as u128), ((s.fee_bps) as u128), ((10000) as u128))) as u64;
     let net = total - fee;
-    s.pool = s.pool.wrapping_add(net);
-    s.fees = s.fees.wrapping_add(fee);
+    match s.pool.checked_add(net) {
+        Some(__v) => s.pool = __v,
+        None => return false,
+    }
+    match s.fees.checked_add(fee) {
+        Some(__v) => s.fees = __v,
+        None => return false,
+    }
     s.lifetime_collected = s.lifetime_collected + (total);
     true
 }
