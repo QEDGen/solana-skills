@@ -140,6 +140,14 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
             "fn apply_{}(state: &mut {}{}) {{\n",
             op.name, op_state_name, param_sig
         ));
+        // Account-valued effects are unexpressible here (the model
+        // carries no accounts) — note each one instead of silently
+        // narrowing the spec (#297).
+        for note in suppressed_effect_notes(&op.name, &mir, &spec) {
+            out.push_str(&format!(
+                "    // not modeled (account-valued; accounts exist only at runtime): {note}\n"
+            ));
+        }
         // Parallel effect semantics: RHS reads of fields this block also
         // writes observe the PRE-state value (matching the Lean model and
         // the Kani conformance assertions) — snapshot them before mutating.
@@ -557,6 +565,7 @@ fn effect_triples(op_name: &str, mir: &crate::mir::Mir, spec: &ParsedSpec) -> Ve
     };
     crate::rust_codegen_util::block_effect_triples_deep(&h.body)
         .into_iter()
+        .filter(|(field, _, value)| !effect_is_account_valued(field, value, op_name, spec))
         .map(|(field, kind, value)| {
             (
                 cast_subscripts(
@@ -574,15 +583,66 @@ fn effect_triples(op_name: &str, mir: &crate::mir::Mir, spec: &ParsedSpec) -> Ve
         .collect()
 }
 
+/// Is this effect unexpressible in the account-free unit-test model?
+/// Two structural signals, matching the shared harness lane
+/// (`emit_transition_fn`'s pubkey-skip) and this file's own guard
+/// suppression (`account_free_conjuncts`):
+/// - the destination field is `Pubkey`-typed (identity flows from
+///   accounts; the model carries no accounts), or
+/// - the RHS reads an account binding (`initializer_ta.pubkey`) — the
+///   `apply_*`/test scopes have no such binding, so rendering it
+///   verbatim is an E0425 (#297).
+fn effect_is_account_valued(
+    field: &str,
+    value: &crate::mir::Expr,
+    op_name: &str,
+    spec: &ParsedSpec,
+) -> bool {
+    let dest_is_pubkey = spec
+        .handlers
+        .iter()
+        .find(|o| o.name == op_name)
+        .is_some_and(|op| crate::rust_codegen_util::field_type_is_pubkey(field, op, spec));
+    dest_is_pubkey
+        || crate::rust_codegen_util::tree_render::tree_mentions_account(
+            crate::rust_codegen_util::mir_expr_tree(value),
+        )
+}
+
+/// Human-readable notes for the effects [`effect_is_account_valued`]
+/// suppressed — emitted as comments in `apply_*` so the model is honest
+/// about what it does not cover.
+fn suppressed_effect_notes(op_name: &str, mir: &crate::mir::Mir, spec: &ParsedSpec) -> Vec<String> {
+    let Some(h) = mir.handlers.iter().find(|h| h.name == op_name) else {
+        return Vec::new();
+    };
+    crate::rust_codegen_util::block_effect_triples_deep(&h.body)
+        .into_iter()
+        .filter(|(field, _, value)| effect_is_account_valued(field, value, op_name, spec))
+        .map(|(field, _, value)| {
+            format!(
+                "{} := {}",
+                crate::rust_codegen_util::strip_variant_prefix_for_flat_state(&field, spec),
+                crate::rust_codegen_util::mir_expr_rust(value)
+            )
+        })
+        .collect()
+}
+
 /// Fields needing a `pre_<field>` snapshot for this handler under
 /// parallel effect semantics (see `parallel_snapshot_fields`): the
 /// `apply_*` helper binds them before mutating, and the effect test
-/// asserts RHS reads against them.
+/// asserts RHS reads against them. Computed over the same filtered
+/// triples `apply_*` emits, so every snapshot is referenced.
 fn parallel_pre_fields(op_name: &str, mir: &crate::mir::Mir, spec: &ParsedSpec) -> Vec<String> {
     let Some(h) = mir.handlers.iter().find(|h| h.name == op_name) else {
         return Vec::new();
     };
-    let triples = crate::rust_codegen_util::block_effect_triples_deep(&h.body);
+    let triples: Vec<(String, &'static str, &crate::mir::Expr)> =
+        crate::rust_codegen_util::block_effect_triples_deep(&h.body)
+            .into_iter()
+            .filter(|(field, _, value)| !effect_is_account_valued(field, value, op_name, spec))
+            .collect();
     crate::rust_codegen_util::parallel_snapshot_fields(&triples, spec)
 }
 
@@ -1683,6 +1743,60 @@ fn flip_cmp(cmp: &'static str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #297 regression: an effect whose RHS reads an account binding
+    /// (`field := acct.pubkey`) rendered the account name verbatim into
+    /// `apply_*` and the effect test — E0425 in a scope with no account
+    /// bindings. Such effects are suppressed with a note, matching the
+    /// shared harness lane's pubkey-skip and this file's own guard
+    /// suppression; adjacent scalar effects survive.
+    #[test]
+    fn account_valued_effects_are_suppressed_with_note() {
+        let src = r#"spec T
+type State | Open of { owner_key : Pubkey, pool : U64 }
+type Error | InvalidAmount
+handler open_pool (amount : U64) : State.Open -> State.Open {
+  accounts {
+    payer    : signer, writable
+    payer_ta : writable, type token
+    state    : writable
+  }
+  requires amount > 0 else InvalidAmount
+  effect {
+    owner_key := payer_ta.pubkey
+    pool      += amount
+  }
+}
+"#;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spec_path = dir.path().join("t.qedspec");
+        std::fs::write(&spec_path, src).expect("write spec");
+        let out_path = dir.path().join("tests.rs");
+        generate(&spec_path, &out_path).expect("generate unit tests");
+        let out = std::fs::read_to_string(&out_path).expect("read output");
+
+        // The account read must not appear as executable code anywhere
+        // (the suppression note mentions it in a comment; statements end
+        // with `;`).
+        assert!(
+            !out.contains("= payer_ta.pubkey;"),
+            "account read must not render as an expression:\n{out}"
+        );
+        assert!(
+            out.contains("not modeled (account-valued"),
+            "suppressed effect carries an explicit note:\n{out}"
+        );
+        // The adjacent scalar effect still renders and is still tested.
+        assert!(
+            out.contains("state.pool += amount"),
+            "scalar effect survives suppression:\n{out}"
+        );
+        // No assertion on the suppressed destination in the effect test.
+        assert!(
+            !out.contains("assert_eq!(state.owner_key"),
+            "effect test must not assert the suppressed field:\n{out}"
+        );
+    }
 
     /// #156 regression: the guard predicate renders from the requires
     /// trees. The legacy path read only the deleted `guard_str`, so every
