@@ -120,7 +120,11 @@ fn propose(s: &mut State) -> bool {
 }
 
 fn approve(s: &mut State, member_index: u8) -> bool {
-    if !((member_index < s.member_count) && (s.voted[(member_index) as usize] == 0)) {
+    if !(((member_index) as usize) < s.members.len()
+        && ((member_index) as usize) < s.voted.len()
+        && (member_index < s.member_count)
+        && (s.voted[(member_index) as usize] == 0))
+    {
         return false;
     }
     if s.status != Status::HasProposal {
@@ -133,7 +137,11 @@ fn approve(s: &mut State, member_index: u8) -> bool {
 }
 
 fn reject(s: &mut State, member_index: u8) -> bool {
-    if !((member_index < s.member_count) && (s.voted[(member_index) as usize] == 0)) {
+    if !(((member_index) as usize) < s.members.len()
+        && ((member_index) as usize) < s.voted.len()
+        && (member_index < s.member_count)
+        && (s.voted[(member_index) as usize] == 0))
+    {
         return false;
     }
     if s.status != Status::HasProposal {
@@ -146,7 +154,10 @@ fn reject(s: &mut State, member_index: u8) -> bool {
 }
 
 fn execute(s: &mut State, member_index: u8) -> bool {
-    if !((member_index < s.member_count) && (s.approval_count >= s.threshold)) {
+    if !(((member_index) as usize) < s.members.len()
+        && (member_index < s.member_count)
+        && (s.approval_count >= s.threshold))
+    {
         return false;
     }
     if s.status != Status::HasProposal {
@@ -178,6 +189,9 @@ fn add_member(s: &mut State, member_index: u8, member_pubkey: [u8; 32]) -> bool 
         return false;
     }
     if s.status != Status::Active {
+        return false;
+    }
+    if !(((member_index) as usize) < s.members.len()) {
         return false;
     }
     s.members[member_index as usize] = member_pubkey;
@@ -423,7 +437,7 @@ proptest! {
     #[test]
     fn approve_rejects_invalid(s in arb_boundary_state(), member_index in prop_oneof![0u8..=3u8, 252u8..=255u8]) {
         let mut s = s;
-        prop_assume!(!((member_index < s.member_count) && (s.voted[(member_index) as usize] == 0)));
+        prop_assume!(!(((member_index) as usize) < s.members.len() && ((member_index) as usize) < s.voted.len() && (member_index < s.member_count) && (s.voted[(member_index) as usize] == 0)));
         prop_assert!(!approve(&mut s, member_index),
             "approve must reject when guard is violated");
     }
@@ -434,7 +448,7 @@ proptest! {
     #[test]
     fn reject_rejects_invalid(s in arb_boundary_state(), member_index in prop_oneof![0u8..=3u8, 252u8..=255u8]) {
         let mut s = s;
-        prop_assume!(!((member_index < s.member_count) && (s.voted[(member_index) as usize] == 0)));
+        prop_assume!(!(((member_index) as usize) < s.members.len() && ((member_index) as usize) < s.voted.len() && (member_index < s.member_count) && (s.voted[(member_index) as usize] == 0)));
         prop_assert!(!reject(&mut s, member_index),
             "reject must reject when guard is violated");
     }
@@ -445,7 +459,7 @@ proptest! {
     #[test]
     fn execute_rejects_invalid(s in arb_boundary_state(), member_index in prop_oneof![0u8..=3u8, 252u8..=255u8]) {
         let mut s = s;
-        prop_assume!(!((member_index < s.member_count) && (s.approval_count >= s.threshold)));
+        prop_assume!(!(((member_index) as usize) < s.members.len() && (member_index < s.member_count) && (s.approval_count >= s.threshold)));
         prop_assert!(!execute(&mut s, member_index),
             "execute must reject when guard is violated");
     }

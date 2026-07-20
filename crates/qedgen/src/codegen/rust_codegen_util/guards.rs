@@ -31,7 +31,110 @@ pub fn collect_full_guard_with_account_env(
     if parts.is_empty() {
         None
     } else {
-        Some(parts.join(" && "))
+        // Bounds first: `&&` short-circuits left-to-right, so no later
+        // term can index out of range (#298).
+        let mut all = requires_bounds_terms(op);
+        all.extend(parts);
+        Some(all.join(" && "))
+    }
+}
+
+/// Synthesized bounds conjuncts for every identifier subscript the
+/// handler's requires clauses read (`voted[member_index]` →
+/// `((member_index) as usize) < s.voted.len()`), in first-seen order.
+///
+/// The model state space is wider than any deployed state: `arb_state` /
+/// `kani::any` generate count fields past a bounded container's
+/// capacity, so a guard like `i < s.member_count` passes for an index
+/// beyond `s.voted.len()` and the next conjunct panics the harness
+/// (proptest) or fails the proof spuriously (Kani). Deployed code
+/// aborts the transaction on that access; the model must reject the
+/// transition instead (#298). Synthesized for every requires clause —
+/// including account-projected ones — because the deployed guard
+/// evaluates them all.
+pub fn requires_bounds_terms(op: &ParsedHandler) -> Vec<String> {
+    render_bounds_terms(&requires_bounds_pairs(op))
+}
+
+/// The `(container, index)` pairs behind [`requires_bounds_terms`] —
+/// exposed so the transition emitter can subtract them from its
+/// effect-subscript pre-checks instead of double-guarding.
+pub(super) fn requires_bounds_pairs(op: &ParsedHandler) -> Vec<(String, String)> {
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for req in &op.requires {
+        collect_tree_subscripts(requires_tree(req), &mut pairs);
+    }
+    pairs
+}
+
+/// `(container, index)` pairs for every state-rooted `container[index]`
+/// read in `tree`, where `index` is an identifier (numeric subscripts
+/// are in range by construction — the container length is a spec
+/// constant).
+pub(super) fn collect_tree_subscripts(
+    tree: &crate::mir::ExprTree,
+    pairs: &mut Vec<(String, String)>,
+) {
+    use crate::mir::expr_tree::{BindingKind, TreeSeg};
+    super::tree_render::for_each_path(tree, &mut |p| {
+        if !matches!(p.binding, BindingKind::StateField | BindingKind::Ghost) {
+            return;
+        }
+        let mut fields: Vec<&str> = Vec::new();
+        for seg in &p.segments {
+            match seg {
+                TreeSeg::Field(name) => fields.push(name.as_str()),
+                TreeSeg::Index(sym) => {
+                    if !fields.is_empty() && !sym.chars().all(|c| c.is_ascii_digit()) {
+                        let pair = (fields.join("."), sym.to_string());
+                        if !pairs.contains(&pair) {
+                            pairs.push(pair);
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// Render `(container, index)` pairs as `s.`-rooted bounds predicates.
+/// Containers may themselves carry a subscript (`accounts[i].loans`);
+/// `cast_subscripts` keeps those inner indexes `usize`.
+pub(super) fn render_bounds_terms(pairs: &[(String, String)]) -> Vec<String> {
+    pairs
+        .iter()
+        .map(|(container, idx)| {
+            format!(
+                "(({idx}) as usize) < s.{}.len()",
+                cast_subscripts(container)
+            )
+        })
+        .collect()
+}
+
+/// `(container, index)` pairs for identifier subscripts in a flattened
+/// effect-target path string (`voted[member_index]` →
+/// `("voted", "member_index")`). Numeric subscripts are skipped — in
+/// range by construction.
+pub(super) fn field_string_subscripts(field: &str, pairs: &mut Vec<(String, String)>) {
+    let mut rest = field;
+    let mut prefix_len = 0usize;
+    while let Some(i) = rest.find('[') {
+        let container = field[..prefix_len + i].to_string();
+        let after = &rest[i + 1..];
+        let Some(j) = after.find(']') else { return };
+        let idx = &after[..j];
+        let is_ident = !idx.is_empty()
+            && idx.chars().all(|c| c.is_alphanumeric() || c == '_')
+            && !idx.starts_with(|c: char| c.is_ascii_digit());
+        if is_ident && !container.is_empty() {
+            let pair = (container, idx.to_string());
+            if !pairs.contains(&pair) {
+                pairs.push(pair);
+            }
+        }
+        prefix_len += i + 1 + j + 1;
+        rest = &after[j + 1..];
     }
 }
 
@@ -145,7 +248,17 @@ pub fn collect_guard_terms_with_account_env(
             }
         }
     }
-    terms
+    if terms.is_empty() {
+        terms
+    } else {
+        // Bounds first — same ordering contract as
+        // `collect_full_guard_with_account_env` (#298); split-term
+        // consumers emit terms in order, so bounds still evaluate before
+        // any indexing term.
+        let mut all = requires_bounds_terms(op);
+        all.extend(terms);
+        all
+    }
 }
 
 pub fn split_top_level_and(expr: &str) -> Vec<String> {

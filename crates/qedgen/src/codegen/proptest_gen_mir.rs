@@ -1571,6 +1571,68 @@ property balance_nonneg :
         );
     }
 
+    /// #298 regression: the model state space allows count fields past a
+    /// bounded container's capacity, so a guard like
+    /// `i < s.member_count` passes for an index beyond `s.voted.len()`
+    /// and the next conjunct panics the harness. Deployed code aborts
+    /// the transaction there; the model must reject the transition.
+    /// Synthesized bounds conjuncts lead the collected guard, and
+    /// effect-only subscripts get transition pre-checks.
+    #[test]
+    fn subscript_bounds_lead_the_model_guard() {
+        let src = r#"spec MiniBounds
+const MAX_MEMBERS = 4
+
+type State | Active of {
+    voted : Map[MAX_MEMBERS] U8,
+    tally : Map[MAX_MEMBERS] U64,
+    member_count : U8,
+  }
+
+type Error
+  | Unauthorized
+
+handler vote (member_index : U8) : State.Active -> State.Active {
+  accounts {
+    voter : signer
+    state : writable
+  }
+  requires member_index < member_count and voted[member_index] == 0 else Unauthorized
+  effect {
+    Active.voted[member_index] := 1
+    Active.tally[member_index] += 1
+  }
+}
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let spec_path = dir.path().join("bounds.qedspec");
+        let out_path = dir.path().join("tests/proptest.rs");
+        std::fs::write(&spec_path, src).unwrap();
+        let spec = crate::check::parse_spec_file(&spec_path).expect("parse");
+        let mir = crate::mir::lower(&spec);
+        generate_impl(&mir, &spec, &out_path).unwrap();
+        let body = std::fs::read_to_string(&out_path).unwrap();
+
+        // Requires-derived bounds lead the transition guard: the bounds
+        // term must appear before the indexing conjunct.
+        let guard_pos = body
+            .find("((member_index) as usize) < s.voted.len()")
+            .expect("bounds term present");
+        let index_read_pos = body
+            .find("s.voted[(member_index) as usize] == 0")
+            .expect("indexing conjunct present");
+        assert!(
+            guard_pos < index_read_pos,
+            "bounds term must precede the indexing read:\n{body}"
+        );
+        // Effect-only subscript (`tally` never appears in requires) gets
+        // a transition pre-check.
+        assert!(
+            body.contains("((member_index) as usize) < s.tally.len()"),
+            "effect-only subscript gets a bounds pre-check:\n{body}"
+        );
+    }
+
     /// #295 regression: multisig-shaped specs (Pubkey handler params,
     /// bare-account guard terms, u8-indexed Map state) generated
     /// non-compiling proptests three ways:
