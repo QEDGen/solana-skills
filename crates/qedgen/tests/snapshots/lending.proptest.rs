@@ -96,7 +96,10 @@ mod pool {
         if s.status != Status::Active {
             return false;
         }
-        s.total_deposits = s.total_deposits.wrapping_add(amount);
+        match s.total_deposits.checked_add(amount) {
+            Some(__v) => s.total_deposits = __v,
+            None => return false,
+        }
         s.status = Status::Active;
         true
     }
