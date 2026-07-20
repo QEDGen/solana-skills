@@ -1,0 +1,9 @@
+[package]
+name = "qedgen-kani-compile-stub"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Compile-only stand-in for the `kani` crate. Lets ordinary rustc type-check generated Kani harnesses (tests/kani.rs) in CI without the Kani toolchain. Never executable; never published."
+
+[dependencies]
+qedgen-kani-compile-stub-macros = { version = "0.1.0", path = "macros" }

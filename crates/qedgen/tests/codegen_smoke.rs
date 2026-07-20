@@ -1,6 +1,6 @@
 mod common;
 
-use common::repo_root;
+use common::{redirect_macros_to_path, repo_root};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -33,118 +33,10 @@ fn run_capture(command: &mut Command) -> String {
     )
 }
 
-/// Generate `<example>` as an Anchor scaffold into a fresh tempdir, write
-/// a `[patch]` config pointing `qedgen-macros` at the in-repo crate, and
-/// run `cargo check` on the result. Don't pass `--offline` — CI runners
-/// start cold, so the smoke needs to be allowed to fetch anchor-lang /
-/// anchor-spl / solana-program on first run; locally cargo's registry
-/// cache makes the second run fast.
-fn smoke_anchor_scaffold(example: &str) {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let spec_src = repo_root()
-        .join("examples/rust")
-        .join(example)
-        .join(format!("{example}.qedspec"));
-    let spec_path = temp.path().join(format!("{example}.qedspec"));
-    std::fs::copy(&spec_src, &spec_path).unwrap_or_else(|e| panic!("copy {} spec: {e}", example));
-
-    std::fs::copy(
-        repo_root()
-            .join("examples/rust")
-            .join(example)
-            .join("qed.toml"),
-        temp.path().join("qed.toml"),
-    )
-    .unwrap_or_else(|e| panic!("copy {} manifest: {e}", example));
-    std::fs::create_dir(temp.path().join(".qed")).expect("create .qed");
-
-    run(Command::new("git").arg("init").current_dir(temp.path()));
-
-    let output_dir = temp.path().join("programs");
-    run(Command::new(env!("CARGO_BIN_EXE_qedgen"))
-        .arg("codegen")
-        .arg("--spec")
-        .arg(&spec_path)
-        .arg("--target")
-        .arg("anchor")
-        .arg("--output-dir")
-        .arg(&output_dir)
-        .current_dir(temp.path()));
-
-    // The generated Cargo.toml stamps `qedgen-macros = { git = ..., tag =
-    // "v<current>" }`, but the tag for the in-progress version doesn't
-    // exist on GitHub until release time. Rewrite the git dep to a path
-    // dep before the smoke compile — cargo's `[patch]` mechanism didn't
-    // reliably override a tagged git source even with the right config.
-    redirect_macros_to_path(&output_dir.join("Cargo.toml"));
-
-    run(Command::new("cargo")
-        .arg("check")
-        .arg("--manifest-path")
-        .arg(output_dir.join("Cargo.toml")));
-}
-
-/// Anchor scaffold smoke + run the generated proptest harness against
-/// it. Raises the floor from "compiles" to "tests pass" — catches
-/// regressions in the predicate / transition rendering that pure
-/// `cargo check` would miss (e.g., the Pubkey-effect-filter bug Day 1
-/// surfaced on token-fundraiser).
-fn smoke_anchor_scaffold_with_proptest(example: &str) {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let spec_src = repo_root()
-        .join("examples/rust")
-        .join(example)
-        .join(format!("{example}.qedspec"));
-    let spec_path = temp.path().join(format!("{example}.qedspec"));
-    std::fs::copy(&spec_src, &spec_path).unwrap_or_else(|e| panic!("copy {} spec: {e}", example));
-
-    std::fs::copy(
-        repo_root()
-            .join("examples/rust")
-            .join(example)
-            .join("qed.toml"),
-        temp.path().join("qed.toml"),
-    )
-    .unwrap_or_else(|e| panic!("copy {} manifest: {e}", example));
-    std::fs::create_dir(temp.path().join(".qed")).expect("create .qed");
-
-    run(Command::new("git").arg("init").current_dir(temp.path()));
-
-    let output_dir = temp.path().join("programs");
-    run(Command::new(env!("CARGO_BIN_EXE_qedgen"))
-        .arg("codegen")
-        .arg("--spec")
-        .arg(&spec_path)
-        .arg("--target")
-        .arg("anchor")
-        .arg("--output-dir")
-        .arg(&output_dir)
-        .current_dir(temp.path()));
-    run(Command::new(env!("CARGO_BIN_EXE_qedgen"))
-        .arg("codegen")
-        .arg("--spec")
-        .arg(&spec_path)
-        .arg("--proptest")
-        .arg("--proptest-output")
-        .arg(output_dir.join("tests/proptest.rs"))
-        .current_dir(temp.path()));
-
-    // The generator ships `[dev-dependencies] proptest` in Cargo.toml
-    // (v2.44 — the harness needs it to compile out of the box), so no
-    // manual append here; appending again would be a duplicate-key
-    // manifest error. Still rewrite the qedgen-macros git dep to a
-    // path dep (see `smoke_anchor_scaffold`) so the unreleased tag
-    // doesn't fail to resolve.
-    let cargo_toml = output_dir.join("Cargo.toml");
-    redirect_macros_to_path(&cargo_toml);
-
-    run(Command::new("cargo")
-        .arg("test")
-        .arg("--manifest-path")
-        .arg(&cargo_toml)
-        .arg("--test")
-        .arg("proptest"));
-}
+// The Anchor scaffold/proptest smokes moved to
+// `tests/generated_artifact_gate.rs` (#294): the gate covers all bundled
+// Anchor examples and raises the floor from "scaffold compiles" to "every
+// generated Rust artifact compiles and its tests run".
 
 /// Generate `<spec>` as a Pinocchio scaffold into a fresh tempdir and run
 /// `cargo build` on it. The Pinocchio path is MIR-native (slice 6): the
@@ -563,36 +455,6 @@ fn proof_completion_pinocchio_kani_profile_diversity_with_cargo_kani() {
     }
 }
 
-/// Rewrite the `qedgen-macros` line in a generated Cargo.toml from a git
-/// dep tagged at the current crate version (which doesn't exist on GitHub
-/// until release time) to a `path` dep pointing at the in-repo crate.
-fn redirect_macros_to_path(cargo_toml: &std::path::Path) {
-    let manifest = std::fs::read_to_string(cargo_toml).expect("read Cargo.toml");
-    let macros_path = repo_root().join("crates/qedgen-macros");
-    let replacement = format!("qedgen-macros = {{ path = {:?} }}", macros_path);
-    let mut found = false;
-    let rewritten: String = manifest
-        .lines()
-        .map(|line| {
-            if line.starts_with("qedgen-macros = {")
-                && line.contains("git = \"https://github.com/qedgen/solana-skills\"")
-            {
-                found = true;
-                replacement.clone()
-            } else {
-                line.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        found,
-        "expected qedgen-macros git line in {}",
-        cargo_toml.display()
-    );
-    std::fs::write(cargo_toml, format!("{rewritten}\n")).expect("rewrite Cargo.toml");
-}
-
 /// sBPF programs are verified by Lean proofs over the assembly; their
 /// runtime behavior is exercised by client-side tests, not generated
 /// Kani/proptest harnesses (which have no sBPF awareness and would emit
@@ -673,24 +535,6 @@ fn sbpf_codegen_skips_kani_harness() {
 #[test]
 fn sbpf_codegen_skips_proptest_harness() {
     assert_sbpf_skips("--proptest");
-}
-
-#[test]
-#[ignore = "runs qedgen codegen and cargo check on a generated Anchor crate"]
-fn escrow_anchor_scaffold_compiles() {
-    smoke_anchor_scaffold("escrow");
-}
-
-#[test]
-#[ignore = "runs qedgen codegen and cargo check on a generated Anchor crate"]
-fn multisig_anchor_scaffold_compiles() {
-    smoke_anchor_scaffold("multisig");
-}
-
-#[test]
-#[ignore = "runs qedgen codegen + cargo test --test proptest on a generated Anchor crate"]
-fn escrow_anchor_proptest_runs() {
-    smoke_anchor_scaffold_with_proptest("escrow");
 }
 
 #[test]

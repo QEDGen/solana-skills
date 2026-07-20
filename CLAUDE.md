@@ -33,7 +33,7 @@ cargo test                                                      # Rust unit + sn
 cd lean_solana && lake build                                    # Lean support library
 ```
 
-Snapshot suites (`tests/{mir,kani,codegen,proptest}_snapshot.rs`) gate every fixture against checked-in references; the shared harness lives in `tests/common/mod.rs` and rebuilds `qedgen` before driving it (no stale-binary footgun). Regenerate with `UPDATE_SNAPSHOTS=1 cargo test --test <suite>`. Full command + flag reference: [`references/cli.md`](references/cli.md).
+Snapshot suites (`tests/{mir,kani,codegen,proptest}_snapshot.rs`) gate every fixture against checked-in references; the shared harness lives in `tests/common/mod.rs` and rebuilds `qedgen` before driving it (no stale-binary footgun). Regenerate with `UPDATE_SNAPSHOTS=1 cargo test --test <suite>`. Snapshots prove output stability, not correctness: the executable artifact gate (`tests/generated_artifact_gate.rs`, `-- --ignored`, own CI job) regenerates every bundled Anchor example, compiles all generated Rust artifacts, runs the generated unit tests and proptests, and type-checks the Kani harness via `crates/kani-compile-stub` (#294). Full command + flag reference: [`references/cli.md`](references/cli.md).
 
 ## Dogfooding → toolchain backlog (dev-mode loop)
 

@@ -57,6 +57,60 @@ pub fn ensure_qedgen_built() {
     });
 }
 
+/// Run a command; panic with full stdout/stderr on nonzero exit.
+pub fn run_ok(command: &mut Command) {
+    run_capture_ok(command);
+}
+
+/// Run a command; panic with full output on nonzero exit; return
+/// stdout + stderr on success.
+pub fn run_capture_ok(command: &mut Command) -> String {
+    let output = command.output().expect("failed to spawn command");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if !output.status.success() {
+        panic!(
+            "command {:?} failed with status {}\noutput:\n{combined}",
+            command.get_program(),
+            output.status,
+        );
+    }
+    combined
+}
+
+/// Rewrite the `qedgen-macros` line in a generated Cargo.toml from a git
+/// dep tagged at the current crate version (which doesn't exist on GitHub
+/// until release time) to a `path` dep pointing at the in-repo crate.
+pub fn redirect_macros_to_path(cargo_toml: &Path) {
+    let manifest = fs::read_to_string(cargo_toml).expect("read Cargo.toml");
+    let macros_path = repo_root().join("crates/qedgen-macros");
+    let replacement = format!("qedgen-macros = {{ path = {:?} }}", macros_path);
+    let mut found = false;
+    let rewritten: String = manifest
+        .lines()
+        .map(|line| {
+            if line.starts_with("qedgen-macros = {")
+                && line.contains("git = \"https://github.com/qedgen/solana-skills\"")
+            {
+                found = true;
+                replacement.clone()
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        found,
+        "expected qedgen-macros git line in {}",
+        cargo_toml.display()
+    );
+    fs::write(cargo_toml, format!("{rewritten}\n")).expect("rewrite Cargo.toml");
+}
+
 /// `crates/qedgen/tests/snapshots/` — where the checked-in references live.
 pub fn snapshots_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
