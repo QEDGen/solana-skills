@@ -30,4 +30,9 @@ solana-pubkey = "4"
 # discriminator (first 8 bytes of sha256), reusing the repo's own
 # hashing crate instead of adding a second sha2 dependency.
 qedgen-hash-core = { version = "0.1.0", path = "../qedgen-hash-core" }
+# SPL Token program + Mint/TokenAccount fixtures for the PDA-signed
+# CPI journey. Version-matched to mollusk-svm above.
+mollusk-svm-programs-token = "0.12.1-agave-4.0"
+spl-token-interface = "2.0.0"
+solana-program-pack = "3"
 tempfile = "3"
