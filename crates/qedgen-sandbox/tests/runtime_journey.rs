@@ -17,13 +17,19 @@
 //! handler bodies are committed — they are the agent-fill half that
 //! codegen deliberately leaves as `todo!()`.
 //!
-//! Scope: this covers the `Uninitialized -> Active` PDA initialization
-//! and its failure modes. The SPL Token CPI whose authority is a
-//! program PDA is the other half of the #294 requirement and needs the
-//! token program ELF wired into Mollusk — tracked separately.
+//! Two journeys, covering both halves of the #294 requirement:
 //!
-//! `#[ignore]` because it shells out to `cargo build-sbf` (~30s warm,
-//! minutes cold) and needs the Solana platform tools.
+//! - `pda_init_journey_and_constraint_violations` — the
+//!   `Uninitialized -> Active` PDA initialization plus its failure
+//!   modes (wrong seeds, non-canonical bump, unsigned payer, re-init).
+//! - `token_cpi_journey_with_pda_authority` — an SPL Token CPI whose
+//!   authority is the vault PDA, so the program signs with the vault's
+//!   seeds and bump. Those must agree with the generated
+//!   `#[account(seeds = …, bump)]` constraint; a mismatch compiles
+//!   cleanly and fails only at runtime.
+//!
+//! `#[ignore]` because they shell out to `cargo build-sbf` (~30s warm,
+//! minutes cold) and need the Solana platform tools.
 
 use mollusk_svm::program::keyed_account_for_system_program;
 use mollusk_svm::Mollusk;
@@ -194,8 +200,12 @@ impl Journey {
     fn new(deploy_dir: &Path) -> Self {
         std::env::set_var("SBF_OUT_DIR", deploy_dir);
         let program_id = Pubkey::from_str(PROGRAM_ID).expect("program id");
+        let mut mollusk = Mollusk::new(&program_id, "runtimevault");
+        // The vault CPIs into SPL Token; without the real program in the
+        // cache the transfer cannot execute at all.
+        mollusk_svm_programs_token::token::add_program(&mut mollusk);
         Self {
-            mollusk: Mollusk::new(&program_id, "runtimevault"),
+            mollusk,
             program_id,
         }
     }
@@ -232,6 +242,142 @@ impl Journey {
             (*vault, vault_account),
             (system_id, system_account),
         ]
+    }
+
+    /// Open a vault and return its post-state account. Every token
+    /// journey starts from a real, program-created vault rather than a
+    /// hand-built one, so the bump under test is the one `init`
+    /// actually stored.
+    fn open_vault(&self, owner: &Pubkey) -> (Pubkey, Account) {
+        let (vault, _) = self.vault_for(owner);
+        let result = self.mollusk.process_instruction(
+            &self.open_ix(owner, &vault, true),
+            &self.accounts(owner, &vault, Account::default()),
+        );
+        assert!(
+            result.program_result.is_ok(),
+            "open must succeed before a token journey: {:?}",
+            result.program_result
+        );
+        let account = result
+            .resulting_accounts
+            .iter()
+            .find(|(k, _)| k == &vault)
+            .map(|(_, a)| a.clone())
+            .expect("vault in result");
+        (vault, account)
+    }
+
+    /// `deposit` / `withdraw` share an account layout: owner, vault,
+    /// vault_ta, owner_ta, token_program.
+    fn token_ix(&self, handler: &str, ctx: &TokenCtx, amount: u64) -> Instruction {
+        let mut data = discriminator(handler);
+        data.extend_from_slice(&amount.to_le_bytes());
+        Instruction::new_with_bytes(
+            self.program_id,
+            &data,
+            vec![
+                AccountMeta::new(ctx.owner, true),
+                AccountMeta::new(ctx.vault, false),
+                AccountMeta::new(ctx.vault_ta, false),
+                AccountMeta::new(ctx.owner_ta, false),
+                AccountMeta::new_readonly(mollusk_svm_programs_token::token::ID, false),
+            ],
+        )
+    }
+}
+
+/// The account set a token journey threads between instructions.
+struct TokenCtx {
+    owner: Pubkey,
+    vault: Pubkey,
+    vault_ta: Pubkey,
+    owner_ta: Pubkey,
+    accounts: Vec<(Pubkey, Account)>,
+}
+
+impl TokenCtx {
+    /// Build a mint plus two token accounts: `owner_ta` holding
+    /// `owner_balance`, and `vault_ta` whose AUTHORITY IS THE VAULT PDA
+    /// — the arrangement that makes `withdraw` a PDA-signed CPI.
+    fn new(owner: Pubkey, vault: Pubkey, vault_account: Account, owner_balance: u64) -> Self {
+        use mollusk_svm_programs_token::token;
+        use spl_token_interface::state::{Account as TokenAccount, AccountState, Mint};
+
+        let mint = Pubkey::new_unique();
+        let owner_ta = Pubkey::new_unique();
+        let vault_ta = Pubkey::new_unique();
+
+        let mint_account = token::create_account_for_mint(Mint {
+            mint_authority: None.into(),
+            supply: owner_balance,
+            decimals: 0,
+            is_initialized: true,
+            freeze_authority: None.into(),
+        });
+        let token_account = |authority: Pubkey, amount: u64| {
+            token::create_account_for_token_account(TokenAccount {
+                mint,
+                owner: authority,
+                amount,
+                delegate: None.into(),
+                state: AccountState::Initialized,
+                is_native: None.into(),
+                delegated_amount: 0,
+                close_authority: None.into(),
+            })
+        };
+
+        let (system_id, _) = keyed_account_for_system_program();
+        let accounts = vec![
+            (owner, Account::new(10_000_000_000, 0, &system_id)),
+            (vault, vault_account),
+            (vault_ta, token_account(vault, 0)),
+            (owner_ta, token_account(owner, owner_balance)),
+            token::keyed_account(),
+            (mint, mint_account),
+        ];
+
+        Self {
+            owner,
+            vault,
+            vault_ta,
+            owner_ta,
+            accounts,
+        }
+    }
+
+    /// Carry an instruction's post-state forward, so a journey observes
+    /// the same account evolution a real transaction sequence would.
+    fn advance(&mut self, resulting: &[(Pubkey, Account)]) {
+        for (key, account) in resulting {
+            if let Some(slot) = self.accounts.iter_mut().find(|(k, _)| k == key) {
+                slot.1 = account.clone();
+            }
+        }
+    }
+
+    fn token_amount(&self, key: &Pubkey) -> u64 {
+        use solana_program_pack::Pack;
+        let account = self
+            .accounts
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, a)| a)
+            .expect("token account present");
+        spl_token_interface::state::Account::unpack(&account.data)
+            .expect("token account decodes")
+            .amount
+    }
+
+    fn vault_total(&self) -> u64 {
+        let account = self
+            .accounts
+            .iter()
+            .find(|(k, _)| k == &self.vault)
+            .map(|(_, a)| a)
+            .expect("vault present");
+        u64::from_le_bytes(account.data[40..48].try_into().unwrap())
     }
 }
 
@@ -370,5 +516,99 @@ fn pda_init_journey_and_constraint_violations() {
             .program_result
             .is_err(),
         "open must reject re-initialization of an existing vault"
+    );
+}
+
+/// The other half of #294's P0 item 2: an SPL Token CPI whose authority
+/// is a program PDA.
+///
+/// `deposit` moves tokens with the OWNER as authority — an ordinary
+/// signed CPI. `withdraw` moves them back with the VAULT PDA as
+/// authority, so the program must sign the CPI with the vault's seeds
+/// and bump. Those seeds have to agree with the generated
+/// `#[account(seeds = …, bump)]` constraint; a mismatch compiles
+/// cleanly and fails only here.
+#[test]
+#[ignore = "shells out to cargo build-sbf; needs Solana platform tools"]
+fn token_cpi_journey_with_pda_authority() {
+    const STARTING_BALANCE: u64 = 1_000;
+    const DEPOSIT: u64 = 400;
+    const WITHDRAW: u64 = 150;
+
+    let deploy = build_fixture_program();
+    let journey = Journey::new(&deploy);
+
+    let owner = Pubkey::new_unique();
+    let (vault, vault_account) = journey.open_vault(&owner);
+    let mut ctx = TokenCtx::new(owner, vault, vault_account, STARTING_BALANCE);
+
+    // ---- Owner-authorized CPI: deposit ------------------------------
+    let result = journey
+        .mollusk
+        .process_instruction(&journey.token_ix("deposit", &ctx, DEPOSIT), &ctx.accounts);
+    assert!(
+        result.program_result.is_ok(),
+        "deposit must succeed with the owner as token authority: {:?}",
+        result.program_result
+    );
+    ctx.advance(&result.resulting_accounts);
+
+    assert_eq!(
+        ctx.token_amount(&ctx.owner_ta),
+        STARTING_BALANCE - DEPOSIT,
+        "deposit must debit the owner's token account"
+    );
+    assert_eq!(
+        ctx.token_amount(&ctx.vault_ta),
+        DEPOSIT,
+        "deposit must credit the vault's token account"
+    );
+    assert_eq!(
+        ctx.vault_total(),
+        DEPOSIT,
+        "deposit must track the balance in vault state"
+    );
+
+    // ---- PDA-authorized CPI: withdraw -------------------------------
+    // The vault PDA is the token authority here, so this only succeeds
+    // if the signer seeds the handler passes match the seeds and bump
+    // on the generated account constraint.
+    let result = journey
+        .mollusk
+        .process_instruction(&journey.token_ix("withdraw", &ctx, WITHDRAW), &ctx.accounts);
+    assert!(
+        result.program_result.is_ok(),
+        "withdraw must succeed: the CPI signer seeds must match the \
+         generated seeds/bump constraint: {:?}",
+        result.program_result
+    );
+    ctx.advance(&result.resulting_accounts);
+
+    assert_eq!(
+        ctx.token_amount(&ctx.vault_ta),
+        DEPOSIT - WITHDRAW,
+        "withdraw must debit the vault's token account via the PDA-signed CPI"
+    );
+    assert_eq!(
+        ctx.token_amount(&ctx.owner_ta),
+        STARTING_BALANCE - DEPOSIT + WITHDRAW,
+        "withdraw must credit the owner's token account"
+    );
+    assert_eq!(
+        ctx.vault_total(),
+        DEPOSIT - WITHDRAW,
+        "withdraw must track the balance in vault state"
+    );
+
+    // ---- Guard still holds over the CPI path ------------------------
+    // `requires total >= amount`: overdrawing must reject rather than
+    // attempt a CPI that would fail deeper in the token program.
+    let result = journey.mollusk.process_instruction(
+        &journey.token_ix("withdraw", &ctx, DEPOSIT * 10),
+        &ctx.accounts,
+    );
+    assert!(
+        result.program_result.is_err(),
+        "withdraw must reject an amount exceeding the tracked total"
     );
 }
