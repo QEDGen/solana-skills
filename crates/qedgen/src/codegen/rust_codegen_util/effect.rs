@@ -293,6 +293,39 @@ pub fn substitute_pre_reads(expr: &str, receiver: &str, fields: &[String]) -> St
     out
 }
 
+/// Rewrite `[ident]` subscripts in a flattened effect-target path to
+/// `[ident as usize]` — harness params bind at their spec types (`u8`
+/// etc.) while Rust arrays index by `usize`. Numeric and compound
+/// subscripts pass through unchanged. (Same rewrite the unit-test
+/// emitter applies to its triples; the LHS is a flattened string until
+/// the #294 P1 renderer unification makes it structural.)
+pub fn cast_subscripts(field: &str) -> String {
+    let mut out = String::new();
+    let mut rest = field;
+    while let Some(i) = rest.find('[') {
+        out.push_str(&rest[..=i]);
+        rest = &rest[i + 1..];
+        let Some(j) = rest.find(']') else {
+            out.push_str(rest);
+            return out;
+        };
+        let idx = &rest[..j];
+        let is_numeric = !idx.is_empty() && idx.chars().all(|c| c.is_ascii_digit());
+        let is_ident = !idx.is_empty()
+            && idx.chars().all(|c| c.is_alphanumeric() || c == '_')
+            && !idx.starts_with(|c: char| c.is_ascii_digit());
+        if is_ident && !is_numeric {
+            out.push_str(&format!("{} as usize", idx));
+        } else {
+            out.push_str(idx);
+        }
+        out.push(']');
+        rest = &rest[j + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Render a single `(field, op_kind, value)` triple into Rust at the given
 /// indent. The helper writes the trailing newline; the caller controls
 /// where the statement sits relative to its surrounding block.
@@ -328,8 +361,10 @@ fn emit_one_effect_inner(
 
     // Harnesses run against a flat `State` (union-of-variant-fields view):
     // strip the variant prefix so `Variant.field := …` emits `s.field = …`;
-    // the variant itself is tracked via `s.status`.
-    let field_owned = strip_variant_prefix_for_flat_state(field, spec);
+    // the variant itself is tracked via `s.status`. Subscripts are cast to
+    // `usize` — params bind at their spec types (`u8` etc.) while Rust
+    // arrays index by `usize` (`s.voted[member_index]` was E0277, #295).
+    let field_owned = cast_subscripts(&strip_variant_prefix_for_flat_state(field, spec));
     let field = field_owned.as_str();
     // Tree-native RHS (#151 Slice 1): one render call replaces the
     // adapter's pre-rendered string + `resolve_value`'s binder surgery +

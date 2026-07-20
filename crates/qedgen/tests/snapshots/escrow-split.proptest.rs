@@ -106,7 +106,7 @@ proptest! {
     #[test]
     fn initialize_rejects_invalid(s in arb_boundary_state(), deposit_amount in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX], receive_amount in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX]) {
         let mut s = s;
-        prop_assume!(!(((deposit_amount > 0) && (receive_amount > 0))));
+        prop_assume!(!((deposit_amount > 0) && (receive_amount > 0)));
         prop_assert!(!initialize(&mut s, deposit_amount, receive_amount),
             "initialize must reject when guard is violated");
     }
