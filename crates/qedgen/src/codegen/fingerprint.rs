@@ -124,7 +124,7 @@ pub fn compute_fingerprint(spec: &ParsedSpec) -> SpecFingerprint {
         hashes.insert("Cargo.toml".to_string(), section_hash(&c));
     }
 
-    // src/tests.rs — unit tests depend on state, operations, properties
+    // tests/unit.rs — unit tests depend on state, operations, properties
     {
         let mut c = String::new();
         for (fname, ftype) in &spec.state_fields {
@@ -144,7 +144,7 @@ pub fn compute_fingerprint(spec: &ParsedSpec) -> SpecFingerprint {
         for state in &spec.lifecycle_states {
             c.push_str(&format!("status={}\n", state));
         }
-        hashes.insert("src/tests.rs".to_string(), section_hash(&c));
+        hashes.insert("tests/unit.rs".to_string(), section_hash(&c));
     }
 
     // tests/kani.rs — depends on everything that generates harnesses
