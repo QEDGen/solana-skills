@@ -1091,8 +1091,11 @@ pub(crate) enum Commands {
         #[arg(long)]
         test: bool,
 
-        /// Output path for unit tests (default: ./programs/src/tests.rs)
-        #[arg(long, default_value = "./programs/src/tests.rs")]
+        /// Output path for unit tests (default: ./programs/tests/unit.rs).
+        /// Lives in `tests/` so cargo auto-discovers it as a test target —
+        /// a `src/` location needs a `mod` hook the scaffold never emits
+        /// (pre-v2.47 default `./programs/src/tests.rs` was dead code).
+        #[arg(long, default_value = "./programs/tests/unit.rs")]
         test_output: PathBuf,
 
         /// Generate proptest harnesses (property-based testing)

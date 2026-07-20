@@ -35,7 +35,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     out.push_str(&crate::codegen_shared::marker(
         "DO NOT EDIT",
         &fp,
-        "src/tests.rs",
+        "tests/unit.rs",
     ));
     out.push_str("// Unit tests generated from qedspec.\n");
     out.push_str("// These test effects, guards, and properties on a plain state struct.\n");
