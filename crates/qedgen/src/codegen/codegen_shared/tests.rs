@@ -2723,3 +2723,98 @@ handler deposit (amount : U64) : State.Active -> State.Active {
         "        self.state.last_seen = self.state.balance;\n"
     );
 }
+
+/// #311 / #307: the account plan encodes three rules as reachability, so
+/// the illegal attribute combinations cannot be constructed. This checks
+/// them at the emission level, where a user would feel them.
+///
+/// `has_one` on an `init` account is the one that shipped broken: Anchor
+/// zeroes the account before evaluating constraints, so the binding could
+/// never hold and every such handler was unopenable.
+#[test]
+fn account_plan_keeps_init_and_has_one_disjoint() {
+    const SRC: &str = r#"spec PlanRules
+
+type Vault
+  | Uninitialized
+  | Active of {
+      owner : Pubkey,
+      total : U64,
+    }
+
+type Error | Bad
+
+pda vault ["vault", owner]
+
+handler open : Vault.Uninitialized -> Vault.Active {
+  auth owner
+  accounts {
+    owner          : signer, writable
+    vault          : writable, pda ["vault", owner]
+    system_program : program
+  }
+  effect {
+    owner := owner.pubkey
+    total := 0
+  }
+}
+
+handler bump_total (amount : U64) : Vault.Active -> Vault.Active {
+  auth owner
+  accounts {
+    owner : signer, writable
+    vault : writable, pda ["vault", owner]
+  }
+  requires amount > 0 else Bad
+  effect { total += amount }
+}
+"#;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let spec_path = dir.path().join("plan.qedspec");
+    std::fs::write(&spec_path, SRC).expect("write spec");
+    std::fs::create_dir_all(dir.path().join(".qed")).expect("create .qed");
+
+    let spec = crate::check::parse_spec_file(&spec_path).expect("parse");
+    let mir = crate::mir::lower(&spec);
+    let out_dir = dir.path().join("programs");
+    crate::codegen_mir::generate(
+        &mir,
+        &spec,
+        &spec_path,
+        &out_dir,
+        crate::Target::Anchor,
+        crate::codegen_mir::RegenOptions::default(),
+    )
+    .expect("anchor codegen");
+    let lib = std::fs::read_to_string(out_dir.join("src/lib.rs")).expect("lib.rs");
+
+    let init_attr = lib
+        .lines()
+        .find(|l| l.contains("#[account(") && l.contains("init"))
+        .expect("an init account attribute is emitted");
+    assert!(
+        !init_attr.contains("has_one"),
+        "has_one must never accompany init — the account is zeroed when \
+         constraints run:\n{init_attr}"
+    );
+    assert!(
+        !init_attr.contains("mut,") && !init_attr.contains(", mut"),
+        "init implies mut; emitting both trips the Anchor macro:\n{init_attr}"
+    );
+    assert!(
+        init_attr.contains("payer =") && init_attr.contains("space ="),
+        "init must carry payer and space:\n{init_attr}"
+    );
+
+    // The non-init handler over the same account DOES bind the authority
+    // — suppression is specific to init, not a blanket drop.
+    let non_init = lib
+        .lines()
+        .filter(|l| l.contains("#[account(") && !l.contains("init"))
+        .find(|l| l.contains("has_one"))
+        .expect("a non-init state account still binds has_one");
+    assert!(
+        non_init.contains("has_one = owner"),
+        "non-init state account keeps its auth binding:\n{non_init}"
+    );
+}

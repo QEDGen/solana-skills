@@ -45,6 +45,121 @@ fn state_account_has_field(acct: &ParsedHandlerAccount, spec: &ParsedSpec, field
     spec.state_fields.iter().any(|(n, _)| n == field)
 }
 
+/// What this handler does to the account, and the facts that follow from
+/// it. Three rules that were previously scattered `if is_init` checks are
+/// encoded here as reachability, so the illegal combinations cannot be
+/// built at all (#311):
+///
+/// - `has_one` exists only on `Existing`. Anchor allocates and ZEROES an
+///   `init` account before evaluating constraints, so a prior-state
+///   binding can never hold there — that was #307, where every generated
+///   Anchor `init` handler with a matching `auth` field was unopenable.
+/// - `token_authority` exists only on `Init`. Anchor and Quasar both
+///   reject `token::authority` on an already-existing account.
+/// - `mut` exists only on `Existing`. `init` implies `mut`; emitting both
+///   trips "mut cannot be provided with init".
+pub(crate) enum AccountLifecycle {
+    /// Created by this handler.
+    Init {
+        payer: Option<String>,
+        /// `None` on Quasar, whose `init` analogue takes size from the
+        /// typed `Account<T>` wrapper.
+        space_target: Option<String>,
+        token_authority: Option<String>,
+    },
+    /// Pre-existing when the handler runs.
+    Existing {
+        writable: bool,
+        has_one: Option<String>,
+    },
+}
+
+/// Everything codegen decides about one handler-account, derived once.
+///
+/// The point is single derivation: before this, the `space =` target, the
+/// state struct name, the `has_one` binding, and the `init` decision were
+/// each recomputed at their point of use and could disagree — #305 and
+/// #307 were both instances of exactly that.
+pub(crate) struct AccountPlan {
+    pub(crate) lifecycle: AccountLifecycle,
+    /// Rendered seed expressions, or `None` when the account has no PDA
+    /// seeds or the target suppresses the directive.
+    pub(crate) seeds: Option<Vec<String>>,
+}
+
+impl AccountPlan {
+    /// Derive the plan. This is the ONLY place these facts are decided.
+    pub(crate) fn derive(
+        acct: &ParsedHandlerAccount,
+        handler: &ParsedHandler,
+        target: crate::Target,
+        spec: &ParsedSpec,
+        is_state_account: bool,
+    ) -> Self {
+        // Infer init from lifecycle. In multi-state specs only the
+        // account matching the handler's `on_account` is init'd —
+        // sibling writable PDAs in the same handler are pre-existing.
+        let lifecycle_is_init = handler.pre_status.as_deref() == Some("Uninitialized")
+            || handler.pre_status.as_deref() == Some("Empty");
+        let on_account_matches = match handler.on_account.as_deref() {
+            Some(adt_name) => {
+                let lower = adt_name.to_lowercase();
+                acct.name == lower || acct.name.starts_with(&lower)
+            }
+            None => true,
+        };
+        let is_init =
+            lifecycle_is_init && on_account_matches && !acct.is_signer && acct.pda_seeds.is_some();
+
+        let lifecycle = if is_init {
+            AccountLifecycle::Init {
+                payer: handler.signer_account().map(|s| s.name.clone()),
+                space_target: match target {
+                    // Shared derivation with `generate_state` — see
+                    // `state_struct_name` (#305).
+                    crate::Target::Anchor => Some(crate::codegen_shared::state_struct_name(
+                        spec,
+                        handler.on_account.as_deref(),
+                    )),
+                    _ => None,
+                },
+                token_authority: acct.authority.clone(),
+            }
+        } else {
+            // R25: lower `auth X` to `has_one = X` when the state-bearing
+            // account has a field named X. Without this binding, every
+            // handler taking an authority signer is reachable by ANY
+            // signer — the signer check verifies "someone signed", not
+            // "the right someone".
+            //
+            // With multi-variant ADT state the auth field often lives in
+            // a variant payload (`Active.owner`); Anchor's `has_one`
+            // macro cannot reach into the inner enum. Suppress there —
+            // Quasar's flat-struct emission keeps every field at top
+            // level, so `has_one = field` works.
+            let has_one = if is_state_account {
+                handler.who.as_ref().and_then(|who| {
+                    let reachable = state_account_has_field(acct, spec, who)
+                        && !(matches!(target, crate::Target::Anchor)
+                            && is_multi_variant_adt_with_field_in_variant(spec, who));
+                    reachable.then(|| who.clone())
+                })
+            } else {
+                None
+            };
+            AccountLifecycle::Existing {
+                writable: acct.is_writable,
+                has_one,
+            }
+        };
+
+        Self {
+            lifecycle,
+            seeds: render_seeds(acct, handler, target, spec, is_init),
+        }
+    }
+}
+
 /// Generate the #[account(...)] attribute for codegen, target-aware.
 ///
 /// Anchor and Quasar both spell the attribute `#[account(...)]` but
@@ -72,62 +187,82 @@ pub(crate) fn quasar_account_attr(
     is_state_account: bool,
 ) -> String {
     let _ = state_name;
-    let mut parts = Vec::new();
+    let plan = AccountPlan::derive(acct, handler, target, spec, is_state_account);
+    render_account_attr(&plan)
+}
 
-    // Infer init from lifecycle. In multi-state specs only the account
-    // matching the handler's `on_account` is init'd — sibling writable
-    // PDAs in the same handler are pre-existing.
-    let lifecycle_is_init = handler.pre_status.as_deref() == Some("Uninitialized")
-        || handler.pre_status.as_deref() == Some("Empty");
-    let on_account_matches = match handler.on_account.as_deref() {
-        // Multi-state: only the named state account init's.
-        Some(adt_name) => {
-            let lower = adt_name.to_lowercase();
-            acct.name == lower || acct.name.starts_with(&lower)
-        }
-        // Single-state spec: any writable PDA can be the init target.
-        None => true,
-    };
-    let is_init =
-        lifecycle_is_init && on_account_matches && !acct.is_signer && acct.pda_seeds.is_some();
+/// Render the `#[account(...)]` attribute from the plan. Pure projection:
+/// every decision was made in `AccountPlan::derive`.
+fn render_account_attr(plan: &AccountPlan) -> String {
+    let mut parts: Vec<String> = Vec::new();
 
-    // `mut` is mutually exclusive with `init` in Anchor (init implies
-    // mut) — emitting both trips `mut cannot be provided with init`.
-    if acct.is_writable && !is_init {
-        parts.push("mut".to_string());
-    }
-
-    if is_init {
-        parts.push("init".to_string());
-        if let Some(signer) = handler.signer_account() {
-            parts.push(format!("payer = {}", signer.name));
-        }
-        // Anchor requires `space = <bytes>` with `init`. We derive
-        // `InitSpace` on every account type / inner enum / record, so
-        // the canonical form is `space = 8 + <AccountStruct>::INIT_SPACE`
-        // (8 = Anchor discriminator). The struct name must match what
-        // `generate_state` emits.
-        let space_target = match target {
-            // Shared derivation with `generate_state` — see
-            // `state_struct_name`. Keying on `on_account` alone emitted
-            // `<Adt>Account` for single-account specs whose ADT name
-            // differs from the program name, against a struct actually
-            // named `<Program>Account` (E0433, scaffold did not
-            // compile).
-            crate::Target::Anchor => {
-                crate::codegen_shared::state_struct_name(spec, handler.on_account.as_deref())
+    match &plan.lifecycle {
+        AccountLifecycle::Existing { writable, has_one } => {
+            if *writable {
+                parts.push("mut".to_string());
             }
-            // Quasar handles space differently — its `init`
-            // analogue takes size from the typed `Account<T>`
-            // wrapper. Skip the `space` attribute on Quasar.
-            _ => String::new(),
-        };
-        if !space_target.is_empty() {
-            parts.push(format!("space = 8 + {}::INIT_SPACE", space_target));
+            if let Some(field) = has_one {
+                // Emitted after seeds below to preserve attribute order.
+                let _ = field;
+            }
+        }
+        AccountLifecycle::Init {
+            payer,
+            space_target,
+            ..
+        } => {
+            parts.push("init".to_string());
+            if let Some(payer) = payer {
+                parts.push(format!("payer = {payer}"));
+            }
+            // Anchor requires `space = <bytes>` with `init`. Every
+            // account type derives `InitSpace`, so the canonical form is
+            // `space = 8 + <AccountStruct>::INIT_SPACE` (8 = Anchor
+            // discriminator).
+            if let Some(target_struct) = space_target {
+                parts.push(format!("space = 8 + {target_struct}::INIT_SPACE"));
+            }
         }
     }
 
-    if let Some(ref seeds) = acct.pda_seeds {
+    if let Some(seeds) = &plan.seeds {
+        parts.push(format!("seeds = [{}]", seeds.join(", ")));
+        parts.push("bump".to_string());
+    }
+
+    match &plan.lifecycle {
+        AccountLifecycle::Init {
+            token_authority, ..
+        } => {
+            if let Some(auth) = token_authority {
+                parts.push(format!("token::authority = {auth}"));
+            }
+        }
+        AccountLifecycle::Existing { has_one, .. } => {
+            if let Some(field) = has_one {
+                parts.push(format!("has_one = {field}"));
+            }
+        }
+    }
+
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("    #[account({})]\n", parts.join(", "))
+    }
+}
+
+/// Render this account's PDA seed expressions, or `None` when it has no
+/// seeds or the target suppresses the directive.
+fn render_seeds(
+    acct: &ParsedHandlerAccount,
+    handler: &ParsedHandler,
+    target: crate::Target,
+    spec: &ParsedSpec,
+    is_init: bool,
+) -> Option<Vec<String>> {
+    let seeds = acct.pda_seeds.as_ref()?;
+    {
         let bound_account_names: std::collections::HashSet<&str> =
             handler.accounts.iter().map(|a| a.name.as_str()).collect();
 
@@ -171,8 +306,11 @@ pub(crate) fn quasar_account_attr(
             (matches!(target, crate::Target::Quasar) && !is_init && needs_state_field_seed)
                 || anchor_variant_field_seed;
 
-        if !suppress_seeds {
-            let seed_parts: Vec<String> = seeds
+        if suppress_seeds {
+            return None;
+        }
+        Some(
+            seeds
                 .iter()
                 .map(|seed| {
                     if let Some(inner) = seed.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
@@ -192,64 +330,7 @@ pub(crate) fn quasar_account_attr(
                         format!("{}.{}.as_ref()", acct.name, seed)
                     }
                 })
-                .collect();
-            parts.push(format!("seeds = [{}]", seed_parts.join(", ")));
-            parts.push("bump".to_string());
-        }
-    }
-
-    // `token::authority = X` is only valid on accounts that are also
-    // `init` / `init_if_needed` — quasar (and anchor) reject it on
-    // already-existing accounts. The spec authority annotation
-    // captures "this token account should belong to this authority";
-    // for non-init accounts that's already enforced at init time and
-    // doesn't need re-emission. For init accounts we emit it so the
-    // macro can wire up the SPL InitToken CPI correctly.
-    if is_init {
-        if let Some(ref auth) = acct.authority {
-            parts.push(format!("token::authority = {}", auth));
-        }
-    }
-
-    // R25: lower `auth X` to `has_one = X` when the state-bearing
-    // account has a field named X. Without this binding, every handler
-    // taking an authority signer is reachable by ANY signer — the
-    // signer check verifies "someone signed", not "the right someone".
-    // Anchor and Quasar both accept `has_one = field`.
-    //
-    // With multi-variant ADT state the auth field often lives in a
-    // variant payload (`Active.owner`); Anchor's `has_one` macro can't
-    // reach into the inner enum ("no field `owner` on `Account<…>`").
-    // Skip emission there — the auth gap surfaces via a TODO line next
-    // to the handler body rather than being dropped silently.
-    // Never on an `init` account: Anchor allocates and ZEROES the
-    // account, then evaluates constraints, so `has_one = owner`
-    // compares an all-zero field against the payer and always fails
-    // (ConstraintHasOne / 2001) — the handler body that populates the
-    // field has not run yet. The account is being created here, so
-    // there is no prior binding to check; authorization on init comes
-    // from the payer's signature and the PDA seeds. Caught by the #294
-    // runtime journey: pre-fix, every generated `init` handler whose
-    // `auth` matched a state field could never be opened at all.
-    if is_state_account && !is_init {
-        if let Some(ref who) = handler.who {
-            if state_account_has_field(acct, spec, who) {
-                // Suppress only on Anchor: its wrapper-struct +
-                // inner-enum emission hides variant-payload fields from
-                // `has_one`; Quasar's flat-struct emission keeps every
-                // field at top level so `has_one = field` works.
-                let suppress_for_anchor_variant = matches!(target, crate::Target::Anchor)
-                    && is_multi_variant_adt_with_field_in_variant(spec, who);
-                if !suppress_for_anchor_variant {
-                    parts.push(format!("has_one = {}", who));
-                }
-            }
-        }
-    }
-
-    if parts.is_empty() {
-        String::new()
-    } else {
-        format!("    #[account({})]\n", parts.join(", "))
+                .collect(),
+        )
     }
 }
