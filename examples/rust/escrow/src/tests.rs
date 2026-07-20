@@ -37,9 +37,9 @@ enum Status {
 
 /// Apply `initialize` effects to state.
 fn apply_initialize(state: &mut EscrowState, deposit_amount: u64, receive_amount: u64) {
+    // not modeled (account-valued; accounts exist only at runtime): initializer_token_account := initializer_ta.pubkey
     state.initializer_amount = deposit_amount;
     state.taker_amount = receive_amount;
-    state.initializer_token_account = initializer_ta.pubkey;
 }
 
 /// Guard predicate for `initialize`.
@@ -70,7 +70,6 @@ mod tests {
         apply_initialize(&mut state, deposit_amount, receive_amount);
         assert_eq!(state.initializer_amount, deposit_amount);
         assert_eq!(state.taker_amount, receive_amount);
-        assert_eq!(state.initializer_token_account, initializer_ta.pubkey);
     }
 
     // ====================================================================
