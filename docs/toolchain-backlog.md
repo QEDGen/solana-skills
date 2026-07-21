@@ -1074,6 +1074,9 @@ and a read-only spot-check arguably shouldn't need project scaffolding at all.
 - **Verdict:** FILE (friction). Low priority; minor but recurs for every
   scratch-dir codegen check.
 - **Issue:** #262
+- **Status:** partially shipped — the combined preflight landed
+  (`run.rs:1814-1845`, #262 closed 2026-07-19); the projectless spot-check
+  half did not and resurfaced at the v2.47.0 §8a step. Residual → F10.
 
 ### ✅ PR #244 tail findings — already filed, no action
 
@@ -1354,3 +1357,58 @@ invocation.
   test target in isolation so one target's compile error can't mask another's
   results. Already applied in `generated_artifact_gate.rs`.
 - **Verdict:** ENCODE. Backlog-only, no issue.
+
+---
+
+## Session: v2.47.0 release cut (2026-07-21)
+
+Source: running the full docs/RELEASING.md checklist for v2.47.0. All gates
+green first try (fmt, clippy, 35 test suites, readme-drift, lake-build 9/9,
+release-gate 7 baselines, audit/deny, artifact gate 3/3); regen-drift diffs
+tag-line-only as documented. The only friction was §8a.
+
+### 🩹 F10 — harness-only codegen spot-check still drags in the full project scaffold; §8a re-derives the staging recipe every release
+
+The §8a `old(...)` harness spot-check (`codegen --proptest --spec <bundled
+fixture>`) still needs the full staging dance: copy the spec to a scratch dir,
+`git init`, `qedgen init`, then codegen. #262's combined preflight shipped
+(one message, all missing prerequisites), but its proposed projectless
+spot-check mode did not — and the reason the `.qed/` prerequisite fires at all
+for a `--proptest`-only run is that the greenfield Rust scaffold runs
+unconditionally: artifact flags are additive on top of it, so there is no
+"generate only the harness I asked for" mode. RELEASING.md §8a carries only
+the grep command, so every release re-derives the recipe. Papercut en route:
+guessing `--output` gets a clap tip pointing at `--ci-output`, not
+`--output-dir`.
+- **Evidence:** this release's §8a run — (1) `codegen --proptest --spec
+  <fixture> --output <dir>` → clap `unexpected argument '--output' … tip: a
+  similar argument exists: '--ci-output'` (repro'd against bin/qedgen
+  v2.47.0); (2) retry → `codegen prerequisites missing: no .qed/ directory
+  next to <fixture>` (`run.rs:1842`); (3) resolution = copy + `git init` +
+  `qedgen init` + codegen. RELEASING.md:27 (§8a) documents only the grep.
+- **Root cause:** `run.rs:1820-1823` — `scaffold_will_run` is derived from
+  spec shape (assembly/brownfield/mirror) only, never from the artifact
+  flags; `codegen_mir::generate` sits in the unconditional `else` arm
+  (`run.rs:1869`), so `--proptest` alone still regenerates the scaffold and
+  inherits its `.qed/` prerequisite (`run.rs:1833`). The runbook gap is doc
+  drift: §8a never included the staging steps its command needs.
+- **Proposed:** (a) doc, this repo: add the exact staging recipe (copy →
+  `git init` → `qedgen init --name … --spec …` → codegen) to RELEASING.md
+  §8a so it runs copy-paste clean in an empty dir; (b) tool: when explicit
+  artifact flags are passed without `--all`, emit only those artifacts —
+  `scaffold_will_run &&= (rust || all || no flags)` — which makes
+  harness-only spot-checks projectless for free (the `.qed/` gate stays for
+  scaffold-emitting invocations). Gate: a CLI test asserting
+  `codegen --proptest --spec <staged spec>` succeeds in a git dir with no
+  `.qed/` and writes only the proptest harness.
+- **Verdict:** FILE (friction). Recurs every release (§8a) and every
+  scratch-dir harness inspection; (b) is the durable half of #262.
+- **Issue:** #323
+
+### ✅ Clean-run signal — #294 gates + docs-alongside-PR discipline holding
+
+Second consecutive release with zero failed gate runs, and the first where
+the §9 doc sweep found zero drift (every PR in the cycle updated
+cli.md/SKILL.md/framework-support.md alongside). Recorded as evidence the
+#294 executable-artifact gates and the docs-alongside-PR discipline work;
+nothing to change, no issue.
