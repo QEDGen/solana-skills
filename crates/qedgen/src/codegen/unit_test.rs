@@ -2337,7 +2337,7 @@ fn eval_tree(
     };
 
     match tree {
-        ExprTree::Int(v) => Some(FixtureValue::Int(*v as i128)),
+        ExprTree::Int(v) => i128::try_from(*v).ok().map(FixtureValue::Int),
         ExprTree::Bool(b) => Some(FixtureValue::Bool(*b)),
         ExprTree::Path(p) => match &p.binding {
             BindingKind::Const(value) => parse_fixture_literal(value),
@@ -3375,8 +3375,12 @@ handler bump (amount : U128) : State.Active -> State.Active {
         // fixture.
         let accepts = accepts_body(&out, "bump");
         assert!(
-            accepts.contains("let _ = guard_bump;") || accepts.contains("assert!(guard_bump"),
-            "large-U128 guard must smoke-test or assert-if-verified:\n{accepts}"
+            accepts.contains("let _ = guard_bump;"),
+            "large-U128 guard must smoke-test rather than assert a wrapped fixture:\n{accepts}"
+        );
+        assert!(
+            !accepts.contains("guard_bump(&"),
+            "large-U128 guard must not execute an unverified fixture:\n{accepts}"
         );
     }
 
