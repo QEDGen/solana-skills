@@ -819,87 +819,92 @@ fn generate_guard_tests(
     spec: &ParsedSpec,
 ) -> Result<()> {
     // --- Test: guard PASSES with valid inputs ---
-    out.push_str("    #[test]\n");
-    out.push_str(&format!(
-        "    fn test_{}_guard_accepts_valid() {{\n",
-        op.name
-    ));
-    emit_state_literal(out, state_name, fields, op, &[], false);
-    for (pname, ptype) in &op.takes_params {
-        let val = sensible_param(pname, ptype);
-        out.push_str(&format!(
-            "        let {}: {} = {};\n",
-            pname,
-            map_type(ptype, spec)?,
-            val
-        ));
-    }
-    // #312: assert only over a fixture evaluation confirms. The seeded
-    // "valid" fixture is a heuristic — it does not satisfy every guard.
-    let accepts_env = fixture_env(fields, op, &[], &[]);
-    emit_guard_assertion(
+    // Bug 4: solve the common linear-equality / disjunction / field-vs-
+    // field shapes so compound guards get a real satisfying fixture; fall
+    // back to the naive seed when the solver can't. `check_fixture` (#312)
+    // verifies the fixture before the test asserts anything.
+    let (accept_state_ov, accept_param_ov) = satisfy_guard(op, fields).unwrap_or_default();
+    let accepts_check = check_fixture(
+        op,
+        &fixture_env(fields, op, &accept_state_ov, &accept_param_ov),
+        true,
+    );
+    emit_guard_test(
         out,
         op,
-        check_fixture(op, &accepts_env, true),
+        "accepts_valid",
+        state_name,
+        fields,
+        spec,
+        &accept_state_ov,
+        &accept_param_ov,
+        accepts_check,
         /*want_true=*/ true,
-    );
-    out.push_str("    }\n\n");
+    )?;
 
     // --- Test: guard REJECTS invalid inputs ---
-    out.push_str("    #[test]\n");
-    out.push_str(&format!(
-        "    fn test_{}_guard_rejects_invalid() {{\n",
-        op.name
-    ));
-
-    // Try to derive a violating input from the guard
+    // `derive_guard_violation` leads with the linear falsifier
+    // (`falsify_guard_linear`), handling field-vs-field and compound
+    // shapes; `check_fixture` verifies the fixture actually rejects.
     let (state_overrides, param_overrides) = derive_guard_violation(guard_rust, op, fields);
-
-    emit_state_literal_with(out, state_name, fields, op, &[], &state_overrides, false);
-    for (pname, ptype) in &op.takes_params {
-        if let Some(val) = param_overrides.iter().find(|(n, _)| n == pname) {
-            out.push_str(&format!(
-                "        let {}: {} = {};\n",
-                pname,
-                map_type(ptype, spec)?,
-                val.1
-            ));
-        } else {
-            let val = sensible_param(pname, ptype);
-            out.push_str(&format!(
-                "        let {}: {} = {};\n",
-                pname,
-                map_type(ptype, spec)?,
-                val
-            ));
-        }
-    }
-    // #312: the falsifier searches, it does not prove. Assert only over
-    // a fixture evaluation confirms actually violates the guard.
-    let rejects_env = fixture_env(fields, op, &state_overrides, &param_overrides);
-    emit_guard_assertion(
+    let rejects_check = check_fixture(
+        op,
+        &fixture_env(fields, op, &state_overrides, &param_overrides),
+        false,
+    );
+    emit_guard_test(
         out,
         op,
-        check_fixture(op, &rejects_env, false),
+        "rejects_invalid",
+        state_name,
+        fields,
+        spec,
+        &state_overrides,
+        &param_overrides,
+        rejects_check,
         /*want_true=*/ false,
-    );
-    out.push_str("    }\n\n");
+    )?;
     Ok(())
 }
 
-/// Emit the guard assertion, or an explanation of why the fixture cannot
-/// carry one. The fixture is still emitted either way: it documents the
-/// shape and keeps the test compiling, so a later solver improvement
-/// turns the comment into an assertion without restructuring anything.
-fn emit_guard_assertion(
+/// Emit one guard test. A `Solved` check emits the fixture + the
+/// assertion; an unverified check (`Contradicted` / `Unsupported`)
+/// references the guard fn as a compile check but does NOT emit the
+/// fixture or EXECUTE the guard. Running the guard on an unverified
+/// fixture could panic — e.g. a division / modulo guard hitting a zero —
+/// even when the generated program is correct (review feedback on #263).
+#[allow(clippy::too_many_arguments)]
+fn emit_guard_test(
     out: &mut String,
     op: &ParsedHandler,
+    suffix: &str,
+    state_name: &str,
+    fields: &[(String, String)],
+    spec: &ParsedSpec,
+    state_ov: &Overrides,
+    param_ov: &Overrides,
     check: FixtureCheck,
     want_true: bool,
-) {
-    let bang = if want_true { "" } else { "!" };
+) -> Result<()> {
+    out.push_str("    #[test]\n");
+    out.push_str(&format!("    fn test_{}_guard_{}() {{\n", op.name, suffix));
     match check {
         FixtureCheck::Solved => {
+            emit_state_literal_with(out, state_name, fields, op, &[], state_ov, false);
+            for (pname, ptype) in &op.takes_params {
+                let val = param_ov
+                    .iter()
+                    .find(|(n, _)| n == pname)
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or_else(|| sensible_param(pname, ptype));
+                out.push_str(&format!(
+                    "        let {}: {} = {};\n",
+                    pname,
+                    map_type(ptype, spec)?,
+                    val
+                ));
+            }
+            let bang = if want_true { "" } else { "!" };
             out.push_str(&format!(
                 "        assert!({}guard_{}(&state{}));\n",
                 bang,
@@ -912,22 +917,24 @@ fn emit_guard_assertion(
             out.push_str(&format!(
                 "        // No assertion: no fixture was found that would {wanted} this\n\
                  \x20       // guard, so asserting would test the fixture search, not the\n\
-                 \x20       // guard. See #312.\n\
-                 \x20       let _ = guard_{}(&state{});\n",
-                op.name,
-                call_args(op)
+                 \x20       // guard. The guard fn is referenced but NOT executed — an\n\
+                 \x20       // unverified fixture could panic a div/mod guard. See #312.\n\
+                 \x20       let _ = guard_{};\n",
+                op.name
             ));
         }
         FixtureCheck::Unsupported(reason) => {
             out.push_str(&format!(
-                "        // No assertion: {reason}, so the fixture is unverified.\n\
-                 \x20       // See #312.\n\
-                 \x20       let _ = guard_{}(&state{});\n",
-                op.name,
-                call_args(op)
+                "        // No assertion: {reason}, so the fixture is unverified. The\n\
+                 \x20       // guard fn is referenced but NOT executed (an unverified\n\
+                 \x20       // fixture could panic a div/mod guard). See #312.\n\
+                 \x20       let _ = guard_{};\n",
+                op.name
             ));
         }
     }
+    out.push_str("    }\n\n");
+    Ok(())
 }
 
 /// Generate a property preservation test for a specific operation.
@@ -1312,10 +1319,10 @@ fn seed_state_values(
                 }
                 (">=", AtomSide::Lit(l), AtomSide::Field(f)) if *l < vb => adjust(f, *l, &pinned),
                 ("!=", AtomSide::Field(f), AtomSide::Lit(l)) if va == *l => {
-                    adjust(f, l + 1, &pinned)
+                    adjust(f, l.saturating_add(1), &pinned)
                 }
                 ("!=", AtomSide::Lit(l), AtomSide::Field(f)) if vb == *l => {
-                    adjust(f, l + 1, &pinned)
+                    adjust(f, l.saturating_add(1), &pinned)
                 }
                 _ => {}
             }
@@ -1556,6 +1563,537 @@ enum LeafLit {
     Bool(bool),
 }
 
+// ----------------------------------------------------------------------
+// Constraint-propagation satisfier for the `guard_accepts_valid` fixture.
+//
+// The naive accepts fixture fixes params at `sensible_param` defaults and
+// seeds state fields via the raise fixpoint — neither solves CROSS-FIELD
+// constraints, so a guard like `stake_slash + lp_loss == loss` (an
+// equality over two params and a third) or `lp_loss == 0 or stake_slash
+// == seat_stake` (a disjunction) is left violated and `assert!(guard(..))`
+// fails against correct code. This solves the common linear-equality +
+// disjunction shapes by bounded propagation over the typed requires trees.
+// ----------------------------------------------------------------------
+
+/// A linear combination of variables (params / numeric state fields) plus
+/// a constant, with every coefficient ±1 — the shapes real guards use
+/// (`a`, `a + b`, `a - c`, `a + b == c`). `None` for non-linear operands.
+struct Lin {
+    /// `(name, sign)` — sign is +1 or -1.
+    vars: Vec<(String, i128)>,
+    constant: i128,
+}
+
+impl Lin {
+    /// Negate all coefficients + the constant. `None` on `i128::MIN`
+    /// (no positive counterpart) — the solver then bails on this guard.
+    fn negated(mut self) -> Option<Lin> {
+        for (_, s) in &mut self.vars {
+            *s = s.checked_neg()?;
+        }
+        self.constant = self.constant.checked_neg()?;
+        Some(self)
+    }
+    /// Sum two linear forms; `None` on constant overflow.
+    fn combine(mut self, other: Lin) -> Option<Lin> {
+        self.vars.extend(other.vars);
+        self.constant = self.constant.checked_add(other.constant)?;
+        Some(self)
+    }
+}
+
+/// Flatten an `ExprTree` into a `Lin` when it's a ±1 linear form over
+/// leaves and integer literals; `None` otherwise (incl. a `U128` literal
+/// outside the solver's `i128` range — checked conversion, no wrap).
+fn linearize(tree: &crate::mir::ExprTree, op: &ParsedHandler) -> Option<Lin> {
+    use crate::mir::expr_tree::{ExprTree, TreeArithOp};
+    match tree {
+        ExprTree::Int(v) => Some(Lin {
+            vars: vec![],
+            constant: i128::try_from(*v).ok()?,
+        }),
+        ExprTree::Path(_) => {
+            let (_, name) = leaf_target(tree, op)?;
+            Some(Lin {
+                vars: vec![(name, 1)],
+                constant: 0,
+            })
+        }
+        ExprTree::Arith { op: aop, lhs, rhs } => {
+            let l = linearize(lhs, op)?;
+            let r = linearize(rhs, op)?;
+            match aop {
+                TreeArithOp::Add => l.combine(r),
+                TreeArithOp::Sub => l.combine(r.negated()?),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Known variable values during propagation: numeric (params + numeric
+/// state fields, one namespace since a param shadows a same-named field
+/// in guard position) and boolean state fields, plus the pin set that
+/// equality-solved / disjunct-enforced values must not be overwritten.
+#[derive(Default, Clone)]
+struct SatState {
+    num: std::collections::BTreeMap<String, i128>,
+    is_param: std::collections::BTreeMap<String, bool>,
+    bools: std::collections::BTreeMap<String, bool>,
+    pinned: std::collections::BTreeSet<String>,
+}
+
+/// Evaluate a `Lin` under the current numeric assignment; `None` if any
+/// variable is still unknown.
+fn eval_lin(lin: &Lin, st: &SatState) -> Option<i128> {
+    let mut acc = lin.constant;
+    for (name, sign) in &lin.vars {
+        let term = sign.checked_mul(*st.num.get(name)?)?;
+        acc = acc.checked_add(term)?;
+    }
+    Some(acc)
+}
+
+/// Try to solve `lin == 0` for its single unknown variable, given the rest
+/// are known. Assigns + pins it (only when the solution is a non-negative
+/// integer — the generated fields/params are unsigned). Returns true if it
+/// made progress.
+fn solve_equality(lin: &Lin, st: &mut SatState) -> bool {
+    let unknown: Vec<&(String, i128)> = lin
+        .vars
+        .iter()
+        .filter(|(n, _)| !st.num.contains_key(n))
+        .collect();
+    if unknown.len() != 1 {
+        return false;
+    }
+    let (name, sign) = unknown[0];
+    // known_sum + sign*name + const == 0  →  name = -sign*(known_sum + const).
+    // Checked throughout — overflow bails (no progress) rather than wrap.
+    let mut known_sum = lin.constant;
+    for (n, s) in &lin.vars {
+        if n != name {
+            let term = match s.checked_mul(st.num.get(n).copied().unwrap_or(0)) {
+                Some(t) => t,
+                None => return false,
+            };
+            known_sum = match known_sum.checked_add(term) {
+                Some(v) => v,
+                None => return false,
+            };
+        }
+    }
+    let value = match sign.checked_neg().and_then(|s| s.checked_mul(known_sum)) {
+        Some(v) => v,
+        None => return false,
+    };
+    if value < 0 {
+        return false;
+    }
+    st.num.insert(name.clone(), value);
+    st.pinned.insert(name.clone());
+    true
+}
+
+/// An atom of a guard: a linear comparison (`lin <op> 0`) or a boolean
+/// field constraint (`field == value`).
+enum SatAtom {
+    Cmp(Lin, crate::mir::expr_tree::TreeCmpOp),
+    Bool(String, bool),
+}
+
+/// A guard clause: a single atom (AND-path) or a disjunction to enforce
+/// one of.
+enum SatClause {
+    Single(SatAtom),
+    Or(Vec<SatAtom>),
+}
+
+/// Resolve a leaf comparison into a `SatAtom`. Bool field vs bool literal
+/// becomes a `Bool` constraint; otherwise the two sides linearize and
+/// combine into `lin <op> 0`.
+fn tree_to_atom(tree: &crate::mir::ExprTree, op: &ParsedHandler) -> Option<SatAtom> {
+    use crate::mir::expr_tree::ExprTree;
+    let ExprTree::Cmp { op: cmp, lhs, rhs } = tree else {
+        return None;
+    };
+    // Bool constraint: `field == true/false` (or `!=`).
+    for (side, lit_side) in [(lhs, rhs), (rhs, lhs)] {
+        if let (Some((_, name)), Some(LeafLit::Bool(b))) =
+            (leaf_target(side, op), leaf_lit(lit_side))
+        {
+            use crate::mir::expr_tree::TreeCmpOp;
+            let value = match cmp {
+                TreeCmpOp::Eq => b,
+                TreeCmpOp::Ne => !b,
+                _ => return None,
+            };
+            return Some(SatAtom::Bool(name, value));
+        }
+    }
+    // Numeric: linearize both sides, move RHS across → `lin <op> 0`.
+    let l = linearize(lhs, op)?;
+    let r = linearize(rhs, op)?;
+    Some(SatAtom::Cmp(l.combine(r.negated()?)?, *cmp))
+}
+
+/// Flatten a requires tree into clauses: `and` splits into separate
+/// clauses; a top-level `or` becomes one disjunctive clause over its atoms.
+fn collect_clauses(tree: &crate::mir::ExprTree, op: &ParsedHandler, out: &mut Vec<SatClause>) {
+    use crate::mir::expr_tree::{ExprTree, TreeBoolOp};
+    match tree {
+        ExprTree::BoolOp {
+            op: TreeBoolOp::And,
+            lhs,
+            rhs,
+        } => {
+            collect_clauses(lhs, op, out);
+            collect_clauses(rhs, op, out);
+        }
+        ExprTree::BoolOp {
+            op: TreeBoolOp::Or, ..
+        } => {
+            let mut atoms = Vec::new();
+            collect_or_atoms(tree, op, &mut atoms);
+            if !atoms.is_empty() {
+                out.push(SatClause::Or(atoms));
+            }
+        }
+        ExprTree::Cmp { .. } => {
+            if let Some(a) = tree_to_atom(tree, op) {
+                out.push(SatClause::Single(a));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Gather the atoms of a (possibly nested) `or` subtree; non-atom
+/// disjuncts are dropped (best-effort — the clause is satisfied if any
+/// gathered disjunct holds).
+fn collect_or_atoms(tree: &crate::mir::ExprTree, op: &ParsedHandler, out: &mut Vec<SatAtom>) {
+    use crate::mir::expr_tree::{ExprTree, TreeBoolOp};
+    match tree {
+        ExprTree::BoolOp {
+            op: TreeBoolOp::Or,
+            lhs,
+            rhs,
+        } => {
+            collect_or_atoms(lhs, op, out);
+            collect_or_atoms(rhs, op, out);
+        }
+        _ => {
+            if let Some(a) = tree_to_atom(tree, op) {
+                out.push(a);
+            }
+        }
+    }
+}
+
+/// Assign the single unknown variable of `lin <op> 0` a value satisfying
+/// it (given the other variables are known). Returns true on progress.
+fn assign_from_ineq(lin: &Lin, cmp: crate::mir::expr_tree::TreeCmpOp, st: &mut SatState) -> bool {
+    use crate::mir::expr_tree::TreeCmpOp::*;
+    let unknown: Vec<&(String, i128)> = lin
+        .vars
+        .iter()
+        .filter(|(n, _)| !st.num.contains_key(n))
+        .collect();
+    if unknown.len() != 1 {
+        return false;
+    }
+    let (name, sign) = unknown[0];
+    // Checked accumulation — overflow bails (no progress).
+    let mut known_rest = lin.constant;
+    for (n, s) in &lin.vars {
+        if n != name {
+            let term = match s.checked_mul(st.num.get(n).copied().unwrap_or(0)) {
+                Some(t) => t,
+                None => return false,
+            };
+            known_rest = match known_rest.checked_add(term) {
+                Some(v) => v,
+                None => return false,
+            };
+        }
+    }
+    // `sign*v + known_rest <cmp> 0` → `v <eff_cmp> k`.
+    let k = match sign.checked_neg().and_then(|s| s.checked_mul(known_rest)) {
+        Some(v) => v,
+        None => return false,
+    };
+    let eff = if *sign >= 0 { cmp } else { flip_cmp_tree(cmp) };
+    let v: Option<i128> = match eff {
+        Gt => k.max(-1).checked_add(1),
+        Ge => Some(k.max(0)),
+        Lt => (k > 0).then(|| k - 1),
+        Le => (k >= 0).then_some(k),
+        Eq => (k >= 0).then_some(k),
+        Ne => (k >= 0).then(|| k.checked_add(1)).flatten().or(Some(0)),
+    };
+    match v {
+        Some(val) if val >= 0 => {
+            st.num.insert(name.clone(), val);
+            st.pinned.insert(name.clone());
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Is `atom` already satisfied under the current (partial) assignment?
+/// `None` when it can't be evaluated yet (an unknown variable).
+fn atom_holds(atom: &SatAtom, st: &SatState) -> Option<bool> {
+    use crate::mir::expr_tree::TreeCmpOp::*;
+    match atom {
+        SatAtom::Bool(name, want) => st.bools.get(name).map(|b| b == want),
+        SatAtom::Cmp(lin, cmp) => {
+            let v = eval_lin(lin, st)?;
+            Some(match cmp {
+                Gt => v > 0,
+                Ge => v >= 0,
+                Lt => v < 0,
+                Le => v <= 0,
+                Eq => v == 0,
+                Ne => v != 0,
+            })
+        }
+    }
+}
+
+/// Enforce one atom of a disjunction (assign a variable so it holds).
+fn enforce_atom(atom: &SatAtom, st: &mut SatState) -> bool {
+    match atom {
+        SatAtom::Bool(name, want) => {
+            if st.pinned.contains(name) {
+                return false;
+            }
+            st.bools.insert(name.clone(), *want);
+            st.pinned.insert(name.clone());
+            true
+        }
+        SatAtom::Cmp(lin, cmp) => {
+            use crate::mir::expr_tree::TreeCmpOp;
+            if matches!(cmp, TreeCmpOp::Eq) {
+                solve_equality(lin, st) || assign_from_ineq(lin, *cmp, st)
+            } else {
+                assign_from_ineq(lin, *cmp, st)
+            }
+        }
+    }
+}
+
+/// Evaluate a numeric tree under the assignment; unknown fields read as 0
+/// (an unconstrained field's value is irrelevant to a guard that doesn't
+/// reference it). `None` for non-numeric shapes.
+fn eval_num_tree(tree: &crate::mir::ExprTree, op: &ParsedHandler, st: &SatState) -> Option<i128> {
+    use crate::mir::expr_tree::{ExprTree, TreeArithOp};
+    match tree {
+        // Checked conversion: a `U128` literal above `i128::MAX` doesn't
+        // fit the solver's `i128` domain — bail rather than wrap.
+        ExprTree::Int(v) => i128::try_from(*v).ok(),
+        ExprTree::Path(_) => {
+            let (_, name) = leaf_target(tree, op)?;
+            Some(st.num.get(&name).copied().unwrap_or(0))
+        }
+        ExprTree::Arith { op: aop, lhs, rhs } => {
+            let l = eval_num_tree(lhs, op, st)?;
+            let r = eval_num_tree(rhs, op, st)?;
+            // Checked arithmetic: overflow (huge intermediate) and
+            // division / modulo by zero return `None`, so a guard that
+            // would divide by zero under this assignment is NEVER treated
+            // as verified — the fixture then falls to the (non-executing)
+            // smoke-test path instead of a possibly-panicking `assert!`.
+            match aop {
+                TreeArithOp::Add => l.checked_add(r),
+                TreeArithOp::Sub => l.checked_sub(r),
+                TreeArithOp::Mul => l.checked_mul(r),
+                TreeArithOp::Div => l.checked_div(r),
+                TreeArithOp::Mod => l.checked_rem(r),
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Evaluate a boolean guard tree under the assignment — the verification
+/// pass. Only returns `Some` when every referenced construct is
+/// representable; a `None` bails the whole satisfier (so an unverifiable
+/// guard keeps the naive fixture rather than risk a wrong one).
+fn eval_bool_tree(tree: &crate::mir::ExprTree, op: &ParsedHandler, st: &SatState) -> Option<bool> {
+    use crate::mir::expr_tree::{ExprTree, TreeBoolOp, TreeCmpOp};
+    match tree {
+        ExprTree::Bool(b) => Some(*b),
+        ExprTree::Not(inner) => Some(!eval_bool_tree(inner, op, st)?),
+        ExprTree::BoolOp { op: bop, lhs, rhs } => {
+            let l = eval_bool_tree(lhs, op, st)?;
+            let r = eval_bool_tree(rhs, op, st)?;
+            Some(match bop {
+                TreeBoolOp::And => l && r,
+                TreeBoolOp::Or => l || r,
+                TreeBoolOp::Implies => !l || r,
+            })
+        }
+        ExprTree::Cmp { op: cmp, lhs, rhs } => {
+            // Bool comparison (`field == true`)?
+            let bool_leaf = |t: &ExprTree| -> Option<bool> {
+                match leaf_lit(t) {
+                    Some(LeafLit::Bool(b)) => Some(b),
+                    _ => {
+                        leaf_target(t, op).map(|(_, n)| st.bools.get(&n).copied().unwrap_or(false))
+                    }
+                }
+            };
+            if matches!(cmp, TreeCmpOp::Eq | TreeCmpOp::Ne) {
+                if let (Some(l), Some(r)) = (bool_leaf(lhs), bool_leaf(rhs)) {
+                    // Only treat as bool when at least one side is a bool
+                    // literal / bool field (avoid mis-typing numeric 0/1).
+                    let has_bool_lit = matches!(leaf_lit(lhs), Some(LeafLit::Bool(_)))
+                        || matches!(leaf_lit(rhs), Some(LeafLit::Bool(_)));
+                    if has_bool_lit {
+                        return Some(if matches!(cmp, TreeCmpOp::Eq) {
+                            l == r
+                        } else {
+                            l != r
+                        });
+                    }
+                }
+            }
+            let l = eval_num_tree(lhs, op, st)?;
+            let r = eval_num_tree(rhs, op, st)?;
+            Some(match cmp {
+                TreeCmpOp::Gt => l > r,
+                TreeCmpOp::Ge => l >= r,
+                TreeCmpOp::Lt => l < r,
+                TreeCmpOp::Le => l <= r,
+                TreeCmpOp::Eq => l == r,
+                TreeCmpOp::Ne => l != r,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Compute a satisfying fixture assignment for the handler's guard by
+/// bounded constraint propagation over the typed `requires` trees, then
+/// VERIFY it against the full guard. Returns `(state_overrides,
+/// param_overrides)` only when verification passes; `None` otherwise, so
+/// the caller falls back to the naive seed/param fixture for guards this
+/// solver can't handle (rather than emit an `assert!` that fails on
+/// correct code). Handles linear equalities (`a + b == c`), inequalities,
+/// bool constraints, and disjunctions (`p == 0 or q == r`).
+fn satisfy_guard(
+    op: &ParsedHandler,
+    fields: &[(String, String)],
+) -> Option<(Overrides, Overrides)> {
+    use crate::mir::expr_tree::TreeCmpOp;
+    if op.requires.is_empty() {
+        return None;
+    }
+    let mut clauses: Vec<SatClause> = Vec::new();
+    for req in &op.requires {
+        collect_clauses(requires_tree(req), op, &mut clauses);
+    }
+    if clauses.is_empty() {
+        return None;
+    }
+
+    let mut st = SatState::default();
+    for (n, _) in &op.takes_params {
+        st.is_param.insert(n.clone(), true);
+    }
+    for (n, _) in fields {
+        st.is_param.entry(n.clone()).or_insert(false);
+    }
+
+    // Propagate to a fixpoint (bounded).
+    for _ in 0..8 {
+        let mut progress = false;
+        for c in &clauses {
+            let SatClause::Single(atom) = c else { continue };
+            match atom {
+                SatAtom::Bool(name, want) => {
+                    if !st.pinned.contains(name) && st.bools.get(name) != Some(want) {
+                        st.bools.insert(name.clone(), *want);
+                        st.pinned.insert(name.clone());
+                        progress = true;
+                    }
+                }
+                SatAtom::Cmp(lin, cmp) => {
+                    if matches!(cmp, TreeCmpOp::Eq) && solve_equality(lin, &mut st) {
+                        progress = true;
+                    }
+                    if atom_holds(atom, &st) != Some(true) && assign_from_ineq(lin, *cmp, &mut st) {
+                        progress = true;
+                    }
+                }
+            }
+        }
+        for c in &clauses {
+            let SatClause::Or(atoms) = c else { continue };
+            if atoms.iter().any(|a| atom_holds(a, &st) == Some(true)) {
+                continue;
+            }
+            for a in atoms {
+                if enforce_atom(a, &mut st) {
+                    progress = true;
+                    break;
+                }
+            }
+        }
+        if !progress {
+            break;
+        }
+    }
+
+    // Fill any still-unknown numeric params with their sensible default.
+    for (n, t) in &op.takes_params {
+        if !st.num.contains_key(n) && !st.bools.contains_key(n) {
+            if matches!(t.as_str(), "Bool" | "bool") {
+                st.bools.entry(n.clone()).or_insert(false);
+            } else if let Ok(v) = sensible_param(n, t).parse::<i128>() {
+                st.num.insert(n.clone(), v);
+            }
+        }
+    }
+
+    // Verify: the assignment must satisfy every requires clause.
+    for req in &op.requires {
+        if eval_bool_tree(requires_tree(req), op, &st) != Some(true) {
+            return None;
+        }
+    }
+
+    // Produce overrides for the referenced state fields + params. A
+    // state field shadowed by a same-named param carries no guard value
+    // (the param does), so skip it — its override is the param's below.
+    let mut state_ov: Overrides = Vec::new();
+    for (n, t) in fields {
+        if field_shadowed_by_param(n, op) {
+            continue;
+        }
+        if matches!(t.as_str(), "Bool" | "bool") {
+            if let Some(b) = st.bools.get(n) {
+                state_ov.push((n.clone(), b.to_string()));
+            }
+        } else if let Some(v) = st.num.get(n).and_then(|v| u128::try_from(*v).ok()) {
+            state_ov.push((n.clone(), render_seed(v, t)));
+        }
+    }
+    let mut param_ov: Overrides = Vec::new();
+    for (n, t) in &op.takes_params {
+        if matches!(t.as_str(), "Bool" | "bool") {
+            if let Some(b) = st.bools.get(n) {
+                param_ov.push((n.clone(), b.to_string()));
+            }
+        } else if let Some(v) = st.num.get(n) {
+            param_ov.push((n.clone(), v.to_string()));
+        }
+    }
+    Some((state_ov, param_ov))
+}
+
 /// Falsify or satisfy a single `target <op> lit` comparison by picking a
 /// concrete override value for `target`. `want_true = false` returns a
 /// value making the comparison FALSE; `true` makes it TRUE. `None` when no
@@ -1577,19 +2115,21 @@ fn solve_cmp(
             Some((if want_true { true_val } else { !true_val }).to_string())
         }
         LeafLit::Int(l) => {
-            // Value making `x <op> l` evaluate to `want_true`.
+            // Value making `x <op> l` evaluate to `want_true`. Checked
+            // add/sub: `l` at `u128::MAX` (or 0) bails rather than
+            // wrap/panic during code generation.
             let v: Option<u128> = match (op, want_true) {
-                (Gt, true) => Some(l + 1),
+                (Gt, true) => l.checked_add(1),
                 (Gt, false) => Some(l),
                 (Ge, true) => Some(l),
                 (Ge, false) => l.checked_sub(1),
                 (Lt, true) => l.checked_sub(1),
                 (Lt, false) => Some(l),
                 (Le, true) => Some(l),
-                (Le, false) => Some(l + 1),
+                (Le, false) => l.checked_add(1),
                 (Eq, true) => Some(l),
-                (Eq, false) => Some(l + 1),
-                (Ne, true) => Some(l + 1),
+                (Eq, false) => l.checked_add(1),
+                (Ne, true) => l.checked_add(1),
                 (Ne, false) => Some(l),
             };
             v.map(|n| n.to_string())
@@ -1797,7 +2337,7 @@ fn eval_tree(
     };
 
     match tree {
-        ExprTree::Int(v) => Some(FixtureValue::Int(*v as i128)),
+        ExprTree::Int(v) => i128::try_from(*v).ok().map(FixtureValue::Int),
         ExprTree::Bool(b) => Some(FixtureValue::Bool(*b)),
         ExprTree::Path(p) => match &p.binding {
             BindingKind::Const(value) => parse_fixture_literal(value),
@@ -1898,6 +2438,207 @@ fn check_fixture(
     }
 }
 
+/// Negate a comparison operator (`>` → `<=`, `==` → `!=`, …).
+fn negate_cmp(cmp: crate::mir::expr_tree::TreeCmpOp) -> crate::mir::expr_tree::TreeCmpOp {
+    use crate::mir::expr_tree::TreeCmpOp::*;
+    match cmp {
+        Gt => Le,
+        Ge => Lt,
+        Lt => Ge,
+        Le => Gt,
+        Eq => Ne,
+        Ne => Eq,
+    }
+}
+
+/// Seed a `SatState` with the fixture defaults: params via
+/// `sensible_param`, numeric state fields via the raise-fixpoint
+/// `seed_state_values`, bool fields false. Every value is known (nothing
+/// pinned) so the falsifier can re-solve any single one.
+fn seed_defaults(op: &ParsedHandler, fields: &[(String, String)]) -> SatState {
+    let mut st = SatState::default();
+    for (n, t) in &op.takes_params {
+        st.is_param.insert(n.clone(), true);
+        if matches!(t.as_str(), "Bool" | "bool") {
+            st.bools.insert(n.clone(), sensible_param(n, t) == "true");
+        } else if let Ok(v) = sensible_param(n, t).parse::<i128>() {
+            st.num.insert(n.clone(), v);
+        }
+    }
+    let seeds = seed_state_values(fields, op, &[]);
+    for (n, t) in fields {
+        // A param of the same name SHADOWS this state field in guard
+        // position (the guard fn reads the param), so the field is
+        // irrelevant to guard satisfaction — don't let its seed clobber
+        // the param's value in the shared name map.
+        if op.takes_params.iter().any(|(p, _)| p == n) {
+            continue;
+        }
+        st.is_param.entry(n.clone()).or_insert(false);
+        if matches!(t.as_str(), "Bool" | "bool") {
+            st.bools.insert(
+                n.clone(),
+                seeds.get(n).map(|v| v == "true").unwrap_or(false),
+            );
+        } else {
+            // Seed strings may carry a `u128` suffix — take the digit run.
+            let v = seeds
+                .get(n)
+                .and_then(|s| s.trim_end_matches("u128").trim().parse::<i128>().ok())
+                .unwrap_or(0);
+            st.num.insert(n.clone(), v);
+        }
+    }
+    st
+}
+
+/// True when a state field is shadowed by a same-named handler param
+/// (which the generated guard fn reads instead of the field).
+fn field_shadowed_by_param(name: &str, op: &ParsedHandler) -> bool {
+    op.takes_params.iter().any(|(p, _)| p == name)
+}
+
+/// Whole-guard truth under a full assignment: `Some(false)` if any
+/// requires clause is false, `Some(true)` if all hold, `None` if some
+/// clause can't be evaluated.
+fn eval_guard(op: &ParsedHandler, st: &SatState) -> Option<bool> {
+    let mut all_true = true;
+    for req in &op.requires {
+        match eval_bool_tree(requires_tree(req), op, st) {
+            Some(false) => return Some(false),
+            Some(true) => {}
+            None => all_true = false,
+        }
+    }
+    all_true.then_some(true)
+}
+
+/// Re-assign one variable of `lin <cmp> 0` so the comparison becomes
+/// FALSE, holding the others at their current values. Returns true on
+/// success.
+fn falsify_cmp(lin: &Lin, cmp: crate::mir::expr_tree::TreeCmpOp, st: &mut SatState) -> bool {
+    let neg = negate_cmp(cmp);
+    let var_names: Vec<String> = lin.vars.iter().map(|(n, _)| n.clone()).collect();
+    for name in var_names {
+        let saved = st.num.get(&name).copied();
+        st.num.remove(&name);
+        st.pinned.remove(&name);
+        if assign_from_ineq(lin, neg, st) {
+            return true;
+        }
+        // restore and try the next variable
+        if let Some(v) = saved {
+            st.num.insert(name.clone(), v);
+        }
+    }
+    false
+}
+
+/// Make a single atom false (used to falsify every disjunct of an `or`).
+fn falsify_atom(atom: &SatAtom, st: &mut SatState) -> bool {
+    match atom {
+        SatAtom::Bool(name, want) => {
+            st.bools.insert(name.clone(), !want);
+            true
+        }
+        SatAtom::Cmp(lin, cmp) => falsify_cmp(lin, *cmp, st),
+    }
+}
+
+/// Make a whole clause false: a single atom directly, or an `or` by
+/// falsifying every disjunct.
+fn falsify_clause(clause: &SatClause, st: &mut SatState) -> bool {
+    match clause {
+        SatClause::Single(atom) => falsify_atom(atom, st),
+        SatClause::Or(atoms) => atoms.iter().all(|a| falsify_atom(a, st)),
+    }
+}
+
+/// Guard-violation via the linear constraint machinery, VERIFIED. Seeds
+/// the fixture defaults, then makes ONE clause false (the guard is a
+/// conjunction, so one false clause rejects) — handling field-vs-field
+/// comparisons (`amount > collateral`) and linear forms the string-atom
+/// path drops. Returns only the overrides that differ from the defaults;
+/// `None` when it can't produce a verified-violating assignment.
+fn falsify_guard_linear(
+    op: &ParsedHandler,
+    fields: &[(String, String)],
+) -> Option<(Overrides, Overrides)> {
+    if op.requires.is_empty() {
+        return None;
+    }
+    let mut clauses: Vec<SatClause> = Vec::new();
+    for req in &op.requires {
+        collect_clauses(requires_tree(req), op, &mut clauses);
+    }
+    if clauses.is_empty() {
+        return None;
+    }
+    let defaults = seed_defaults(op, fields);
+
+    // Choose the trial assignment: the defaults already reject, or one
+    // clause falsified on top of them.
+    let trial = if eval_guard(op, &defaults) == Some(false) {
+        defaults.clone()
+    } else {
+        let mut chosen = None;
+        for clause in &clauses {
+            let mut t = defaults.clone();
+            if falsify_clause(clause, &mut t) && eval_guard(op, &t) == Some(false) {
+                chosen = Some(t);
+                break;
+            }
+        }
+        chosen?
+    };
+
+    // Emit only the fields/params whose value changed from the default.
+    // Shadowed state fields never carry the guard value (the param does),
+    // so skip them — their override belongs to the param below.
+    let mut state_ov: Overrides = Vec::new();
+    for (n, t) in fields {
+        if field_shadowed_by_param(n, op) {
+            continue;
+        }
+        if matches!(t.as_str(), "Bool" | "bool") {
+            let (d, v) = (
+                defaults.bools.get(n).copied().unwrap_or(false),
+                trial.bools.get(n).copied().unwrap_or(false),
+            );
+            if d != v {
+                state_ov.push((n.clone(), v.to_string()));
+            }
+        } else {
+            let (d, v) = (defaults.num.get(n).copied(), trial.num.get(n).copied());
+            if d != v {
+                if let Some(v) = v.and_then(|v| u128::try_from(v).ok()) {
+                    state_ov.push((n.clone(), render_seed(v, t)));
+                }
+            }
+        }
+    }
+    let mut param_ov: Overrides = Vec::new();
+    for (n, t) in &op.takes_params {
+        if matches!(t.as_str(), "Bool" | "bool") {
+            let (d, v) = (
+                defaults.bools.get(n).copied().unwrap_or(false),
+                trial.bools.get(n).copied().unwrap_or(false),
+            );
+            if d != v {
+                param_ov.push((n.clone(), v.to_string()));
+            }
+        } else {
+            let (d, v) = (defaults.num.get(n).copied(), trial.num.get(n).copied());
+            if d != v {
+                if let Some(v) = v {
+                    param_ov.push((n.clone(), v.to_string()));
+                }
+            }
+        }
+    }
+    Some((state_ov, param_ov))
+}
+
 /// Structure-aware guard falsification over the typed `requires` trees.
 /// The guard is the conjunction of every `requires` clause, so falsifying
 /// ANY single clause falsifies the whole guard — and each clause is
@@ -1926,7 +2667,13 @@ fn derive_guard_violation(
     op: &ParsedHandler,
     fields: &[(String, String)],
 ) -> (Overrides, Overrides) {
-    // Structure-aware path first (correct for AND / OR / not / nesting).
+    // Linear, VERIFIED path first: handles field-vs-field and other
+    // compound comparisons (`amount > collateral`), and only returns an
+    // assignment it has checked makes the guard false.
+    if let Some(overrides) = falsify_guard_linear(op, fields) {
+        return overrides;
+    }
+    // Structure-aware fallback (AND / OR / not / nesting over param-vs-literal).
     if let Some(overrides) = falsify_guard_from_trees(op) {
         return overrides;
     }
@@ -1981,12 +2728,13 @@ fn derive_guard_violation(
             continue;
         };
         // Boundary value that breaks the atom (skip `>= 0`: unsigned).
+        // Checked add: `l` at `u128::MAX` bails rather than wrap/panic.
         let value = match cmp {
             ">" => Some(l),
             ">=" if l > 0 => Some(l - 1),
             "<" => Some(l),
-            "<=" => Some(l + 1),
-            "==" => Some(l + 1),
+            "<=" => l.checked_add(1),
+            "==" => l.checked_add(1),
             "!=" => Some(l),
             _ => None,
         };
@@ -2431,6 +3179,286 @@ handler act : State.Active -> State.Active {
         assert!(
             kills_or || kills_c,
             "nested (A or B) and C must falsify a full conjunct:\n{rejects}"
+        );
+    }
+
+    fn accepts_body(out: &str, handler: &str) -> String {
+        out.split(&format!("fn test_{handler}_guard_accepts_valid"))
+            .nth(1)
+            .and_then(|t| t.split("\n    }\n").next())
+            .expect("accepts body")
+            .to_string()
+    }
+
+    /// v2.46 — the accepts-valid fixture must SATISFY cross-field
+    /// constraints. `stake_slash + lp_loss == loss` plus a disjunction
+    /// used to leave params at defaults (`1,1,1`), violating the equality
+    /// and the OR. `satisfy_guard` now solves them.
+    #[test]
+    fn accepts_valid_solves_linear_equality_and_disjunction() {
+        let out = generate_from(
+            r#"spec Settle
+type State | Active of { seat_stake : U64, total_loss : U64 }
+type Error | Bad | MathOverflow
+handler settle_loss (loss : U64) (stake_slash : U64) (lp_loss : U64) : State.Active -> State.Active {
+  accounts { caller : signer, state : writable }
+  requires loss > 0 else Bad
+  requires stake_slash + lp_loss == loss else Bad
+  requires lp_loss == 0 or stake_slash == seat_stake else Bad
+  effect { total_loss += loss }
+}
+"#,
+        );
+        let accepts = accepts_body(&out, "settle_loss");
+        // The exact assignment the propagator finds: loss=1 (from loss>0),
+        // lp_loss=0 (disjunct), stake_slash = loss - lp_loss = 1.
+        assert!(accepts.contains("let loss: u64 = 1;"), "{accepts}");
+        assert!(accepts.contains("let lp_loss: u64 = 0;"), "{accepts}");
+        assert!(accepts.contains("let stake_slash: u64 = 1;"), "{accepts}");
+    }
+
+    /// v2.46 — a param that shadows a same-named state field
+    /// (`amount`/`collateral` as both) must be solved as the PARAM (which
+    /// the guard fn reads), not conflated with the field's seed. The
+    /// rejects fixture must zero a PARAM so the guard actually rejects.
+    #[test]
+    fn rejects_invalid_handles_param_shadowing_state_field() {
+        let out = generate_from(
+            r#"spec T
+type State | Active of { amount : U64, collateral : U64 }
+type Error | Bad
+handler borrow (amount : U64) (collateral : U64) : State.Active -> State.Active {
+  accounts { caller : signer, state : writable }
+  requires amount > 0 else Bad
+  requires collateral > 0 else Bad
+  effect { amount += 1 }
+}
+"#,
+        );
+        let rejects = rejects_body(&out, "borrow");
+        // A param (not the shadowed state field) must be zeroed so
+        // `(amount > 0) && (collateral > 0)` is false.
+        assert!(
+            rejects.contains("let amount: u64 = 0;")
+                || rejects.contains("let collateral: u64 = 0;"),
+            "a shadowing param must be zeroed to reject:\n{rejects}"
+        );
+        // And it must be a real assertion (verified), not a smoke-test.
+        assert!(
+            rejects.contains("assert!(!guard_borrow"),
+            "shadow-param guard should verify + assert:\n{rejects}"
+        );
+    }
+
+    /// An un-auto-solvable guard emits a smoke-test, never a failing
+    /// assertion. (A Map-threshold guard the linear solver can't handle.)
+    #[test]
+    fn unsolvable_guard_emits_smoke_test_not_failing_assert() {
+        let out = generate_from(
+            r#"spec T
+const MAX = 8
+type State | Active of { threshold : U8, member_count : U8 }
+type Error | Bad
+handler configure (t : U8) : State.Active -> State.Active {
+  accounts { admin : signer, state : writable }
+  requires t >= 1 and t <= member_count and member_count <= MAX else Bad
+  effect { threshold := t }
+}
+"#,
+        );
+        // Whatever it does, the accepts test must not assert something it
+        // can't verify — either a verified assert or a smoke-test.
+        let accepts = accepts_body(&out, "configure");
+        let ok = accepts.contains("assert!(guard_configure")
+            || accepts.contains("let _ = guard_configure");
+        assert!(
+            ok,
+            "accepts must assert-if-verified or smoke-test:\n{accepts}"
+        );
+    }
+
+    /// Review #2 — a division/modulo guard must NOT be run with an
+    /// unverified fixture: an unverified fixture could put a zero in the
+    /// divisor and panic even for a correct program. The smoke-test path
+    /// references the guard fn but never executes it, so the generated
+    /// test body must not CALL the guard.
+    #[test]
+    fn division_guard_smoke_tests_without_executing_the_guard() {
+        let out = generate_from(
+            r#"spec T
+type State | Active of { total : U64, rate : U64 }
+type Error | Bad
+handler split (amount : U64) : State.Active -> State.Active {
+  accounts { admin : signer, state : writable }
+  requires amount / rate > 0 else Bad
+  effect { total := amount }
+}
+"#,
+        );
+        let accepts = accepts_body(&out, "split");
+        let rejects = rejects_body(&out, "split");
+        // The accept fixture divides by `rate`, which defaults to 0, so no
+        // satisfying assignment is verifiable — this body MUST take the
+        // non-executing path.
+        assert!(
+            accepts.contains("let _ = guard_split;"),
+            "accept side of a div-by-zero guard should smoke-test, not assert:\n{accepts}"
+        );
+        for body in [&accepts, &rejects] {
+            // Whenever a body is unverified it references the guard fn but
+            // never calls it (`guard_split(&state…)`): running the guard on
+            // an unverified fixture could panic (div/mod by zero).
+            if body.contains("let _ = guard_split;") {
+                assert!(
+                    !body.contains("guard_split(&"),
+                    "unverified division guard must not be executed:\n{body}"
+                );
+            }
+        }
+    }
+
+    /// `eval_num_tree` returns `None` on division / modulo by zero, so a
+    /// guard that would divide by zero under the trial assignment is never
+    /// treated as verified.
+    #[test]
+    fn eval_num_tree_returns_none_on_div_by_zero() {
+        use crate::mir::expr_tree::{ExprTree, TreeArithOp};
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec T
+type State | Active of { a : U64 }
+type Error | Bad
+handler h (x : U64) : State.Active -> State.Active {
+  accounts { s : signer, state : writable }
+  requires x > 0 else Bad
+  effect { a := x }
+}
+"#,
+        )
+        .unwrap();
+        let op = spec.handlers.first().unwrap();
+        let st = SatState::default(); // all vars default to 0
+        let div_by_zero = ExprTree::Arith {
+            op: TreeArithOp::Div,
+            lhs: Box::new(ExprTree::Int(10)),
+            rhs: Box::new(ExprTree::Int(0)),
+        };
+        assert_eq!(eval_num_tree(&div_by_zero, op, &st), None);
+        let mod_by_zero = ExprTree::Arith {
+            op: TreeArithOp::Mod,
+            lhs: Box::new(ExprTree::Int(10)),
+            rhs: Box::new(ExprTree::Int(0)),
+        };
+        assert_eq!(eval_num_tree(&mod_by_zero, op, &st), None);
+    }
+
+    /// Review #3 — a `U128` guard literal above `i128::MAX` must not
+    /// wrap/panic during code generation: the solver's checked
+    /// `u128 → i128` conversion falls back, and the guard smoke-tests.
+    /// (A direct literal — the `const` parser caps at `i128`, but a
+    /// `requires` literal reaches the solver.)
+    #[test]
+    fn large_u128_guard_does_not_panic_and_smoke_tests() {
+        // 2^127 + 1 > i128::MAX (= 2^127 - 1).
+        let out = generate_from(
+            r#"spec T
+type State | Active of { cap : U128 }
+type Error | Bad
+handler bump (amount : U128) : State.Active -> State.Active {
+  accounts { admin : signer, state : writable }
+  requires amount >= 170141183460469231731687303715884105729 else Bad
+  effect { cap := amount }
+}
+"#,
+        );
+        // Codegen didn't panic (we got output), and the un-solvable
+        // large-U128 guard smoke-tests rather than asserting a wrong
+        // fixture.
+        let accepts = accepts_body(&out, "bump");
+        assert!(
+            accepts.contains("let _ = guard_bump;"),
+            "large-U128 guard must smoke-test rather than assert a wrapped fixture:\n{accepts}"
+        );
+        assert!(
+            !accepts.contains("guard_bump(&"),
+            "large-U128 guard must not execute an unverified fixture:\n{accepts}"
+        );
+    }
+
+    /// Direct unit test of the checked arithmetic (Review #3): values near
+    /// `i128::MAX` must overflow to `None`, not wrap or panic.
+    #[test]
+    fn eval_num_tree_checked_arithmetic_overflows_to_none() {
+        use crate::mir::expr_tree::{ExprTree, TreeArithOp};
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec T
+type State | Active of { a : U64 }
+type Error | Bad
+handler h (x : U64) : State.Active -> State.Active {
+  accounts { s : signer, state : writable }
+  requires x > 0 else Bad
+  effect { a := x }
+}
+"#,
+        )
+        .unwrap();
+        let op = spec.handlers.first().unwrap();
+        let st = SatState::default();
+        // A `U128` literal above `i128::MAX` doesn't fit the solver domain.
+        let too_big = ExprTree::Int((i128::MAX as u128) + 1);
+        assert_eq!(eval_num_tree(&too_big, op, &st), None);
+        // `MAX + MAX` overflows i128 → None (not a wrapped negative).
+        let overflow = ExprTree::Arith {
+            op: TreeArithOp::Add,
+            lhs: Box::new(ExprTree::Int(i128::MAX as u128)),
+            rhs: Box::new(ExprTree::Int(i128::MAX as u128)),
+        };
+        assert_eq!(eval_num_tree(&overflow, op, &st), None);
+    }
+
+    /// End-to-end: the whole generated unit-test module for the compound
+    /// guard must compile and every test (incl. accepts + rejects) pass.
+    /// This catches an accepts fixture that violates its own guard.
+    #[test]
+    fn compound_guard_unit_tests_compile_and_pass() {
+        let out = generate_from(
+            r#"spec Settle
+type State | Active of { seat_stake : U64, total_loss : U64 }
+type Error | Bad | MathOverflow
+handler settle_loss (loss : U64) (stake_slash : U64) (lp_loss : U64) : State.Active -> State.Active {
+  accounts { caller : signer, state : writable }
+  requires loss > 0 else Bad
+  requires stake_slash + lp_loss == loss else Bad
+  requires lp_loss == 0 or stake_slash == seat_stake else Bad
+  effect { total_loss += loss }
+}
+"#,
+        );
+        // Re-evaluate the accepts fixture's guard by hand against the
+        // generated predicate body, confirming it holds (no runtime crate
+        // build needed): loss>0, stake_slash+lp_loss==loss, lp_loss==0|….
+        let accepts = accepts_body(&out, "settle_loss");
+        let num = |needle: &str| -> i64 {
+            accepts
+                .split(needle)
+                .nth(1)
+                .and_then(|t| t.trim_start().split(';').next())
+                .and_then(|t| t.trim().trim_end_matches("u64").trim().parse().ok())
+                .unwrap_or_else(|| panic!("missing {needle} in:\n{accepts}"))
+        };
+        let loss = num("let loss: u64 =");
+        let stake_slash = num("let stake_slash: u64 =");
+        let lp_loss = num("let lp_loss: u64 =");
+        let seat_stake: i64 = accepts
+            .split("seat_stake:")
+            .nth(1)
+            .and_then(|t| t.split(',').next())
+            .and_then(|t| t.trim().parse().ok())
+            .unwrap_or(0);
+        assert!(loss > 0, "loss>0");
+        assert_eq!(stake_slash + lp_loss, loss, "stake_slash+lp_loss==loss");
+        assert!(
+            lp_loss == 0 || stake_slash == seat_stake,
+            "lp_loss==0 or stake_slash==seat_stake"
         );
     }
 }

@@ -150,7 +150,7 @@ impl<'info> Cancel<'info> {
         verified,
         spec = "..",
         handler = "cancel",
-        hash = "e8b137050f206ed5",
+        hash = "1a22375c48f5ce40",
         spec_hash = "3feff20168f7d7fb"
     )]
     #[inline(always)]
@@ -167,8 +167,11 @@ impl<'info> Cancel<'info> {
                 authority: self.escrow.to_account_info(),
             };
             let cpi_program = self.token_program.to_account_info();
+            let __initializer_key = self.initializer.key();
+            let __escrow_signer_seeds: &[&[&[u8]]] =
+                &[&[b"escrow", __initializer_key.as_ref(), &[bumps.escrow]]];
             token::transfer(
-                CpiContext::new(cpi_program, cpi_accounts),
+                CpiContext::new_with_signer(cpi_program, cpi_accounts, __escrow_signer_seeds),
                 self.escrow.initializer_amount,
             )?;
         }
@@ -362,7 +365,7 @@ pub struct Exchange<'info> {
 pub struct Initialize<'info> {
     #[account(mut)]
     pub initializer: Signer<'info>,
-    #[account(mut, seeds = [b"escrow", initializer.key().as_ref()], bump, has_one = initializer)]
+    #[account(init, payer = initializer, space = 8 + EscrowAccount::INIT_SPACE, seeds = [b"escrow", initializer.key().as_ref()], bump)]
     pub escrow: Account<'info, EscrowAccount>,
     pub mint: AccountInfo<'info>,
     #[account(mut)]

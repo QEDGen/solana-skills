@@ -579,6 +579,34 @@ fn bare_state_field_requires_reach_harness_with_receiver() {
     );
 }
 
+/// v2.46 (Bug 2) — a `set` effect whose RHS is a comparison
+/// (`seat_active := seat_stake > 0`) must parenthesize it in the
+/// conformance assert: `s.seat_active == pre_seat_stake > 0` is a chained
+/// comparison (a Rust compile error).
+#[test]
+fn conformance_parenthesizes_comparison_valued_set_rhs() {
+    let (mir, parsed) = lower_inline(
+        r#"spec Vault
+program_id "11111111111111111111111111111111"
+type State | Active of { seat_stake : U64, seat_active : Bool }
+type Error | Bad
+handler settle : State.Active -> State.Active {
+  permissionless
+  effect { seat_active := seat_stake > 0 }
+}
+"#,
+    );
+    let out = render(&mir, &parsed);
+    assert!(
+        out.contains("s.seat_active == (pre_seat_stake > 0)"),
+        "comparison-valued set RHS must be parenthesized in the conformance assert:\n{out}"
+    );
+    assert!(
+        !out.contains("s.seat_active == pre_seat_stake > 0"),
+        "unparenthesized chained comparison must not appear:\n{out}"
+    );
+}
+
 /// Issues #143–#146: compound effect RHS and predicate arithmetic reach
 /// the Kani harness as compilable, model-faithful Rust.
 ///   #143 — ref_impl calls in effect RHS render Rust call syntax with the

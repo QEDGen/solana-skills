@@ -320,8 +320,23 @@ pub(crate) fn emit_one_conformance_harness(
     };
     match op_kind {
         "set" => {
-            let assertion =
-                util::rewrite_kani_pubkey_comparisons(&expected_eq(&resolved), op, parsed);
+            // A `set` RHS that is itself a comparison / boolean op
+            // (`seat_active := seat_stake > 0`) must be parenthesized:
+            // `s.seat_active == pre_seat_stake > 0` is a chained
+            // comparison (a Rust compile error), and an `&&`/`||` RHS
+            // would bind at the wrong precedence. Arithmetic / method-call
+            // RHSs (the common case) render at a tighter precedence and
+            // need no wrapping.
+            let needs_paren = matches!(
+                tree,
+                crate::mir::ExprTree::Cmp { .. } | crate::mir::ExprTree::BoolOp { .. }
+            );
+            let rhs = if needs_paren {
+                format!("({resolved})")
+            } else {
+                resolved.clone()
+            };
+            let assertion = util::rewrite_kani_pubkey_comparisons(&expected_eq(&rhs), op, parsed);
             out.push_str(&format!(
                 "        assert!({}, \"{} must equal {}\");\n",
                 assertion,

@@ -102,10 +102,23 @@ impl AccountPlan {
         let lifecycle_is_init = handler.pre_status.as_deref() == Some("Uninitialized")
             || handler.pre_status.as_deref() == Some("Empty");
         let on_account_matches = match handler.on_account.as_deref() {
-            Some(adt_name) => {
+            // Multi-ACCOUNT spec (≥2 state ADTs): `on_account` is a real
+            // per-account discriminator (`Loan.Uninitialized` → only the
+            // `loan` account init's). Match the account name.
+            Some(adt_name) if spec.account_types.len() > 1 => {
                 let lower = adt_name.to_lowercase();
                 acct.name == lower || acct.name.starts_with(&lower)
             }
+            // Single-account spec written type-qualified
+            // (`State.Uninitialized`): `on_account` is `Some("State")` —
+            // the sole state TYPE, not an account name — so a name
+            // heuristic wrongly rejected a PDA named anything but `state`
+            // (e.g. `vault`), and `init/payer/space` never emitted. The
+            // resolved state-bearing account (`is_state_account`) is the
+            // init target here.
+            Some(_) => is_state_account,
+            // Unqualified single-state spec: any writable PDA can be the
+            // init target (original permissive behavior).
             None => true,
         };
         let is_init =

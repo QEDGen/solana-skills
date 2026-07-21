@@ -2058,6 +2058,112 @@ handler poke : State.Active -> State.Active {
         );
     }
 
+    /// v2.46 (Bug 5) — a single-ADT `State.Uninitialized -> State.Active`
+    /// handler over a PDA must emit `#[account(init, payer, space = 8 +
+    /// <Program>Account::INIT_SPACE, …)]`. The type-qualified pre-state
+    /// (`State.`) previously set `on_account = Some("State")`, and the
+    /// name heuristic then rejected a PDA named anything but `state`, so
+    /// init/payer/space never emitted (and the space struct name resolved
+    /// to the non-existent `StateAccount`).
+    #[test]
+    fn anchor_init_emits_for_type_qualified_single_adt_pda() {
+        let src = r#"spec Vault
+program_id "11111111111111111111111111111111"
+type State
+  | Uninitialized
+  | Active of { admin : Pubkey, balance : U64 }
+type Error | Bad
+pda vault ["vault", admin]
+handler initialize : State.Uninitialized -> State.Active {
+  accounts {
+    admin : signer, writable
+    vault : writable, pda ["vault", admin]
+    system_program : program
+  }
+  effect { state := .Active { admin := admin, balance := 0 } }
+}
+"#;
+        let parsed = crate::chumsky_adapter::parse_str(src).expect("parse");
+        let mir = crate::mir::lower(&parsed);
+        let fp = crate::fingerprint::compute_fingerprint(&parsed);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let temp = tmp.path();
+        std::fs::create_dir_all(temp.join("src")).expect("mk src");
+        emit_lib(
+            &mir,
+            &parsed,
+            &fp,
+            temp,
+            Target::Anchor,
+            Path::new("unused.qedspec"),
+            RegenOptions::default(),
+        )
+        .expect("emit lib");
+        let lib = std::fs::read_to_string(temp.join("src/lib.rs")).expect("lib.rs");
+        // The vault line must carry init/payer/space with the correct
+        // wrapper struct name (`VaultAccount`, not `StateAccount`).
+        let vault_line = lib
+            .lines()
+            .find(|l| l.contains("seeds = [b\"vault\""))
+            .unwrap_or_else(|| panic!("no vault #[account] line in:\n{lib}"));
+        assert!(
+            vault_line.contains("init")
+                && vault_line.contains("payer = admin")
+                && vault_line.contains("space = 8 + VaultAccount::INIT_SPACE"),
+            "init/payer/space must emit with the VaultAccount wrapper; got:\n{vault_line}"
+        );
+        assert!(
+            !lib.contains("StateAccount::INIT_SPACE"),
+            "space must not reference the non-existent StateAccount; got:\n{lib}"
+        );
+    }
+
+    /// A non-init handler on the same PDA stays `mut` (init only on the
+    /// Uninitialized→X transition).
+    #[test]
+    fn anchor_non_init_handler_keeps_mut_not_init() {
+        let src = r#"spec Vault
+program_id "11111111111111111111111111111111"
+type State
+  | Uninitialized
+  | Active of { admin : Pubkey, balance : U64 }
+type Error | Bad | MathOverflow
+pda vault ["vault", admin]
+handler deposit (amount : U64) : State.Active -> State.Active {
+  accounts {
+    admin : signer
+    vault : writable, pda ["vault", admin]
+  }
+  effect { balance += amount }
+}
+"#;
+        let parsed = crate::chumsky_adapter::parse_str(src).expect("parse");
+        let mir = crate::mir::lower(&parsed);
+        let fp = crate::fingerprint::compute_fingerprint(&parsed);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let temp = tmp.path();
+        std::fs::create_dir_all(temp.join("src")).expect("mk src");
+        emit_lib(
+            &mir,
+            &parsed,
+            &fp,
+            temp,
+            Target::Anchor,
+            Path::new("unused.qedspec"),
+            RegenOptions::default(),
+        )
+        .expect("emit lib");
+        let lib = std::fs::read_to_string(temp.join("src/lib.rs")).expect("lib.rs");
+        let vault_line = lib
+            .lines()
+            .find(|l| l.contains("seeds = [b\"vault\""))
+            .expect("vault line");
+        assert!(
+            vault_line.contains("mut") && !vault_line.contains("init"),
+            "non-init handler must keep mut, not init; got:\n{vault_line}"
+        );
+    }
+
     /// The disambiguation is scoped: a spec with no prelude-colliding type
     /// gets no explicit re-import line.
     #[test]

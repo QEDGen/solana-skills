@@ -219,7 +219,7 @@ mod tests {
             total_borrows: 0,
             interest_rate: 0,
         };
-        let amount: u64 = 100;
+        let amount: u64 = 1;
         assert!(guard_deposit(&state, amount));
     }
 
@@ -243,7 +243,7 @@ mod tests {
             amount: 100,
             collateral: 0,
         };
-        let amount: u64 = 100;
+        let amount: u64 = 1;
         let collateral: u64 = 1;
         assert!(guard_borrow(&state, amount, collateral));
     }
@@ -277,13 +277,10 @@ mod tests {
         let state = LoanState {
             borrower: [1u8; 32],
             pool: [1u8; 32],
-            amount: 100,
+            amount: 0,
             collateral: 0,
         };
-        // No assertion: no fixture was found that would violate this
-        // guard, so asserting would test the fixture search, not the
-        // guard. See #312.
-        let _ = guard_liquidate(&state);
+        assert!(!guard_liquidate(&state));
     }
 
     // ====================================================================

@@ -258,7 +258,7 @@ use crate::state::*;
 pub struct Initialize<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
-    #[account(mut, seeds = [b"treasury", payer.key().as_ref()], bump)]
+    #[account(init, payer = payer, space = 8 + TreasuryAccount::INIT_SPACE, seeds = [b"treasury", payer.key().as_ref()], bump)]
     pub treasury: Account<'info, TreasuryAccount>,
 }
 

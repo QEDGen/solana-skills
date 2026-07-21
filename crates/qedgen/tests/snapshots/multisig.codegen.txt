@@ -1510,121 +1510,59 @@ mod tests {
 
     #[test]
     fn test_approve_guard_accepts_valid() {
-        let state = MultisigState {
-            creator: [1u8; 32],
-            threshold: 0,
-            member_count: 2,
-            members: Default::default(),
-            voted: Default::default(),
-            approval_count: 0,
-            rejection_count: 0,
-        };
-        let member_index: u8 = 0;
-        // No assertion: guard reads accounts, containers, or unsupported operators, so the fixture is unverified.
-        // See #312.
-        let _ = guard_approve(&state, member_index);
+        // No assertion: guard reads accounts, containers, or unsupported operators, so the fixture is unverified. The
+        // guard fn is referenced but NOT executed (an unverified
+        // fixture could panic a div/mod guard). See #312.
+        let _ = guard_approve;
     }
 
     #[test]
     fn test_approve_guard_rejects_invalid() {
-        let state = MultisigState {
-            creator: [1u8; 32],
-            threshold: 0,
-            member_count: 2,
-            members: Default::default(),
-            voted: Default::default(),
-            approval_count: 0,
-            rejection_count: 0,
-        };
-        let member_index: u8 = 0;
-        // No assertion: guard reads accounts, containers, or unsupported operators, so the fixture is unverified.
-        // See #312.
-        let _ = guard_approve(&state, member_index);
+        // No assertion: guard reads accounts, containers, or unsupported operators, so the fixture is unverified. The
+        // guard fn is referenced but NOT executed (an unverified
+        // fixture could panic a div/mod guard). See #312.
+        let _ = guard_approve;
     }
 
     #[test]
     fn test_reject_guard_accepts_valid() {
-        let state = MultisigState {
-            creator: [1u8; 32],
-            threshold: 0,
-            member_count: 2,
-            members: Default::default(),
-            voted: Default::default(),
-            approval_count: 0,
-            rejection_count: 0,
-        };
-        let member_index: u8 = 0;
-        // No assertion: guard reads accounts, containers, or unsupported operators, so the fixture is unverified.
-        // See #312.
-        let _ = guard_reject(&state, member_index);
+        // No assertion: guard reads accounts, containers, or unsupported operators, so the fixture is unverified. The
+        // guard fn is referenced but NOT executed (an unverified
+        // fixture could panic a div/mod guard). See #312.
+        let _ = guard_reject;
     }
 
     #[test]
     fn test_reject_guard_rejects_invalid() {
-        let state = MultisigState {
-            creator: [1u8; 32],
-            threshold: 0,
-            member_count: 2,
-            members: Default::default(),
-            voted: Default::default(),
-            approval_count: 0,
-            rejection_count: 0,
-        };
-        let member_index: u8 = 0;
-        // No assertion: guard reads accounts, containers, or unsupported operators, so the fixture is unverified.
-        // See #312.
-        let _ = guard_reject(&state, member_index);
+        // No assertion: guard reads accounts, containers, or unsupported operators, so the fixture is unverified. The
+        // guard fn is referenced but NOT executed (an unverified
+        // fixture could panic a div/mod guard). See #312.
+        let _ = guard_reject;
     }
 
     #[test]
     fn test_execute_guard_accepts_valid() {
-        let state = MultisigState {
-            creator: [1u8; 32],
-            threshold: 0,
-            member_count: 2,
-            members: Default::default(),
-            voted: Default::default(),
-            approval_count: 0,
-            rejection_count: 0,
-        };
-        let member_index: u8 = 0;
-        // No assertion: guard reads accounts, containers, or unsupported operators, so the fixture is unverified.
-        // See #312.
-        let _ = guard_execute(&state, member_index);
+        // No assertion: guard reads accounts, containers, or unsupported operators, so the fixture is unverified. The
+        // guard fn is referenced but NOT executed (an unverified
+        // fixture could panic a div/mod guard). See #312.
+        let _ = guard_execute;
     }
 
     #[test]
     fn test_execute_guard_rejects_invalid() {
-        let state = MultisigState {
-            creator: [1u8; 32],
-            threshold: 0,
-            member_count: 2,
-            members: Default::default(),
-            voted: Default::default(),
-            approval_count: 0,
-            rejection_count: 0,
-        };
-        let member_index: u8 = 0;
-        // No assertion: guard reads accounts, containers, or unsupported operators, so the fixture is unverified.
-        // See #312.
-        let _ = guard_execute(&state, member_index);
+        // No assertion: guard reads accounts, containers, or unsupported operators, so the fixture is unverified. The
+        // guard fn is referenced but NOT executed (an unverified
+        // fixture could panic a div/mod guard). See #312.
+        let _ = guard_execute;
     }
 
     #[test]
     fn test_cancel_proposal_guard_accepts_valid() {
-        let state = MultisigState {
-            creator: [1u8; 32],
-            threshold: 0,
-            member_count: 0,
-            members: Default::default(),
-            voted: Default::default(),
-            approval_count: 0,
-            rejection_count: 0,
-        };
         // No assertion: no fixture was found that would satisfy this
         // guard, so asserting would test the fixture search, not the
-        // guard. See #312.
-        let _ = guard_cancel_proposal(&state);
+        // guard. The guard fn is referenced but NOT executed — an
+        // unverified fixture could panic a div/mod guard. See #312.
+        let _ = guard_cancel_proposal;
     }
 
     #[test]
@@ -1668,12 +1606,9 @@ mod tests {
             approval_count: 0,
             rejection_count: 0,
         };
-        let member_index: u8 = 0;
+        let member_index: u8 = 2;
         let member_pubkey: [u8; 32] = [1u8; 32];
-        // No assertion: no fixture was found that would violate this
-        // guard, so asserting would test the fixture search, not the
-        // guard. See #312.
-        let _ = guard_add_member(&state, member_index, member_pubkey);
+        assert!(!guard_add_member(&state, member_index, member_pubkey));
     }
 
     #[test]
@@ -1695,10 +1630,10 @@ mod tests {
         let state = MultisigState {
             creator: [1u8; 32],
             threshold: 0,
-            member_count: 2,
+            member_count: 0,
             members: Default::default(),
             voted: Default::default(),
-            approval_count: 1,
+            approval_count: 0,
             rejection_count: 0,
         };
         assert!(!guard_remove_member(&state));
