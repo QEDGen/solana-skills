@@ -3096,3 +3096,77 @@ handler bump_total (amount : U64) : Vault.Active -> Vault.Active {
         "non-init state account keeps its auth binding:\n{non_init}"
     );
 }
+
+/// #317 — init accounts whose seeds reference a state field are enforced by
+/// the account macro. R28 must not independently reclassify the same seeds and
+/// add a second runtime check (or its `InvalidPda` error variant).
+#[test]
+fn account_plan_keeps_init_seed_enforcement_macro_only() {
+    const SRC: &str = r#"spec InitSeeds
+
+type Vault
+  | Uninitialized
+  | Active of { authority : Pubkey }
+
+type Error | Bad
+
+handler open : Vault.Uninitialized -> Vault.Active {
+  permissionless
+  accounts {
+    payer          : signer, writable
+    vault          : writable, pda ["vault", authority]
+    system_program : program
+  }
+  effect { authority := payer.pubkey }
+}
+"#;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let spec_path = dir.path().join("init-seeds.qedspec");
+    std::fs::write(&spec_path, SRC).expect("write spec");
+    std::fs::create_dir_all(dir.path().join(".qed")).expect("create .qed");
+    let spec = crate::check::parse_spec_file(&spec_path).expect("parse");
+    let mir = crate::mir::lower(&spec);
+
+    for target in [Target::Anchor, Target::Quasar] {
+        let target_name = match target {
+            Target::Anchor => "anchor",
+            Target::Quasar => "quasar",
+            Target::Pinocchio => unreachable!(),
+        };
+        let out_dir = dir.path().join(target_name);
+        crate::codegen_mir::generate(
+            &mir,
+            &spec,
+            &spec_path,
+            &out_dir,
+            target,
+            crate::codegen_mir::RegenOptions::default(),
+        )
+        .expect("codegen");
+
+        let guards = std::fs::read_to_string(out_dir.join("src/guards.rs")).expect("guards.rs");
+        let errors = std::fs::read_to_string(out_dir.join("src/errors.rs")).expect("errors.rs");
+        let account_surface = match target {
+            Target::Anchor => std::fs::read_to_string(out_dir.join("src/lib.rs")).expect("lib.rs"),
+            Target::Quasar => {
+                std::fs::read_to_string(out_dir.join("src/instructions/open.rs")).expect("open.rs")
+            }
+            Target::Pinocchio => unreachable!(),
+        };
+
+        assert!(
+            account_surface.contains("init")
+                && account_surface.contains("seeds = [b\"vault\", vault.authority.as_ref()]")
+                && account_surface.contains("bump"),
+            "{target:?} macro must own init seed enforcement:\n{account_surface}"
+        );
+        assert!(
+            !guards.contains("R28 PDA check"),
+            "{target:?} must not duplicate macro enforcement at runtime:\n{guards}"
+        );
+        assert!(
+            !errors.contains("InvalidPda"),
+            "{target:?} must not declare an unused R28 error variant:\n{errors}"
+        );
+    }
+}

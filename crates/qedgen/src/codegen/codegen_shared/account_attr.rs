@@ -74,6 +74,18 @@ pub(crate) enum AccountLifecycle {
     },
 }
 
+/// One canonical decision for how an account's PDA seeds are enforced.
+/// Consumers must not re-derive the suppression predicate: the account macro
+/// renderer and R28 runtime guard are complementary projections of this enum.
+pub(crate) enum SeedPlan {
+    /// The account has no declared PDA seeds.
+    None,
+    /// The target account macro enforces these rendered seed expressions.
+    Macro(Vec<String>),
+    /// The target macro cannot represent this seed shape; R28 must enforce it.
+    Runtime,
+}
+
 /// Everything codegen decides about one handler-account, derived once.
 ///
 /// The point is single derivation: before this, the `space =` target, the
@@ -82,9 +94,7 @@ pub(crate) enum AccountLifecycle {
 /// #307 were both instances of exactly that.
 pub(crate) struct AccountPlan {
     pub(crate) lifecycle: AccountLifecycle,
-    /// Rendered seed expressions, or `None` when the account has no PDA
-    /// seeds or the target suppresses the directive.
-    pub(crate) seeds: Option<Vec<String>>,
+    pub(crate) seeds: SeedPlan,
 }
 
 impl AccountPlan {
@@ -168,7 +178,7 @@ impl AccountPlan {
 
         Self {
             lifecycle,
-            seeds: render_seeds(acct, handler, target, spec, is_init),
+            seeds: plan_seeds(acct, handler, target, spec, is_init),
         }
     }
 }
@@ -238,7 +248,7 @@ fn render_account_attr(plan: &AccountPlan) -> String {
         }
     }
 
-    if let Some(seeds) = &plan.seeds {
+    if let SeedPlan::Macro(seeds) = &plan.seeds {
         parts.push(format!("seeds = [{}]", seeds.join(", ")));
         parts.push("bump".to_string());
     }
@@ -265,16 +275,17 @@ fn render_account_attr(plan: &AccountPlan) -> String {
     }
 }
 
-/// Render this account's PDA seed expressions, or `None` when it has no
-/// seeds or the target suppresses the directive.
-fn render_seeds(
+/// Decide once whether the macro or R28 owns PDA enforcement for this account.
+fn plan_seeds(
     acct: &ParsedHandlerAccount,
     handler: &ParsedHandler,
     target: crate::Target,
     spec: &ParsedSpec,
     is_init: bool,
-) -> Option<Vec<String>> {
-    let seeds = acct.pda_seeds.as_ref()?;
+) -> SeedPlan {
+    let Some(seeds) = acct.pda_seeds.as_ref() else {
+        return SeedPlan::None;
+    };
     {
         let bound_account_names: std::collections::HashSet<&str> =
             handler.accounts.iter().map(|a| a.name.as_str()).collect();
@@ -320,9 +331,9 @@ fn render_seeds(
                 || anchor_variant_field_seed;
 
         if suppress_seeds {
-            return None;
+            return SeedPlan::Runtime;
         }
-        Some(
+        SeedPlan::Macro(
             seeds
                 .iter()
                 .map(|seed| {
