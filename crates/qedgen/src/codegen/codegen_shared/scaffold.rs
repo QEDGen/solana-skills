@@ -303,8 +303,8 @@ pub(crate) fn render_handler_scaffold(
         if c.result_binding.is_none() {
             continue;
         }
-        match try_emit_cpi(c, handler, spec, target) {
-            Some(rendered) => {
+        match plan_cpi(c, handler, spec, target) {
+            CpiPlan::Complete(rendered) => {
                 out.push_str(&format!(
                     "        // Spec call: {}.{} (binding: {})\n",
                     c.target_interface,
@@ -314,7 +314,7 @@ pub(crate) fn render_handler_scaffold(
                 out.push_str(&rendered);
                 emitted_call_indices.insert(idx);
             }
-            None => {
+            CpiPlan::AgentFill(reason) => {
                 let args = c
                     .args
                     .iter()
@@ -322,11 +322,12 @@ pub(crate) fn render_handler_scaffold(
                     .collect::<Vec<_>>()
                     .join(", ");
                 out.push_str(&format!(
-                    "        // Spec call: {}.{}({}) (binding: {}) — needs fill\n",
+                    "        // Spec call: {}.{}({}) (binding: {}) — agent fill: {}\n",
                     c.target_interface,
                     c.target_handler,
                     args,
-                    c.result_binding.as_deref().unwrap_or("_")
+                    c.result_binding.as_deref().unwrap_or("_"),
+                    reason.render(),
                 ));
                 any_unmechanized_call_pre = true;
                 emitted_call_indices.insert(idx);
@@ -486,15 +487,15 @@ pub(crate) fn render_handler_scaffold(
         if emitted_call_indices.contains(&idx) {
             continue;
         }
-        match try_emit_cpi(c, handler, spec, target) {
-            Some(rendered) => {
+        match plan_cpi(c, handler, spec, target) {
+            CpiPlan::Complete(rendered) => {
                 out.push_str(&format!(
-                    "        // Spec call: {}.{} (Anchor CPI emitted by v2.8 G4)\n",
+                    "        // Spec call: {}.{} (complete CPI emitted)\n",
                     c.target_interface, c.target_handler
                 ));
                 out.push_str(&rendered);
             }
-            None => {
+            CpiPlan::AgentFill(reason) => {
                 let args = c
                     .args
                     .iter()
@@ -502,8 +503,11 @@ pub(crate) fn render_handler_scaffold(
                     .collect::<Vec<_>>()
                     .join(", ");
                 out.push_str(&format!(
-                    "        // Spec call: {}.{}({}) — v2.9 will emit a generic Anchor CPI\n",
-                    c.target_interface, c.target_handler, args
+                    "        // Spec call: {}.{}({}) — agent fill: {}\n",
+                    c.target_interface,
+                    c.target_handler,
+                    args,
+                    reason.render(),
                 ));
                 any_unmechanized_call = true;
             }

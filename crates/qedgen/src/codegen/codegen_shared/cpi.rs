@@ -1,5 +1,125 @@
 use super::*;
 
+/// The only two legal outcomes for a spec-level CPI call.
+///
+/// A target either emits the complete invocation, including every signer the
+/// interface requires, or it emits an explicit agent-fill site. In particular,
+/// a PDA signer may never fall through to an unsigned `invoke()` / `.invoke()`
+/// that looks complete but can only fail at runtime.
+pub(crate) enum CpiPlan {
+    Complete(String),
+    AgentFill(CpiFillReason),
+}
+
+pub(crate) enum CpiFillReason {
+    /// One or more interface signer slots bind to caller-owned PDAs and the
+    /// target's emitter did not assemble signer seeds for them (Anchor builder
+    /// shapes do — `CpiContext::new_with_signer`; every other path emits
+    /// unsigned invocations).
+    PdaSigner { accounts: Vec<String> },
+    /// The target has no complete lowering for this interface/handler shape.
+    Unsupported { target: Target },
+}
+
+impl CpiFillReason {
+    pub(crate) fn render(&self) -> String {
+        match self {
+            Self::PdaSigner { accounts } => format!(
+                "PDA signer authority ({}) requires signer-seed assembly; fill the complete signed CPI",
+                accounts.join(", ")
+            ),
+            Self::Unsupported { target } => format!(
+                "{} does not fully mechanize this CPI shape; fill the complete invocation",
+                target_name(*target)
+            ),
+        }
+    }
+}
+
+fn target_name(target: Target) -> &'static str {
+    match target {
+        Target::Anchor => "Anchor",
+        Target::Quasar => "Quasar",
+        Target::Pinocchio => "Pinocchio",
+    }
+}
+
+/// Build the per-call mechanization plan.
+///
+/// Target dispatch runs first; the PDA-signer check is a post-condition on
+/// the emitted artifact. A call whose signer slots bind caller PDAs is
+/// `Complete` only if the emitted code actually signs for them
+/// (`new_with_signer` / `invoke_signed`) — the Anchor builder shapes do, and
+/// the runtime journey (#308/#310) proves that path on-chain. Any emitter
+/// that would produce a plausible but unsigned invocation for a program
+/// authority (Anchor generic `invoke`, the builder's plain-`new` fallback
+/// when seeds aren't assemblable, Quasar, Pinocchio) resolves to an explicit
+/// agent-fill site instead.
+pub(crate) fn plan_cpi(
+    call: &crate::check::ParsedCall,
+    handler: &ParsedHandler,
+    spec: &ParsedSpec,
+    target: Target,
+) -> CpiPlan {
+    let Some(iface) = spec
+        .interfaces
+        .iter()
+        .find(|i| i.name == call.target_interface)
+    else {
+        return CpiPlan::AgentFill(CpiFillReason::Unsupported { target });
+    };
+
+    let pda_signers = iface
+        .handlers
+        .iter()
+        .find(|h| h.name == call.target_handler)
+        .into_iter()
+        .flat_map(|h| h.accounts.iter().filter(|a| a.is_signer))
+        .filter_map(|signer_slot| {
+            let arg = call.args.iter().find(|a| a.name == signer_slot.name)?;
+            handler
+                .accounts
+                .iter()
+                .find(|a| a.name == arg.rust_expr && a.pda_seeds.is_some())
+                .map(|a| a.name.clone())
+        })
+        .collect::<Vec<_>>();
+
+    let is_spl_token = iface.program_id.as_deref() == Some(SPL_TOKEN_PROGRAM_ID);
+    let is_system = iface.program_id.as_deref() == Some(SYSTEM_PROGRAM_ID);
+
+    let emitted = match (target, is_spl_token, is_system) {
+        (Target::Anchor, true, _) => emit_spl_token_cpi_anchor(call, handler, spec),
+        (Target::Anchor, false, true) => emit_system_cpi_anchor(call, handler, iface, spec),
+        (Target::Anchor, false, false) => emit_generic_cpi_anchor(call, handler, iface, spec),
+        (Target::Quasar, true, _) => emit_spl_token_cpi_quasar(call, handler, spec),
+        (Target::Quasar, false, true) => emit_system_cpi_quasar(call, handler, spec),
+        // Quasar generic CPI not implemented (would use `BufCpiCall`).
+        (Target::Quasar, false, false) => None,
+        (Target::Pinocchio, true, _) => emit_spl_token_cpi_pinocchio(call, handler, spec),
+        (Target::Pinocchio, false, true) => emit_system_cpi_pinocchio(call, handler, spec),
+        // Pinocchio generic CPI not implemented (raw invoke_signed).
+        (Target::Pinocchio, false, false) => None,
+    };
+
+    match emitted {
+        Some(code) if pda_signers.is_empty() || code_signs_for_pda(&code) => {
+            CpiPlan::Complete(code)
+        }
+        _ if !pda_signers.is_empty() => CpiPlan::AgentFill(CpiFillReason::PdaSigner {
+            accounts: pda_signers,
+        }),
+        _ => CpiPlan::AgentFill(CpiFillReason::Unsupported { target }),
+    }
+}
+
+/// Whether emitted CPI code signs for a program-owned PDA. Checked on the
+/// artifact itself (not re-derived from dispatch) so no emitter — present or
+/// future — can ship an unsigned invocation for a PDA signer.
+fn code_signs_for_pda(code: &str) -> bool {
+    code.contains("new_with_signer") || code.contains("invoke_signed")
+}
+
 /// Try to emit a real CPI invocation for one `call Interface.handler(...)`
 /// site. Dispatch on `(target, is_spl_token, is_system)`:
 ///
@@ -14,31 +134,16 @@ use super::*;
 /// Returns `None` for unrecognized interfaces/handlers and unimplemented
 /// branches (Quasar/Pinocchio generic) — the caller falls back to a
 /// structured comment + `todo!()` for the agent to fill.
+#[cfg(test)]
 pub(crate) fn try_emit_cpi(
     call: &crate::check::ParsedCall,
     handler: &ParsedHandler,
     spec: &ParsedSpec,
     target: Target,
 ) -> Option<String> {
-    let iface = spec
-        .interfaces
-        .iter()
-        .find(|i| i.name == call.target_interface)?;
-    let is_spl_token = iface.program_id.as_deref() == Some(SPL_TOKEN_PROGRAM_ID);
-    let is_system = iface.program_id.as_deref() == Some(SYSTEM_PROGRAM_ID);
-
-    match (target, is_spl_token, is_system) {
-        (Target::Anchor, true, _) => emit_spl_token_cpi_anchor(call, handler, spec),
-        (Target::Anchor, false, true) => emit_system_cpi_anchor(call, handler, iface, spec),
-        (Target::Anchor, false, false) => emit_generic_cpi_anchor(call, handler, iface, spec),
-        (Target::Quasar, true, _) => emit_spl_token_cpi_quasar(call, handler, spec),
-        (Target::Quasar, false, true) => emit_system_cpi_quasar(call, handler, spec),
-        // Quasar generic CPI not implemented (would use `BufCpiCall`).
-        (Target::Quasar, false, false) => None,
-        (Target::Pinocchio, true, _) => emit_spl_token_cpi_pinocchio(call, handler, spec),
-        (Target::Pinocchio, false, true) => emit_system_cpi_pinocchio(call, handler, spec),
-        // Pinocchio generic CPI not implemented (raw invoke_signed).
-        (Target::Pinocchio, false, false) => None,
+    match plan_cpi(call, handler, spec, target) {
+        CpiPlan::Complete(code) => Some(code),
+        CpiPlan::AgentFill(_) => None,
     }
 }
 

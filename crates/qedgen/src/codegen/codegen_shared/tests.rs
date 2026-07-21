@@ -754,6 +754,145 @@ handler send (n : U64) : State.Active -> State.Active {
     );
 }
 
+/// #314 — an interface signer slot bound to a caller PDA must resolve to a
+/// complete SIGNED invocation or an explicit agent-fill site, never a
+/// plausible but unsigned invoke. Anchor's builder shapes own signer-seed
+/// assembly (`new_with_signer`, proven by the runtime journey); Quasar and
+/// Pinocchio do not, so they must choose the explicit agent-fill outcome.
+#[test]
+fn cpi_pda_authority_signs_on_anchor_and_is_agent_fill_elsewhere() {
+    let spec = crate::chumsky_adapter::parse_str(
+        r#"spec Caller
+program_id "11111111111111111111111111111111"
+
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+  handler transfer (amount : U64) {
+    accounts {
+      from      : writable
+      to        : writable
+      authority : signer
+    }
+  }
+}
+
+type State | Active of { owner : Pubkey }
+type Error | E
+
+handler send (n : U64) : State.Active -> State.Active {
+  permissionless
+  accounts {
+    owner         : readonly
+    vault         : writable, pda ["vault", owner]
+    src           : writable
+    dst           : writable
+    token_program : program
+  }
+  call Token.transfer(from = src, to = dst, amount = n, authority = vault)
+}
+"#,
+    )
+    .unwrap();
+    let handler = spec.handlers.iter().find(|h| h.name == "send").unwrap();
+    let call = handler.calls.first().unwrap();
+
+    match plan_cpi(call, handler, &spec, Target::Anchor) {
+        CpiPlan::Complete(rendered) => assert!(
+            rendered.contains("CpiContext::new_with_signer"),
+            "Anchor must sign for the PDA authority; got:\n{rendered}"
+        ),
+        CpiPlan::AgentFill(reason) => panic!(
+            "Anchor owns signer-seed assembly for builder shapes; got fill: {}",
+            reason.render()
+        ),
+    }
+
+    for target in [Target::Quasar, Target::Pinocchio] {
+        match plan_cpi(call, handler, &spec, target) {
+            CpiPlan::AgentFill(CpiFillReason::PdaSigner { accounts }) => {
+                assert_eq!(accounts, vec!["vault"]);
+            }
+            CpiPlan::AgentFill(other) => {
+                panic!("expected PDA-signer reason, got: {}", other.render())
+            }
+            CpiPlan::Complete(rendered) => {
+                panic!("{target:?} emitted a plausible but unsigned PDA CPI:\n{rendered}")
+            }
+        }
+    }
+}
+
+/// #314 — Pinocchio cannot rely on an account macro to allocate and assign a
+/// lifecycle-created PDA. The handler body must request an explicit fill site
+/// instead of mutating state and returning `Ok(())` as though creation happened.
+#[test]
+fn pinocchio_lifecycle_pda_creation_requires_fill() {
+    let spec = crate::chumsky_adapter::parse_str(
+        r#"spec Caller
+type State | Uninitialized | Active of { owner : Pubkey }
+type Error | E
+handler open : State.Uninitialized -> State.Active {
+  permissionless
+  accounts {
+    payer : signer, writable
+    state : writable, pda ["state", payer]
+  }
+  effect { owner := payer.pubkey }
+}
+"#,
+    )
+    .unwrap();
+    let handler = spec.handlers.iter().find(|h| h.name == "open").unwrap();
+    let mut rendered = String::new();
+
+    let needs_fill = emit_pinocchio_effect_body(&mut rendered, handler, &spec);
+
+    assert!(needs_fill, "PDA creation must force the handler fill tail");
+    assert!(
+        rendered.contains("Lifecycle init requires PDA allocation/assignment")
+            && rendered.contains("complete signed System CPI"),
+        "fill site must state the complete missing operation:\n{rendered}"
+    );
+}
+
+#[test]
+fn pinocchio_events_and_transfer_sugar_require_fill() {
+    let spec = crate::chumsky_adapter::parse_str(
+        r#"spec Caller
+type State | Active of { total : U64 }
+type Error | E
+event Sent { amount : U64 }
+handler send (n : U64) : State.Active -> State.Active {
+  permissionless
+  accounts {
+    state         : writable
+    owner         : signer
+    src           : writable, type token
+    dst           : writable, type token
+    token_program : program
+  }
+  transfers { from src to dst amount n authority owner }
+  emits Sent
+}
+"#,
+    )
+    .unwrap();
+    let handler = spec.handlers.iter().find(|h| h.name == "send").unwrap();
+    let mut rendered = String::new();
+
+    let needs_fill = emit_pinocchio_effect_body(&mut rendered, handler, &spec);
+
+    assert!(
+        needs_fill,
+        "events/transfers must force the handler fill tail"
+    );
+    assert!(
+        rendered.contains("Spec event: emit Sent — agent fill")
+            && rendered.contains("Spec transfer: src -> dst amount=n — agent fill"),
+        "both unmechanized intents must be explicit:\n{rendered}"
+    );
+}
+
 /// Helper for the Quasar / Pinocchio CPI tests — same SPL Token
 /// transfer fixture shape used in
 /// `cpi_emits_anchor_spl_transfer_for_canonical_program_id`, but

@@ -101,7 +101,7 @@ impl Deposit {
     pub fn handler(&self, amount: u64) -> Result<()> {
         guards::deposit(self, amount)?;
         // Spec effect (needs fill): pool_balance add amount
-        // Spec call: Token.transfer(amount=amount) — v2.9 will emit a generic Anchor CPI
+        // Spec call: Token.transfer(amount=amount) — agent fill: Anchor does not fully mechanize this CPI shape; fill the complete invocation
         todo!("fill non-mechanical effects, events, transfers, calls")
     }
 }

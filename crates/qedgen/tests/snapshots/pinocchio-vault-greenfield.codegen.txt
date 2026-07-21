@@ -191,8 +191,8 @@ impl Withdraw<'_> {
             amount: amount,
         }
         .invoke()?;
-        // TODO(slice 6 4b-cont): events / transfers.
-        Ok(())
+        // Spec event: emit Withdrawn — agent fill
+        todo!("fill non-mechanical effects, events, transfers, calls")
     }
 }
 
