@@ -834,18 +834,24 @@ pub struct Path {
     /// First segment indicates the namespace (`state`, an account
     /// binding name, a handler param).
     pub segments: Vec<Symbol>,
+    /// Structured source path for effect targets. This is populated by the
+    /// parser adapter and retained through lowering; legacy constructors
+    /// leave it empty.
+    pub tree: Option<expr_tree::TreePath>,
 }
 
 impl Path {
     pub fn single(name: impl Into<Symbol>) -> Self {
         Path {
             segments: vec![name.into()],
+            tree: None,
         }
     }
 
     pub fn dotted(parts: &[&str]) -> Self {
         Path {
             segments: parts.iter().map(|s| s.to_string()).collect(),
+            tree: None,
         }
     }
 }
@@ -1573,7 +1579,8 @@ fn lower_effects(effects: &[crate::check::ParsedEffect]) -> Vec<Stmt> {
     let mut stmts = Vec::new();
     for eff in effects {
         let err_override = eff.on_error.clone();
-        let path = parse_field_path(&eff.field);
+        let mut path = parse_field_path(&eff.field);
+        path.tree = eff.lhs.clone();
         let tree = eff.tree.clone();
         let value = &eff.value;
         // `value` doubles as the Lean form; the Rust form comes from the
@@ -1624,6 +1631,7 @@ fn lower_effects(effects: &[crate::check::ParsedEffect]) -> Vec<Stmt> {
 fn parse_field_path(s: &str) -> Path {
     Path {
         segments: s.split('.').map(|seg| seg.to_string()).collect(),
+        tree: None,
     }
 }
 

@@ -134,7 +134,7 @@ fn approve(s: &mut State, member_index: u8) -> bool {
         Some(__v) => s.approval_count = __v,
         None => return false,
     }
-    s.voted[member_index as usize] = 1;
+    s.voted[(member_index) as usize] = 1;
     s.status = Status::HasProposal;
     true
 }
@@ -154,7 +154,7 @@ fn reject(s: &mut State, member_index: u8) -> bool {
         Some(__v) => s.rejection_count = __v,
         None => return false,
     }
-    s.voted[member_index as usize] = 1;
+    s.voted[(member_index) as usize] = 1;
     s.status = Status::HasProposal;
     true
 }
@@ -200,7 +200,7 @@ fn add_member(s: &mut State, member_index: u8, member_pubkey: [u8; 32]) -> bool 
     if !(((member_index) as usize) < s.members.len()) {
         return false;
     }
-    s.members[member_index as usize] = member_pubkey;
+    s.members[(member_index) as usize] = member_pubkey;
     s.status = Status::Active;
     true
 }

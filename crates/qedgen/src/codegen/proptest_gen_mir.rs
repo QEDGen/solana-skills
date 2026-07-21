@@ -1153,8 +1153,10 @@ fn emit_overflow_tests_for(
             }
             // Strip variant prefix so `Active.balance` resolves to `balance`
             // for the flat-State model (fn name + field lookup).
-            let field_owned =
-                rust_codegen_util::strip_variant_prefix_for_flat_state(&field_raw, spec);
+            let field_owned = rust_codegen_util::strip_variant_prefix_for_flat_state(
+                &rust_codegen_util::effect_path_source(field_raw),
+                spec,
+            );
             let field = field_owned.as_str();
 
             let dsl_type = all_fields
@@ -1769,7 +1771,7 @@ handler approve (member_index : U8) (member_pubkey : Pubkey) : State.Active -> S
         );
         // (c) Effect-LHS subscript is cast to usize.
         assert!(
-            body.contains("s.voted[member_index as usize] = 1"),
+            body.contains("s.voted[(member_index) as usize] = 1"),
             "effect-LHS subscript casts to usize:\n{body}"
         );
     }

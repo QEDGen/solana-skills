@@ -131,6 +131,50 @@ pub fn strip_variant_prefix_for_flat_state(path: &str, spec: &ParsedSpec) -> Str
     path.to_string()
 }
 
+/// Source spelling of a MIR target path. This is the compatibility view for
+/// schema lookups and diagnostics; Rust emission must use
+/// [`render_effect_target`] so structured subscripts reach the canonical
+/// precedence-aware renderer.
+pub fn effect_path_source(path: &crate::mir::Path) -> String {
+    path.segments.join(".")
+}
+
+/// Render an effect target with its runtime receiver. Adapter-built paths
+/// use the same canonical renderer as every other Rust expression, including
+/// structural `usize` casts for index segments. The fallback is only for
+/// legacy/fixture paths that predate the typed carrier.
+pub fn render_effect_target(path: &crate::mir::Path, spec: &ParsedSpec, receiver: &str) -> String {
+    use crate::mir::expr_tree::{BindingKind, TreeSeg};
+    if let Some(mut tree) = path.tree.clone() {
+        let root_is_variant = spec
+            .account_types
+            .iter()
+            .any(|a| a.variants.iter().any(|v| v.name == tree.root));
+        if root_is_variant {
+            tree.root = "state".to_string();
+            tree.binding = BindingKind::StateField;
+        }
+        if matches!(tree.binding, BindingKind::StateField | BindingKind::Ghost) {
+            if let Some(TreeSeg::Field(first)) = tree.segments.first() {
+                let is_variant = spec
+                    .account_types
+                    .iter()
+                    .any(|a| a.variants.iter().any(|v| v.name == *first));
+                if is_variant {
+                    tree.segments.remove(0);
+                }
+            }
+        }
+        return super::tree_render::render_rust(
+            &crate::mir::ExprTree::Path(tree),
+            super::tree_render::RustCx::native()
+                .with_binder(super::tree_render::Binder::SelfAcct(receiver)),
+        );
+    }
+    let flat = strip_variant_prefix_for_flat_state(&effect_path_source(path), spec);
+    format!("{receiver}.{}", cast_subscripts(&flat))
+}
+
 /// Project an effect-shaped MIR `Stmt` back onto the `(field, op_kind,
 /// value)` triple the string templates below consume — the #66 adaptor
 /// that makes `Stmt` the iteration source for the Kani/proptest transition
@@ -145,20 +189,20 @@ pub fn strip_variant_prefix_for_flat_state(path: &str, spec: &ParsedSpec) -> Str
 /// for the Kani/proptest backends.
 pub fn stmt_effect_triple(
     stmt: &crate::mir::Stmt,
-) -> Option<(String, &'static str, &crate::mir::Expr)> {
+) -> Option<(&crate::mir::Path, &'static str, &crate::mir::Expr)> {
     use crate::mir::Stmt;
     match stmt {
-        Stmt::Assign { path, rhs } => Some((path.segments.join("."), "set", rhs)),
+        Stmt::Assign { path, rhs } => Some((path, "set", rhs)),
         Stmt::CheckedAdd { path, delta, .. } => {
             // The lowered per-site error name is Lean/scaffold surface;
             // the pure model signals overflow via `return false`.
-            Some((path.segments.join("."), "add", delta))
+            Some((path, "add", delta))
         }
-        Stmt::CheckedSub { path, delta, .. } => Some((path.segments.join("."), "sub", delta)),
-        Stmt::SatAdd { path, delta } => Some((path.segments.join("."), "add_sat", delta)),
-        Stmt::SatSub { path, delta } => Some((path.segments.join("."), "sub_sat", delta)),
-        Stmt::WrapAdd { path, delta } => Some((path.segments.join("."), "add_wrap", delta)),
-        Stmt::WrapSub { path, delta } => Some((path.segments.join("."), "sub_wrap", delta)),
+        Stmt::CheckedSub { path, delta, .. } => Some((path, "sub", delta)),
+        Stmt::SatAdd { path, delta } => Some((path, "add_sat", delta)),
+        Stmt::SatSub { path, delta } => Some((path, "sub_sat", delta)),
+        Stmt::WrapAdd { path, delta } => Some((path, "add_wrap", delta)),
+        Stmt::WrapSub { path, delta } => Some((path, "sub_wrap", delta)),
         // Guard surface: `requires X else Err` folds into the guard
         // conjunction via `collect_full_guard*`, not the body.
         Stmt::RequireOrAbort { .. } => None,
@@ -185,7 +229,7 @@ pub fn stmt_effect_triple(
 /// see conditionally-applied effects.
 pub fn block_effect_triples(
     body: &crate::mir::Block,
-) -> Vec<(String, &'static str, &crate::mir::Expr)> {
+) -> Vec<(&crate::mir::Path, &'static str, &crate::mir::Expr)> {
     body.stmts.iter().filter_map(stmt_effect_triple).collect()
 }
 
@@ -194,10 +238,10 @@ pub fn block_effect_triples(
 /// and tests) where a conditionally-applied effect counts.
 pub fn block_effect_triples_deep(
     body: &crate::mir::Block,
-) -> Vec<(String, &'static str, &crate::mir::Expr)> {
+) -> Vec<(&crate::mir::Path, &'static str, &crate::mir::Expr)> {
     fn walk<'a>(
         stmts: &'a [crate::mir::Stmt],
-        out: &mut Vec<(String, &'static str, &'a crate::mir::Expr)>,
+        out: &mut Vec<(&'a crate::mir::Path, &'static str, &'a crate::mir::Expr)>,
     ) {
         for s in stmts {
             if let Some(t) = stmt_effect_triple(s) {
@@ -250,13 +294,13 @@ pub fn state_field_reads(
 /// Takes the exact triple stream the caller will emit (post pubkey-skip
 /// filtering), so every snapshot is referenced by an emitted statement.
 pub fn parallel_snapshot_fields(
-    triples: &[(String, &'static str, &crate::mir::Expr)],
+    triples: &[(&crate::mir::Path, &'static str, &crate::mir::Expr)],
     spec: &ParsedSpec,
 ) -> Vec<String> {
     let mut written: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut read: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for (field, _, value) in triples {
-        let flat = strip_variant_prefix_for_flat_state(field, spec);
+        let flat = strip_variant_prefix_for_flat_state(&effect_path_source(field), spec);
         written.insert(effect_target_base(&flat).to_string());
         state_field_reads(mir_expr_tree(value), &mut read);
     }
@@ -334,7 +378,7 @@ pub fn emit_one_effect(
     out: &mut String,
     spec: &ParsedSpec,
     wrapping: bool,
-    field: &str,
+    field: &crate::mir::Path,
     op_kind: &str,
     value: &crate::mir::Expr,
     indent: &str,
@@ -350,7 +394,7 @@ fn emit_one_effect_inner(
     out: &mut String,
     spec: &ParsedSpec,
     wrapping: bool,
-    field: &str,
+    field: &crate::mir::Path,
     op_kind: &str,
     value: &crate::mir::Expr,
     indent: &str,
@@ -364,8 +408,10 @@ fn emit_one_effect_inner(
     // the variant itself is tracked via `s.status`. Subscripts are cast to
     // `usize` — params bind at their spec types (`u8` etc.) while Rust
     // arrays index by `usize` (`s.voted[member_index]` was E0277, #295).
-    let field_owned = cast_subscripts(&strip_variant_prefix_for_flat_state(field, spec));
+    let effect_path = field;
+    let field_owned = strip_variant_prefix_for_flat_state(&effect_path_source(effect_path), spec);
     let field = field_owned.as_str();
+    let field_target = render_effect_target(effect_path, spec, "s");
     // Tree-native RHS (#151 Slice 1): one render call replaces the
     // adapter's pre-rendered string + `resolve_value`'s binder surgery +
     // the account-pubkey substring rewrite. Fallibility is structural,
@@ -407,17 +453,17 @@ fn emit_one_effect_inner(
     let rust_value = substitute_pre_reads(&rust_value, "s", pre_fields);
     match op_kind {
         "set" => {
-            out.push_str(&format!("{indent}s.{field} = {rust_value};\n"));
+            out.push_str(&format!("{indent}{field_target} = {rust_value};\n"));
         }
         "add" => {
             if wrapping {
                 out.push_str(&format!(
-                    "{indent}s.{field} = s.{field}.wrapping_add({rust_value});\n"
+                    "{indent}{field_target} = {field_target}.wrapping_add({rust_value});\n"
                 ));
             } else {
                 out.push_str(&format!(
-                    "{indent}match s.{field}.checked_add({rust_value}) {{\n\
-                     {indent}    Some(__v) => s.{field} = __v,\n\
+                    "{indent}match {field_target}.checked_add({rust_value}) {{\n\
+                     {indent}    Some(__v) => {field_target} = __v,\n\
                      {indent}    None => return false,\n\
                      {indent}}}\n"
                 ));
@@ -425,23 +471,23 @@ fn emit_one_effect_inner(
         }
         "add_sat" => {
             out.push_str(&format!(
-                "{indent}s.{field} = s.{field}.saturating_add({rust_value});\n"
+                "{indent}{field_target} = {field_target}.saturating_add({rust_value});\n"
             ));
         }
         "add_wrap" => {
             out.push_str(&format!(
-                "{indent}s.{field} = s.{field}.wrapping_add({rust_value});\n"
+                "{indent}{field_target} = {field_target}.wrapping_add({rust_value});\n"
             ));
         }
         "sub" => {
             if wrapping {
                 out.push_str(&format!(
-                    "{indent}s.{field} = s.{field}.wrapping_sub({rust_value});\n"
+                    "{indent}{field_target} = {field_target}.wrapping_sub({rust_value});\n"
                 ));
             } else {
                 out.push_str(&format!(
-                    "{indent}match s.{field}.checked_sub({rust_value}) {{\n\
-                     {indent}    Some(__v) => s.{field} = __v,\n\
+                    "{indent}match {field_target}.checked_sub({rust_value}) {{\n\
+                     {indent}    Some(__v) => {field_target} = __v,\n\
                      {indent}    None => return false,\n\
                      {indent}}}\n"
                 ));
@@ -449,12 +495,12 @@ fn emit_one_effect_inner(
         }
         "sub_sat" => {
             out.push_str(&format!(
-                "{indent}s.{field} = s.{field}.saturating_sub({rust_value});\n"
+                "{indent}{field_target} = {field_target}.saturating_sub({rust_value});\n"
             ));
         }
         "sub_wrap" => {
             out.push_str(&format!(
-                "{indent}s.{field} = s.{field}.wrapping_sub({rust_value});\n"
+                "{indent}{field_target} = {field_target}.wrapping_sub({rust_value});\n"
             ));
         }
         _ => {
@@ -471,7 +517,7 @@ pub fn emit_one_effect_with_account_env(
     out: &mut String,
     spec: &ParsedSpec,
     wrapping: bool,
-    field: &str,
+    field: &crate::mir::Path,
     op_kind: &str,
     value: &crate::mir::Expr,
     indent: &str,

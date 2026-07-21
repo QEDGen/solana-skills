@@ -567,10 +567,9 @@ fn effect_triples(op_name: &str, mir: &crate::mir::Mir, spec: &ParsedSpec) -> Ve
         .into_iter()
         .filter(|(field, _, value)| !effect_is_account_valued(field, value, op_name, spec))
         .map(|(field, kind, value)| {
+            let target = crate::rust_codegen_util::render_effect_target(field, spec, "state");
             (
-                cast_subscripts(
-                    &crate::rust_codegen_util::strip_variant_prefix_for_flat_state(&field, spec),
-                ),
+                target.strip_prefix("state.").unwrap_or(&target).to_string(),
                 kind,
                 // `state.` receiver, same binder as `render_for_state` —
                 // the native default renders state reads as `s.<field>`,
@@ -593,7 +592,7 @@ fn effect_triples(op_name: &str, mir: &crate::mir::Mir, spec: &ParsedSpec) -> Ve
 ///   `apply_*`/test scopes have no such binding, so rendering it
 ///   verbatim is an E0425 (#297).
 fn effect_is_account_valued(
-    field: &str,
+    field: &crate::mir::Path,
     value: &crate::mir::Expr,
     op_name: &str,
     spec: &ParsedSpec,
@@ -602,7 +601,13 @@ fn effect_is_account_valued(
         .handlers
         .iter()
         .find(|o| o.name == op_name)
-        .is_some_and(|op| crate::rust_codegen_util::field_type_is_pubkey(field, op, spec));
+        .is_some_and(|op| {
+            crate::rust_codegen_util::field_type_is_pubkey(
+                &crate::rust_codegen_util::effect_path_source(field),
+                op,
+                spec,
+            )
+        });
     dest_is_pubkey
         || crate::rust_codegen_util::tree_render::tree_mentions_account(
             crate::rust_codegen_util::mir_expr_tree(value),
@@ -622,7 +627,10 @@ fn suppressed_effect_notes(op_name: &str, mir: &crate::mir::Mir, spec: &ParsedSp
         .map(|(field, _, value)| {
             format!(
                 "{} := {}",
-                crate::rust_codegen_util::strip_variant_prefix_for_flat_state(&field, spec),
+                crate::rust_codegen_util::strip_variant_prefix_for_flat_state(
+                    &crate::rust_codegen_util::effect_path_source(field),
+                    spec,
+                ),
                 crate::rust_codegen_util::mir_expr_rust(value)
             )
         })
@@ -638,7 +646,7 @@ fn parallel_pre_fields(op_name: &str, mir: &crate::mir::Mir, spec: &ParsedSpec) 
     let Some(h) = mir.handlers.iter().find(|h| h.name == op_name) else {
         return Vec::new();
     };
-    let triples: Vec<(String, &'static str, &crate::mir::Expr)> =
+    let triples: Vec<(&crate::mir::Path, &'static str, &crate::mir::Expr)> =
         crate::rust_codegen_util::block_effect_triples_deep(&h.body)
             .into_iter()
             .filter(|(field, _, value)| !effect_is_account_valued(field, value, op_name, spec))
@@ -650,36 +658,6 @@ fn parallel_pre_fields(op_name: &str, mir: &crate::mir::Mir, spec: &ParsedSpec) 
 /// receiver this file renders with.
 fn substitute_pre_state_reads(value: &str, pre_fields: &[String]) -> String {
     crate::rust_codegen_util::substitute_pre_reads(value, "state", pre_fields)
-}
-
-/// Rewrite `[ident]` subscripts to `[ident as usize]` — unit tests bind
-/// params at their spec types (`u8` etc.) while Rust arrays index by
-/// `usize`. Numeric and compound subscripts pass through unchanged.
-fn cast_subscripts(field: &str) -> String {
-    let mut out = String::new();
-    let mut rest = field;
-    while let Some(i) = rest.find('[') {
-        out.push_str(&rest[..=i]);
-        rest = &rest[i + 1..];
-        let Some(j) = rest.find(']') else {
-            out.push_str(rest);
-            return out;
-        };
-        let idx = &rest[..j];
-        let is_numeric = !idx.is_empty() && idx.chars().all(|c| c.is_ascii_digit());
-        let is_ident = !idx.is_empty()
-            && idx.chars().all(|c| c.is_alphanumeric() || c == '_')
-            && !idx.starts_with(|c: char| c.is_ascii_digit());
-        if is_ident && !is_numeric {
-            out.push_str(&format!("{} as usize", idx));
-        } else {
-            out.push_str(idx);
-        }
-        out.push(']');
-        rest = &rest[j + 1..];
-    }
-    out.push_str(rest);
-    out
 }
 
 /// Identifier-safe form of an effect-target path for `pre_*` snapshot

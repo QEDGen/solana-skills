@@ -63,7 +63,8 @@ pub(crate) fn emit_effect_conformance_harnesses(
             .ok_or_else(|| anyhow::anyhow!("MIR has no handler `{}`", op.name))?;
         let triples = util::block_effect_triples(body);
         for (field, op_kind, value) in triples.iter().cloned() {
-            let harness_name = format!("verify_{}_effect_{}", op.name, sanitize_ident(&field));
+            let field_name = util::effect_path_source(field);
+            let harness_name = format!("verify_{}_effect_{}", op.name, sanitize_ident(&field_name));
             emit_one_conformance_harness(
                 out,
                 ConformanceHarness {
@@ -75,7 +76,7 @@ pub(crate) fn emit_effect_conformance_harnesses(
                     field_type_lookup: &field_type_lookup,
                     harness_name: &harness_name,
                     assume_lines: &[],
-                    effect: (&field, op_kind, value),
+                    effect: (field, op_kind, value),
                     sibling_triples: &triples,
                 },
             )?;
@@ -115,7 +116,7 @@ pub(crate) fn emit_effect_conformance_harnesses(
                         "verify_{}_arm{}_effect_{}",
                         op.name,
                         idx,
-                        sanitize_ident(&field)
+                        sanitize_ident(&util::effect_path_source(field))
                     );
                     emit_one_conformance_harness(
                         out,
@@ -128,7 +129,7 @@ pub(crate) fn emit_effect_conformance_harnesses(
                             field_type_lookup: &field_type_lookup,
                             harness_name: &harness_name,
                             assume_lines: &assume,
-                            effect: (&field, op_kind, value),
+                            effect: (field, op_kind, value),
                             sibling_triples: &arm_triples,
                         },
                     )?;
@@ -144,7 +145,7 @@ pub(crate) fn emit_effect_conformance_harnesses(
                     let harness_name = format!(
                         "verify_{}_default_effect_{}",
                         op.name,
-                        sanitize_ident(&field)
+                        sanitize_ident(&util::effect_path_source(field))
                     );
                     emit_one_conformance_harness(
                         out,
@@ -157,7 +158,7 @@ pub(crate) fn emit_effect_conformance_harnesses(
                             field_type_lookup: &field_type_lookup,
                             harness_name: &harness_name,
                             assume_lines: &assumes,
-                            effect: (&field, op_kind, value),
+                            effect: (field, op_kind, value),
                             sibling_triples: &default_triples,
                         },
                     )?;
@@ -181,10 +182,10 @@ pub(crate) struct ConformanceHarness<'a> {
     pub(crate) harness_name: &'a str,
     pub(crate) assume_lines: &'a [String],
     /// The target effect: `(field, op_kind, value)`.
-    pub(crate) effect: (&'a str, &'a str, &'a crate::mir::Expr),
+    pub(crate) effect: (&'a crate::mir::Path, &'a str, &'a crate::mir::Expr),
     /// The effect set that can legally fire alongside the target — the
     /// whole flat body, or one Branch arm.
-    pub(crate) sibling_triples: &'a [(String, &'static str, &'a crate::mir::Expr)],
+    pub(crate) sibling_triples: &'a [(&'a crate::mir::Path, &'static str, &'a crate::mir::Expr)],
 }
 
 /// One effect-conformance harness: symbolic (or zeroed-init) state,
@@ -211,6 +212,9 @@ pub(crate) fn emit_one_conformance_harness(
     } = ctx;
 
     let is_init = op.pre_status.as_deref() == Some("Uninitialized");
+    let effect_path = field;
+    let field_owned = util::effect_path_source(effect_path);
+    let field = field_owned.as_str();
 
     let base = util::effect_target_base(field);
     if !field_type_lookup.contains_key(base) {
@@ -310,12 +314,12 @@ pub(crate) fn emit_one_conformance_harness(
     // missing here, so `s.voted[member_index] == 1` was an E0277 that
     // only surfaced once the Kani compile gate began to run for this
     // example.
-    let field_read = crate::rust_codegen_util::cast_subscripts(field);
+    let field_read = util::render_effect_target(effect_path, parsed, "s");
     let expected_eq = |expected: &str| -> String {
         if has_try {
-            format!("Some(s.{field_read}) == (|| Some({expected}))()")
+            format!("Some({field_read}) == (|| Some({expected}))()")
         } else {
-            format!("s.{field_read} == {expected}")
+            format!("{field_read} == {expected}")
         }
     };
     match op_kind {
@@ -369,7 +373,7 @@ pub(crate) fn emit_one_conformance_harness(
         if fname.as_str() != field {
             let sibling_mutated = sibling_triples
                 .iter()
-                .any(|(f, _, _)| f.as_str() == fname.as_str());
+                .any(|(f, _, _)| util::effect_path_source(f) == fname.as_str());
             if !sibling_mutated {
                 let assertion = util::rewrite_kani_pubkey_comparisons(
                     &format!("s.{fname} == pre_{fname}"),
