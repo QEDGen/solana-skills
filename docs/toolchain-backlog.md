@@ -992,3 +992,365 @@ IDL-derivable; only the per-handler transition edge needs the impl.
 
 _Both surfaced from the same principle raised while reviewing IDL handler coverage:
 anything mechanically derivable from the IDL should not be a `TODO` in the skeleton._
+
+---
+
+## Session: v2.45.0 release cut (2026-07-18)
+
+Source: running the full `docs/RELEASING.md` checklist for v2.45.0 (merged PRs
+#244/#245/#259, tagged + published with binaries). No audit target — friction is
+in the check gate, the release runbook, and standalone-codegen DX. Ranked
+most-leverage first.
+
+### 🐞 B8 — `check` summary + exit code silently drop `Severity::Error` lints  [NEEDS-FIX]
+
+`qedgen check --frozen --spec examples/rust/escrow/` prints
+`E [P1] [invariant_no_body] invariant 'conservation' has only a description
+string … (vacuous proof)` yet the summary says `0 warning(s), 6 info` and the
+exit code is 0. Reproduced identically on escrow-split and on the v2.44.0 tagged
+binary (pre-existing). An E-severity lint that neither fails the check nor
+appears in any counter is invisible to CI and to the RELEASING.md §8 gate — the
+§8 baseline claim "every bundled example is warning-clean except multisig" is
+technically true only because the accounting can't see Error-class lints.
+- **Evidence:** command above (exit 0, `0 warning(s)`); `examples/rust/escrow/escrow.qedspec:125`
+  + `examples/rust/escrow-split/properties.qedspec:3` (description-only `conservation`);
+  RELEASING.md §8 wording.
+- **Root cause:** `run.rs:1337-1351` — the check summary counts only
+  `Severity::Warning` and `Severity::Info`, and `has_issues` is set only when
+  `warns > 0`. `Severity::Error` entries (emitted by `invariant_no_body`
+  `structural.rs:1146`, `duplicate_effect_target`, `effect_type_mismatch`,
+  `map_bound_not_const`, …) print with the `E` prefix (`run_helpers.rs:746`) but
+  are excluded from both counters and the exit decision. Inconsistent with
+  `ratify.rs:367` / `elicit.rs:604`, which DO treat `Severity::Error` as blocking.
+- **Proposed:** (1) count errors in their own bucket (`N error(s), M warning(s),
+  K info`) and set `has_issues` when `errors > 0`; (2) fix the bundled
+  escrow/escrow-split specs first (give `conservation` a real `expr` body or
+  drop it) so the frozen gate stays green; (3) align RELEASING.md §8 to
+  "error- and warning-clean". Gate with a test asserting an Error-severity lint
+  makes `check` exit non-zero.
+- **Verdict:** FILE (bug). High leverage: Error is the severity the vacuous-proof
+  lints use — today the release gate can't see exactly the findings it exists for.
+- **Issue:** #260
+
+### 🩹 F5 — RELEASING.md gaps: no publish-release step; auditor-skill sync undocumented
+
+Two runbook gaps hit in sequence during the v2.45.0 cut:
+(a) `.github/workflows/release.yml` triggers on `release: types [created]` — a
+pushed tag alone builds NO binaries, and the checklist ends at the doc-drift
+sweep with no "publish the GitHub release" step; `gh release create v<version>`
+(the actual asset trigger) had to be discovered by reading the workflow.
+(b) Step 1 says bump `skills/qedgen-auditor/VERSION` and run
+`check-auditor-skill.sh`, but the gate then fails on the installed-copy diff
+(`check-auditor-skill.sh:133-142` `diff -qr` vs `.claude/skills/qedgen-auditor`)
+until `scripts/sync-auditor-skill.sh` is run — the error names the fix, but the
+checklist doesn't include the sync.
+- **Evidence:** `release.yml` `on: release: types [created]`; RELEASING.md
+  steps 1–9 (no publish step, no sync step); v2.45.0 cut hit both.
+- **Root cause:** doc drift — the checklist predates the release-asset workflow
+  and the installed-skill-copy gate.
+- **Proposed:** add a final step "tag, then `gh release create v<version>` —
+  this event (not the tag push) triggers the binary build"; fold
+  `bash scripts/sync-auditor-skill.sh .claude/skills/qedgen-auditor` into step 1.
+  Optionally also trigger `release.yml` on tag push so the runbook can't miss it.
+- **Verdict:** FILE (friction). Hits every release.
+- **Issue:** #261
+
+### 🩹 F7 — standalone codegen reveals prerequisites one error at a time
+
+A one-off `qedgen codegen --proptest --spec <file>` in a scratch dir (the §8a
+`old()` harness spot-check) fails serially: first `qedgen requires a git repo —
+run 'git init' first`, then after `git init`, `No .qed/ directory found … run
+'qedgen init' first`. Two round-trips for what one preflight message could say —
+and a read-only spot-check arguably shouldn't need project scaffolding at all.
+- **Evidence:** scratch repro (copied bundled escrow spec to an empty dir):
+  run 1 exits 1 with the git message; run 2 (post-`git init`) exits 1 with the
+  `.qed/` message.
+- **Root cause:** the gates live in different layers and each fails fast —
+  `run_helpers.rs:543` (git check) vs `codegen_mir.rs:135` (`.qed/` check) — with
+  no combined preflight.
+- **Proposed:** a single preflight that reports ALL missing prerequisites at
+  once; or a projectless spot-check mode (`--stdout`/`--dry-run`) for generating
+  a harness from a bare spec without `git init` + `qedgen init`.
+- **Verdict:** FILE (friction). Low priority; minor but recurs for every
+  scratch-dir codegen check.
+- **Issue:** #262
+
+### ✅ PR #244 tail findings — already filed, no action
+
+PR #244's body listed five unfixed findings offered as issues. All five already
+have issues: install.sh version skew → #252 (open), partial-regen stale `lib.rs`
+→ #253 (open), `(looking in )` empty-path import errors + raw char-class parse
+errors → #254 (open, covers both), implication operator in property bodies →
+#255 (closed). Cross-linked here; nothing new to file.
+
+---
+
+## Session: maintainer bug-sweep + prevention program (2026-07-19)
+
+Source: the issue-sweep session (closed #248–254, #260–262, #269–274, #279 via
+PRs #264–287; shipped release-gate.sh, cold-start-smoke.sh, journey tests,
+SeverityCounts tally). No verification target — friction below surfaced while
+dogfooding the CLI in scratch dirs and staging debug. All repros re-run against
+HEAD (post-#268/#277/#285) with a fresh debug build, not the stale v2.45.0
+`bin/qedgen`. Ranked most-leverage first.
+
+### 🐞 B9 — `--program .` yields generic `spec Program` / `program.qedspec` — root never canonicalized  [NEEDS-FIX]
+
+Residual of the #248/#249 lane fix: `probe --program . --emit-spec-candidates
+--audit-dir .qed/audit/j1` records `"program_root": "."` verbatim in
+`run-manifest.json` and emits `spec Program` in the skeleton; `ratify` then
+writes `./program.qedspec`. Expected: the directory's real name (`spec
+Scoutdemo` / `scoutdemo.qedspec` when cwd is `scoutdemo/`). `--program .` is
+the natural invocation from inside a program root, so every artifact in that
+flow gets the placeholder name.
+- **Evidence:** scratch repro (HEAD debug build, 2026-07-19): dir named
+  `scoutdemo/`, `probe --program . --emit-spec-candidates --audit-dir
+  .qed/audit/j1` → manifest `"program_root": "."`, skeleton `spec Program`;
+  `ratify --audit-dir .qed/audit/j1` → `Wrote spec to ./program.qedspec`.
+- **Root cause:** the raw clap `--program` path is never canonicalized.
+  `run.rs:377` binds `prog_root` straight from the arg;
+  `run_helpers.rs:67-71` (`write_audit_working_set`) does
+  `prog_root.file_name()` — `None` for `"."` → `"program"` — and
+  `run_helpers.rs:267,345` record the raw string into
+  domain-dossier/run-manifest. Downstream, `ratify.rs:1233-1238`
+  (`manifest_program_root`) returns the recorded `"."` as-is (passes the
+  only guard, non-empty), and `ratify.rs:1241-1251` (`default_spec_path`)
+  hits the same `file_name() == None` → `"program"` fallback.
+- **Proposed:** canonicalize once at the probe entry (`run.rs:377`,
+  `dunce::canonicalize` or `cwd.join(p)` + normalize) before
+  `write_audit_working_set`, so the skeleton name AND the recorded manifest
+  are correct at the source; defensively canonicalize relative roots in
+  `manifest_program_root` for already-written manifests. Gate: extend the
+  `default_paths_prefer_manifest_program_root` test (ratify.rs:1916) with a
+  `program_root: "."` case, plus a probe test asserting the skeleton spec
+  name for `--program .` equals the cwd dir name.
+- **Verdict:** FILE (bug). Medium-high leverage: names flow into the spec,
+  the handoff, and every default output path of the bootstrap→ratify lane.
+- **Issue:** #289
+
+### 🩹 F8 — resolved output paths render with a literal `/./` segment in codegen messages
+
+Post-#279/#285 spec-relative resolution joins the clap literal default
+`./programs` onto the absolute spec dir without normalization:
+`codegen --spec <abs>/escrow.qedspec` prints `Generated 9 files in
+<abs>/./programs`. Cosmetic (paths still resolve), but the `/./` shows up in
+every codegen completion message and any surface that echoes the resolved
+paths (all nine `against_spec` outputs).
+- **Evidence:** scratch repro (HEAD debug build): staged bundled escrow spec,
+  `codegen --spec $DIR/escrow.qedspec` → `Generated 9 files in
+  /private/tmp/…/cg/./programs`.
+- **Root cause:** `run.rs:1778-1784` — `against_spec` does
+  `spec_dir.join(p)` where `p` is a clap default like `./programs`
+  (`cli.rs:1017` et al.); `PathBuf::join` preserves the `CurDir` component
+  and `display()` renders it. Message seam: `codegen_mir.rs:169`.
+- **Proposed:** lexically normalize in `against_spec` —
+  `spec_dir.join(p).components().collect::<PathBuf>()` (the `Components`
+  iterator drops interior `.`) — so all nine outputs are clean at one seam.
+  Gate: unit test asserting the resolved path contains no `/./`.
+- **Verdict:** FILE (friction). Low priority; one-line fix, touches every
+  codegen invocation's output.
+- **Issue:** #290
+
+### 📐 M5 — integration tests must stage specs; `--spec` at a repo fixture now writes into the repo  [ENCODE]
+
+Since #279/#285 made codegen output dirs spec-relative, an integration test
+that points `--spec` at a real `examples/` or `tests/fixtures/` path writes
+generated artifacts INTO the repo tree. `common::stage_spec_surface`
+(`crates/qedgen/tests/common/mod.rs:210`, used by `codegen_determinism.rs`
+and `mir_snapshot.rs`) is the correct pattern: copy the spec surface to a
+tempdir first. Encode: a doc note in `tests/common/mod.rs` ("never point
+--spec at repo fixtures in tests that trigger codegen") and optionally a CI
+grep gate over `crates/qedgen/tests/` for `--spec` + `examples/` literals.
+No issue — skill/docs change, main loop encodes.
+
+### 📐 M6 — CI-mirror-before-merge discipline is in memory, not in the repo  [ENCODE]
+
+The sweep repeatedly needed the full local CI mirror before merging: `cargo
+fmt --check`, `clippy -D warnings`, regen-drift, `scripts/release-gate.sh`
+(e.g. #277 exists only because a merge skipped the fmt gate). The sequence
+lives in maintainer memory, not the repo. Encode: a `scripts/pre-merge.sh`
+that chains the exact CI steps (or a CLAUDE.md "before merging" note pointing
+at release-gate.sh + fmt/clippy). No issue — docs/scripts change, main loop
+encodes.
+
+### ✅ Verified non-issues — checked, nothing to file
+
+- **`check` auto-writing `qed.lock`**: by design, cargo-parity —
+  `LockMode::Auto` (`check/parse.rs:12`) writes/refreshes the lock on
+  successful parse (`qed_lock.rs:302-331`, unit-tested at `parse.rs:754`);
+  `--frozen` is the documented CI refuse-to-update mode
+  (`references/cli.md:287`). Surprise factor judged low; not filed.
+- **examples `.qed/` hygiene**: both `multisig/.qed` and `escrow-split/.qed`
+  have `config.json` tracked; the stray `last-error.{log,json}` files are
+  gitignored (root `.gitignore:34` `*.log`, `:96` `**/.qed/last-error.json`);
+  `git status` clean. The reported "empty .qed" premise did not reproduce.
+- **Sandboxed-HOME install testing**: already shipped as
+  `scripts/cold-start-smoke.sh` + `cold-start.yml` (#274, closed). Nothing
+  further.
+
+---
+
+## Session: generated-artifact gate bring-up — #294 P0 (2026-07-20)
+
+Source: building the executable generated-artifact gate
+(`crates/qedgen/tests/generated_artifact_gate.rs` + `crates/kani-compile-stub/`):
+regenerate each bundled Anchor example from its spec via `codegen --all` into a
+tempdir, compile every generated Rust artifact, run generated unit tests +
+proptests, type-check `tests/kani.rs` with plain rustc. The gate's first full
+run against escrow / lending / multisig exposed four latent codegen defects —
+exactly the class #294 predicted CI could not see. Logs: session scratchpad
+`gate-{full,escrow,lending,multisig}.log`. All targets are public bundled
+examples. Ranked most-leverage first.
+
+### 🐞 B10 — generated unit tests were dead code: default `--test-output` had no compile hook  [FIXED — pending PR]
+
+The default unit-test path was `./programs/src/tests.rs`, but no scaffold
+`lib.rs` ever emitted `mod tests;` — so the file was never compiled by any
+build, anywhere, including all bundled examples. Every defect below (and #263's
+"lending 1 + multisig 5 failing") stayed latent behind this: the tests existed
+as text, not as software.
+- **Evidence:** pre-fix `codegen --all` tree (unit.rs under `src/` with no
+  `mod` hook); `grep "mod tests" examples/rust/*/programs/src/lib.rs` → no
+  matches; the gate only saw unit-test failures after the move.
+- **Root cause:** `cli.rs` default `--test-output ./programs/src/tests.rs` — a
+  `src/` location needs a `mod` declaration the scaffold never emits; cargo
+  only auto-discovers test targets under `tests/`.
+- **Fix (in this session's working tree, pending PR):** default moved to
+  `./programs/tests/unit.rs` (cargo auto-discovery); fingerprint role string
+  updated in `unit_test.rs` / `integration_test.rs`; the new gate compiles and
+  runs it from a clean regen.
+- **Verdict:** FIXED in-session (main loop); no separate issue — lands with the
+  #294 P0 PR. Highest leverage: it converts the whole generated-unit-test
+  surface from dead text into gated, executable artifacts.
+- **Issue:** — (covered by #294)
+
+### 🐞 B11 — proptest emitter breaks on multisig-shaped specs: 3 compile-error classes  [NEEDS-FIX]
+
+Regenerated multisig `cargo test --test proptest` → 11 compile errors in 3
+sub-classes, all emitter defects:
+- (a) **Unbound signer names** — `E0425 cannot find value approver/rejecter/
+  executor` ×6: guards like `state.members[member_index] == approver` compare a
+  state field against a BARE auth-signer account name. The proptest model
+  carries no accounts, and `collect_full_guard`'s suppression only catches
+  `<account>.pubkey`/`.key()` mentions, not bare account names.
+- (b) **Format-string strategies break on non-scalar params** — `member_pubkey
+  in 0[u8; 32]..=[u8; 32]::MAX` (syntax error ×2): four sites build param
+  strategies as `format!("0{rt}..={rt}::MAX")` instead of routing through
+  `strategy_for_field`, so any `Pubkey` (→ `[u8; 32]`) param emits invalid Rust.
+- (c) **Effect-LHS subscript index not cast** — `s.voted[member_index] = 1;` →
+  `E0277 [u8] cannot be indexed by u8` ×3: the RHS/read side renders
+  `s.members[(member_index) as usize]` via the tree renderer, but the effect
+  target path is raw string interpolation with no `as usize`.
+- **Evidence:** `gate-multisig.log:34-276` (proptest.rs:310/548 syntax errors;
+  :124/:140/:156/:435/:446/:457 E0425; :133/:149/:192 E0277); regenerated from
+  `examples/rust/multisig/multisig.qedspec` (`auth approver`, spec:118-128).
+- **Root cause:** (a) `rust_codegen_util/guards.rs:42-46` — `suppress_requires`
+  uses `tree_mentions_account_pubkey` (dotted reads only), vs `unit_test.rs:523`
+  which uses the broader `tree_mentions_account` (bare names included);
+  (b) `proptest_gen_mir.rs:830,996,1165,1254` — inline
+  `format!("{} in 0{}..={}::MAX", …)` bypassing `strategy_for_field`;
+  (c) `rust_codegen_util/effect.rs:373-431` — `emit_one_effect_inner` writes
+  `s.{field}` with the raw target string, no subscript cast.
+- **Proposed:** (a) suppress guard conjuncts mentioning any handler-account
+  name (reuse/lift unit_test's `tree_mentions_account` walk into guards.rs);
+  (b) route the four param-strategy sites through `strategy_for_field`;
+  (c) render the effect target path through the same subscript-cast logic as
+  the read side (`(idx) as usize`). Gate: the #294 P0 gate already covers all
+  three; add per-class emitter unit tests.
+- **Verdict:** FILE (bug). High leverage: signer-membership guards, Pubkey
+  params, and subscripted effects are the standard multisig/registry shape —
+  overlaps #294 P1 "precedence-aware renderer" (class b is the same
+  string-concat disease) but each class needs its own concrete fix.
+- **Issue:** #295
+
+### 🐞 B12 — proptest model wraps checked-default `+=`, so generated overflow tests fail on correct specs  [NEEDS-FIX]
+
+Regenerated lending: `deposit_no_overflow_on_total_deposits` and
+`deposit_preserves_pool_solvency` FAIL at runtime with "overflow:
+deposit.total_deposits wrapped around after add". The spec's `total_deposits +=
+amount` is checked-default (`+=` → `checked_add(..).ok_or(err)?` doctrine,
+#146): the deployed handler REJECTS overflow, it never wraps. But the proptest
+transition fn is emitted with `wrapping=true`, so the model wraps AND returns
+`true` — then the generated test's own premise ("if transition succeeded, the
+add must not have wrapped") is violated by the model, not the program. A
+generated test fails on a correct bundled example.
+- **Evidence:** `gate-lending.log:27-46,101` (both failures + wrap message);
+  `examples/rust/lending/lending.qedspec:89` (`total_deposits += amount`,
+  default checked).
+- **Root cause:** `proptest_gen_mir.rs:741` passes `wrapping: true` to
+  `emit_transition_fn` ("full-state-space mode"), which forces default `+=`
+  through `effect.rs:378-381` `wrapping_add` — while
+  `emit_overflow_tests_for` (`proptest_gen_mir.rs:1192-1198`) asserts
+  `s.field >= pre` whenever the transition returns true. The model and the
+  test disagree about what "succeeded" means; `emit_one_effect`'s checked arm
+  (`effect.rs:383-388`, `return false` on None) is exactly the semantics the
+  test assumes.
+- **Proposed:** honor per-effect semantics in the proptest model: default
+  `+=`/`-=` use the checked arm (return false on overflow → the overflow test
+  becomes a real check that success implies no wrap); only explicit `+=?`
+  keeps wrapping. If a full-state-space wrap-probe mode is still wanted, gate
+  the no-overflow assertion to wrap-declared effects instead. Regression: run
+  the generated lending proptests in the #294 P0 gate (already wired).
+- **Verdict:** FILE (bug). High leverage: `+=` checked-default is the most
+  common effect shape; today every such spec generates a proptest that fails
+  on correct code — the exact "no false findings" ethos violation.
+- **Issue:** #296
+
+### 🐞 B13 — unit-test emitter leaks account names into the account-less model via effect RHS  [NEEDS-FIX]
+
+Regenerated escrow `cargo test --test unit` → `E0425 cannot find value
+initializer_ta` ×2. The `initialize` effect `initializer_token_account :=
+initializer_ta.pubkey` reads an ACCOUNT pubkey in its RHS; the standalone
+unit-test model declares no accounts, but both the `apply_*` helper and the
+effect test's assertion render the RHS verbatim. The guard path already
+suppresses account-touching clauses (`account_free_conjuncts`); the effect
+path has no equivalent — and unlike proptest's `emit_transition_fn` (which
+skips Pubkey-targeted effects when no account env is bound,
+`emit.rs:485-489`), `unit_test.rs` has its own effect emission with no such
+skip. These tests could never have run even if B10's wiring existed.
+- **Evidence:** `gate-escrow.log:84-96` (unit.rs:42 `state.
+  initializer_token_account = initializer_ta.pubkey;`, unit.rs:73 the matching
+  `assert_eq!`); `examples/rust/escrow/escrow.qedspec:63`.
+- **Root cause:** `codegen/unit_test.rs` — the apply-helper loop (~:108-190)
+  and `generate_effect_test` (:644) emit every effect triple's RHS with no
+  account-mention check; the suppression machinery exists 400 lines down
+  (`account_free_conjuncts` :497-523, `tree_mentions_account`) but only the
+  requires path uses it.
+- **Proposed:** in the unit-test model, skip effects whose RHS mentions a
+  handler account (same predicate the guard path uses), mirroring the
+  transition-fn Pubkey-effect skip — and skip the corresponding effect-test
+  assertion. Gate: #294 P0 compiles the regenerated escrow unit tests.
+- **Verdict:** FILE (bug). Medium-high leverage: any init-style handler that
+  records a caller/account pubkey into state (the standard escrow/vault
+  pattern) currently emits non-compiling unit tests.
+- **Issue:** #297
+
+### 🐞 (cross-ref) guard-solver rejects-invalid fixtures — covered by #263 class 4
+
+The gate reproduced the guard-fixture failures #263 already owns: regenerated
+multisig unit.rs 5/51 FAIL (`test_add_member_guard_rejects_invalid`,
+`test_approve_guard_rejects_invalid`, `test_reject_guard_rejects_invalid`,
+`test_execute_guard_rejects_invalid`, `test_cancel_proposal_guard_accepts_valid`
+— 46 passed), lending unit.rs 1/22 (`test_liquidate_guard_rejects_invalid`,
+`gate-full.log:274-288`): solver-guessed fixtures that don't actually violate
+(or satisfy) the guard, asserted anyway. #263's item 4 (bounded constraint
+solver + `Solved | Unsupported` honesty + smoke-test fallback) is exactly this;
+its claim "previously lending 1 + multisig 5 failing" matches the gate's counts.
+No new issue — evidence recorded here so the #294 P0 gate can serve as the
+acceptance check when #263 lands.
+
+### 🩹 F9 — cargo's per-binary fail-fast hid failing generated targets during gate bring-up  [ENCODE]
+
+`cargo test` (no flags) stops at the first failing test binary, and a compile
+error in one target masks sibling targets entirely — lending's unit.rs
+failures never surfaced until `--no-fail-fast`, and multisig's unit-test
+runtime failures were invisible behind proptest.rs compile errors in the same
+invocation.
+- **Evidence:** `gate-lending.log` (unit failures only appear in the
+  `--no-fail-fast` run); `gate-multisig.log` (proptest compile errors, no unit
+  results) vs the ms-gate re-run (5/51 unit failures once isolated).
+- **Encode (methodology, for the gate + skill):** executable artifact gates
+  must (1) always pass `--no-fail-fast`, and (2) compile/run each generated
+  test target in isolation so one target's compile error can't mask another's
+  results. Already applied in `generated_artifact_gate.rs`.
+- **Verdict:** ENCODE. Backlog-only, no issue.
