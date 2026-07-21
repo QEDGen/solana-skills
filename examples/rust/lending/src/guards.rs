@@ -85,7 +85,7 @@ pub fn borrow<'info>(
         return Err(ProgramError::from(LendingError::Unauthorized));
     }
     // requires: amount > 0 ∧ collateral > 0
-    if !((amount > 0) && (collateral > 0)) {
+    if !(amount > 0 && collateral > 0) {
         return Err(ProgramError::from(LendingError::InvalidAmount));
     }
     // lifecycle: status := Active

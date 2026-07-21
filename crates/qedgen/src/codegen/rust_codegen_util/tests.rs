@@ -474,8 +474,8 @@ handler swap (amount : U64) (min_out : U64) : State.Active -> State.Active {
         exprs,
         vec![
             "accounts.admin.pubkey == s.admin_key",
-            "(amount >= min_out)",
-            "(min_out > 0)",
+            "amount >= min_out",
+            "min_out > 0",
         ]
     );
 }

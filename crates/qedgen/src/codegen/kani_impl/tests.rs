@@ -457,7 +457,7 @@ handler recompute (n : U64) {
     // Panic-freedom is claimed UNDER the handler's preconditions — the `requires`
     // guard is assumed (not asserted).
     assert!(
-        compact(&body).contains(&compact("kani::assume((n <= pre_cap));")),
+        compact(&body).contains(&compact("kani::assume(n <= pre_cap);")),
         "panic-free harness assumes the `requires` guard; got:\n{body}"
     );
     // Call-only: no `assert!` and no ensures/reject scaffolding in this proof.
@@ -3159,8 +3159,9 @@ handler deposit (amt : U64) {
     let is_ok_pos = body
         .find("if result.is_ok()")
         .expect("harness must have `if result.is_ok()`");
-    let assume_pos = body
+    let assume_pos = body[is_ok_pos..]
         .find("kani::assume(amt > 0)")
+        .map(|i| is_ok_pos + i)
         .expect("assume present (just asserted above)");
     let assert_pos = body[is_ok_pos..]
         .find("assert!")
@@ -3666,7 +3667,7 @@ fn context_mode_emits_try_accounts_gate() {
     // state account in place (`ctx_accounts.settings.<field>`).
     assert!(
         compact(&body).contains(&compact("let pre_status = ctx_accounts.settings.status;"))
-            && compact(&body).contains(&compact("kani::assume((pre_status == 1));"))
+            && compact(&body).contains(&compact("kani::assume(pre_status == 1);"))
             && compact(&body)
                 .contains(&compact("ctx_accounts.settings.threshold == new_threshold")),
         "requires assume off the pre-snapshot; ensures reads ctx_accounts.<state>; got:\n{body}"
@@ -3768,7 +3769,7 @@ handler decrement (amount : U64) {
         "nested-old parent record snapshotted via clone; got:\n{body}"
     );
     assert!(
-        compact(&body).contains(&compact("kani::assume((amount <= pre_window.remaining));")),
+        compact(&body).contains(&compact("kani::assume(amount <= pre_window.remaining);")),
         "requires reads the nested pre-snapshot path; got:\n{body}"
     );
     assert!(

@@ -22,10 +22,7 @@ pub fn collect_full_guard_with_account_env(
     let mut parts = Vec::new();
     for req in &op.requires {
         for tree in projected_requires_trees(req, account_binder) {
-            parts.push(format!(
-                "({})",
-                render_requires_tree(tree, wrapping, account_binder)
-            ));
+            parts.push(render_requires_conjunct(tree, wrapping, account_binder));
         }
     }
     if parts.is_empty() {
@@ -188,38 +185,39 @@ fn requires_tree(req: &crate::check::ParsedRequires) -> &crate::mir::ExprTree {
         .expect("ParsedRequires.tree is always populated by the chumsky adapter (#151/#156)")
 }
 
-/// One projected requires tree as a Rust predicate. Tree-native (#151
-/// Slice 1): one render call under the right arithmetic policy —
-/// `Widened` (math-exact; issue #146) or the `Wrapping` proptest-guard
-/// composite.
-fn render_requires_tree(
+/// Render one projected requires tree for an outer conjunction. The tree
+/// renderer owns both arithmetic policy and the minimum parentheses needed
+/// in that slot.
+fn render_requires_conjunct(
     tree: &crate::mir::ExprTree,
     wrapping: bool,
     account_binder: Option<&str>,
 ) -> String {
-    use super::tree_render::{render_rust, ArithMode, RustCx};
+    use super::tree_render::{render_rust_conjunct, ArithMode, RustCx};
     let arith = if wrapping {
         ArithMode::Wrapping
     } else {
         ArithMode::Widened
     };
-    let cx = RustCx::native()
-        .with_arith(arith)
-        .with_acct_env(account_binder);
-    render_rust(tree, cx)
+    render_rust_conjunct(
+        tree,
+        RustCx::native()
+            .with_arith(arith)
+            .with_acct_env(account_binder),
+    )
 }
 
 /// Per-conjunct guard terms of a handler's requires clauses, rendered as
 /// Rust predicates. Tree-native conjunct split: the top `And` node's
-/// operands, matching the legacy top-level `&&` string split (each
-/// operand keeps the parens the bool-op rendering gave it). Without an
-/// account env, terms are the account-free projection (#295).
+/// operands become independent terms, and the renderer adds grouping only
+/// where an outer conjunction needs it. Without an account env, terms are
+/// the account-free projection (#295).
 pub fn collect_guard_terms_with_account_env(
     op: &ParsedHandler,
     wrapping: bool,
     account_binder: Option<&str>,
 ) -> Vec<String> {
-    use super::tree_render::{render_rust, top_conjuncts, ArithMode, RustCx};
+    use super::tree_render::{render_rust_conjunct, top_conjuncts, ArithMode, RustCx};
 
     let mut terms = Vec::new();
     for req in &op.requires {
@@ -237,14 +235,8 @@ pub fn collect_guard_terms_with_account_env(
         let projected = projected_requires_trees(req, account_binder);
         for tree in &projected {
             let conjuncts = top_conjuncts(tree);
-            let multi = conjuncts.len() > 1 || projected.len() > 1;
             for c in conjuncts {
-                let rendered = render_rust(c, cx);
-                terms.push(if multi {
-                    format!("({})", rendered)
-                } else {
-                    rendered
-                });
+                terms.push(render_rust_conjunct(c, cx));
             }
         }
     }

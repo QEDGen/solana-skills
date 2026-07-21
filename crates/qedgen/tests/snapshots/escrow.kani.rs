@@ -125,7 +125,7 @@ fn initialize(
     deposit_amount: u64,
     receive_amount: u64,
 ) -> bool {
-    if !((deposit_amount > 0) && (receive_amount > 0)) {
+    if !(deposit_amount > 0 && receive_amount > 0) {
         return false;
     }
     if s.status != Status::Uninitialized {
@@ -209,7 +209,7 @@ fn verify_initialize_rejects_invalid() {
             pubkey: kani::any(),
         },
     };
-    kani::assume(!((deposit_amount > 0) && (receive_amount > 0)));
+    kani::assume(!(deposit_amount > 0 && receive_amount > 0));
     kani::cover!(true, "guard-violation domain is satisfiable");
     assert!(
         !initialize(&mut s, &accounts, deposit_amount, receive_amount),

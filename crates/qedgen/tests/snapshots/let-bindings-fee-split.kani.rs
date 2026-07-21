@@ -39,7 +39,7 @@ struct State {
 // ============================================================================
 
 fn collect(s: &mut State, total: u64) -> bool {
-    if !((total > 0) && (net > 0)) {
+    if !(total > 0 && net > 0) {
         return false;
     }
     let fee =
@@ -71,7 +71,7 @@ fn verify_collect_rejects_invalid() {
         fee_bps: kani::any(),
     };
     let total: u64 = kani::any();
-    kani::assume(!((total > 0) && (net > 0)));
+    kani::assume(!(total > 0 && net > 0));
     kani::cover!(true, "guard-violation domain is satisfiable");
     assert!(
         !collect(&mut s, total),
@@ -97,7 +97,7 @@ fn verify_collect_ensures_0() {
         fee_bps: kani::any(),
     };
     let total: u64 = kani::any();
-    kani::assume((total > 0) && (net > 0));
+    kani::assume(total > 0 && net > 0);
     let pre = s.clone();
     if collect(&mut s, total) {
         let post = &s;

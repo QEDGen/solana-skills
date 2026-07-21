@@ -206,8 +206,8 @@ impl<'a> RustCx<'a> {
 }
 
 /// Operator precedence for minimal-paren rendering. Higher binds tighter.
-/// `Atom` never needs wrapping; strings that self-parenthesize (bool ops,
-/// casts, `let`/`if` blocks, method-call chains) report `Atom`.
+/// `Atom` never needs wrapping; casts, `let`/`if` blocks, and method-call
+/// chains report it.
 ///
 /// The paren rules preserve the *tree's* evaluation order, not just parse
 /// validity: `Add(a, Sub(b, c))` must render `a + (b - c)` — `a + b - c`
@@ -215,15 +215,24 @@ impl<'a> RustCx<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Prec {
     Or,
+    And,
     Cmp,
     AddSub,
     MulDiv,
+    Unary,
     Atom,
 }
 
 /// Render `e` under `cx`. Entry point for every Rust-emitting consumer.
 pub fn render_rust(e: &ExprTree, cx: RustCx) -> String {
     render(e, cx, false).0
+}
+
+/// Render `e` for one operand of an outer `&&` composition. Callers that
+/// combine requires clauses use this instead of adding parentheses to an
+/// already-rendered string, keeping precedence ownership in this module.
+pub fn render_rust_conjunct(e: &ExprTree, cx: RustCx) -> String {
+    atom_for(Prec::And, render(e, cx, false))
 }
 
 /// Core renderer: returns the rendered string plus its top-level
@@ -285,22 +294,28 @@ fn render(e: &ExprTree, cx: RustCx, inside_old: bool) -> (String, Prec) {
                 Prec::Atom,
             )
         }
-        // Bool ops parenthesize both operands unconditionally — matches the
-        // legacy output byte-for-byte and sidesteps `&&`/`||` precedence.
         ExprTree::BoolOp { op, lhs, rhs } => {
-            let l = render(lhs, cx, inside_old).0;
-            let r = render(rhs, cx, inside_old).0;
-            let s = match op {
-                TreeBoolOp::And => format!("({}) && ({})", l, r),
-                TreeBoolOp::Or => format!("({}) || ({})", l, r),
+            let l = render(lhs, cx, inside_old);
+            let r = render(rhs, cx, inside_old);
+            match op {
+                TreeBoolOp::And => (
+                    format!("{} && {}", atom_for(Prec::And, l), atom_for(Prec::And, r)),
+                    Prec::And,
+                ),
+                TreeBoolOp::Or => (
+                    format!("{} || {}", atom_for(Prec::Or, l), atom_for(Prec::Or, r)),
+                    Prec::Or,
+                ),
                 // `a implies b` ≡ `!a || b`.
-                TreeBoolOp::Implies => format!("(!({})) || ({})", l, r),
-            };
-            (s, Prec::Atom)
+                TreeBoolOp::Implies => (
+                    format!("!{} || {}", atom_for(Prec::Unary, l), atom_for(Prec::Or, r)),
+                    Prec::Or,
+                ),
+            }
         }
         ExprTree::Not(inner) => (
-            format!("!({})", render(inner, cx, inside_old).0),
-            Prec::Atom,
+            format!("!{}", atom_for(Prec::Unary, render(inner, cx, inside_old))),
+            Prec::Unary,
         ),
         ExprTree::Cmp { op, lhs, rhs } => (render_cmp(*op, lhs, rhs, cx, inside_old), Prec::Cmp),
         ExprTree::Arith { op, lhs, rhs } => render_arith(*op, lhs, rhs, cx, inside_old),
@@ -1264,9 +1279,9 @@ pub fn tree_references_abstract_binder(e: &ExprTree) -> bool {
 }
 
 /// Immediate conjuncts of the top node: `And(l, r)` → `[l, r]`, anything
-/// else → `[e]`. Deliberately NON-recursive — the legacy string splitter
-/// only broke the *top-level* `&&` (nested conjunctions sit inside the
-/// bool-op's own parens), and per-term guard emission must match it.
+/// else → `[e]`. Deliberately non-recursive: a nested conjunction remains
+/// one term, with grouping supplied by the precedence-aware renderer when
+/// its outer composition requires it.
 pub fn top_conjuncts(e: &ExprTree) -> Vec<&ExprTree> {
     match e {
         ExprTree::BoolOp {
@@ -1672,6 +1687,50 @@ mod tests {
             rhs: Box::new(param("c", Ty::U64)),
         };
         assert_eq!(render_rust(&scaled, RustCx::native()), "(a + b) * c");
+    }
+
+    #[test]
+    fn boolean_precedence_uses_only_structural_parentheses() {
+        fn cmp(name: &str, value: u128) -> ExprTree {
+            ExprTree::Cmp {
+                op: TreeCmpOp::Eq,
+                lhs: Box::new(param(name, Ty::U64)),
+                rhs: Box::new(ExprTree::Int(value)),
+            }
+        }
+
+        let nested_or = ExprTree::BoolOp {
+            op: TreeBoolOp::And,
+            lhs: Box::new(cmp("a", 1)),
+            rhs: Box::new(ExprTree::BoolOp {
+                op: TreeBoolOp::Or,
+                lhs: Box::new(cmp("b", 2)),
+                rhs: Box::new(cmp("c", 3)),
+            }),
+        };
+        assert_eq!(
+            render_rust(&nested_or, RustCx::native()),
+            "a == 1 && (b == 2 || c == 3)"
+        );
+
+        let and_under_or = ExprTree::BoolOp {
+            op: TreeBoolOp::Or,
+            lhs: Box::new(cmp("a", 1)),
+            rhs: Box::new(ExprTree::BoolOp {
+                op: TreeBoolOp::And,
+                lhs: Box::new(cmp("b", 2)),
+                rhs: Box::new(cmp("c", 3)),
+            }),
+        };
+        assert_eq!(
+            render_rust(&and_under_or, RustCx::native()),
+            "a == 1 || b == 2 && c == 3"
+        );
+
+        assert_eq!(
+            render_rust(&ExprTree::Not(Box::new(cmp("a", 1))), RustCx::native()),
+            "!(a == 1)"
+        );
     }
 
     #[test]

@@ -27,7 +27,7 @@ pub fn initialize<'info>(
         return Err(ProgramError::from(EscrowError::Unauthorized));
     }
     // requires: deposit_amount > 0 ∧ receive_amount > 0
-    if !((deposit_amount > 0) && (receive_amount > 0)) {
+    if !(deposit_amount > 0 && receive_amount > 0) {
         return Err(ProgramError::from(EscrowError::InvalidAmount));
     }
     // lifecycle: status := Open

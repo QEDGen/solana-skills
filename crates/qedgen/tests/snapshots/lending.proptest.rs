@@ -142,7 +142,7 @@ mod pool {
         #[test]
         fn init_pool_rejects_invalid(s in arb_boundary_state(), rate in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX]) {
             let mut s = s;
-            prop_assume!(!((rate > 0)));
+            prop_assume!(!(rate > 0));
             prop_assert!(!init_pool(&mut s, rate),
                 "init_pool must reject when guard is violated");
         }
@@ -153,7 +153,7 @@ mod pool {
         #[test]
         fn deposit_rejects_invalid(s in arb_boundary_state(), amount in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX]) {
             let mut s = s;
-            prop_assume!(!((amount > 0)));
+            prop_assume!(!(amount > 0));
             prop_assert!(!deposit(&mut s, amount),
                 "deposit must reject when guard is violated");
         }
@@ -306,7 +306,7 @@ mod loan {
     }
 
     fn borrow(s: &mut State, amount: u64, collateral: u64) -> bool {
-        if !((amount > 0) && (collateral > 0)) {
+        if !(amount > 0 && collateral > 0) {
             return false;
         }
         if s.status != Status::Empty {
@@ -345,7 +345,7 @@ mod loan {
         #[test]
         fn borrow_rejects_invalid(s in arb_boundary_state(), amount in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX], collateral in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX]) {
             let mut s = s;
-            prop_assume!(!((amount > 0) && (collateral > 0)));
+            prop_assume!(!(amount > 0 && collateral > 0));
             prop_assert!(!borrow(&mut s, amount, collateral),
                 "borrow must reject when guard is violated");
         }
@@ -356,7 +356,7 @@ mod loan {
         #[test]
         fn liquidate_rejects_invalid(s in arb_boundary_state()) {
             let mut s = s;
-            prop_assume!(!((s.amount > s.collateral)));
+            prop_assume!(!(s.amount > s.collateral));
             prop_assert!(!liquidate(&mut s),
                 "liquidate must reject when guard is violated");
         }

@@ -123,7 +123,7 @@ pub fn initialize<'info>(
         return Err(EscrowError::Unauthorized.into());
     }
     // requires: deposit_amount > 0 ∧ receive_amount > 0
-    if !((deposit_amount > 0) && (receive_amount > 0)) {
+    if !(deposit_amount > 0 && receive_amount > 0) {
         return Err(EscrowError::InvalidAmount.into());
     }
     // lifecycle: status := Open

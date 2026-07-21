@@ -15,6 +15,121 @@ use crate::codegen_shared::{map_type, write_generated_file, DslTypeExt};
 use crate::mir::Mir;
 use crate::rust_codegen_util;
 
+/// Small typed syntax for proptest strategy expressions. Strategy selection
+/// decides the shape; this renderer owns calls, ranges, macro alternatives,
+/// and method chaining so nested strategies are not assembled by interpolating
+/// already-rendered Rust fragments.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum StrategyExpr {
+    Atom(String),
+    Range {
+        start: String,
+        end: Option<String>,
+        inclusive: bool,
+    },
+    Call {
+        callee: String,
+        args: Vec<StrategyExpr>,
+    },
+    OneOf(Vec<StrategyExpr>),
+    Method {
+        receiver: Box<StrategyExpr>,
+        method: String,
+        args: Vec<StrategyExpr>,
+    },
+}
+
+impl StrategyExpr {
+    fn atom(value: impl Into<String>) -> Self {
+        Self::Atom(value.into())
+    }
+
+    fn range(start: impl Into<String>, end: impl Into<String>) -> Self {
+        Self::Range {
+            start: start.into(),
+            end: Some(end.into()),
+            inclusive: true,
+        }
+    }
+
+    fn half_open_range(start: impl Into<String>, end: impl Into<String>) -> Self {
+        Self::Range {
+            start: start.into(),
+            end: Some(end.into()),
+            inclusive: false,
+        }
+    }
+
+    fn range_from(start: impl Into<String>) -> Self {
+        Self::Range {
+            start: start.into(),
+            end: None,
+            inclusive: false,
+        }
+    }
+
+    fn call(callee: impl Into<String>, args: Vec<Self>) -> Self {
+        Self::Call {
+            callee: callee.into(),
+            args,
+        }
+    }
+
+    fn one_of(choices: Vec<Self>) -> Self {
+        Self::OneOf(choices)
+    }
+
+    fn method(self, method: impl Into<String>, args: Vec<Self>) -> Self {
+        Self::Method {
+            receiver: Box::new(self),
+            method: method.into(),
+            args,
+        }
+    }
+
+    fn render(&self) -> String {
+        match self {
+            Self::Atom(value) => value.clone(),
+            Self::Range {
+                start,
+                end,
+                inclusive,
+            } => match (end, inclusive) {
+                (Some(end), true) => format!("{start}..={end}"),
+                (Some(end), false) => format!("{start}..{end}"),
+                (None, _) => format!("{start}.."),
+            },
+            Self::Call { callee, args } => format!(
+                "{callee}({})",
+                args.iter().map(Self::render).collect::<Vec<_>>().join(", ")
+            ),
+            Self::OneOf(choices) => format!(
+                "prop_oneof![{}]",
+                choices
+                    .iter()
+                    .map(Self::render)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::Method {
+                receiver,
+                method,
+                args,
+            } => format!(
+                "{}.{method}({})",
+                receiver.render(),
+                args.iter().map(Self::render).collect::<Vec<_>>().join(", ")
+            ),
+        }
+    }
+}
+
+impl std::fmt::Display for StrategyExpr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.render())
+    }
+}
+
 /// Generate the proptest harness file at `output_path`.
 pub fn generate(mir: &Mir, parsed: &ParsedSpec, output_path: &Path) -> Result<()> {
     if parsed.handlers.is_empty() {
@@ -25,53 +140,75 @@ pub fn generate(mir: &Mir, parsed: &ParsedSpec, output_path: &Path) -> Result<()
 
 /// Proptest strategy for a DSL primitive type; compound types go through
 /// `strategy_for_field`, which dispatches here once unwrapped.
-fn strategy_for_type(dsl_type: &str) -> &str {
+fn strategy_for_type(dsl_type: &str) -> StrategyExpr {
     match dsl_type {
-        "U8" => "0u8..=255u8",
-        "U16" => "0u16..=u16::MAX",
-        "U32" => "0u32..=u32::MAX",
-        "U64" => "0u64..=u64::MAX",
-        "U128" => "0u128..=u128::MAX",
-        "I8" => "i8::MIN..=i8::MAX",
-        "I16" => "i16::MIN..=i16::MAX",
-        "I32" => "i32::MIN..=i32::MAX",
-        "I64" => "i64::MIN..=i64::MAX",
-        "I128" => "any::<i128>()",
-        "Bool" => "any::<bool>()",
-        "Pubkey" => "prop::array::uniform32(0u8..)",
+        "U8" => StrategyExpr::range("0u8", "255u8"),
+        "U16" => StrategyExpr::range("0u16", "u16::MAX"),
+        "U32" => StrategyExpr::range("0u32", "u32::MAX"),
+        "U64" => StrategyExpr::range("0u64", "u64::MAX"),
+        "U128" => StrategyExpr::range("0u128", "u128::MAX"),
+        "I8" => StrategyExpr::range("i8::MIN", "i8::MAX"),
+        "I16" => StrategyExpr::range("i16::MIN", "i16::MAX"),
+        "I32" => StrategyExpr::range("i32::MIN", "i32::MAX"),
+        "I64" => StrategyExpr::range("i64::MIN", "i64::MAX"),
+        "I128" => StrategyExpr::call("any::<i128>", Vec::new()),
+        "Bool" => StrategyExpr::call("any::<bool>", Vec::new()),
+        "Pubkey" => StrategyExpr::call(
+            "prop::array::uniform32",
+            vec![StrategyExpr::range_from("0u8")],
+        ),
         // Byte tokens (#191): `uniform32` maxes out at 32, so Bytes64 uses
         // proptest's const-generic array `Arbitrary` (proptest ≥ 1.0).
-        "Bytes32" => "prop::array::uniform32(0u8..)",
-        "Bytes64" => "any::<[u8; 64]>()",
+        "Bytes32" => StrategyExpr::call(
+            "prop::array::uniform32",
+            vec![StrategyExpr::range_from("0u8")],
+        ),
+        "Bytes64" => StrategyExpr::call("any::<[u8; 64]>", Vec::new()),
         // Fin[N] arrives here with the wrapper stripped; modelled as a small
         // usize range since real usage is as an index.
-        "Fin" => "0usize..=1024usize",
-        _ => "0u64..=u64::MAX",
+        "Fin" => StrategyExpr::range("0usize", "1024usize"),
+        _ => StrategyExpr::range("0u64", "u64::MAX"),
     }
 }
 
 /// Boundary-biased strategy for guard rejection tests: mixes near-0 and
 /// near-MAX values so both `> 0` and `<= LARGE_CONST` guards reject often.
-fn boundary_strategy_for_type(dsl_type: &str) -> &str {
+fn boundary_strategy_for_type(dsl_type: &str) -> StrategyExpr {
+    let edge_ranges = |min: &str, low: &str, high: &str, max: &str| {
+        StrategyExpr::one_of(vec![
+            StrategyExpr::range(min, low),
+            StrategyExpr::range(high, max),
+        ])
+    };
     match dsl_type {
-        "U8" => "prop_oneof![0u8..=3u8, 252u8..=255u8]",
-        "U16" => "prop_oneof![0u16..=3u16, (u16::MAX - 3)..=u16::MAX]",
-        "U32" => "prop_oneof![0u32..=3u32, (u32::MAX - 3)..=u32::MAX]",
-        "U64" => "prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX]",
-        "U128" => "prop_oneof![0u128..=3u128, (u128::MAX - 3)..=u128::MAX]",
-        "I8" => "prop_oneof![i8::MIN..=(i8::MIN + 3), (i8::MAX - 3)..=i8::MAX]",
-        "I16" => "prop_oneof![i16::MIN..=(i16::MIN + 3), (i16::MAX - 3)..=i16::MAX]",
-        "I32" => "prop_oneof![i32::MIN..=(i32::MIN + 3), (i32::MAX - 3)..=i32::MAX]",
-        "I64" => "prop_oneof![i64::MIN..=(i64::MIN + 3), (i64::MAX - 3)..=i64::MAX]",
-        "I128" => "any::<i128>()",
-        "Bool" => "any::<bool>()",
-        "Pubkey" => "prop::array::uniform32(0u8..1u8)",
-        "Bytes32" => "prop::array::uniform32(0u8..1u8)",
-        "Bytes64" => {
-            "prop::collection::vec(0u8..1u8, 64).prop_map(|v| <[u8; 64]>::try_from(v).unwrap())"
-        }
-        "Fin" => "prop_oneof![0usize..=3usize, 1020usize..=1024usize]",
-        _ => "prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX]",
+        "U8" => edge_ranges("0u8", "3u8", "252u8", "255u8"),
+        "U16" => edge_ranges("0u16", "3u16", "(u16::MAX - 3)", "u16::MAX"),
+        "U32" => edge_ranges("0u32", "3u32", "(u32::MAX - 3)", "u32::MAX"),
+        "U64" => edge_ranges("0u64", "3u64", "(u64::MAX - 3)", "u64::MAX"),
+        "U128" => edge_ranges("0u128", "3u128", "(u128::MAX - 3)", "u128::MAX"),
+        "I8" => edge_ranges("i8::MIN", "(i8::MIN + 3)", "(i8::MAX - 3)", "i8::MAX"),
+        "I16" => edge_ranges("i16::MIN", "(i16::MIN + 3)", "(i16::MAX - 3)", "i16::MAX"),
+        "I32" => edge_ranges("i32::MIN", "(i32::MIN + 3)", "(i32::MAX - 3)", "i32::MAX"),
+        "I64" => edge_ranges("i64::MIN", "(i64::MIN + 3)", "(i64::MAX - 3)", "i64::MAX"),
+        "I128" => StrategyExpr::call("any::<i128>", Vec::new()),
+        "Bool" => StrategyExpr::call("any::<bool>", Vec::new()),
+        "Pubkey" | "Bytes32" => StrategyExpr::call(
+            "prop::array::uniform32",
+            vec![StrategyExpr::half_open_range("0u8", "1u8")],
+        ),
+        "Bytes64" => StrategyExpr::call(
+            "prop::collection::vec",
+            vec![
+                StrategyExpr::half_open_range("0u8", "1u8"),
+                StrategyExpr::atom("64"),
+            ],
+        )
+        .method(
+            "prop_map",
+            vec![StrategyExpr::atom("|v| <[u8; 64]>::try_from(v).unwrap()")],
+        ),
+        "Fin" => edge_ranges("0usize", "3usize", "1020usize", "1024usize"),
+        _ => edge_ranges("0u64", "3u64", "(u64::MAX - 3)", "u64::MAX"),
     }
 }
 
@@ -83,7 +220,7 @@ fn strategy_for_field(
     spec: &ParsedSpec,
     mode: StrategyMode,
     field_bound: Option<&str>,
-) -> Result<String> {
+) -> Result<StrategyExpr> {
     let dsl_type = dsl_type.trim();
 
     // Map[BOUND] T → strict-length Vec<T> → [T; N] via TryInto.
@@ -97,8 +234,16 @@ fn strategy_for_field(
                 let inner_src = rest[close + 1..].trim();
                 let n = spec.resolve_map_bound(bound_src)?;
                 let inner_strategy = strategy_for_field(inner_src, spec, mode, None)?;
-                return Ok(format!(
-                    "prop::collection::vec({inner_strategy}, {n}..={n}).prop_map(|v| v.try_into().ok().unwrap())"
+                return Ok(StrategyExpr::call(
+                    "prop::collection::vec",
+                    vec![
+                        inner_strategy,
+                        StrategyExpr::range(n.to_string(), n.to_string()),
+                    ],
+                )
+                .method(
+                    "prop_map",
+                    vec![StrategyExpr::atom("|v| v.try_into().ok().unwrap()")],
                 ));
             }
         }
@@ -111,14 +256,14 @@ fn strategy_for_field(
     // Fin[N] → usize; bound is informational.
     if dsl_type.starts_with("Fin[") {
         return Ok(match mode {
-            StrategyMode::Full => strategy_for_type("Fin").to_string(),
-            StrategyMode::Boundary => boundary_strategy_for_type("Fin").to_string(),
+            StrategyMode::Full => strategy_for_type("Fin"),
+            StrategyMode::Boundary => boundary_strategy_for_type("Fin"),
         });
     }
 
     // Record type → arb_<Name>() — emitted by emit_record_prop_composes.
     if spec.records.iter().any(|r| r.name == dsl_type) {
-        return Ok(format!("arb_{}()", dsl_type));
+        return Ok(StrategyExpr::call(format!("arb_{}", dsl_type), Vec::new()));
     }
 
     // Unit-variant sum type → arb_<Name>() (emit_unit_sum_prop_oneofs).
@@ -129,7 +274,7 @@ fn strategy_for_field(
             && !s.variants.is_empty()
             && s.variants.iter().all(|v| v.fields.is_empty())
     }) {
-        return Ok(format!("arb_{}()", dsl_type));
+        return Ok(StrategyExpr::call(format!("arb_{}", dsl_type), Vec::new()));
     }
 
     // Type alias: resolve transitively and recurse.
@@ -144,21 +289,25 @@ fn strategy_for_field(
             StrategyMode::Boundary => {
                 let n: u128 = bound.parse().unwrap_or(u128::MAX);
                 if n < 3 {
-                    format!("0{rt}..={b}{rt}", rt = rust_type, b = bound)
+                    StrategyExpr::range(format!("0{rust_type}"), format!("{bound}{rust_type}"))
                 } else {
-                    format!(
-                        "prop_oneof![0{rt}..=3{rt}, ({b} - 3)..={b}{rt}]",
-                        rt = rust_type,
-                        b = bound
-                    )
+                    StrategyExpr::one_of(vec![
+                        StrategyExpr::range(format!("0{rust_type}"), format!("3{rust_type}")),
+                        StrategyExpr::range(
+                            format!("({bound} - 3)"),
+                            format!("{bound}{rust_type}"),
+                        ),
+                    ])
                 }
             }
-            StrategyMode::Full => format!("0{rt}..={b}{rt}", rt = rust_type, b = bound),
+            StrategyMode::Full => {
+                StrategyExpr::range(format!("0{rust_type}"), format!("{bound}{rust_type}"))
+            }
         });
     }
     Ok(match mode {
-        StrategyMode::Boundary => boundary_strategy_for_type(dsl_type).to_string(),
-        StrategyMode::Full => strategy_for_type(dsl_type).to_string(),
+        StrategyMode::Boundary => boundary_strategy_for_type(dsl_type),
+        StrategyMode::Full => strategy_for_type(dsl_type),
     })
 }
 
@@ -1270,7 +1419,10 @@ fn emit_sequence_test_for(
                 // Type-dispatched strategy — see the effect-conformance
                 // site above (#295).
                 .map(|(_, t)| strategy_for_field(t, spec, StrategyMode::Full, None))
-                .collect::<Result<Vec<_>>>()?;
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .map(|strategy| strategy.render())
+                .collect();
             let names: Vec<&str> = op.takes_params.iter().map(|(n, _)| n.as_str()).collect();
             // proptest's tuple `Strategy` impl caps at arity 12; >12-arg
             // handlers (common for brownfield init handlers) hit E0599.
@@ -1780,11 +1932,11 @@ handler approve (member_index : U8) (member_pubkey : Pubkey) : State.Active -> S
     fn strategy_for_field_primitive_routes_through_strategy_for_type() {
         let spec = ParsedSpec::default();
         let s = strategy_for_field("U64", &spec, StrategyMode::Full, None).unwrap();
-        assert_eq!(s, "0u64..=u64::MAX");
+        assert_eq!(s.render(), "0u64..=u64::MAX");
         let s = strategy_for_field("U128", &spec, StrategyMode::Full, None).unwrap();
-        assert_eq!(s, "0u128..=u128::MAX");
+        assert_eq!(s.render(), "0u128..=u128::MAX");
         let s = strategy_for_field("I128", &spec, StrategyMode::Full, None).unwrap();
-        assert_eq!(s, "any::<i128>()");
+        assert_eq!(s.render(), "any::<i128>()");
     }
 
     #[test]
@@ -1797,12 +1949,13 @@ handler approve (member_index : U8) (member_pubkey : Pubkey) : State.Active -> S
             ..ParsedSpec::default()
         };
         let s = strategy_for_field("Map[N] U64", &spec, StrategyMode::Full, None).unwrap();
+        let rendered = s.render();
         assert!(
-            s.starts_with("prop::collection::vec(0u64..=u64::MAX, 4..=4)"),
+            rendered.starts_with("prop::collection::vec(0u64..=u64::MAX, 4..=4)"),
             "unexpected Map-primitive strategy: {s}"
         );
         assert!(
-            s.contains(".prop_map(|v| v.try_into().ok().unwrap())"),
+            rendered.contains(".prop_map(|v| v.try_into().ok().unwrap())"),
             "missing try_into prop_map: {s}"
         );
     }
@@ -1819,11 +1972,12 @@ handler noop { }
 "#;
         let spec = parse_str(src).expect("parse");
         let s = strategy_for_field("Account", &spec, StrategyMode::Full, None).unwrap();
-        assert_eq!(s, "arb_Account()");
+        assert_eq!(s.render(), "arb_Account()");
 
         let s = strategy_for_field("Map[N] Account", &spec, StrategyMode::Full, None).unwrap();
         assert!(
-            s.starts_with("prop::collection::vec(arb_Account(), 4..=4)"),
+            s.render()
+                .starts_with("prop::collection::vec(arb_Account(), 4..=4)"),
             "Map-record strategy didn't call into arb_Account: {s}"
         );
     }
@@ -1834,7 +1988,7 @@ handler noop { }
         // `Map[N] <SumName>` references, so test the strategy in isolation.
         let spec = spec_with_unit_sum("Status", &["Open", "Closed", "Cancelled"]);
         let s = strategy_for_field("Status", &spec, StrategyMode::Full, None).unwrap();
-        assert_eq!(s, "arb_Status()");
+        assert_eq!(s.render(), "arb_Status()");
     }
 
     #[test]
@@ -1849,7 +2003,7 @@ handler noop { }
 "#;
         let spec = parse_str(src).expect("parse");
         let s = strategy_for_field("AccountIdx", &spec, StrategyMode::Full, None).unwrap();
-        assert_eq!(s, "0usize..=1024usize");
+        assert_eq!(s.render(), "0usize..=1024usize");
     }
 
     #[test]
@@ -1927,8 +2081,12 @@ handler noop { }
     fn strategy_for_field_boundary_small_bound_avoids_underflow() {
         let spec = ParsedSpec::default();
         let s = strategy_for_field("U64", &spec, StrategyMode::Boundary, Some("2")).unwrap();
-        assert_eq!(s, "0u64..=2u64");
-        assert!(!s.contains("- 3"), "must not emit `(b - 3)` for b < 3");
+        let rendered = s.render();
+        assert_eq!(rendered, "0u64..=2u64");
+        assert!(
+            !rendered.contains("- 3"),
+            "must not emit `(b - 3)` for b < 3"
+        );
     }
 
     // ========================================================================

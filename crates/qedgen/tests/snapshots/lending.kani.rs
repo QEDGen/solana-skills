@@ -381,7 +381,7 @@ mod loan {
     // ============================================================================
 
     fn borrow(s: &mut State, amount: u64, collateral: u64) -> bool {
-        if !((amount > 0) && (collateral > 0)) {
+        if !(amount > 0 && collateral > 0) {
             return false;
         }
         if s.status != Status::Empty {
@@ -433,7 +433,7 @@ mod loan {
         kani::assume(s.status == Status::Empty);
         let amount: u64 = kani::any();
         let collateral: u64 = kani::any();
-        kani::assume(!((amount > 0) && (collateral > 0)));
+        kani::assume(!(amount > 0 && collateral > 0));
         kani::cover!(true, "guard-violation domain is satisfiable");
         assert!(
             !borrow(&mut s, amount, collateral),
