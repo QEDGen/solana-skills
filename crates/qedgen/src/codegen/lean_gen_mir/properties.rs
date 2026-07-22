@@ -61,13 +61,16 @@ pub(super) fn emit_properties(out: &mut String, mir: &Mir, rec: &mut ObligationR
                 &sub_lemma,
             );
             out.push_str(&format!(
-                "theorem {} (s s' : State) (signer : Pubkey){}\n",
-                sub_lemma, param_sig
+                "theorem {} (s s' : State) (signer : Pubkey){}{}\n",
+                sub_lemma,
+                ctx_sig(mir, h),
+                param_sig
             ));
             out.push_str(&format!(
-                "    (h_inv : {} s) (h : {} s signer{} = some s') :\n",
+                "    (h_inv : {} s) (h : {} s signer{}{} = some s') :\n",
                 safe_name(&prop.name),
                 trans_name,
+                ctx_arg(mir, h),
                 param_args
             ));
             let proof_tail = preservation_proof_script(mir, h, prop);
@@ -86,13 +89,20 @@ pub(super) fn emit_properties(out: &mut String, mir: &Mir, rec: &mut ObligationR
                 "/-- {} is preserved by every operation. Auto-proven by case split. -/\n",
                 prop.name
             ));
+            let spec_ctx = if spec_action_ctx_fields(mir).is_empty() {
+                ("", "")
+            } else {
+                (" (ctx : ActionCtx)", " ctx")
+            };
             out.push_str(&format!(
-                "theorem {}_inductive (s s' : State) (signer : Pubkey) (op : Operation)\n",
-                safe_name(&prop.name)
+                "theorem {}_inductive (s s' : State) (signer : Pubkey){} (op : Operation)\n",
+                safe_name(&prop.name),
+                spec_ctx.0
             ));
             out.push_str(&format!(
-                "    (h_inv : {} s) (h : applyOp s signer op = some s') : {} s'",
+                "    (h_inv : {} s) (h : applyOp s signer{} op = some s') : {} s'",
                 safe_name(&prop.name),
+                spec_ctx.1,
                 safe_name(&prop.name)
             ));
             let master_proof = master_inductive_proof_script(mir, prop);
@@ -226,8 +236,12 @@ pub(super) fn master_inductive_proof_script(mir: &Mir, prop: &crate::mir::Proper
         if prop.preserved_by.contains(&h.name) {
             let ref_name = safe_name(&format!("{}_preserved_by_{}", prop.name, h.name));
             proof.push_str(&format!(
-                "  | {}{} => exact {} s s' signer{} h_inv h\n",
-                ctor, param_bind, ref_name, param_bind
+                "  | {}{} => exact {} s s' signer{}{} h_inv h\n",
+                ctor,
+                param_bind,
+                ref_name,
+                ctx_arg(mir, h),
+                param_bind
             ));
         } else {
             let trans_name = safe_name(&format!("{}Transition", h.name));
@@ -416,12 +430,16 @@ pub(super) fn emit_frame_conditions(out: &mut String, mir: &Mir, rec: &mut Oblig
         );
 
         out.push_str(&format!(
-            "theorem {} (s s' : State) (signer : Pubkey){}\n",
-            theorem_name, param_sig
+            "theorem {} (s s' : State) (signer : Pubkey){}{}\n",
+            theorem_name,
+            ctx_sig(mir, h),
+            param_sig
         ));
         out.push_str(&format!(
-            "    (h : {} s signer{} = some s') :\n",
-            trans_name, param_args
+            "    (h : {} s signer{}{} = some s') :\n",
+            trans_name,
+            ctx_arg(mir, h),
+            param_args
         ));
         let conjuncts: Vec<String> = unchanged
             .iter()
@@ -504,12 +522,23 @@ pub(super) fn emit_aborts_if_adt(out: &mut String, mir: &Mir, rec: &mut Obligati
 /// def where the `let`s are bound, so the names would be free (#156
 /// fixture `let-bindings-fee-split`). Let-free handlers keep the
 /// adapter's pre-rendered string (byte parity with existing snapshots).
-fn abort_pred_lean(h: &crate::mir::HandlerMir, pred: &crate::mir::Predicate) -> String {
+/// `action_ctx` routes account reads through the theorem's `ctx` binder
+/// (#328), matching the guard conjunct's rendering.
+fn abort_pred_lean(
+    h: &crate::mir::HandlerMir,
+    pred: &crate::mir::Predicate,
+    action_ctx: bool,
+) -> String {
+    let cx = if action_ctx {
+        tree_render::LeanCx::guard().with_action_ctx()
+    } else {
+        tree_render::LeanCx::guard()
+    };
     match &pred.0.tree {
         Some(tree) if !h.lets.is_empty() => {
-            tree_render::render_lean(&h.inline_let_bindings(tree), tree_render::LeanCx::guard())
+            tree_render::render_lean(&h.inline_let_bindings(tree), cx)
         }
-        _ => expr_lean(&pred.0, tree_render::LeanCx::guard()),
+        _ => expr_lean(&pred.0, cx),
     }
 }
 
@@ -551,32 +580,62 @@ pub(super) fn emit_aborts_if_with_sorry(
         let param_args = param_args_str(&h.params);
 
         // `aborts_total` collapses all abort conditions into one iff theorem.
-        let all_abort_lean: Vec<String> = h
-            .requires_or_abort
-            .iter()
-            .map(|r| format!("\u{00AC}({})", abort_pred_lean(h, &r.pred)))
-            .collect();
+        // Clauses ctx routing cannot express are recorded unsupported and
+        // left out of the disjunction (pre-#328 they rendered free
+        // identifiers here — a non-elaborating module).
+        let mut all_abort_lean: Vec<String> = Vec::new();
+        let mut total_supported: Vec<usize> = Vec::new();
+        for (i, r) in h.requires_or_abort.iter().enumerate() {
+            match render_guard_pred(mir, h, &r.pred.0) {
+                PredRender::Plain(_) => {
+                    all_abort_lean
+                        .push(format!("\u{00AC}({})", abort_pred_lean(h, &r.pred, false)));
+                    total_supported.push(i);
+                }
+                PredRender::Ctx(_, _) => {
+                    all_abort_lean.push(format!("\u{00AC}({})", abort_pred_lean(h, &r.pred, true)));
+                    total_supported.push(i);
+                }
+                PredRender::Dropped => {}
+            }
+        }
 
-        if h.aborts_total && !all_abort_lean.is_empty() {
+        if h.aborts_total && !h.requires_or_abort.is_empty() {
             let theorem_name = safe_name(&format!("{}_aborts_iff", h.name));
-            // The collapsed iff covers every clause: record each clause
-            // index against the one theorem so keys line up with the
+            // The collapsed iff covers every supported clause: record each
+            // clause index against the one theorem so keys line up with the
             // per-clause path (and with transitions.rs).
             for i in 0..h.requires_or_abort.len() {
-                rec.emitted(
-                    ObligationKind::Abort,
-                    &h.name,
-                    &format!("abort_{i}"),
-                    &theorem_name,
-                );
+                if total_supported.contains(&i) {
+                    rec.emitted(
+                        ObligationKind::Abort,
+                        &h.name,
+                        &format!("abort_{i}"),
+                        &theorem_name,
+                    );
+                } else {
+                    rec.unsupported(
+                        ObligationKind::Abort,
+                        &h.name,
+                        &format!("abort_{i}"),
+                        UnsupportedReason::LeanHandlerAccountPubkey,
+                    );
+                }
+            }
+            if all_abort_lean.is_empty() {
+                continue;
             }
             out.push_str(&format!(
-                "theorem {} (s : State) (signer : Pubkey){} :\n",
-                theorem_name, param_sig
+                "theorem {} (s : State) (signer : Pubkey){}{} :\n",
+                theorem_name,
+                ctx_sig(mir, h),
+                param_sig
             ));
             out.push_str(&format!(
-                "    {} s signer{} = none \u{2194}\n",
-                trans_name, param_args
+                "    {} s signer{}{} = none \u{2194}\n",
+                trans_name,
+                ctx_arg(mir, h),
+                param_args
             ));
             let disjunction = all_abort_lean.join(" \u{2228} ");
             out.push_str(&format!("    ({}) := {}\n\n", disjunction, sorry_form));
@@ -620,16 +679,21 @@ pub(super) fn emit_aborts_if_with_sorry(
         let cond_parts = build_guard_cond_parts(mir, h);
         let flat_path = sorry_form == "sorry";
         for (i, r) in h.requires_or_abort.iter().enumerate() {
-            let pred_lean = abort_pred_lean(h, &r.pred);
-            if mentions_handler_account_pubkey(&pred_lean, &h.accounts) {
-                rec.unsupported(
-                    ObligationKind::Abort,
-                    &h.name,
-                    &format!("abort_{i}"),
-                    UnsupportedReason::LeanHandlerAccountPubkey,
-                );
-                continue;
-            }
+            // #328 — account-reading predicates route through `ActionCtx`;
+            // only shapes ctx cannot express stay reported unsupported.
+            let (pred_lean, req_lean) = match render_guard_pred(mir, h, &r.pred.0) {
+                PredRender::Dropped => {
+                    rec.unsupported(
+                        ObligationKind::Abort,
+                        &h.name,
+                        &format!("abort_{i}"),
+                        UnsupportedReason::LeanHandlerAccountPubkey,
+                    );
+                    continue;
+                }
+                PredRender::Plain(req_lean) => (abort_pred_lean(h, &r.pred, false), req_lean),
+                PredRender::Ctx(req_lean, _) => (abort_pred_lean(h, &r.pred, true), req_lean),
+            };
             let theorem_name = theorem_name_for(&r.err, &mut error_seen);
             rec.emitted(
                 ObligationKind::Abort,
@@ -638,23 +702,28 @@ pub(super) fn emit_aborts_if_with_sorry(
                 &theorem_name,
             );
             out.push_str(&format!(
-                "theorem {} (s : State) (signer : Pubkey){}\n",
-                theorem_name, param_sig
+                "theorem {} (s : State) (signer : Pubkey){}{}\n",
+                theorem_name,
+                ctx_sig(mir, h),
+                param_sig
             ));
             // Positioned against the guard conjunct in its original
             // (let-name) form — the transition's `if` binds the lets, so
             // its condition keeps the names; the hypothesis carries the
             // inlined form, and the `if_neg` projection unifies the two
             // up to zeta reduction.
-            let req_lean = expr_lean(&r.pred.0, tree_render::LeanCx::guard());
             let req_pos = cond_parts.iter().position(|c| c == &req_lean);
             if flat_path {
                 if let Some(pos) = req_pos {
                     let proof =
                         abort_requires_proof(&trans_name, &cond_parts, pos, !h.lets.is_empty());
                     out.push_str(&format!(
-                        "    (h : \u{00AC}({})) : {} s signer{} = none{}\n",
-                        pred_lean, trans_name, param_args, proof
+                        "    (h : \u{00AC}({})) : {} s signer{}{} = none{}\n",
+                        pred_lean,
+                        trans_name,
+                        ctx_arg(mir, h),
+                        param_args,
+                        proof
                     ));
                     continue;
                 }
@@ -672,14 +741,22 @@ pub(super) fn emit_aborts_if_with_sorry(
                 // placeholder and keep the obligation honest.
                 let proof = format!(" := by\n  unfold {}\n  cases s <;> simp_all\n", trans_name);
                 out.push_str(&format!(
-                    "    (h : \u{00AC}({})) : {} s signer{} = none{}\n",
-                    pred_lean, trans_name, param_args, proof
+                    "    (h : \u{00AC}({})) : {} s signer{}{} = none{}\n",
+                    pred_lean,
+                    trans_name,
+                    ctx_arg(mir, h),
+                    param_args,
+                    proof
                 ));
                 continue;
             }
             out.push_str(&format!(
-                "    (h : \u{00AC}({})) : {} s signer{} = none := {}\n\n",
-                pred_lean, trans_name, param_args, sorry_form
+                "    (h : \u{00AC}({})) : {} s signer{}{} = none := {}\n\n",
+                pred_lean,
+                trans_name,
+                ctx_arg(mir, h),
+                param_args,
+                sorry_form
             ));
         }
     }
@@ -719,12 +796,16 @@ pub(super) fn emit_ensures(out: &mut String, mir: &Mir, rec: &mut ObligationReco
                 &theorem_name,
             );
             out.push_str(&format!(
-                "theorem {} (s s' : State) (signer : Pubkey){}\n",
-                theorem_name, param_sig
+                "theorem {} (s s' : State) (signer : Pubkey){}{}\n",
+                theorem_name,
+                ctx_sig(mir, h),
+                param_sig
             ));
             out.push_str(&format!(
-                "    (h : {} s signer{} = some s') :\n",
-                trans_name, param_args
+                "    (h : {} s signer{}{} = some s') :\n",
+                trans_name,
+                ctx_arg(mir, h),
+                param_args
             ));
             out.push_str(&format!(
                 "    {} := sorry\n\n",

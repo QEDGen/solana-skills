@@ -763,8 +763,19 @@ handler deposit (amount : U64) : State.Active -> State.Active {
 
 `<account>.pubkey` lowers to `ctx.<account>.key()` in Anchor handlers and to
 the symbolic `Pubkey` slot in proptest / Kani. Inside a Lean transition
-body it disappears — account-pubkey writes are dropped from the Lean
-model (the proof obligation is about account identity, not byte value).
+body an account-pubkey *write* disappears — the proof obligation is about
+account identity, not byte value.
+
+Account-pubkey *reads* in `requires` clauses reach the Lean model through
+`ActionCtx` (#328): codegen emits one `structure ActionCtx` carrying every
+account address (and imported cross-program state field, for dotted `auth
+acct.field`) the guards read; transitions that read any take
+`(ctx : ActionCtx)`, the authorization clause stays in the guard
+(`ctx.initializer_ta = s.initializer_token_account`), and the matching
+abort theorem is emitted with a mechanical proof. This covers flat-state
+shapes with single-projection reads; the ADT and indexed lanes, and deeper
+projections, keep the clause out of the model and report it in the
+obligation manifest as `unsupported(lean_handler_account_pubkey)`.
 
 ### `effect` block
 

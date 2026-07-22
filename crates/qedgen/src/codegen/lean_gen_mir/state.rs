@@ -226,6 +226,24 @@ pub(super) fn emit_lifecycle_marker(out: &mut String, mir: &Mir) {
     out.push_str("  deriving Repr, DecidableEq, BEq, Inhabited\n\n");
 }
 
+/// #328 — `structure ActionCtx`: every handler-account value the guard
+/// predicates read (account addresses + imported cross-program state).
+/// Emitted only when some guard reads one; transitions that read any of
+/// them take `(ctx : ActionCtx)`.
+pub(super) fn emit_action_ctx(out: &mut String, mir: &Mir) {
+    let fields = spec_action_ctx_fields(mir);
+    if fields.is_empty() {
+        return;
+    }
+    out.push_str("/-- Handler invocation context (#328): account addresses and cross-program\n");
+    out.push_str("    state the guards read. Universally quantified in every theorem. -/\n");
+    out.push_str("structure ActionCtx where\n");
+    for (name, ty) in &fields {
+        out.push_str(&format!("  {} : {}\n", safe_name(name), ty));
+    }
+    out.push('\n');
+}
+
 /// Emit the `inductive Operation` enum + `def applyOp` dispatcher.
 pub(super) fn emit_operation_inductive(out: &mut String, mir: &Mir) {
     if mir.handlers.is_empty() {
@@ -248,7 +266,18 @@ pub(super) fn emit_operation_inductive(out: &mut String, mir: &Mir) {
     }
     out.push_str("  deriving Repr, DecidableEq, BEq\n\n");
 
-    out.push_str("def applyOp (s : State) (signer : Pubkey) : Operation \u{2192} Option State\n");
+    // #328 — when any handler's guards read invocation context, the
+    // dispatcher threads one `ctx` binder; only ctx-reading transitions
+    // consume it.
+    let spec_ctx = if spec_action_ctx_fields(mir).is_empty() {
+        ""
+    } else {
+        " (ctx : ActionCtx)"
+    };
+    out.push_str(&format!(
+        "def applyOp (s : State) (signer : Pubkey){} : Operation \u{2192} Option State\n",
+        spec_ctx
+    ));
     for h in &mir.handlers {
         let ctor = safe_name(&h.name);
         let trans = safe_name(&format!("{}Transition", h.name));
@@ -264,8 +293,12 @@ pub(super) fn emit_operation_inductive(out: &mut String, mir: &Mir) {
             format!(" {}", names.join(" "))
         };
         out.push_str(&format!(
-            "  | .{}{} => {} s signer{}\n",
-            ctor, pattern_args, trans, call_args
+            "  | .{}{} => {} s signer{}{}\n",
+            ctor,
+            pattern_args,
+            trans,
+            ctx_arg(mir, h),
+            call_args
         ));
     }
     out.push('\n');

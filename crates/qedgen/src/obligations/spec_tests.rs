@@ -95,11 +95,12 @@ fn kani_adt_state_repr_gap_is_reported() {
     assert_eq!(gap[0].kind, ObligationKind::StateRepresentation);
 }
 
-/// #328 — Lean drops requires clauses naming a handler account's pubkey.
-/// The bundled escrow example (`requires initializer_ta.pubkey == …`)
-/// must report each dropped clause instead of weakening silently.
+/// #328 — flat-shape account-pubkey clauses route through `ActionCtx`
+/// instead of dropping. The bundled escrow example (`requires
+/// initializer_ta.pubkey == …`) must report zero dropped clauses and an
+/// emitted abort theorem for each authorization clause.
 #[test]
-fn lean_handler_account_pubkey_drops_are_reported() {
+fn lean_handler_account_pubkey_clauses_route_through_action_ctx() {
     let (mir, parsed) = lower_fixture("examples/rust/escrow/escrow.qedspec");
     let entries = reconciled(
         ObligationBackend::Lean,
@@ -109,8 +110,36 @@ fn lean_handler_account_pubkey_drops_are_reported() {
     );
     let dropped = entries_with_reason(&entries, UnsupportedReason::LeanHandlerAccountPubkey);
     assert!(
+        dropped.is_empty(),
+        "flat-shape authorization clauses must route through ActionCtx: {:#?}",
+        dropped
+    );
+    let emitted_aborts: Vec<&ObligationEntry> = entries
+        .iter()
+        .filter(|e| {
+            e.kind == ObligationKind::Abort && matches!(e.status, ObligationStatus::Emitted { .. })
+        })
+        .collect();
+    assert!(
+        !emitted_aborts.is_empty(),
+        "escrow's authorization aborts must be emitted theorems: {:#?}",
+        entries
+    );
+}
+
+/// #328 — the ADT lane keeps the drop-and-report behavior (its guard
+/// emitters bind pattern binders, not `s.` receivers). The bundled
+/// cross-program-vault ADT example must still surface its dropped
+/// authorization clause.
+#[test]
+fn lean_adt_shape_still_reports_account_pubkey_drops() {
+    let (mir, parsed) = lower_fixture("examples/rust/cross-program-vault/vault.qedspec");
+    assert!(parsed.state_repr_is_adt(), "fixture is the ADT example");
+    let entries = crate::lean_gen_mir::collect_obligations(&mir);
+    let dropped = entries_with_reason(&entries, UnsupportedReason::LeanHandlerAccountPubkey);
+    assert!(
         !dropped.is_empty(),
-        "escrow's pubkey-authorization clauses must surface: {:#?}",
+        "ADT-shape drops must stay reported: {:#?}",
         entries
     );
 }

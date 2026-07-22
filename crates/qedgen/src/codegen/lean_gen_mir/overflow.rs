@@ -98,8 +98,9 @@ pub(super) fn emit_overflow_inner(
             &format!("{}_overflow_safe", safe_name(&h.name)),
         );
         out.push_str(&format!(
-            "theorem {}_overflow_safe (s s' : State) (signer : Pubkey){}\n",
+            "theorem {}_overflow_safe (s s' : State) (signer : Pubkey){}{}\n",
             safe_name(&h.name),
+            ctx_sig(mir, h),
             param_sig
         ));
         let pre_joined = pre_parts
@@ -112,8 +113,10 @@ pub(super) fn emit_overflow_inner(
             out.push_str(&format!("    (h_inv_{} : {} s)\n", safe_name(inv), inv));
         }
         out.push_str(&format!(
-            "    (h : {} s signer{} = some s') :\n",
-            trans_name, param_args
+            "    (h : {} s signer{}{} = some s') :\n",
+            trans_name,
+            ctx_arg(mir, h),
+            param_args
         ));
         let post_joined = post_parts
             .iter()

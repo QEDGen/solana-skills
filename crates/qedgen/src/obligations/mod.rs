@@ -163,7 +163,7 @@ impl UnsupportedReason {
                 "spec has no lifecycle, so the liveness target predicate cannot be stated"
             }
             UnsupportedReason::LeanHandlerAccountPubkey => {
-                "predicate names a handler account pubkey, which the Lean transition signature does not bind (#328)"
+                "predicate reads a handler account the transition cannot bind; ActionCtx routing covers flat shapes with single-projection reads only (#328)"
             }
             UnsupportedReason::CpiMissingStateBinders => {
                 "callee ensures not composed: call site lacks `state_binders` for the referenced fields"
