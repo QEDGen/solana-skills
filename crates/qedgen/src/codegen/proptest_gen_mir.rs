@@ -192,11 +192,9 @@ fn strategy_for_prim(ty: &crate::mir::Ty) -> Option<StrategyExpr> {
             vec![StrategyExpr::range_from("0u8")],
         ),
         Ty::Bytes64 => StrategyExpr::call("any::<[u8; 64]>", Vec::new()),
-        Ty::Fin { .. }
-        | Ty::Vec { .. }
-        | Ty::Option { .. }
-        | Ty::Map { .. }
-        | Ty::Custom(_) => return None,
+        Ty::Fin { .. } | Ty::Vec { .. } | Ty::Option { .. } | Ty::Map { .. } | Ty::Custom(_) => {
+            return None
+        }
     })
 }
 
@@ -238,11 +236,9 @@ fn boundary_strategy_for_prim(ty: &crate::mir::Ty) -> Option<StrategyExpr> {
             "prop_map",
             vec![StrategyExpr::atom("|v| <[u8; 64]>::try_from(v).unwrap()")],
         ),
-        Ty::Fin { .. }
-        | Ty::Vec { .. }
-        | Ty::Option { .. }
-        | Ty::Map { .. }
-        | Ty::Custom(_) => return None,
+        Ty::Fin { .. } | Ty::Vec { .. } | Ty::Option { .. } | Ty::Map { .. } | Ty::Custom(_) => {
+            return None
+        }
     })
 }
 
@@ -325,15 +321,10 @@ fn strategy_for_ty(
         // a hard-coded 0..=1024 regardless of N).
         Ty::Fin { bound } => {
             let n: usize = spec.resolve_map_bound(bound)?.parse().map_err(|_| {
-                anyhow::anyhow!(
-                    "Fin bound `{}` did not resolve to a numeric value",
-                    bound
-                )
+                anyhow::anyhow!("Fin bound `{}` did not resolve to a numeric value", bound)
             })?;
             Ok(match mode {
-                StrategyMode::Full => {
-                    StrategyExpr::half_open_range("0usize", format!("{n}usize"))
-                }
+                StrategyMode::Full => StrategyExpr::half_open_range("0usize", format!("{n}usize")),
                 StrategyMode::Boundary => {
                     if n <= 8 {
                         StrategyExpr::half_open_range("0usize", format!("{n}usize"))
@@ -351,10 +342,7 @@ fn strategy_for_ty(
         }
         Ty::Option { value } => {
             let inner_strategy = strategy_for_ty(value, spec, mode, None)?;
-            Ok(StrategyExpr::call(
-                "prop::option::of",
-                vec![inner_strategy],
-            ))
+            Ok(StrategyExpr::call("prop::option::of", vec![inner_strategy]))
         }
         // No bound policy exists for `Vec` in the DSL — an unbounded
         // strategy would be a wrong-domain model, so this is an explicit

@@ -579,13 +579,19 @@ pub enum Ty {
     /// `Fin[N]` — bounded natural index domain. Bound carried verbatim
     /// (numeric literal or constant name), resolved via the spec's
     /// `const` table where a concrete value is needed.
-    Fin { bound: Symbol },
+    Fin {
+        bound: Symbol,
+    },
     /// `Vec T` — growable sequence. No bound policy in the DSL yet:
     /// Rust-facing backends render `Vec<T>`; proptest reports it as an
     /// unsupported strategy target (#330) until a bound policy exists.
-    Vec { value: Box<Ty> },
+    Vec {
+        value: Box<Ty>,
+    },
     /// `Option T`.
-    Option { value: Box<Ty> },
+    Option {
+        value: Box<Ty>,
+    },
     /// User-declared type name (a record, sum type, or imported type).
     Custom(Symbol),
     /// Bounded map keyed by `Pubkey`; capacity carried verbatim as a string —
