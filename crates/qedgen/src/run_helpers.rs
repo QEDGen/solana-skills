@@ -494,6 +494,7 @@ pub(crate) fn record_verify_evidence(
     report: &crate::verify::VerifyReport,
     kani_impl_bound: bool,
     probe_repros_passed: Option<bool>,
+    obligations_digest: Option<String>,
 ) {
     match crate::verify::evidence::build(
         spec,
@@ -501,6 +502,7 @@ pub(crate) fn record_verify_evidence(
         report,
         kani_impl_bound,
         probe_repros_passed,
+        obligations_digest,
     )
     .and_then(|e| crate::verify::evidence::record(&e, spec))
     {

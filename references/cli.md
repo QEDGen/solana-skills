@@ -274,7 +274,7 @@ $QEDGEN check --regen-drift --examples-root examples/rust
 |---|---|---|---|
 | `--spec` | Path | optional | Spec file or directory. Defaults to `.qed/config.json spec` |
 | `--proofs` | Path | `./formal_verification` | Proofs directory |
-| `--coverage` | bool | false | Show operation × property matrix (also enabled by default) |
+| `--coverage` | bool | false | Show operation × property matrix (spec coverage) plus the per-backend obligation rollup (backend coverage, #332): for each of kani / lean / proptest, how many requested obligations are `emitted` vs `unsupported(reason)` vs `failed`, recomputed in memory from the current spec. `--json` adds a `backend_coverage` key next to the existing matrix fields. |
 | `--explain` | bool | false | Generate Markdown verification report |
 | `--output` | Path | stdout | Output file for --explain |
 | `--drift` | Path | - | Rust source path for #[qed(verified)] drift detection |
@@ -416,6 +416,7 @@ $QEDGEN verify --spec my_program.qedspec --check-upstream --upstream-stale-ok
 | `--crucible-stateful` | bool | false | Stateful action-chain mode for `--crucible`. |
 | `--recursive` | bool | false | v2.27 Track D3 — DFS-walk the transitive proof-package closure (deduped by path) and run `lake build` per layer. Per-layer PASS/FAIL is reported; failed layers print the first ~10 lines of stderr/stdout. Exits non-zero on any layer failure; emits "every imported proof package built clean" when all pass. No-op success when the spec imports nothing with `verified = true` in `qed.lock`. |
 | `--require-verified` | bool | false | v2.27 Track D2 — exits non-zero before any backend dispatches if any imported Tier-1+ interface (binary_hash + `ensures`) did NOT ship a `.qed/proofs/<Iface>.lean + lakefile.lean` package alongside. Tier-0 (no ensures) and sentinel-pinned natives (all-zero binary_hash) are exempt. Default-off in v2.27 because the bundled stdlib still ships Stance 1 for `import System from "system"` (no bundled proof package for Pubkey-param handlers). |
+| `--strict` | bool | false | #332 — recompute the reconciled backend-obligation manifest (kani / lean / proptest, in memory) and exit 1 on any `unsupported` or `failed` entry. A passing strict verify means no requested obligation was silently dropped by a backend. Known capability gaps (multi-account file-level features #324, ADT Kani parity #326, pubkey Lean clauses #328, multi-account ghosts #331) fail affected specs by design. |
 
 ### `probe`
 Probe a `.qedspec` for category-coverage gaps (spec-aware mode) or walk a
@@ -673,6 +674,14 @@ Requires a git repo (see [Require-git guard](#require-git-guard)).
 
 `--spec` is optional — when omitted, resolved via the nearest
 `.qed/config.json`'s `spec` field. Explicit `--spec` overrides.
+
+When any model backend runs (`--kani`, `--proptest`, `--lean`, `--all`; not
+sBPF specs), codegen also writes the backend-obligation manifest to
+`.qed/obligations.json` (#332): every requested obligation, per backend, as
+`emitted` (with the harness / theorem / test name), `unsupported` (with a
+machine-readable capability reason), or `failed`. One summary line per
+backend is printed, plus one line per non-emitted obligation. The manifest
+never gates codegen — `verify --strict` is the gate.
 
 ```bash
 # From inside a project initialized with `qedgen init --spec ...`

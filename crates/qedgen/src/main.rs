@@ -6,6 +6,7 @@ mod descriptor;
 mod dispatch;
 mod fs_walk;
 mod mir;
+mod obligations;
 mod probe;
 mod project;
 mod run;

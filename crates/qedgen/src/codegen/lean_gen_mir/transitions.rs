@@ -1,17 +1,23 @@
 use super::*;
+use crate::obligations::{ObligationKind, ObligationRecorder, UnsupportedReason};
 
 /// Emit a transition per handler under the multi-variant ADT shape:
 /// `match s with | .Pre <bindings> => … | _ => none`, the arm constructing
 /// `.Post <args>` from effects + pre-variant bindings. Post-variant fields
 /// not derivable from the spec (effects, auth, carry-over) fall back to
 /// type defaults with a `todo!()` comment.
-pub(super) fn emit_transitions_adt(out: &mut String, mir: &Mir) {
+pub(super) fn emit_transitions_adt(out: &mut String, mir: &Mir, rec: &mut ObligationRecorder) {
     for h in &mir.handlers {
-        emit_handler_transition_adt(out, mir, h);
+        emit_handler_transition_adt(out, mir, h, rec);
     }
 }
 
-pub(super) fn emit_handler_transition_adt(out: &mut String, mir: &Mir, h: &crate::mir::HandlerMir) {
+pub(super) fn emit_handler_transition_adt(
+    out: &mut String,
+    mir: &Mir,
+    h: &crate::mir::HandlerMir,
+    rec: &mut ObligationRecorder,
+) {
     use crate::mir::Stmt;
 
     let trans_name = safe_name(&format!("{}Transition", h.name));
@@ -87,16 +93,28 @@ pub(super) fn emit_handler_transition_adt(out: &mut String, mir: &Mir, h: &crate
     // original spec ordering survives). Clauses mentioning a handler-account
     // `.pubkey` / `.key()` projection are filtered: those identifiers have
     // no Lean scope and would leave free variables in the statement.
-    for p in &h.pre {
+    for (i, p) in h.pre.iter().enumerate() {
         let lean = expr_lean(&p.0, tree_render::LeanCx::guard());
         if mentions_handler_account_pubkey(&lean, &h.accounts) {
+            rec.unsupported(
+                ObligationKind::TransitionGuard,
+                &h.name,
+                &format!("pre_{i}"),
+                UnsupportedReason::LeanHandlerAccountPubkey,
+            );
             continue;
         }
         cond_parts.push(lean);
     }
-    for r in &h.requires_or_abort {
+    for (i, r) in h.requires_or_abort.iter().enumerate() {
         let lean = expr_lean(&r.pred.0, tree_render::LeanCx::guard());
         if mentions_handler_account_pubkey(&lean, &h.accounts) {
+            rec.unsupported(
+                ObligationKind::Abort,
+                &h.name,
+                &format!("abort_{i}"),
+                UnsupportedReason::LeanHandlerAccountPubkey,
+            );
             continue;
         }
         cond_parts.push(lean);

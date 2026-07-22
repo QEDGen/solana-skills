@@ -1,4 +1,5 @@
 use super::*;
+use crate::obligations::{ObligationKind, ObligationRecorder, UnsupportedReason};
 
 /// Emit CPI theorems, two halves:
 ///
@@ -22,7 +23,11 @@ use super::*;
 /// Returns the pinned interface names referenced by call sites — the
 /// caller decides which sibling `<Iface>.lean` modules to write and which
 /// lakefile `require` directives to inject.
-pub(super) fn emit_cpi_theorems(out: &mut String, mir: &Mir) -> std::collections::BTreeSet<String> {
+pub(super) fn emit_cpi_theorems(
+    out: &mut String,
+    mir: &Mir,
+    rec: &mut ObligationRecorder,
+) -> std::collections::BTreeSet<String> {
     use crate::mir::Stmt;
 
     let mut pinned_interfaces: std::collections::BTreeSet<String> =
@@ -86,12 +91,24 @@ pub(super) fn emit_cpi_theorems(out: &mut String, mir: &Mir) -> std::collections
             // so the obligation is tracked without inventing a proof
             // shape that doesn't match.
             if authority.is_none() {
+                rec.unsupported(
+                    ObligationKind::TransferEnvelope,
+                    &h.name,
+                    &format!("transfer{suffix}"),
+                    UnsupportedReason::LeanTransferNoAuthority,
+                );
                 out.push_str(&format!(
                     "-- {} transfer{}: no authority declared; envelope theorem skipped.\n\n",
                     h.name, suffix,
                 ));
                 continue;
             }
+            rec.emitted(
+                ObligationKind::TransferEnvelope,
+                &h.name,
+                &format!("transfer{suffix}"),
+                &theorem_name,
+            );
 
             out.push_str(&format!(
                 "def {} (from_pk to_pk authority_pk : Pubkey) : CpiInstruction :=\n",
@@ -219,6 +236,12 @@ pub(super) fn emit_cpi_theorems(out: &mut String, mir: &Mir) -> std::collections
                                 missing[0],
                             ));
                         }
+                        rec.unsupported(
+                            ObligationKind::CpiEnsures,
+                            &h.name,
+                            &format!("{}.{}.call{}.post{}", target.0, method.0, call_idx, ens_idx),
+                            UnsupportedReason::CpiMissingStateBinders,
+                        );
                         continue;
                     }
                 }
@@ -227,6 +250,14 @@ pub(super) fn emit_cpi_theorems(out: &mut String, mir: &Mir) -> std::collections
                     "{}_{}_{}_call_{}_post_{}",
                     h.name, target.0, method.0, call_idx, ens_idx,
                 ));
+                // Tier-0 `by sorry` theorems exist as theorems — recorded
+                // emitted like the pinned axiom-discharged form.
+                rec.emitted(
+                    ObligationKind::CpiEnsures,
+                    &h.name,
+                    &format!("{}.{}.call{}.post{}", target.0, method.0, call_idx, ens_idx),
+                    &theorem_name,
+                );
 
                 if pinned {
                     let axiom_qualified = format!(

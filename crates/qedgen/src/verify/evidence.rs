@@ -58,6 +58,12 @@ pub struct VerifyEvidence {
     /// True iff at least one implementation-bound backend passed. The
     /// only field `stamp` accepts as license for `#[qed(verified)]`.
     pub implementation_verified: bool,
+    /// `sha256_hex16` over the reconciled backend-obligation entries at
+    /// verify time (#332) — lets `stamp` and audits see which backend
+    /// coverage a verify run was measured against. Absent on sBPF specs
+    /// and records written before schema v3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub obligations_digest: Option<String>,
 }
 
 /// Canonical evidence location for a spec: `<spec_dir>/.qed/verify-evidence.json`
@@ -151,6 +157,7 @@ pub fn build(
     report: &VerifyReport,
     kani_impl_bound: bool,
     probe_repros_passed: Option<bool>,
+    obligations_digest: Option<String>,
 ) -> Result<VerifyEvidence> {
     let mut backends: Vec<BackendEvidence> = report
         .backends
@@ -182,7 +189,7 @@ pub fn build(
     let program_hash = program.map(program_source_hash).transpose()?;
     let implementation_verified = has_impl_pass && program_hash.is_some();
     Ok(VerifyEvidence {
-        schema_version: 2,
+        schema_version: 3,
         spec: spec.display().to_string(),
         spec_hash: spec_file_hash(spec)?,
         program: program.map(|p| p.display().to_string()),
@@ -193,6 +200,7 @@ pub fn build(
             .unwrap_or(0),
         backends,
         implementation_verified,
+        obligations_digest,
     })
 }
 
@@ -356,7 +364,7 @@ mod tests {
         ]);
         // kani ran a MODEL harness (kani_impl_bound = false).
         let program = tmp_program(&spec);
-        let e = build(&spec, Some(&program), &r, false, None).unwrap();
+        let e = build(&spec, Some(&program), &r, false, None, None).unwrap();
         assert!(!e.implementation_verified);
         let _ = std::fs::remove_dir_all(spec.parent().unwrap());
     }
@@ -367,30 +375,30 @@ mod tests {
         let program = tmp_program(&spec);
         let r = report(vec![("miri", BackendStatus::Passed)]);
         assert!(
-            build(&spec, Some(&program), &r, false, None)
+            build(&spec, Some(&program), &r, false, None, None)
                 .unwrap()
                 .implementation_verified
         );
         assert!(
-            !build(&spec, None, &r, false, None)
+            !build(&spec, None, &r, false, None, None)
                 .unwrap()
                 .implementation_verified
         );
         let r = report(vec![("kani", BackendStatus::Passed)]);
         assert!(
-            build(&spec, Some(&program), &r, true, None)
+            build(&spec, Some(&program), &r, true, None, None)
                 .unwrap()
                 .implementation_verified
         );
         let r = report(vec![("kani", BackendStatus::Failed)]);
         assert!(
-            !build(&spec, Some(&program), &r, true, None)
+            !build(&spec, Some(&program), &r, true, None, None)
                 .unwrap()
                 .implementation_verified
         );
         let r = report(vec![]);
         assert!(
-            !build(&spec, Some(&program), &r, false, Some(true))
+            !build(&spec, Some(&program), &r, false, Some(true), None)
                 .unwrap()
                 .implementation_verified,
             "a fired bug reproducer is not implementation conformance evidence"
@@ -410,7 +418,7 @@ mod tests {
 
         // Model-only evidence → refusal naming eligibility.
         let r = report(vec![("proptest", BackendStatus::Passed)]);
-        let e = build(&spec, Some(&program), &r, false, None).unwrap();
+        let e = build(&spec, Some(&program), &r, false, None, None).unwrap();
         record(&e, &spec).unwrap();
         let err = require_stamp_evidence(&spec, &program, None)
             .unwrap_err()
@@ -419,7 +427,7 @@ mod tests {
 
         // Impl-bound pass → gate opens.
         let r = report(vec![("miri", BackendStatus::Passed)]);
-        let e = build(&spec, Some(&program), &r, false, None).unwrap();
+        let e = build(&spec, Some(&program), &r, false, None, None).unwrap();
         record(&e, &spec).unwrap();
         assert!(require_stamp_evidence(&spec, &program, None).is_ok());
 

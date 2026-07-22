@@ -3,32 +3,50 @@
 //! dispatch (including the per-account scoped `ParsedSpec` view).
 
 use super::*;
+use crate::obligations::{ObligationBackend, ObligationEntry, ObligationKind, ObligationRecorder, UnsupportedReason};
 
 /// Generate the Kani harness file at `output_path` from a pre-lowered
 /// `Mir` + the originating `ParsedSpec`.
 pub fn generate(mir: &Mir, parsed: &ParsedSpec, output_path: &Path) -> Result<()> {
+    generate_with_obligations(mir, parsed, output_path).map(|_| ())
+}
+
+/// `generate` + the backend-obligation record (#332): what this run
+/// emitted, and what it could not express, per obligation.
+pub fn generate_with_obligations(
+    mir: &Mir,
+    parsed: &ParsedSpec,
+    output_path: &Path,
+) -> Result<Vec<ObligationEntry>> {
     if mir.handlers.is_empty() {
         anyhow::bail!("No operations found in the spec — is this a valid qedspec file?");
     }
 
     crate::rust_codegen_util::check_effect_targets(parsed)?;
 
-    let content = render_with_progress(mir, parsed);
+    let mut rec = ObligationRecorder::new(ObligationBackend::Kani);
+    let content = render_inner(mir, parsed, true, skip_guard_proofs_from_env(), &mut rec);
     write_generated_file(output_path, &content)?;
 
     eprintln!("Generated Kani harnesses in {}", output_path.display());
-    Ok(())
+    Ok(rec.into_entries())
+}
+
+/// Obligation collection without artifact generation: run the pure render
+/// with a recorder and discard the output. Used by `check --coverage` and
+/// `verify --strict`, which must not write files.
+pub fn collect_obligations(mir: &Mir, parsed: &ParsedSpec) -> Vec<ObligationEntry> {
+    let mut rec = ObligationRecorder::new(ObligationBackend::Kani);
+    let _ = render_inner(mir, parsed, false, false, &mut rec);
+    rec.into_entries()
 }
 
 /// Pure render: deterministic structural prefix, then the per-account
 /// body, branching on single- vs multi-account.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn render(mir: &Mir, parsed: &ParsedSpec) -> String {
-    render_inner(mir, parsed, false, false)
-}
-
-pub(crate) fn render_with_progress(mir: &Mir, parsed: &ParsedSpec) -> String {
-    render_inner(mir, parsed, true, skip_guard_proofs_from_env())
+    let mut rec = ObligationRecorder::new(ObligationBackend::Kani);
+    render_inner(mir, parsed, false, false, &mut rec)
 }
 
 pub(crate) fn render_inner(
@@ -36,6 +54,7 @@ pub(crate) fn render_inner(
     parsed: &ParsedSpec,
     progress: bool,
     skip_guard_proofs: bool,
+    rec: &mut ObligationRecorder,
 ) -> String {
     let mut out = String::new();
     if progress {
@@ -54,17 +73,30 @@ pub(crate) fn render_inner(
     emit_state_model_header(&mut out);
     emit_constants(&mut out, mir);
 
+    // #326 — Kani has no ADT lowering: `pragma state_repr = adt` specs are
+    // verified against the flat union-of-fields carrier. Report the
+    // representation gap so Kani and Lean results are never read as
+    // representation-parity evidence.
+    if parsed.state_repr_is_adt() {
+        rec.unsupported(
+            ObligationKind::StateRepresentation,
+            "file",
+            "state_repr",
+            UnsupportedReason::KaniAdtStateRepr,
+        );
+    }
+
     if parsed.account_types.len() > 1 {
         // Multi-account: per-account `mod <lowercase>` blocks; file-level
         // features (covers / liveness / env) emit in single mode only.
         if let Err(e) =
-            emit_multi_account_sections(&mut out, mir, parsed, progress, skip_guard_proofs)
+            emit_multi_account_sections(&mut out, mir, parsed, progress, skip_guard_proofs, rec)
         {
             out.push_str(&format!("// MIR-ERROR: multi-account emit failed: {}\n", e));
         }
     } else {
         if let Err(e) =
-            emit_single_account_sections(&mut out, mir, parsed, progress, skip_guard_proofs)
+            emit_single_account_sections(&mut out, mir, parsed, progress, skip_guard_proofs, rec)
         {
             out.push_str(&format!(
                 "// MIR-ERROR: single-account emit failed: {}\n",
@@ -93,6 +125,7 @@ pub(crate) fn emit_single_account_sections(
     parsed: &ParsedSpec,
     progress: bool,
     skip_guard_proofs: bool,
+    rec: &mut ObligationRecorder,
 ) -> Result<()> {
     if progress {
         eprintln!("Rendering Kani section: state model");
@@ -108,36 +141,36 @@ pub(crate) fn emit_single_account_sections(
         if progress {
             eprintln!("Rendering Kani section: guard rejection proofs");
         }
-        emit_guard_enforcement_harnesses(out, parsed, progress)?;
+        emit_guard_enforcement_harnesses(out, parsed, progress, rec)?;
     }
     if progress {
         eprintln!("Rendering Kani section: property preservation proofs");
     }
-    emit_property_preservation_harnesses(out, parsed)?;
+    emit_property_preservation_harnesses(out, parsed, rec)?;
     // Section order (property → ensures → invariant → effect → overflow)
     // is load-bearing for snapshot byte-equivalence.
     if progress {
         eprintln!("Rendering Kani section: ensures preservation proofs");
     }
-    emit_ensures_preservation_harnesses(out, parsed)?;
+    emit_ensures_preservation_harnesses(out, parsed, rec)?;
     if progress {
         eprintln!("Rendering Kani section: invariant preservation proofs");
     }
-    emit_invariant_preservation_harnesses(out, parsed)?;
+    emit_invariant_preservation_harnesses(out, parsed, rec)?;
     if progress {
         eprintln!("Rendering Kani section: effect conformance proofs");
     }
-    emit_effect_conformance_harnesses(out, mir, parsed)?;
+    emit_effect_conformance_harnesses(out, mir, parsed, rec)?;
     if progress {
         eprintln!("Rendering Kani section: overflow proofs");
     }
-    emit_overflow_detection_harnesses(out, mir, parsed)?;
+    emit_overflow_detection_harnesses(out, mir, parsed, rec)?;
     // File-level features (covers / liveness / environment) —
     // single-mode only; multi-account specs skip these entirely.
     if progress {
         eprintln!("Rendering Kani section: cover/liveness/environment proofs");
     }
-    emit_file_level_features(out, mir, parsed)?;
+    emit_file_level_features(out, mir, parsed, rec)?;
     Ok(())
 }
 
@@ -152,18 +185,31 @@ pub(crate) fn emit_multi_account_sections(
     parsed: &ParsedSpec,
     progress: bool,
     skip_guard_proofs: bool,
+    rec: &mut ObligationRecorder,
 ) -> Result<()> {
     use crate::rust_codegen_util as util;
 
     for acct in &parsed.account_types {
         let acct_fields_view = util::field_refs(&acct.fields);
         if acct_fields_view.is_empty() {
+            rec.unsupported(
+                ObligationKind::AccountModel,
+                &acct.name,
+                &acct.name,
+                UnsupportedReason::AccountHasNoFields,
+            );
             continue;
         }
 
         let scoped = scope_parsed_to_account(parsed, acct);
 
         if scoped.handlers.is_empty() {
+            rec.unsupported(
+                ObligationKind::AccountModel,
+                &acct.name,
+                &acct.name,
+                UnsupportedReason::AccountHasNoHandlers,
+            );
             continue;
         }
 
@@ -182,15 +228,52 @@ pub(crate) fn emit_multi_account_sections(
                 );
             }
         } else {
-            emit_guard_enforcement_harnesses(out, &scoped, progress)?;
+            emit_guard_enforcement_harnesses(out, &scoped, progress, rec)?;
         }
-        emit_property_preservation_harnesses(out, &scoped)?;
-        emit_ensures_preservation_harnesses(out, &scoped)?;
-        emit_invariant_preservation_harnesses(out, &scoped)?;
-        emit_effect_conformance_harnesses(out, mir, &scoped)?;
-        emit_overflow_detection_harnesses(out, mir, &scoped)?;
+        emit_property_preservation_harnesses(out, &scoped, rec)?;
+        emit_ensures_preservation_harnesses(out, &scoped, rec)?;
+        emit_invariant_preservation_harnesses(out, &scoped, rec)?;
+        emit_effect_conformance_harnesses(out, mir, &scoped, rec)?;
+        emit_overflow_detection_harnesses(out, mir, &scoped, rec)?;
 
         out.push_str(&format!("}} // mod {}\n\n", mod_name));
+    }
+
+    // #324 — file-level features (covers / liveness / environment) are
+    // never lowered in multi-account mode: a trace may span accounts and
+    // per-account duplication would change its semantics. Report every
+    // requested file-level obligation as unsupported instead of letting
+    // it disappear.
+    for cover in &parsed.covers {
+        for i in 0..cover.traces.len() {
+            rec.unsupported(
+                ObligationKind::Cover,
+                "file",
+                &format!("{}::{}", cover.name, i),
+                UnsupportedReason::KaniMultiAccountFileLevel,
+            );
+        }
+    }
+    for liveness in &parsed.liveness_props {
+        rec.unsupported(
+            ObligationKind::Liveness,
+            "file",
+            &liveness.name,
+            UnsupportedReason::KaniMultiAccountFileLevel,
+        );
+    }
+    for env in &parsed.environments {
+        for prop in &parsed.properties {
+            if prop.expression.is_none() {
+                continue;
+            }
+            rec.unsupported(
+                ObligationKind::Environment,
+                "file",
+                &format!("{}::{}", prop.name, env.name),
+                UnsupportedReason::KaniMultiAccountFileLevel,
+            );
+        }
     }
 
     Ok(())

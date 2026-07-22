@@ -1,4 +1,5 @@
 use super::*;
+use crate::obligations::{ObligationKind, ObligationRecorder, UnsupportedReason};
 
 /// `(root_field, idx)` → `Vec<(inner_field, op_kind, value)>` — groups
 /// multiple writes to the same `Map` slot into one `Function.update`.
@@ -54,7 +55,7 @@ pub(super) fn default_value_for(t: &str) -> &'static str {
 ///     theorems, NO covers / liveness / environments — only the
 ///     property predicate `def`s land in `Spec.lean`. Proofs live
 ///     in a sibling `Proofs.lean` (qedgen init seeds it).
-pub(super) fn render_indexed_state(mir: &Mir) -> String {
+pub(super) fn render_indexed_state(mir: &Mir, rec: &mut ObligationRecorder) -> String {
     let mut out = String::new();
 
     // -- Imports --
@@ -168,7 +169,7 @@ pub(super) fn render_indexed_state(mir: &Mir) -> String {
 
     // -- Transitions --
     for h in &mir.handlers {
-        emit_indexed_transition(&mut out, mir, h, &map_roots, emit_marker);
+        emit_indexed_transition(&mut out, mir, h, &map_roots, emit_marker, rec);
     }
 
     // -- Operation inductive + applyOp --
@@ -396,6 +397,7 @@ pub(super) fn emit_indexed_transition(
     h: &crate::mir::HandlerMir,
     map_roots: &std::collections::BTreeMap<String, String>,
     emit_marker: bool,
+    rec: &mut ObligationRecorder,
 ) {
     use crate::mir::Stmt;
 
@@ -427,9 +429,15 @@ pub(super) fn emit_indexed_transition(
     // reorder an interleaved sequence (e.g. match-arm-abort: bare arm
     // condition + error-carrying abort marker). Parenthesized as wholes;
     // subscript-rewritten so `state.members[i]` → `(s.members i)`.
-    for pred in &h.requires_in_order {
+    for (i, pred) in h.requires_in_order.iter().enumerate() {
         let lean = expr_lean_app(&pred.0);
         if mentions_handler_account_pubkey(&lean, &h.accounts) {
+            rec.unsupported(
+                ObligationKind::TransitionGuard,
+                &h.name,
+                &format!("req_{i}"),
+                UnsupportedReason::LeanHandlerAccountPubkey,
+            );
             continue;
         }
         conds.push(format!("({})", lean));

@@ -1,4 +1,5 @@
 use super::*;
+use crate::obligations::{ObligationKind, ObligationRecorder, UnsupportedReason};
 
 /// Multi-account renderer. Per `type <Account>`: `<Account>State` struct,
 /// `<Account>Status` inductive, transitions, `<Account>Operation` +
@@ -13,7 +14,7 @@ use super::*;
 /// single-account section emitters, then rewrite the bare identifiers
 /// (`State`, `Status`, `Operation`, `applyOp`, `applyOps`) to per-account
 /// form via `rename_state_idents` — avoids duplicating every emitter.
-pub(super) fn render_multi_account(mir: &Mir) -> String {
+pub(super) fn render_multi_account(mir: &Mir, rec: &mut ObligationRecorder) -> String {
     let mut out = String::new();
     emit_header(&mut out, mir);
     emit_namespace_open(&mut out, mir);
@@ -26,13 +27,19 @@ pub(super) fn render_multi_account(mir: &Mir) -> String {
     for acct in &mir.account_states {
         let scoped = scope_mir_to_account(mir, acct);
         if scoped.handlers.is_empty() {
+            rec.unsupported(
+                ObligationKind::AccountModel,
+                &acct.name,
+                &acct.name,
+                UnsupportedReason::AccountHasNoHandlers,
+            );
             continue;
         }
         let mut block = String::new();
         emit_lifecycle_marker(&mut block, &scoped);
         emit_state_struct(&mut block, &scoped);
         emit_transitions(&mut block, &scoped);
-        let _pinned = emit_cpi_theorems(&mut block, &scoped);
+        let _pinned = emit_cpi_theorems(&mut block, &scoped, rec);
         emit_operation_inductive(&mut block, &scoped);
         out.push_str(&rename_state_idents(&block, &acct.name));
     }
@@ -41,7 +48,7 @@ pub(super) fn render_multi_account(mir: &Mir) -> String {
     // structured comments.
     emit_invariants_as_comments(&mut out, mir);
 
-    emit_properties_multi(&mut out, mir);
+    emit_properties_multi(&mut out, mir, rec);
 
     // Pass 2 — per-account: abort theorems, ensures, frame, overflow.
     // Overflow needs each account's properties on the scoped Mir so the
@@ -50,16 +57,24 @@ pub(super) fn render_multi_account(mir: &Mir) -> String {
     for acct in &mir.account_states {
         let mut scoped = scope_mir_to_account(mir, acct);
         if scoped.handlers.is_empty() {
+            // Same identity as the pass-1 record — the duplicate collapse
+            // keeps this a single entry.
+            rec.unsupported(
+                ObligationKind::AccountModel,
+                &acct.name,
+                &acct.name,
+                UnsupportedReason::AccountHasNoHandlers,
+            );
             continue;
         }
         if let Some(props) = prop_groups.get(&acct.name) {
             scoped.properties = props.clone();
         }
         let mut block = String::new();
-        emit_aborts_if(&mut block, &scoped);
-        emit_ensures(&mut block, &scoped);
-        emit_frame_conditions(&mut block, &scoped);
-        emit_overflow(&mut block, &scoped);
+        emit_aborts_if(&mut block, &scoped, rec);
+        emit_ensures(&mut block, &scoped, rec);
+        emit_frame_conditions(&mut block, &scoped, rec);
+        emit_overflow(&mut block, &scoped, rec);
         out.push_str(&rename_state_idents(&block, &acct.name));
     }
 
@@ -70,17 +85,17 @@ pub(super) fn render_multi_account(mir: &Mir) -> String {
     let primary_scoped = scope_mir_to_account(mir, primary);
     {
         let mut tail = String::new();
-        emit_covers_multi(&mut tail, mir, &primary_scoped);
+        emit_covers_multi(&mut tail, mir, &primary_scoped, rec);
         out.push_str(&rename_state_idents(&tail, &primary.name));
     }
 
     // Liveness binds to the account owning the via-ops (resolved via
     // `via_ops[0].on_account`).
-    emit_liveness_multi(&mut out, mir);
+    emit_liveness_multi(&mut out, mir, rec);
 
     // Environments — each property × environment cross emits its
     // preservation theorem against the account-scoped state type.
-    emit_environments_multi(&mut out, mir);
+    emit_environments_multi(&mut out, mir, rec);
 
     emit_namespace_close(&mut out, mir);
     out
@@ -123,7 +138,7 @@ pub(super) fn group_properties_by_account(
 /// existing single-account `emit_liveness` against a Mir scoped to its
 /// owning account, with token renames applied to the per-liveness
 /// block.
-pub(super) fn emit_liveness_multi(out: &mut String, mir: &Mir) {
+pub(super) fn emit_liveness_multi(out: &mut String, mir: &Mir, rec: &mut ObligationRecorder) {
     if mir.liveness_props.is_empty() || mir.account_states.is_empty() {
         return;
     }
@@ -158,13 +173,24 @@ pub(super) fn emit_liveness_multi(out: &mut String, mir: &Mir) {
         let acct_name = resolve(&liveness.via_ops);
         let acct = match mir.account_states.iter().find(|a| a.name == acct_name) {
             Some(a) => a,
-            None => continue,
+            None => {
+                // Structural gap: the via-ops resolved to an account name
+                // with no scoped state — the theorem silently disappears
+                // without this record.
+                rec.failed(
+                    ObligationKind::Liveness,
+                    "file",
+                    &liveness.name,
+                    "liveness via-ops resolve to an account not present in account_states",
+                );
+                continue;
+            }
         };
         let mut scoped = scope_mir_to_account(mir, acct);
         scoped.liveness_props = vec![liveness.clone()];
 
         let mut block = String::new();
-        emit_liveness_inner_body(&mut block, &scoped, &mut emitted_helpers, &acct.name);
+        emit_liveness_inner_body(&mut block, &scoped, &mut emitted_helpers, &acct.name, rec);
         out.push_str(&block);
     }
 }
@@ -180,6 +206,7 @@ pub(super) fn emit_liveness_inner_body(
     scoped: &Mir,
     emitted_helpers: &mut std::collections::BTreeSet<String>,
     account_name: &str,
+    rec: &mut ObligationRecorder,
 ) {
     // Buffer raw output (bare identifiers) so we can rename before pushing
     // to the caller. The applyOps helper emits at most once per account.
@@ -198,7 +225,7 @@ pub(super) fn emit_liveness_inner_body(
 
     // Shared theorem rendering; the section header (already written by
     // the caller) and the applyOps helper (managed above) are skipped.
-    emit_liveness_body(&mut buf, scoped, /* adt_form */ false);
+    emit_liveness_body(&mut buf, scoped, /* adt_form */ false, rec);
 
     out.push_str(&rename_state_idents(&buf, account_name));
 }
@@ -206,7 +233,7 @@ pub(super) fn emit_liveness_inner_body(
 /// Multi-account environment emit. Each property × environment cross
 /// emits a preservation theorem against the property's owning account
 /// (grouped by the account whose fields the property touches).
-pub(super) fn emit_environments_multi(out: &mut String, mir: &Mir) {
+pub(super) fn emit_environments_multi(out: &mut String, mir: &Mir, rec: &mut ObligationRecorder) {
     if mir.environments.is_empty() || mir.properties.is_empty() {
         return;
     }
@@ -229,7 +256,7 @@ pub(super) fn emit_environments_multi(out: &mut String, mir: &Mir) {
         scoped.properties = props.clone();
         scoped.environments = mir.environments.clone();
         let mut block = String::new();
-        emit_environments_body(&mut block, &scoped);
+        emit_environments_body(&mut block, &scoped, rec);
         out.push_str(&rename_state_idents(&block, &acct.name));
     }
 }
@@ -359,7 +386,7 @@ pub(super) fn emit_invariants_as_comments(out: &mut String, mir: &Mir) {
 /// Group properties by which account's fields they reference (via
 /// `group_properties_by_account`), then emit each group through the
 /// per-account scoped path.
-pub(super) fn emit_properties_multi(out: &mut String, mir: &Mir) {
+pub(super) fn emit_properties_multi(out: &mut String, mir: &Mir, rec: &mut ObligationRecorder) {
     if mir.properties.is_empty() || mir.account_states.is_empty() {
         return;
     }
@@ -375,7 +402,7 @@ pub(super) fn emit_properties_multi(out: &mut String, mir: &Mir) {
         let mut scoped = scope_mir_to_account(mir, acct);
         scoped.properties = props;
         let mut block = String::new();
-        emit_properties(&mut block, &scoped);
+        emit_properties(&mut block, &scoped, rec);
         out.push_str(&rename_state_idents(&block, &acct.name));
     }
 }
@@ -383,7 +410,12 @@ pub(super) fn emit_properties_multi(out: &mut String, mir: &Mir) {
 /// Emit cover trace theorems, skipping any whose handler sequence targets
 /// more than one account; skipped traces emit a structured comment so the
 /// spec author can see the obligation was dropped.
-pub(super) fn emit_covers_multi(out: &mut String, mir: &Mir, primary_scoped: &Mir) {
+pub(super) fn emit_covers_multi(
+    out: &mut String,
+    mir: &Mir,
+    primary_scoped: &Mir,
+    rec: &mut ObligationRecorder,
+) {
     if mir.covers.is_empty() {
         return;
     }
@@ -428,6 +460,17 @@ pub(super) fn emit_covers_multi(out: &mut String, mir: &Mir, primary_scoped: &Mi
             }
         }
         if spans_multi {
+            // Every trace of the skipped cover disappears from the file —
+            // record each requested trace obligation instead of letting
+            // it vanish (same keys as the emitted path).
+            for i in 0..c.traces.len() {
+                rec.unsupported(
+                    ObligationKind::Cover,
+                    "file",
+                    &format!("{}::{}", c.name, i),
+                    UnsupportedReason::MultiAccountCrossAccountObligation,
+                );
+            }
             let label: String = c
                 .traces
                 .first()
@@ -447,7 +490,7 @@ pub(super) fn emit_covers_multi(out: &mut String, mir: &Mir, primary_scoped: &Mi
         scoped.covers = kept;
         // The section header is already written above; render the
         // theorem bodies directly through the shared emitter.
-        emit_covers_body(out, &scoped, /* adt_form */ false);
+        emit_covers_body(out, &scoped, /* adt_form */ false, rec);
     }
 }
 

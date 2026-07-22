@@ -3,6 +3,7 @@
 //! `mul_bps_floor_u128` call-binding rewrite, and the term slug helper).
 
 use super::*;
+use crate::obligations::{ObligationKind, ObligationRecorder, UnsupportedReason};
 
 /// Emit `#[kani::proof] fn verify_<handler>_rejects_invalid()` per handler
 /// with a guard or `requires` clause. One monolithic harness per handler up
@@ -15,6 +16,7 @@ pub(crate) fn emit_guard_enforcement_harnesses(
     out: &mut String,
     parsed: &ParsedSpec,
     progress: bool,
+    rec: &mut ObligationRecorder,
 ) -> Result<()> {
     use crate::rust_codegen_util as util;
 
@@ -47,6 +49,12 @@ pub(crate) fn emit_guard_enforcement_harnesses(
         if guard_terms.is_empty() {
             // `has_guard()` but no expressible negation — skip to avoid
             // a vacuous `kani::assume(!(true))` harness.
+            rec.unsupported(
+                ObligationKind::GuardRejection,
+                &op.name,
+                &op.name,
+                UnsupportedReason::KaniGuardNegationInexpressible,
+            );
             continue;
         }
 
@@ -59,6 +67,7 @@ pub(crate) fn emit_guard_enforcement_harnesses(
             .expect("guard terms came from an expressible full guard");
             let full_guard = util::rewrite_kani_pubkey_comparisons(&full_guard, op, parsed);
             let harness_name = format!("verify_{}_rejects_invalid", op.name);
+            rec.emitted(ObligationKind::GuardRejection, &op.name, &op.name, &harness_name);
             if progress {
                 eprintln!("Rendering Kani guard proof: {harness_name}");
             }
@@ -86,6 +95,9 @@ pub(crate) fn emit_guard_enforcement_harnesses(
                 let slug = guard_term_slug(&term_expr);
                 let harness_name =
                     format!("verify_{}_rejects_invalid_{}_{}", op.name, idx + 1, slug);
+                // Split form: one obligation, several sub-harnesses — the
+                // recorder collapses duplicates, keeping the first name.
+                rec.emitted(ObligationKind::GuardRejection, &op.name, &op.name, &harness_name);
                 if progress {
                     eprintln!("Rendering Kani guard proof: {harness_name}");
                 }
