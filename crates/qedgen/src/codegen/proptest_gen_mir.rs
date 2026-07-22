@@ -13,6 +13,9 @@ use std::path::Path;
 use crate::check::{ParsedHandler, ParsedInvariant, ParsedProperty, ParsedSpec};
 use crate::codegen_shared::{map_type, write_generated_file, DslTypeExt};
 use crate::mir::Mir;
+use crate::obligations::{
+    ObligationBackend, ObligationEntry, ObligationKind, ObligationRecorder, UnsupportedReason,
+};
 use crate::rust_codegen_util;
 
 /// Small typed syntax for proptest strategy expressions. Strategy selection
@@ -132,10 +135,30 @@ impl std::fmt::Display for StrategyExpr {
 
 /// Generate the proptest harness file at `output_path`.
 pub fn generate(mir: &Mir, parsed: &ParsedSpec, output_path: &Path) -> Result<()> {
+    generate_with_obligations(mir, parsed, output_path).map(|_| ())
+}
+
+/// `generate` + the backend-obligation record (#332).
+pub fn generate_with_obligations(
+    mir: &Mir,
+    parsed: &ParsedSpec,
+    output_path: &Path,
+) -> Result<Vec<ObligationEntry>> {
     if parsed.handlers.is_empty() {
         anyhow::bail!("No operations found in the spec — is this a valid qedspec file?");
     }
-    generate_impl(mir, parsed, output_path)
+    let mut rec = ObligationRecorder::new(ObligationBackend::Proptest);
+    generate_impl(mir, parsed, Some(output_path), &mut rec)?;
+    Ok(rec.into_entries())
+}
+
+/// Obligation collection without artifact generation: run the render with
+/// a recorder and discard the output. Used by `check --coverage` and
+/// `verify --strict`, which must not write files.
+pub fn collect_obligations(mir: &Mir, parsed: &ParsedSpec) -> Vec<ObligationEntry> {
+    let mut rec = ObligationRecorder::new(ObligationBackend::Proptest);
+    let _ = generate_impl(mir, parsed, None, &mut rec);
+    rec.into_entries()
 }
 
 /// Proptest strategy for a DSL primitive type; compound types go through
@@ -430,7 +453,12 @@ fn extract_field_upper_bounds(
 
 /// Generate proptest harnesses: random-input state-machine tests checking
 /// invariants after every transition.
-fn generate_impl(mir: &Mir, spec: &ParsedSpec, output_path: &Path) -> Result<()> {
+fn generate_impl(
+    mir: &Mir,
+    spec: &ParsedSpec,
+    output_path: Option<&Path>,
+    rec: &mut ObligationRecorder,
+) -> Result<()> {
     rust_codegen_util::check_effect_targets(spec)?;
 
     let fp = crate::fingerprint::compute_fingerprint(spec);
@@ -516,10 +544,36 @@ fn mul_div_round_half_up_u128(a: u128, b: u128, d: u128) -> u128 {\n\
     rust_codegen_util::emit_constants(&mut out, &spec.constants);
 
     if is_multi {
+        // #331 — spec-global ghosts are absent from the multi-account model
+        // entirely (the single-account branch chains them into State; this
+        // branch does not). Report every ghost-reading property obligation
+        // as unsupported instead of letting it degrade or vanish.
+        for prop in &spec.properties {
+            let Some(rust) = &prop.rust_expression else {
+                continue;
+            };
+            if spec.ghosts.iter().any(|g| references_field(rust, &g.name)) {
+                for op_name in &prop.preserved_by {
+                    rec.unsupported(
+                        ObligationKind::PropertyPreservation,
+                        op_name,
+                        &prop.name,
+                        UnsupportedReason::ProptestMultiAccountGhost,
+                    );
+                }
+            }
+        }
+
         // Multi-account: generate per-account sections in separate modules
         for acct in &spec.account_types {
             let acct_fields = rust_codegen_util::field_refs(&acct.fields);
             if acct_fields.is_empty() {
+                rec.unsupported(
+                    ObligationKind::AccountModel,
+                    &acct.name,
+                    &acct.name,
+                    UnsupportedReason::AccountHasNoFields,
+                );
                 continue;
             }
             let acct_handlers: Vec<&ParsedHandler> = spec
@@ -528,6 +582,12 @@ fn mul_div_round_half_up_u128(a: u128, b: u128, d: u128) -> u128 {\n\
                 .filter(|h| h.on_account.as_deref() == Some(&acct.name))
                 .collect();
             if acct_handlers.is_empty() {
+                rec.unsupported(
+                    ObligationKind::AccountModel,
+                    &acct.name,
+                    &acct.name,
+                    UnsupportedReason::AccountHasNoHandlers,
+                );
                 continue;
             }
             let acct_field_names: Vec<&str> = acct_fields.iter().map(|(n, _)| n.as_str()).collect();
@@ -557,6 +617,7 @@ fn mul_div_round_half_up_u128(a: u128, b: u128, d: u128) -> u128 {\n\
                 &acct_props,
                 &acct.lifecycle,
                 spec,
+                rec,
             )?;
 
             out.push_str(&format!("}} // mod {}\n\n", mod_name));
@@ -586,11 +647,14 @@ fn mul_div_round_half_up_u128(a: u128, b: u128, d: u128) -> u128 {\n\
             &all_props,
             &spec.lifecycle_states,
             spec,
+            rec,
         )?;
     }
 
-    write_generated_file(output_path, &out)?;
-    eprintln!("Generated proptest harnesses at {}", output_path.display());
+    if let Some(output_path) = output_path {
+        write_generated_file(output_path, &out)?;
+        eprintln!("Generated proptest harnesses at {}", output_path.display());
+    }
     Ok(())
 }
 
@@ -606,6 +670,7 @@ fn emit_account_section(
     properties: &[&ParsedProperty],
     lifecycle_states: &[String],
     spec: &ParsedSpec,
+    rec: &mut ObligationRecorder,
 ) -> Result<()> {
     // Records/enums referenced by State are declared first, then their
     // `arb_<Name>()` strategies so `arb_state` can call into them. `Default`
@@ -704,6 +769,14 @@ fn emit_account_section(
     // Clone properties once for sections that need owned copies
     let owned_props: Vec<ParsedProperty> = properties.iter().map(|p| (*p).clone()).collect();
 
+    // Computed early because the ghost-property record in
+    // `emit_preservation_tests_for` needs to know whether the sequence
+    // harness (which is what validates ghost properties) will exist.
+    // Must stay in sync with the `want_sequence` gate below.
+    let will_emit_sequence = ((!owned_props.is_empty() && handlers.len() > 1)
+        || !mir.hooks.is_empty())
+        && !handlers.is_empty();
+
     // Property preservation tests
     if !props_with_expr.is_empty() {
         emit_preservation_tests_for(
@@ -713,6 +786,8 @@ fn emit_account_section(
             mutable_fields,
             lifecycle_states,
             spec,
+            will_emit_sequence,
+            rec,
         )?;
     }
 
@@ -727,6 +802,7 @@ fn emit_account_section(
             mutable_fields,
             lifecycle_states,
             spec,
+            rec,
         )?;
     }
 
@@ -734,7 +810,7 @@ fn emit_account_section(
     let guard_ops: Vec<&&ParsedHandler> = handlers.iter().filter(|op| op.has_guard()).collect();
     if !guard_ops.is_empty() {
         let guard_refs: Vec<&ParsedHandler> = guard_ops.iter().map(|op| **op).collect();
-        emit_guard_tests(out, &guard_refs, mutable_fields, all_fields);
+        emit_guard_tests(out, &guard_refs, mutable_fields, all_fields, rec);
     }
 
     // Overflow detection tests — the checked-add filter reads the lowered
@@ -760,6 +836,7 @@ fn emit_account_section(
             all_fields,
             spec,
             &owned_props,
+            rec,
         )?;
     }
 
@@ -768,6 +845,12 @@ fn emit_account_section(
     // `init`, which is what fires the injected `after_store` assertions.
     let want_sequence = (!owned_props.is_empty() && handlers.len() > 1) || !mir.hooks.is_empty();
     if want_sequence && !handlers.is_empty() {
+        rec.emitted(
+            ObligationKind::BackendExtra,
+            "file",
+            "state_machine_sequence",
+            "state_machine_sequence",
+        );
         emit_sequence_test_for(
             out,
             handlers,
@@ -919,6 +1002,7 @@ fn references_field(rust: &str, name: &str) -> bool {
     false
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_preservation_tests_for(
     out: &mut String,
     handlers: &[&ParsedHandler],
@@ -926,6 +1010,8 @@ fn emit_preservation_tests_for(
     mutable_fields: &[&(String, String)],
     lifecycle_states: &[String],
     spec: &ParsedSpec,
+    will_emit_sequence: bool,
+    rec: &mut ObligationRecorder,
 ) -> Result<()> {
     for prop in properties {
         if prop.expression.is_none() {
@@ -938,6 +1024,28 @@ fn emit_preservation_tests_for(
         // sampling exhausts ("too many global rejects").
         if let Some(rust) = &prop.rust_expression {
             if spec.ghosts.iter().any(|g| references_field(rust, &g.name)) {
+                for op_name in &prop.preserved_by {
+                    if !handlers.iter().any(|o| &o.name == op_name) {
+                        continue;
+                    }
+                    if will_emit_sequence {
+                        // The obligation is exercised by the sequence
+                        // harness, not a dedicated per-pair test.
+                        rec.emitted(
+                            ObligationKind::PropertyPreservation,
+                            op_name,
+                            &prop.name,
+                            "state_machine_sequence",
+                        );
+                    } else {
+                        rec.failed(
+                            ObligationKind::PropertyPreservation,
+                            op_name,
+                            &prop.name,
+                            "ghost property needs the sequence harness, which this section does not emit",
+                        );
+                    }
+                }
                 continue;
             }
         }
@@ -950,6 +1058,12 @@ fn emit_preservation_tests_for(
             if op.is_none() {
                 continue;
             }
+            rec.emitted(
+                ObligationKind::PropertyPreservation,
+                op_name,
+                &prop.name,
+                &format!("{}_preserves_{}", op_name, prop.name),
+            );
 
             let is_init = op
                 .map(|o| o.pre_status.as_deref() == Some("Uninitialized"))
@@ -1116,6 +1230,7 @@ fn emit_preservation_tests_for(
 /// (`handler.invariants`) and only emits when the invariant has a
 /// `rust_expr` body — description-only / unsupported-quantifier invariants
 /// are skipped silently.
+#[allow(clippy::too_many_arguments)]
 fn emit_invariant_preservation_tests_for(
     out: &mut String,
     handlers: &[&ParsedHandler],
@@ -1123,6 +1238,7 @@ fn emit_invariant_preservation_tests_for(
     mutable_fields: &[&(String, String)],
     lifecycle_states: &[String],
     spec: &ParsedSpec,
+    rec: &mut ObligationRecorder,
 ) -> Result<()> {
     for op in handlers {
         let op_name = &op.name;
@@ -1142,6 +1258,19 @@ fn emit_invariant_preservation_tests_for(
                 continue;
             };
             let is_init = op.pre_status.as_deref() == Some("Uninitialized");
+            {
+                let verb = if is_establish {
+                    "establishes"
+                } else {
+                    "preserves"
+                };
+                rec.emitted(
+                    ObligationKind::InvariantPreservation,
+                    op_name,
+                    &format!("{}_{}", verb, inv.name),
+                    &format!("{}_{}_{}", op_name, verb, inv.name),
+                );
+            }
 
             out.push_str("proptest! {\n");
             out.push_str("    #![proptest_config(ProptestConfig { max_global_rejects: 65536, ..ProptestConfig::with_cases(256) })]\n");
@@ -1221,6 +1350,7 @@ fn emit_guard_tests(
     guard_ops: &[&ParsedHandler],
     _mutable_fields: &[&(String, String)],
     all_fields: &[(String, String)],
+    rec: &mut ObligationRecorder,
 ) {
     for op in guard_ops {
         // Skip handlers whose only guards reference handler-account pubkeys —
@@ -1229,8 +1359,20 @@ fn emit_guard_tests(
         // `prop_assume!(!(true))` → always rejects → "Too many global
         // rejects". Real guard checks still emit in the runtime handler.
         let Some(rust_guard) = rust_codegen_util::collect_full_guard(op, true) else {
+            rec.unsupported(
+                ObligationKind::GuardRejection,
+                &op.name,
+                &op.name,
+                UnsupportedReason::ProptestGuardNotExpressible,
+            );
             continue;
         };
+        rec.emitted(
+            ObligationKind::GuardRejection,
+            &op.name,
+            &op.name,
+            &format!("{}_rejects_invalid", op.name),
+        );
 
         out.push_str("proptest! {\n");
         // High reject limit: guard negation filters most inputs by design
@@ -1291,6 +1433,7 @@ fn emit_overflow_tests_for(
     all_fields: &[(String, String)],
     spec: &ParsedSpec,
     properties: &[ParsedProperty],
+    rec: &mut ObligationRecorder,
 ) -> Result<()> {
     for op in overflow_ops {
         let body = mir
@@ -1315,9 +1458,23 @@ fn emit_overflow_tests_for(
                 .unwrap_or("U64");
             let max_val = match type_max(dsl_type) {
                 Some(m) => m,
-                None => continue,
+                None => {
+                    rec.unsupported(
+                        ObligationKind::Overflow,
+                        &op.name,
+                        field,
+                        UnsupportedReason::ProptestNonNumericOverflowTarget,
+                    );
+                    continue;
+                }
             };
             let rust_type = map_type(dsl_type, spec)?;
+            rec.emitted(
+                ObligationKind::Overflow,
+                &op.name,
+                field,
+                &format!("{}_no_overflow_on_{}", op.name, field),
+            );
 
             out.push_str("proptest! {\n");
             out.push_str("    #![proptest_config(ProptestConfig { max_global_rejects: 65536, ..ProptestConfig::with_cases(256) })]\n");
@@ -1713,7 +1870,8 @@ property balance_nonneg :
         std::fs::write(&spec_path, src).unwrap();
         let spec = crate::check::parse_spec_file(&spec_path).expect("parse");
         let mir = crate::mir::lower(&spec);
-        generate_impl(&mir, &spec, &out_path).unwrap();
+        let mut rec = ObligationRecorder::new(ObligationBackend::Proptest);
+        generate_impl(&mir, &spec, Some(&out_path), &mut rec).unwrap();
         let body = std::fs::read_to_string(&out_path).unwrap();
 
         // Function names land as bare-field, not variant-prefixed.
@@ -1772,7 +1930,8 @@ handler vote (member_index : U8) : State.Active -> State.Active {
         std::fs::write(&spec_path, src).unwrap();
         let spec = crate::check::parse_spec_file(&spec_path).expect("parse");
         let mir = crate::mir::lower(&spec);
-        generate_impl(&mir, &spec, &out_path).unwrap();
+        let mut rec = ObligationRecorder::new(ObligationBackend::Proptest);
+        generate_impl(&mir, &spec, Some(&out_path), &mut rec).unwrap();
         let body = std::fs::read_to_string(&out_path).unwrap();
 
         // Requires-derived bounds lead the transition guard: the bounds
@@ -1834,7 +1993,8 @@ handler deposit (amount : U64) : State.Active -> State.Active {
         std::fs::write(&spec_path, src).unwrap();
         let spec = crate::check::parse_spec_file(&spec_path).expect("parse");
         let mir = crate::mir::lower(&spec);
-        generate_impl(&mir, &spec, &out_path).unwrap();
+        let mut rec = ObligationRecorder::new(ObligationBackend::Proptest);
+        generate_impl(&mir, &spec, Some(&out_path), &mut rec).unwrap();
         let body = std::fs::read_to_string(&out_path).unwrap();
 
         // Default `+=` rejects on overflow instead of wrapping.
@@ -1899,7 +2059,8 @@ handler approve (member_index : U8) (member_pubkey : Pubkey) : State.Active -> S
         std::fs::write(&spec_path, src).unwrap();
         let spec = crate::check::parse_spec_file(&spec_path).expect("parse");
         let mir = crate::mir::lower(&spec);
-        generate_impl(&mir, &spec, &out_path).unwrap();
+        let mut rec = ObligationRecorder::new(ObligationBackend::Proptest);
+        generate_impl(&mir, &spec, Some(&out_path), &mut rec).unwrap();
         let body = std::fs::read_to_string(&out_path).unwrap();
 
         // (a) Pubkey param strategy is type-dispatched, never a range.
@@ -2102,6 +2263,7 @@ handler noop { }
         let handlers: Vec<&ParsedHandler> = spec.handlers.iter().collect();
         let properties: Vec<&ParsedProperty> = spec.properties.iter().collect();
         let mut out = String::new();
+        let mut rec = ObligationRecorder::new(ObligationBackend::Proptest);
         emit_account_section(
             &mut out,
             &mir,
@@ -2112,6 +2274,7 @@ handler noop { }
             &properties,
             &spec.lifecycle_states,
             &spec,
+            &mut rec,
         )
         .expect("emit");
         out

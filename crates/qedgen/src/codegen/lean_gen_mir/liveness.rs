@@ -1,4 +1,5 @@
 use super::*;
+use crate::obligations::{ObligationKind, ObligationRecorder};
 
 /// Concrete state used for cover-trace proof synthesis. Field values
 /// are strings rather than typed Lean terms — Pubkey fields hold `"pk"`
@@ -289,17 +290,22 @@ pub(super) fn cover_trace_proof(
 /// the witness machinery can't synthesize a discharge. `reachable
 /// when` entries always emit `:= sorry` — no witness chain is
 /// available.
-pub(super) fn emit_covers(out: &mut String, mir: &Mir) {
-    emit_covers_inner(out, mir, false);
+pub(super) fn emit_covers(out: &mut String, mir: &Mir, rec: &mut ObligationRecorder) {
+    emit_covers_inner(out, mir, false, rec);
 }
 
 /// ADT-shape cover emitter — same trace structure but witness terms
 /// are rendered as variant constructors via `witness_state_to_adt`.
-pub(super) fn emit_covers_adt(out: &mut String, mir: &Mir) {
-    emit_covers_inner(out, mir, true);
+pub(super) fn emit_covers_adt(out: &mut String, mir: &Mir, rec: &mut ObligationRecorder) {
+    emit_covers_inner(out, mir, true, rec);
 }
 
-pub(super) fn emit_covers_inner(out: &mut String, mir: &Mir, adt_form: bool) {
+pub(super) fn emit_covers_inner(
+    out: &mut String,
+    mir: &Mir,
+    adt_form: bool,
+    rec: &mut ObligationRecorder,
+) {
     if mir.covers.is_empty() {
         return;
     }
@@ -311,7 +317,7 @@ pub(super) fn emit_covers_inner(out: &mut String, mir: &Mir, adt_form: bool) {
         "-- ============================================================================\n\n",
     );
 
-    emit_covers_body(out, mir, adt_form);
+    emit_covers_body(out, mir, adt_form, rec);
 }
 
 /// Per-cover theorem rendering — shared body of `emit_covers_inner`
@@ -319,7 +325,12 @@ pub(super) fn emit_covers_inner(out: &mut String, mir: &Mir, adt_form: bool) {
 /// `emit_covers_multi` (which writes its own header before filtering
 /// cross-account traces, then calls this directly — no more
 /// render-then-strip).
-pub(super) fn emit_covers_body(out: &mut String, mir: &Mir, adt_form: bool) {
+pub(super) fn emit_covers_body(
+    out: &mut String,
+    mir: &Mir,
+    adt_form: bool,
+    rec: &mut ObligationRecorder,
+) {
     for cover in &mir.covers {
         for (trace_idx, trace) in cover.traces.iter().enumerate() {
             let suffix = if cover.traces.len() > 1 {
@@ -328,6 +339,12 @@ pub(super) fn emit_covers_body(out: &mut String, mir: &Mir, adt_form: bool) {
                 String::new()
             };
 
+            rec.emitted(
+                ObligationKind::Cover,
+                "file",
+                &format!("{}::{}", cover.name, trace_idx),
+                &format!("cover_{}{}", cover.name, suffix),
+            );
             out.push_str(&format!(
                 "/-- {} \u{2014} trace [{}] is reachable. -/\n",
                 cover.name,
@@ -419,6 +436,12 @@ pub(super) fn emit_covers_body(out: &mut String, mir: &Mir, adt_form: bool) {
         }
 
         for (op_name, when_pred) in &cover.reachable {
+            rec.emitted(
+                ObligationKind::Cover,
+                "file",
+                &format!("{}::reachable::{}", cover.name, op_name),
+                &format!("cover_{}_{}", cover.name, safe_name(op_name)),
+            );
             let handler = mir.handlers.iter().find(|h| h.name == *op_name);
             let trans = safe_name(&format!("{}Transition", op_name));
             let param_exists = handler
@@ -471,8 +494,8 @@ pub(super) fn emit_covers_body(out: &mut String, mir: &Mir, adt_form: bool) {
 }
 
 /// Emit `liveness` (bounded leads-to) theorems — see `emit_liveness_inner`.
-pub(super) fn emit_liveness(out: &mut String, mir: &Mir) {
-    emit_liveness_inner(out, mir, false);
+pub(super) fn emit_liveness(out: &mut String, mir: &Mir, rec: &mut ObligationRecorder) {
+    emit_liveness_inner(out, mir, false, rec);
 }
 
 /// ADT-shape liveness emitter. Statement form: `∃ ops, … ∧ ∀ s',
@@ -481,11 +504,16 @@ pub(super) fn emit_liveness(out: &mut String, mir: &Mir) {
 /// `∃ ops s', …` (existential over both the ops sequence and the
 /// resulting state). Both are valid liveness statements; the split is
 /// snapshot-pinned.
-pub(super) fn emit_liveness_adt(out: &mut String, mir: &Mir) {
-    emit_liveness_inner(out, mir, true);
+pub(super) fn emit_liveness_adt(out: &mut String, mir: &Mir, rec: &mut ObligationRecorder) {
+    emit_liveness_inner(out, mir, true, rec);
 }
 
-pub(super) fn emit_liveness_inner(out: &mut String, mir: &Mir, adt_form: bool) {
+pub(super) fn emit_liveness_inner(
+    out: &mut String,
+    mir: &Mir,
+    adt_form: bool,
+    rec: &mut ObligationRecorder,
+) {
     if mir.liveness_props.is_empty() {
         return;
     }
@@ -510,16 +538,27 @@ pub(super) fn emit_liveness_inner(out: &mut String, mir: &Mir, adt_form: bool) {
         out.push_str("    | none => none\n\n");
     }
 
-    emit_liveness_body(out, mir, adt_form);
+    emit_liveness_body(out, mir, adt_form, rec);
 }
 
 /// Per-liveness theorem rendering — shared body of `emit_liveness_inner`
 /// (single-account: header + `applyOps` helper above) and the
 /// multi-account `emit_liveness_inner_body` (per-account helper + token
 /// renames handled by the caller).
-pub(super) fn emit_liveness_body(out: &mut String, mir: &Mir, adt_form: bool) {
+pub(super) fn emit_liveness_body(
+    out: &mut String,
+    mir: &Mir,
+    adt_form: bool,
+    rec: &mut ObligationRecorder,
+) {
     for liveness in &mir.liveness_props {
         let bound = liveness.within_steps.unwrap_or(10);
+        rec.emitted(
+            ObligationKind::Liveness,
+            "file",
+            &liveness.name,
+            &format!("liveness_{}", liveness.name),
+        );
         out.push_str(&format!(
             "/-- {} \u{2014} from {} leads to {} within {} steps via [{}]. -/\n",
             liveness.name,
@@ -789,7 +828,7 @@ pub(super) fn liveness_multi_step_proof(
 /// Proof body auto-discharges with `unfold <prop> at h_inv ⊢; dsimp;
 /// exact h_inv` when the mutated fields don't appear in the property
 /// expression; otherwise emits `:= sorry`.
-pub(super) fn emit_environments(out: &mut String, mir: &Mir) {
+pub(super) fn emit_environments(out: &mut String, mir: &Mir, rec: &mut ObligationRecorder) {
     if mir.environments.is_empty() {
         return;
     }
@@ -801,7 +840,7 @@ pub(super) fn emit_environments(out: &mut String, mir: &Mir) {
         "-- ============================================================================\n\n",
     );
 
-    emit_environments_body(out, mir);
+    emit_environments_body(out, mir, rec);
 }
 
 /// Per-(environment × property) theorem rendering — shared body of
@@ -810,13 +849,19 @@ pub(super) fn emit_environments(out: &mut String, mir: &Mir) {
 /// Includes the bare-field-name constraint rewrite the spec's
 /// `constraint <field> > 0` form needs — historically only the
 /// multi-account clone had it (drift healed in T4).
-pub(super) fn emit_environments_body(out: &mut String, mir: &Mir) {
+pub(super) fn emit_environments_body(out: &mut String, mir: &Mir, rec: &mut ObligationRecorder) {
     for env in &mir.environments {
         for prop in &mir.properties {
             let prop_expr = match &prop.expression {
                 Some(e) => e,
                 None => continue,
             };
+            rec.emitted(
+                ObligationKind::Environment,
+                "file",
+                &format!("{}::{}", prop.name, env.name),
+                &format!("{}_under_{}", prop.name, env.name),
+            );
 
             let param_sig: String = env
                 .mutates

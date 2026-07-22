@@ -900,6 +900,17 @@ pub(crate) enum Commands {
         /// per-layer Lake build cost.
         #[arg(long)]
         recursive: bool,
+
+        /// #332 — fail unless every backend obligation is `emitted`.
+        /// Recomputes the reconciled backend-obligation manifest in
+        /// memory (kani / lean / proptest) and exits 1 on any
+        /// `unsupported` or `failed` entry: a passing strict verify
+        /// means no requested obligation was silently dropped by a
+        /// backend. Off by default because known capability gaps
+        /// (multi-account file-level features, ADT Kani parity,
+        /// pubkey-guard Lean clauses) would fail every affected spec.
+        #[arg(long)]
+        strict: bool,
     },
 
     /// Lint one Anchor IDL for mainnet-readiness before first deploy.

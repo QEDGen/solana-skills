@@ -3,6 +3,7 @@
 //! file-level features (covers / liveness / environment).
 
 use super::*;
+use crate::obligations::{ObligationKind, ObligationRecorder, UnsupportedReason};
 
 /// Per-(handler, field) effect-conformance harnesses — one proof per pair
 /// so a single stuck mul/div field can't block sibling-field verification.
@@ -19,6 +20,7 @@ pub(crate) fn emit_effect_conformance_harnesses(
     out: &mut String,
     mir: &Mir,
     parsed: &ParsedSpec,
+    rec: &mut ObligationRecorder,
 ) -> Result<()> {
     use crate::codegen_shared::sanitize_ident;
     use crate::rust_codegen_util as util;
@@ -67,6 +69,7 @@ pub(crate) fn emit_effect_conformance_harnesses(
             let harness_name = format!("verify_{}_effect_{}", op.name, sanitize_ident(&field_name));
             emit_one_conformance_harness(
                 out,
+                rec,
                 ConformanceHarness {
                     parsed,
                     op,
@@ -120,6 +123,7 @@ pub(crate) fn emit_effect_conformance_harnesses(
                     );
                     emit_one_conformance_harness(
                         out,
+                        rec,
                         ConformanceHarness {
                             parsed,
                             op,
@@ -149,6 +153,7 @@ pub(crate) fn emit_effect_conformance_harnesses(
                     );
                     emit_one_conformance_harness(
                         out,
+                        rec,
                         ConformanceHarness {
                             parsed,
                             op,
@@ -194,6 +199,7 @@ pub(crate) struct ConformanceHarness<'a> {
 /// frame check over `sibling_triples`.
 pub(crate) fn emit_one_conformance_harness(
     out: &mut String,
+    rec: &mut ObligationRecorder,
     ctx: ConformanceHarness<'_>,
 ) -> Result<()> {
     use crate::rust_codegen_util as util;
@@ -220,6 +226,12 @@ pub(crate) fn emit_one_conformance_harness(
     if !field_type_lookup.contains_key(base) {
         return Ok(());
     }
+    rec.emitted(
+        ObligationKind::EffectConformance,
+        &op.name,
+        harness_name,
+        harness_name,
+    );
 
     let field_type = field_type_lookup.get(field).copied().unwrap_or("");
     let solver = util::pick_kani_solver_for_effect(field_type, &util::mir_expr_rust(value), op);
@@ -401,6 +413,7 @@ pub(crate) fn emit_overflow_detection_harnesses(
     out: &mut String,
     mir: &Mir,
     parsed: &ParsedSpec,
+    rec: &mut ObligationRecorder,
 ) -> Result<()> {
     use crate::rust_codegen_util as util;
 
@@ -438,6 +451,12 @@ pub(crate) fn emit_overflow_detection_harnesses(
     );
 
     for op in &overflow_ops {
+        rec.emitted(
+            ObligationKind::Overflow,
+            &op.name,
+            &op.name,
+            &format!("verify_{}_no_overflow", op.name),
+        );
         emit_proof_preamble(
             out,
             parsed,
@@ -486,6 +505,7 @@ pub(crate) fn emit_file_level_features(
     out: &mut String,
     mir: &Mir,
     parsed: &ParsedSpec,
+    rec: &mut ObligationRecorder,
 ) -> Result<()> {
     use crate::codegen_shared::map_type;
     use crate::rust_codegen_util as util;
@@ -511,6 +531,12 @@ pub(crate) fn emit_file_level_features(
                 } else {
                     String::new()
                 };
+                rec.emitted(
+                    ObligationKind::Cover,
+                    "file",
+                    &format!("{}::{}", cover.name, i),
+                    &format!("cover_{}{}", cover.name, suffix),
+                );
                 emit_proof_preamble(
                     out,
                     parsed,
@@ -591,6 +617,12 @@ pub(crate) fn emit_file_level_features(
 
             // No lifecycle → no target predicate; skip with a structured comment.
             if !has_lifecycle {
+                rec.unsupported(
+                    ObligationKind::Liveness,
+                    "file",
+                    &liveness.name,
+                    UnsupportedReason::KaniLivenessNoLifecycle,
+                );
                 out.push_str(&format!(
                     "// liveness {}: skipped — spec has no lifecycle, no target predicate to cover\n\n",
                     liveness.name
@@ -598,6 +630,12 @@ pub(crate) fn emit_file_level_features(
                 continue;
             }
 
+            rec.emitted(
+                ObligationKind::Liveness,
+                "file",
+                &liveness.name,
+                &format!("verify_liveness_{}", liveness.name),
+            );
             emit_proof_preamble(
                 out,
                 parsed,
@@ -687,6 +725,12 @@ pub(crate) fn emit_file_level_features(
                 let (rust_constraints, needs_pre, needs_post) =
                     render_environment_constraints(mir_env, !env.external_fields.is_empty());
 
+                rec.emitted(
+                    ObligationKind::Environment,
+                    "file",
+                    &format!("{}::{}", prop.name, env.name),
+                    &format!("verify_{}_under_{}", prop.name, env.name),
+                );
                 emit_proof_preamble(
                     out,
                     parsed,

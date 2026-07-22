@@ -1297,14 +1297,27 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 None
             };
 
-            // Coverage matrix (--coverage)
+            // Coverage matrix (--coverage). Two levels (#332/#324): the
+            // handler × property matrix is SPEC coverage (a handler is
+            // named by a property); the obligation rollup is BACKEND
+            // coverage (each backend emitted a faithful obligation).
+            // Backend coverage is recomputed in memory from the current
+            // spec — never read from a stale manifest file.
             if coverage {
                 let parsed = parsed_shared.as_ref().expect("parsed under coverage guard");
                 let matrix = check::coverage_matrix(parsed);
+                let mir = crate::mir::lower(parsed);
+                let entries = crate::obligations::collect_all(&mir, parsed);
+                let backend_reports = crate::obligations::backend_coverage_reports(&entries);
                 if json {
-                    println!("{}", serde_json::to_string_pretty(&matrix)?);
+                    // Additive JSON shape: the matrix keys stay top-level
+                    // (existing consumers), `backend_coverage` is new.
+                    let mut value = serde_json::to_value(&matrix)?;
+                    value["backend_coverage"] = serde_json::to_value(&backend_reports)?;
+                    println!("{}", serde_json::to_string_pretty(&value)?);
                 } else {
                     check::print_coverage_table(&matrix);
+                    crate::obligations::print_backend_coverage(&entries);
                 }
             }
 
@@ -1416,6 +1429,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             crucible_stateful,
             require_verified,
             recursive,
+            strict,
         } => {
             require_git_repo()?;
 
@@ -1521,6 +1535,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                         },
                         false,
                         probe_repros_passed,
+                        None,
                     );
                     std::process::exit(1);
                 }
@@ -1535,6 +1550,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                         },
                         false,
                         probe_repros_passed,
+                        None,
                     );
                     return Ok(());
                 }
@@ -1641,13 +1657,52 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                      input; verification evidence will not authorize `stamp`"
                 );
             }
+            // #332 — reconciled backend-obligation entries: digested into
+            // the evidence record on every run; gating only under --strict.
+            // Computed in memory from the current spec (pure renders), so
+            // the result can never be stale-file drift.
+            let obligation_entries = {
+                let parsed = check::parse_spec_file(&spec)?;
+                let mir = crate::mir::lower(&parsed);
+                crate::obligations::collect_all(&mir, &parsed)
+            };
+            let obligations_digest = if obligation_entries.is_empty() {
+                None
+            } else {
+                serde_json::to_string(&obligation_entries)
+                    .ok()
+                    .map(|s| qedgen_hash_core::sha256_hex16(&s))
+            };
+
             record_verify_evidence(
                 &spec,
                 evidence_program,
                 &report,
                 kani_impl_bound,
                 probe_repros_passed,
+                obligations_digest,
             );
+
+            if strict {
+                crate::obligations::print_backend_summaries(&obligation_entries);
+                let problems = crate::obligations::problem_entries(&obligation_entries);
+                for problem in &problems {
+                    eprintln!("  {}", crate::obligations::describe_problem(problem));
+                }
+                let counts = crate::obligations::StatusCounts::of(&obligation_entries);
+                if counts.gates_strict() {
+                    eprintln!(
+                        "verify --strict: {} obligation(s) not emitted — backend coverage \
+                         is incomplete (see the entries above and .qed/obligations.json)",
+                        counts.unsupported + counts.failed
+                    );
+                    std::process::exit(1);
+                }
+                eprintln!(
+                    "verify --strict: all {} backend obligation(s) emitted",
+                    counts.emitted
+                );
+            }
 
             if !report.ok() {
                 std::process::exit(1);
@@ -1896,6 +1951,14 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 )?;
             }
 
+            // #332 — backend-obligation manifest: each model backend
+            // reports every requested obligation as emitted / unsupported /
+            // failed; reconciliation synthesizes `failed` for anything a
+            // backend silently dropped. Persisted to `.qed/obligations.json`
+            // after the last backend runs.
+            let mut obligation_entries: Vec<crate::obligations::ObligationEntry> = Vec::new();
+            let mut obligation_backends: Vec<crate::obligations::ObligationBackend> = Vec::new();
+
             if kani || all {
                 // sBPF is verified by Lean proofs over the assembly; the
                 // harness generator has no sBPF awareness and would emit
@@ -1911,7 +1974,15 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                     if let Err(e) = deps::require_kani() {
                         eprintln!("warning: {e}");
                     }
-                    kani_mir::generate(&mir, &parsed, &kani_output)?;
+                    let recorded =
+                        kani_mir::generate_with_obligations(&mir, &parsed, &kani_output)?;
+                    obligation_entries.extend(crate::obligations::reconciled(
+                        crate::obligations::ObligationBackend::Kani,
+                        &mir,
+                        &parsed,
+                        recorded,
+                    ));
+                    obligation_backends.push(crate::obligations::ObligationBackend::Kani);
                     // #182: deliver + depend on the crate if the spec-model
                     // harness imports mul_div from it.
                     deliver_prelude_if_referenced(&kani_output)?;
@@ -1987,7 +2058,18 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                         note_sbpf_skip("proptest");
                     }
                 } else {
-                    proptest_gen_mir::generate(&mir, &parsed, &proptest_output)?;
+                    let recorded = proptest_gen_mir::generate_with_obligations(
+                        &mir,
+                        &parsed,
+                        &proptest_output,
+                    )?;
+                    obligation_entries.extend(crate::obligations::reconciled(
+                        crate::obligations::ObligationBackend::Proptest,
+                        &mir,
+                        &parsed,
+                        recorded,
+                    ));
+                    obligation_backends.push(crate::obligations::ObligationBackend::Proptest);
                 }
             }
             if crucible || all {
@@ -2040,7 +2122,17 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 // `lean_gen_mir` handles every spec shape — single/multi-
                 // account, indexed records, ADTs, and sBPF (via the MIR
                 // `is_assembly` flag).
-                lean_gen_mir::generate(&mir, &parsed, &lean_output)?;
+                let recorded =
+                    lean_gen_mir::generate_with_obligations(&mir, &parsed, &lean_output)?;
+                if !is_assembly {
+                    obligation_entries.extend(crate::obligations::reconciled(
+                        crate::obligations::ObligationBackend::Lean,
+                        &mir,
+                        &parsed,
+                        recorded,
+                    ));
+                    obligation_backends.push(crate::obligations::ObligationBackend::Lean);
+                }
                 // Bootstrap Proofs.lean alongside Spec.lean. Never overwrites
                 // an existing file — the user-owned theorems survive regen.
                 if let Some(proofs_dir) = lean_output.parent() {
@@ -2068,6 +2160,37 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 }
                 std::fs::write(&ci_output, workflow)?;
                 eprintln!("Generated CI workflow: {}", ci_output.display());
+            }
+
+            // #332 — persist the manifest and summarize per backend. Silent
+            // local artifact generation (tactile-tooling rule); the summary
+            // lines make non-emitted obligations loud without gating codegen
+            // (the gate is `verify --strict`). Persisted only when the
+            // project already has `.qed/` state — a harness-only invocation
+            // in a bare directory must not stage `.qed/` (#323 contract,
+            // `codegen_preflight` gate); `verify` recomputes in memory
+            // regardless, so nothing is lost.
+            if !obligation_backends.is_empty() {
+                crate::obligations::print_backend_summaries(&obligation_entries);
+                let problems = crate::obligations::problem_entries(&obligation_entries);
+                for problem in &problems {
+                    eprintln!("  {}", crate::obligations::describe_problem(problem));
+                }
+                if init::find_qed_dir(&spec).is_some() {
+                    let manifest = crate::obligations::build_manifest(
+                        &spec,
+                        obligation_backends,
+                        obligation_entries,
+                    );
+                    match crate::obligations::record(&manifest, &spec) {
+                        Ok(path) => {
+                            eprintln!("Recorded obligation manifest: {}", path.display())
+                        }
+                        Err(e) => {
+                            eprintln!("warning: could not write obligation manifest: {}", e)
+                        }
+                    }
+                }
             }
 
             // Surface stale `#[qed(verified)]` stamps right after regen so

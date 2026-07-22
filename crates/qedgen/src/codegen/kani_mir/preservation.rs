@@ -4,6 +4,7 @@
 //! proofs.
 
 use super::*;
+use crate::obligations::{ObligationKind, ObligationRecorder, UnsupportedReason};
 
 /// Emit `#[kani::proof] fn verify_<handler>_preserves_<property>()` per
 /// `(property, handler)` pair named in the property's `preserved_by` list.
@@ -18,6 +19,7 @@ use super::*;
 pub(crate) fn emit_property_preservation_harnesses(
     out: &mut String,
     parsed: &ParsedSpec,
+    rec: &mut ObligationRecorder,
 ) -> Result<()> {
     use crate::codegen_shared::map_type;
     use crate::rust_codegen_util as util;
@@ -51,6 +53,12 @@ pub(crate) fn emit_property_preservation_harnesses(
                 continue;
             };
 
+            rec.emitted(
+                ObligationKind::PropertyPreservation,
+                op_name,
+                &prop.name,
+                &format!("verify_{}_preserves_{}", op_name, prop.name),
+            );
             out.push_str("#[kani::proof]\n");
             out.push_str("#[kani::unwind(2)]\n");
             out.push_str("#[kani::solver(cadical)]\n");
@@ -240,6 +248,7 @@ pub(crate) fn emit_property_preservation_harnesses(
 pub(crate) fn emit_ensures_preservation_harnesses(
     out: &mut String,
     parsed: &ParsedSpec,
+    rec: &mut ObligationRecorder,
 ) -> Result<()> {
     use crate::rust_codegen_util as util;
 
@@ -272,6 +281,12 @@ pub(crate) fn emit_ensures_preservation_harnesses(
 
     for op in handlers_with_ensures {
         for (idx, ensures) in op.ensures.iter().enumerate() {
+            rec.emitted(
+                ObligationKind::EnsuresPreservation,
+                &op.name,
+                &idx.to_string(),
+                &format!("verify_{}_ensures_{}", op.name, idx),
+            );
             emit_proof_preamble(
                 out,
                 parsed,
@@ -344,6 +359,12 @@ pub(crate) fn emit_ensures_preservation_harnesses(
                         &call.state_binders,
                     );
                     if !missing.is_empty() {
+                        rec.unsupported(
+                            ObligationKind::CpiEnsures,
+                            &op.name,
+                            &format!("{}.{}", call.target_interface, call.target_handler),
+                            UnsupportedReason::CpiMissingStateBinders,
+                        );
                         out.push_str(&format!(
                             "        // `{}.{}` ensures skipped: missing `state_binders` for {}.\n",
                             call.target_interface,
@@ -398,6 +419,7 @@ pub(crate) fn emit_ensures_preservation_harnesses(
 pub(crate) fn emit_invariant_preservation_harnesses(
     out: &mut String,
     parsed: &ParsedSpec,
+    rec: &mut ObligationRecorder,
 ) -> Result<()> {
     use crate::rust_codegen_util as util;
 
@@ -440,6 +462,12 @@ pub(crate) fn emit_invariant_preservation_harnesses(
             .collect();
 
         for (inv_name, is_establish) in pairs {
+            let verb = if is_establish {
+                "establishes"
+            } else {
+                "preserves"
+            };
+            let obligation_key = format!("{}_{}", verb, inv_name);
             let Some(inv) = linked_invs.iter().find(|i| &i.name == inv_name) else {
                 continue;
             };
@@ -450,16 +478,23 @@ pub(crate) fn emit_invariant_preservation_harnesses(
                 .map(crate::check::rust_expr_is_unsupported)
                 .unwrap_or(true)
             {
+                rec.unsupported(
+                    ObligationKind::InvariantPreservation,
+                    &op.name,
+                    &obligation_key,
+                    UnsupportedReason::UnsupportedPredicateBody,
+                );
                 continue;
             }
 
             let is_init = op.pre_status.as_deref() == Some("Uninitialized");
 
-            let verb = if is_establish {
-                "establishes"
-            } else {
-                "preserves"
-            };
+            rec.emitted(
+                ObligationKind::InvariantPreservation,
+                &op.name,
+                &obligation_key,
+                &format!("verify_{}_{}_{}", op.name, verb, inv.name),
+            );
             emit_proof_preamble(
                 out,
                 parsed,

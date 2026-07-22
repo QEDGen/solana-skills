@@ -342,7 +342,9 @@ fn render_emits_effect_conformance_harnesses() {
 #[test]
 fn render_skip_guard_proofs_still_emits_effect_proofs() {
     let (mir, parsed) = lower_fixture("examples/rust/escrow/escrow.qedspec");
-    let out = render_inner(&mir, &parsed, false, true);
+    let mut rec =
+        crate::obligations::ObligationRecorder::new(crate::obligations::ObligationBackend::Kani);
+    let out = render_inner(&mir, &parsed, false, true, &mut rec);
     assert!(
         !out.contains("// Guard enforcement — transitions reject invalid inputs"),
         "expected guard-rejection section to be skipped"

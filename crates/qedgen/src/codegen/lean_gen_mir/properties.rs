@@ -1,4 +1,5 @@
 use super::*;
+use crate::obligations::{ObligationKind, ObligationRecorder, UnsupportedReason};
 
 /// Emit property declarations + preservation theorems:
 ///
@@ -17,7 +18,7 @@ use super::*;
 /// Proof bodies come from `preservation_proof_script` /
 /// `master_inductive_proof_script`. Properties with no `expression` body
 /// emit a structured comment only.
-pub(super) fn emit_properties(out: &mut String, mir: &Mir) {
+pub(super) fn emit_properties(out: &mut String, mir: &Mir, rec: &mut ObligationRecorder) {
     if mir.properties.is_empty() {
         return;
     }
@@ -53,6 +54,12 @@ pub(super) fn emit_properties(out: &mut String, mir: &Mir) {
             let param_sig = param_sig_str(&h.params);
             let param_args = param_args_str(&h.params);
             let sub_lemma = safe_name(&format!("{}_preserved_by_{}", prop.name, h.name));
+            rec.emitted(
+                ObligationKind::PropertyPreservation,
+                &h.name,
+                &prop.name,
+                &sub_lemma,
+            );
             out.push_str(&format!(
                 "theorem {} (s s' : State) (signer : Pubkey){}\n",
                 sub_lemma, param_sig
@@ -69,6 +76,12 @@ pub(super) fn emit_properties(out: &mut String, mir: &Mir) {
 
         // Master theorem: preserved by every Operation case.
         if !covered.is_empty() {
+            rec.emitted(
+                ObligationKind::BackendExtra,
+                "file",
+                &format!("{}_inductive", prop.name),
+                &safe_name(&format!("{}_inductive", prop.name)),
+            );
             out.push_str(&format!(
                 "/-- {} is preserved by every operation. Auto-proven by case split. -/\n",
                 prop.name
@@ -309,7 +322,7 @@ pub(super) fn emit_invariants(out: &mut String, mir: &Mir) {
 /// `True := trivial` placeholder body — the inductive State needs
 /// variant-aware case analysis the flat `s'.f = s.f` form can't express
 /// (per-pre-variant reasoning is v3.0 roadmap).
-pub(super) fn emit_frame_conditions_adt(out: &mut String, mir: &Mir) {
+pub(super) fn emit_frame_conditions_adt(out: &mut String, mir: &Mir, rec: &mut ObligationRecorder) {
     let has_modifies = mir.handlers.iter().any(|h| h.modifies.is_some());
     if !has_modifies {
         return;
@@ -331,6 +344,12 @@ pub(super) fn emit_frame_conditions_adt(out: &mut String, mir: &Mir) {
         let param_sig = param_sig_str(&h.params);
         let param_args = param_args_str(&h.params);
         let theorem_name = safe_name(&format!("{}_frame", h.name));
+        rec.emitted(
+            ObligationKind::BackendExtra,
+            &h.name,
+            "frame",
+            &theorem_name,
+        );
         out.push_str(&format!(
             "theorem {} (s s' : State) (signer : Pubkey){}\n",
             theorem_name, param_sig
@@ -350,7 +369,7 @@ pub(super) fn emit_frame_conditions_adt(out: &mut String, mir: &Mir) {
 /// Flat-shape frame conditions: per handler with a `modifies` clause,
 /// prove every field NOT in `modifies` stays equal across the transition.
 /// Lifecycle-transitioning handlers implicitly modify `status`.
-pub(super) fn emit_frame_conditions(out: &mut String, mir: &Mir) {
+pub(super) fn emit_frame_conditions(out: &mut String, mir: &Mir, rec: &mut ObligationRecorder) {
     let has_modifies = mir.handlers.iter().any(|h| h.modifies.is_some());
     if !has_modifies {
         return;
@@ -389,6 +408,12 @@ pub(super) fn emit_frame_conditions(out: &mut String, mir: &Mir) {
         let param_sig = param_sig_str(&h.params);
         let param_args = param_args_str(&h.params);
         let theorem_name = safe_name(&format!("{}_frame", h.name));
+        rec.emitted(
+            ObligationKind::BackendExtra,
+            &h.name,
+            "frame",
+            &theorem_name,
+        );
 
         out.push_str(&format!(
             "theorem {} (s s' : State) (signer : Pubkey){}\n",
@@ -418,8 +443,8 @@ pub(super) fn emit_frame_conditions(out: &mut String, mir: &Mir) {
 ///
 /// `aborts_total` instead emits a single `<h>_aborts_iff` theorem with the
 /// disjunction of every abort condition.
-pub(super) fn emit_aborts_if(out: &mut String, mir: &Mir) {
-    emit_aborts_if_with_sorry(out, mir, "sorry");
+pub(super) fn emit_aborts_if(out: &mut String, mir: &Mir, rec: &mut ObligationRecorder) {
+    emit_aborts_if_with_sorry(out, mir, "sorry", rec);
 }
 
 /// Tactic body for a flat-path requires-based abort theorem: the
@@ -470,8 +495,8 @@ pub(super) fn abort_requires_proof(
 /// ADT-shape variant — emits `:= by sorry` for every clause. Only the
 /// proof body's tactic / term form differs; theorem statements are
 /// identical to the flat path.
-pub(super) fn emit_aborts_if_adt(out: &mut String, mir: &Mir) {
-    emit_aborts_if_with_sorry(out, mir, "by sorry");
+pub(super) fn emit_aborts_if_adt(out: &mut String, mir: &Mir, rec: &mut ObligationRecorder) {
+    emit_aborts_if_with_sorry(out, mir, "by sorry", rec);
 }
 
 /// Abort-hypothesis Lean form. Predicates referencing handler `let`
@@ -498,7 +523,12 @@ fn property_cx(prop: &crate::mir::PropertyMir) -> tree_render::LeanCx {
     }
 }
 
-pub(super) fn emit_aborts_if_with_sorry(out: &mut String, mir: &Mir, sorry_form: &str) {
+pub(super) fn emit_aborts_if_with_sorry(
+    out: &mut String,
+    mir: &Mir,
+    sorry_form: &str,
+    rec: &mut ObligationRecorder,
+) {
     let has_aborts = mir.handlers.iter().any(|h| !h.requires_or_abort.is_empty());
     if !has_aborts {
         return;
@@ -529,6 +559,17 @@ pub(super) fn emit_aborts_if_with_sorry(out: &mut String, mir: &Mir, sorry_form:
 
         if h.aborts_total && !all_abort_lean.is_empty() {
             let theorem_name = safe_name(&format!("{}_aborts_iff", h.name));
+            // The collapsed iff covers every clause: record each clause
+            // index against the one theorem so keys line up with the
+            // per-clause path (and with transitions.rs).
+            for i in 0..h.requires_or_abort.len() {
+                rec.emitted(
+                    ObligationKind::Abort,
+                    &h.name,
+                    &format!("abort_{i}"),
+                    &theorem_name,
+                );
+            }
             out.push_str(&format!(
                 "theorem {} (s : State) (signer : Pubkey){} :\n",
                 theorem_name, param_sig
@@ -578,12 +619,24 @@ pub(super) fn emit_aborts_if_with_sorry(out: &mut String, mir: &Mir, sorry_form:
         // script ill-formed.
         let cond_parts = build_guard_cond_parts(mir, h);
         let flat_path = sorry_form == "sorry";
-        for r in &h.requires_or_abort {
+        for (i, r) in h.requires_or_abort.iter().enumerate() {
             let pred_lean = abort_pred_lean(h, &r.pred);
             if mentions_handler_account_pubkey(&pred_lean, &h.accounts) {
+                rec.unsupported(
+                    ObligationKind::Abort,
+                    &h.name,
+                    &format!("abort_{i}"),
+                    UnsupportedReason::LeanHandlerAccountPubkey,
+                );
                 continue;
             }
             let theorem_name = theorem_name_for(&r.err, &mut error_seen);
+            rec.emitted(
+                ObligationKind::Abort,
+                &h.name,
+                &format!("abort_{i}"),
+                &theorem_name,
+            );
             out.push_str(&format!(
                 "theorem {} (s : State) (signer : Pubkey){}\n",
                 theorem_name, param_sig
@@ -639,7 +692,7 @@ pub(super) fn emit_aborts_if_with_sorry(out: &mut String, mir: &Mir, sorry_form:
 ///     (h : <h>Transition s signer <args> = some s') :
 ///     <ensures-lean-expr> := sorry
 /// ```
-pub(super) fn emit_ensures(out: &mut String, mir: &Mir) {
+pub(super) fn emit_ensures(out: &mut String, mir: &Mir, rec: &mut ObligationRecorder) {
     let has_ensures = mir.handlers.iter().any(|h| !h.post.is_empty());
     if !has_ensures {
         return;
@@ -659,6 +712,12 @@ pub(super) fn emit_ensures(out: &mut String, mir: &Mir) {
         let param_args = param_args_str(&h.params);
         for (i, ens) in h.post.iter().enumerate() {
             let theorem_name = safe_name(&format!("{}_ensures_{}", h.name, i));
+            rec.emitted(
+                ObligationKind::EnsuresPreservation,
+                &h.name,
+                &i.to_string(),
+                &theorem_name,
+            );
             out.push_str(&format!(
                 "theorem {} (s s' : State) (signer : Pubkey){}\n",
                 theorem_name, param_sig

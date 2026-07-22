@@ -1,4 +1,5 @@
 use super::*;
+use crate::obligations::{ObligationKind, ObligationRecorder};
 
 /// Emit overflow-safety obligations: for every handler whose body issues
 /// `CheckedAdd`, a theorem that all numeric state fields stay within their
@@ -8,17 +9,22 @@ use super::*;
 /// Flat-state proofs auto-discharge via `unfold + split + cases + refine +
 /// simp/omega` (`overflow_proof_script`); ADT-shape proofs remain
 /// `:= by sorry` until the pattern-match scrutinee form lands.
-pub(super) fn emit_overflow(out: &mut String, mir: &Mir) {
-    emit_overflow_inner(out, mir, /* adt_form = */ false);
+pub(super) fn emit_overflow(out: &mut String, mir: &Mir, rec: &mut ObligationRecorder) {
+    emit_overflow_inner(out, mir, /* adt_form = */ false, rec);
 }
 
 /// ADT-shape variant — closes overflow theorems with `:= by sorry`; the
 /// statement is identical to the flat shape.
-pub(super) fn emit_overflow_adt(out: &mut String, mir: &Mir) {
-    emit_overflow_inner(out, mir, /* adt_form = */ true);
+pub(super) fn emit_overflow_adt(out: &mut String, mir: &Mir, rec: &mut ObligationRecorder) {
+    emit_overflow_inner(out, mir, /* adt_form = */ true, rec);
 }
 
-pub(super) fn emit_overflow_inner(out: &mut String, mir: &Mir, adt_form: bool) {
+pub(super) fn emit_overflow_inner(
+    out: &mut String,
+    mir: &Mir,
+    adt_form: bool,
+    rec: &mut ObligationRecorder,
+) {
     use crate::mir::{Stmt, Ty};
 
     let has_add = |h: &crate::mir::HandlerMir| -> bool {
@@ -85,6 +91,12 @@ pub(super) fn emit_overflow_inner(out: &mut String, mir: &Mir, adt_form: bool) {
             .map(|p| p.name.as_str())
             .collect();
 
+        rec.emitted(
+            ObligationKind::Overflow,
+            &h.name,
+            &h.name,
+            &format!("{}_overflow_safe", safe_name(&h.name)),
+        );
         out.push_str(&format!(
             "theorem {}_overflow_safe (s s' : State) (signer : Pubkey){}\n",
             safe_name(&h.name),
