@@ -8,6 +8,7 @@ use super::*;
 mod arithmetic;
 mod auth;
 mod cpi;
+mod ctor_types;
 mod known_types;
 mod shared;
 mod state;
@@ -40,6 +41,10 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     // instead of surfacing as invalid Lean or a silent u64 proptest
     // strategy at codegen time.
     warnings.extend(known_types::check_known_types(spec));
+
+    // Constructor / record-literal / record-update expressions must carry
+    // a resolved nominal type for Rust rendering (#325).
+    warnings.extend(ctor_types::check_ctor_types(spec));
 
     // ADT-state `WrongState` compile gate.
     warnings.extend(check_adt_state_missing_wrong_state(spec));

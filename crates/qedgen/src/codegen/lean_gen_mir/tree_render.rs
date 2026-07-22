@@ -292,7 +292,7 @@ fn render(e: &ExprTree, cx: LeanCx, inside_old: bool) -> (String, Prec) {
             out.push(')');
             (out, Prec::Atom)
         }
-        ExprTree::Ctor { variant, payload } => (
+        ExprTree::Ctor { variant, payload, .. } => (
             match payload {
                 None => format!(".{}", variant),
                 Some(p) => format!(".{} {}", variant, render(p, cx, inside_old).0),
@@ -301,7 +301,7 @@ fn render(e: &ExprTree, cx: LeanCx, inside_old: bool) -> (String, Prec) {
             // but is context-elaborated; parents should parenthesize.
             Prec::Implies,
         ),
-        ExprTree::RecordLit(fields) => {
+        ExprTree::RecordLit { fields, .. } => {
             let body = fields
                 .iter()
                 .map(|(n, v)| format!("{} := {}", n, render(v, cx, inside_old).0))
@@ -309,7 +309,7 @@ fn render(e: &ExprTree, cx: LeanCx, inside_old: bool) -> (String, Prec) {
                 .join(", ");
             (format!("{{ {} }}", body), Prec::Atom)
         }
-        ExprTree::RecordUpdate { base, updates } => {
+        ExprTree::RecordUpdate { base, updates, .. } => {
             let base_str = render(base, cx, inside_old).0;
             let body = updates
                 .iter()
@@ -431,7 +431,7 @@ fn render_old(inner: &ExprTree, cx: LeanCx) -> (String, Prec) {
         | ExprTree::MulDivRoundHalfUp { .. }
         | ExprTree::Match { .. }
         | ExprTree::Ctor { .. }
-        | ExprTree::RecordLit(_)
+        | ExprTree::RecordLit { .. }
         | ExprTree::RecordUpdate { .. }
         | ExprTree::IsVariant { .. }
         | ExprTree::App { .. }
@@ -634,8 +634,8 @@ pub fn tree_mentions_ident(e: &ExprTree, name: &str) -> bool {
         ExprTree::Ctor { payload, .. } => payload
             .as_ref()
             .is_some_and(|p| tree_mentions_ident(p, name)),
-        ExprTree::RecordLit(fields) => fields.iter().any(|(_, v)| tree_mentions_ident(v, name)),
-        ExprTree::RecordUpdate { base, updates } => {
+        ExprTree::RecordLit { fields, .. } => fields.iter().any(|(_, v)| tree_mentions_ident(v, name)),
+        ExprTree::RecordUpdate { base, updates, .. } => {
             tree_mentions_ident(base, name)
                 || updates.iter().any(|(_, v)| tree_mentions_ident(v, name))
         }
