@@ -81,6 +81,36 @@ fn lower_inline(src: &str) -> (Mir, ParsedSpec) {
     (mir, parsed)
 }
 
+/// #337 — dotted cross-program auth (`auth admin_config.admin`) reads an
+/// imported account's state field. The Kani model must bind it as a
+/// flattened symbolic member on the account-env struct and route the
+/// guard through it — never emit the bare (unbound) identifier.
+#[test]
+fn imported_state_field_guard_binds_symbolic_env_member() {
+    let (mir, parsed) = lower_fixture("examples/rust/cross-program-vault/vault.qedspec");
+    let out = render(&mir, &parsed);
+
+    // Env struct member, typed from the imported AdminConfig.State.admin.
+    assert!(
+        out.contains("admin_config_admin: [u8; 32],"),
+        "flattened env member missing:\n{out}"
+    );
+    // Binding site mirrors the struct.
+    assert!(
+        out.contains("admin_config_admin: kani::any(),"),
+        "symbolic binding missing:\n{out}"
+    );
+    // Guard routes through the env; the bare identifier must be gone.
+    assert!(
+        out.contains("accounts.admin_config_admin == accounts.admin.pubkey"),
+        "guard must read the env member:\n{out}"
+    );
+    assert!(
+        !out.contains("(admin_config.admin"),
+        "bare unbound identifier must not appear:\n{out}"
+    );
+}
+
 /// #326 — single-account ADT spec with a variant-dropping transition:
 /// the flat carrier gains the `state_repr_valid` invariant, symbolic
 /// inits assume it, the dropping transition resets the dropped field,

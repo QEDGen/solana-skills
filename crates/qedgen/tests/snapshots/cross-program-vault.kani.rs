@@ -52,6 +52,7 @@ struct EmergencyCloseAccounts {
     sink_ta: KaniAccount,
     token_program: KaniAccount,
     admin_config: KaniAccount,
+    admin_config_admin: [u8; 32],
 }
 
 // ============================================================================
@@ -86,7 +87,7 @@ fn deposit(s: &mut State, amount: u64) -> bool {
 }
 
 fn emergency_close(s: &mut State, accounts: &EmergencyCloseAccounts) -> bool {
-    if !(admin_config.admin == accounts.admin.pubkey) {
+    if !(accounts.admin_config_admin == accounts.admin.pubkey) {
         return false;
     }
     if s.status != Status::Active {
@@ -149,8 +150,9 @@ fn verify_emergency_close_rejects_invalid() {
         admin_config: KaniAccount {
             pubkey: kani::any(),
         },
+        admin_config_admin: kani::any(),
     };
-    kani::assume(!(admin_config.admin == accounts.admin.pubkey));
+    kani::assume(!(accounts.admin_config_admin == accounts.admin.pubkey));
     kani::cover!(true, "guard-violation domain is satisfiable");
     assert!(
         !emergency_close(&mut s, &accounts),
@@ -214,6 +216,7 @@ fn verify_emergency_close_effect_total_deposits() {
         admin_config: KaniAccount {
             pubkey: kani::any(),
         },
+        admin_config_admin: kani::any(),
     };
     if emergency_close(&mut s, &accounts) {
         assert!(s.total_deposits == 0, "total_deposits must equal 0");
