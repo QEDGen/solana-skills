@@ -60,11 +60,7 @@ fn kani_multi_account_file_level_obligations_surface() {
     );
 
     let dropped = entries_with_reason(&entries, UnsupportedReason::KaniMultiAccountFileLevel);
-    let expected_file_level = parsed
-        .covers
-        .iter()
-        .map(|c| c.traces.len())
-        .sum::<usize>()
+    let expected_file_level = parsed.covers.iter().map(|c| c.traces.len()).sum::<usize>()
         + parsed.liveness_props.len()
         + parsed.environments.len()
             * parsed
@@ -72,7 +68,10 @@ fn kani_multi_account_file_level_obligations_surface() {
                 .iter()
                 .filter(|p| p.expression.is_some())
                 .count();
-    assert!(expected_file_level > 0, "lending declares file-level obligations");
+    assert!(
+        expected_file_level > 0,
+        "lending declares file-level obligations"
+    );
     assert_eq!(
         dropped.len(),
         expected_file_level,
@@ -86,7 +85,10 @@ fn kani_multi_account_file_level_obligations_surface() {
 #[test]
 fn kani_adt_state_repr_gap_is_reported() {
     let (mir, parsed) = lower_fixture("examples/rust/cross-program-vault/vault.qedspec");
-    assert!(parsed.state_repr_is_adt(), "fixture declares adt state_repr");
+    assert!(
+        parsed.state_repr_is_adt(),
+        "fixture declares adt state_repr"
+    );
     let entries = crate::kani_mir::collect_obligations(&mir, &parsed);
     let gap = entries_with_reason(&entries, UnsupportedReason::KaniAdtStateRepr);
     assert_eq!(gap.len(), 1);
@@ -184,8 +186,7 @@ property ghost_tracks_total :
         &parsed,
         crate::proptest_gen_mir::collect_obligations(&mir, &parsed),
     );
-    let ghost_dropped =
-        entries_with_reason(&entries, UnsupportedReason::ProptestMultiAccountGhost);
+    let ghost_dropped = entries_with_reason(&entries, UnsupportedReason::ProptestMultiAccountGhost);
     assert!(
         !ghost_dropped.is_empty(),
         "ghost property must be reported unsupported: {:#?}",

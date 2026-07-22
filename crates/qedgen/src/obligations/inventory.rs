@@ -86,7 +86,10 @@ fn property_pairs(parsed: &ParsedSpec) -> Vec<(&str, &str)> {
 fn invariant_pairs(parsed: &ParsedSpec) -> Vec<(&str, String)> {
     let mut pairs = Vec::new();
     for h in &parsed.handlers {
-        for (names, verb) in [(&h.invariants, "preserves"), (&h.establishes, "establishes")] {
+        for (names, verb) in [
+            (&h.invariants, "preserves"),
+            (&h.establishes, "establishes"),
+        ] {
             for inv_name in names {
                 if parsed.invariants.iter().any(|i| &i.name == inv_name) {
                     pairs.push((h.name.as_str(), format!("{}_{}", verb, inv_name)));

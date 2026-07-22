@@ -3,7 +3,9 @@
 //! dispatch (including the per-account scoped `ParsedSpec` view).
 
 use super::*;
-use crate::obligations::{ObligationBackend, ObligationEntry, ObligationKind, ObligationRecorder, UnsupportedReason};
+use crate::obligations::{
+    ObligationBackend, ObligationEntry, ObligationKind, ObligationRecorder, UnsupportedReason,
+};
 
 /// Generate the Kani harness file at `output_path` from a pre-lowered
 /// `Mir` + the originating `ParsedSpec`.
