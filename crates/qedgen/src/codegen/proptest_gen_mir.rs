@@ -773,9 +773,9 @@ fn emit_account_section(
     // `emit_preservation_tests_for` needs to know whether the sequence
     // harness (which is what validates ghost properties) will exist.
     // Must stay in sync with the `want_sequence` gate below.
-    let will_emit_sequence =
-        ((!owned_props.is_empty() && handlers.len() > 1) || !mir.hooks.is_empty())
-            && !handlers.is_empty();
+    let will_emit_sequence = ((!owned_props.is_empty() && handlers.len() > 1)
+        || !mir.hooks.is_empty())
+        && !handlers.is_empty();
 
     // Property preservation tests
     if !props_with_expr.is_empty() {
@@ -1259,7 +1259,11 @@ fn emit_invariant_preservation_tests_for(
             };
             let is_init = op.pre_status.as_deref() == Some("Uninitialized");
             {
-                let verb = if is_establish { "establishes" } else { "preserves" };
+                let verb = if is_establish {
+                    "establishes"
+                } else {
+                    "preserves"
+                };
                 rec.emitted(
                     ObligationKind::InvariantPreservation,
                     op_name,

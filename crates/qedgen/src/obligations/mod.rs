@@ -366,24 +366,23 @@ pub fn reconciled(
     recorded: Vec<ObligationEntry>,
 ) -> Vec<ObligationEntry> {
     let expected = inventory::expected_obligations(mir, parsed, backend);
-    let missing_status = if backend == ObligationBackend::Lean
-        && crate::lean_gen_mir::uses_indexed_shape(mir)
-    {
-        ObligationStatus::Unsupported {
-            reason: UnsupportedReason::LeanIndexedShapeProofsExternal,
-        }
-    } else if parsed.account_types.len() > 1 {
-        ObligationStatus::Unsupported {
-            reason: UnsupportedReason::MultiAccountCrossAccountObligation,
-        }
-    } else {
-        ObligationStatus::Failed {
-            reason: format!(
-                "requested by the spec but not reported by the {} backend",
-                backend.name()
-            ),
-        }
-    };
+    let missing_status =
+        if backend == ObligationBackend::Lean && crate::lean_gen_mir::uses_indexed_shape(mir) {
+            ObligationStatus::Unsupported {
+                reason: UnsupportedReason::LeanIndexedShapeProofsExternal,
+            }
+        } else if parsed.account_types.len() > 1 {
+            ObligationStatus::Unsupported {
+                reason: UnsupportedReason::MultiAccountCrossAccountObligation,
+            }
+        } else {
+            ObligationStatus::Failed {
+                reason: format!(
+                    "requested by the spec but not reported by the {} backend",
+                    backend.name()
+                ),
+            }
+        };
     inventory::reconcile(backend, expected, recorded, missing_status)
 }
 
@@ -572,8 +571,8 @@ pub fn record(manifest: &ObligationManifest, spec: &Path) -> Result<PathBuf> {
 /// is part of the manifest contract for external tooling.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn load(path: &Path) -> Result<ObligationManifest> {
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let raw =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let manifest: ObligationManifest =
         serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
     if manifest.schema_version > OBLIGATIONS_SCHEMA_VERSION {

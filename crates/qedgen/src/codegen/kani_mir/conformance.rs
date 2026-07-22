@@ -226,7 +226,12 @@ pub(crate) fn emit_one_conformance_harness(
     if !field_type_lookup.contains_key(base) {
         return Ok(());
     }
-    rec.emitted(ObligationKind::EffectConformance, &op.name, harness_name, harness_name);
+    rec.emitted(
+        ObligationKind::EffectConformance,
+        &op.name,
+        harness_name,
+        harness_name,
+    );
 
     let field_type = field_type_lookup.get(field).copied().unwrap_or("");
     let solver = util::pick_kani_solver_for_effect(field_type, &util::mir_expr_rust(value), op);
