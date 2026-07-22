@@ -27,7 +27,7 @@ sBPF assembly is selected by `pragma sbpf` in the spec, not by a `Target`.
 | IDL → brownfield fuzz (`probe/crucible_brownfield`) | ✅ 0.30 | ✅ | ⚠️ needs on-disk Codama/0.30 IDL | ❌ deferred | ❌ parked |
 | Brownfield adapt → spec skeleton (`adapt/`) — *deprecated* | ✅ args + accounts + errors | ❌ no adapter | ⚠️ handlers-only skeleton | ⚠️ loose (no conventions) | ❌ |
 | Greenfield Rust scaffold (`codegen_mir`) | ✅ | ⚠️ generic CPI → `todo!()` | ⚠️ generic CPI → `todo!()`; imported mirrors error | n/a | n/a |
-| Kani spec-model (`kani_mir`) | ✅ | ✅ | ✅ | n/a | skip by design |
+| Kani spec-model (`kani_mir`) | ✅ ¹ | ✅ ¹ | ✅ ¹ | n/a | skip by design |
 | impl-Kani (`kani_impl`) | ✅ greenfield + state-struct (#162) + Context (#169) | ⚠️ greenfield shape only | ⚠️ own `#[repr(C)]` shape; some ix-data field types TODO | ❌ | ❌ |
 | proptest (`proptest_gen_mir`) | ✅ | ✅ | ✅ | n/a | skip by design |
 | Lean (`lean_gen_mir`) | ✅ | ✅ | ✅ | n/a | ✅ dedicated sBPF path |
@@ -36,6 +36,14 @@ sBPF assembly is selected by `pragma sbpf` in the spec, not by a `Target`.
 | Probe: runtime-specific findings (`probe/`) | ❌ agent-layer (SKILL.md) | ❌ agent-layer | ✅ richest (`pinocchio_probe`) | ⚠️ Shank dispatcher discovery only | ❌ |
 | Miri divergence repros (`verify/miri_verify`) | ❌ | ❌ | ✅ | ❌ | n/a |
 | Ratchet / readiness (`verify/ratchet`) | ✅ | ✅ | ❌ no ratchet crate | ❌ | ❌ |
+
+¹ `pragma state_repr = adt` (#326): single-account specs with defaultable
+variant payloads verify over the ADT state space — the flat carrier gains a
+`state_repr_valid` invariant (assumed at every symbolic init, preserved by
+transition canonicalization), so Kani cannot construct cross-variant field
+combinations. Multi-account ADT and non-defaultable payload types stay on the
+unconstrained flat model, reported as `unsupported(kani_adt_state_repr)` in
+the obligation manifest.
 
 ## Codegen ownership contract: CPIs, PDA creation, and events
 

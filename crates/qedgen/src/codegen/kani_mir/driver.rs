@@ -75,17 +75,28 @@ pub(crate) fn render_inner(
     emit_state_model_header(&mut out);
     emit_constants(&mut out, mir);
 
-    // #326 — Kani has no ADT lowering: `pragma state_repr = adt` specs are
-    // verified against the flat union-of-fields carrier. Report the
-    // representation gap so Kani and Lean results are never read as
-    // representation-parity evidence.
+    // #326 — `pragma state_repr = adt`: single-account specs with
+    // expressible variant defaults get the `state_repr_valid` invariant
+    // (assumed at every symbolic init, preserved by transition
+    // canonicalization), so Kani proves over exactly the ADT state space.
+    // Shapes the invariant cannot express (multi-account, non-defaultable
+    // payload types) keep the flat model and stay reported unsupported.
     if parsed.state_repr_is_adt() {
-        rec.unsupported(
-            ObligationKind::StateRepresentation,
-            "file",
-            "state_repr",
-            UnsupportedReason::KaniAdtStateRepr,
-        );
+        if crate::rust_codegen_util::kani_adt_view(parsed).is_some() {
+            rec.emitted(
+                ObligationKind::StateRepresentation,
+                "file",
+                "state_repr",
+                "state_repr_valid",
+            );
+        } else {
+            rec.unsupported(
+                ObligationKind::StateRepresentation,
+                "file",
+                "state_repr",
+                UnsupportedReason::KaniAdtStateRepr,
+            );
+        }
     }
 
     if parsed.account_types.len() > 1 {
@@ -300,6 +311,12 @@ pub(crate) fn scope_parsed_to_account(
     let mut scoped = parsed.clone();
 
     scoped.account_types = vec![acct.clone()];
+
+    // #326 — ADT Kani parity is single-account only; a scoped multi-account
+    // section must keep the flat model, so drop the pragma `kani_adt_view`
+    // keys on. The file-level unsupported status is recorded in
+    // `render_inner` from the unscoped spec.
+    scoped.pragma_assignments.retain(|(k, _)| k != "state_repr");
 
     scoped.handlers = parsed
         .handlers

@@ -81,6 +81,141 @@ fn lower_inline(src: &str) -> (Mir, ParsedSpec) {
     (mir, parsed)
 }
 
+/// #326 — single-account ADT spec with a variant-dropping transition:
+/// the flat carrier gains the `state_repr_valid` invariant, symbolic
+/// inits assume it, the dropping transition resets the dropped field,
+/// and the conformance frame asserts the default instead of `pre_`.
+#[test]
+fn adt_state_repr_validity_and_canonicalization() {
+    let (mir, parsed) = lower_inline(
+        r#"
+spec AdtDrop
+
+pragma state_repr = adt
+
+program_id "11111111111111111111111111111111"
+
+type State
+  | Setup
+  | Active of { total : U64, flag : U8 }
+  | Paused of { total : U64 }
+
+type Error
+  | InvalidAmount
+  | MathOverflow
+
+handler start : State.Setup -> State.Active {
+  permissionless
+  accounts {
+    payer : signer, writable
+  }
+  effect {
+    state := .Active { total := 0, flag := 0 }
+  }
+}
+
+handler pause : State.Active -> State.Paused {
+  permissionless
+  accounts {
+    payer : signer, writable
+  }
+  modifies [total]
+  effect {
+    total += 1
+  }
+}
+"#,
+    );
+    let out = render(&mir, &parsed);
+
+    // Validity invariant: absent fields pinned to defaults per variant.
+    assert!(
+        out.contains("fn state_repr_valid(s: &State) -> bool"),
+        "validity fn missing:\n{out}"
+    );
+    assert!(
+        out.contains("Status::Setup => s.total == 0 && s.flag == 0,"),
+        "Setup arm must pin both payload fields:\n{out}"
+    );
+    assert!(
+        out.contains("Status::Paused => s.flag == 0,"),
+        "Paused arm must pin the dropped field:\n{out}"
+    );
+    assert!(
+        out.contains("Status::Active => true,"),
+        "full-payload variant needs no conjuncts:\n{out}"
+    );
+
+    // Symbolic inits assume the invariant.
+    assert!(
+        out.contains("kani::assume(state_repr_valid(&s));"),
+        "harness preamble must assume validity:\n{out}"
+    );
+
+    // The Active -> Paused transition resets the dropped field.
+    assert!(
+        out.contains("s.flag = 0; // State::Paused does not carry this field"),
+        "canonicalization reset missing:\n{out}"
+    );
+
+    // Conformance frame for `pause`: dropped sibling asserts the default,
+    // and its unused `pre_` snapshot is not taken.
+    let pause_harness = out
+        .split("fn verify_pause_effect_total()")
+        .nth(1)
+        .and_then(|rest| rest.split("#[kani::proof]").next())
+        .expect("pause conformance harness body");
+    assert!(
+        pause_harness.contains("s.flag == 0"),
+        "dropped sibling must assert its default:\n{pause_harness}"
+    );
+    assert!(
+        !pause_harness.contains("let pre_flag"),
+        "dropped sibling must not snapshot pre-state:\n{pause_harness}"
+    );
+}
+
+/// #326 — shapes the invariant cannot express (here: a record-typed
+/// variant payload with no comparable default) keep the flat model and
+/// emit no `state_repr_valid`.
+#[test]
+fn adt_inexpressible_payload_stays_flat() {
+    let (mir, parsed) = lower_inline(
+        r#"
+spec AdtRecordPayload
+
+pragma state_repr = adt
+
+program_id "11111111111111111111111111111111"
+
+type Meta = { owner : Pubkey, }
+
+type State
+  | Setup
+  | Active of { meta : Meta }
+
+type Error
+  | InvalidAmount
+
+handler start : State.Setup -> State.Active {
+  permissionless
+  accounts {
+    payer : signer, writable
+  }
+}
+"#,
+    );
+    assert!(
+        crate::rust_codegen_util::kani_adt_view(&parsed).is_none(),
+        "record payload has no comparable default"
+    );
+    let out = render(&mir, &parsed);
+    assert!(
+        !out.contains("state_repr_valid"),
+        "inexpressible shape must stay on the flat model:\n{out}"
+    );
+}
+
 const ENVIRONMENT_SPEC_HEAD: &str = r#"spec EnvironmentHarness
 program_id "11111111111111111111111111111111"
 

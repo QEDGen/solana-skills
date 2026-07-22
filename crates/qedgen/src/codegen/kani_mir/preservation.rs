@@ -106,6 +106,9 @@ pub(crate) fn emit_property_preservation_harnesses(
                     out.push_str("        status: kani::any(),\n");
                 }
                 out.push_str("    };\n");
+                // #326 — ADT specs constrain the symbolic pre-state to the
+                // declared variants.
+                util::emit_state_repr_valid_assume(out, parsed, "pre", "    ");
                 if lifecycle.len() >= 2 {
                     if let Some(ref pre_status) = op.pre_status {
                         out.push_str(&format!(
