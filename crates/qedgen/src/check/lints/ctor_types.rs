@@ -36,9 +36,9 @@ pub(super) fn check_ctor_types(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                     .collect::<Vec<_>>()
                     .join(", ")
             )),
-            ExprTree::RecordUpdate { ty: None, .. } => problems.push(
-                "record update base has no resolvable record type".to_string(),
-            ),
+            ExprTree::RecordUpdate { ty: None, .. } => {
+                problems.push("record update base has no resolvable record type".to_string())
+            }
             _ => {}
         });
         for problem in problems {

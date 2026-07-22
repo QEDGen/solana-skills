@@ -292,7 +292,9 @@ fn render(e: &ExprTree, cx: LeanCx, inside_old: bool) -> (String, Prec) {
             out.push(')');
             (out, Prec::Atom)
         }
-        ExprTree::Ctor { variant, payload, .. } => (
+        ExprTree::Ctor {
+            variant, payload, ..
+        } => (
             match payload {
                 None => format!(".{}", variant),
                 Some(p) => format!(".{} {}", variant, render(p, cx, inside_old).0),
@@ -634,7 +636,9 @@ pub fn tree_mentions_ident(e: &ExprTree, name: &str) -> bool {
         ExprTree::Ctor { payload, .. } => payload
             .as_ref()
             .is_some_and(|p| tree_mentions_ident(p, name)),
-        ExprTree::RecordLit { fields, .. } => fields.iter().any(|(_, v)| tree_mentions_ident(v, name)),
+        ExprTree::RecordLit { fields, .. } => {
+            fields.iter().any(|(_, v)| tree_mentions_ident(v, name))
+        }
         ExprTree::RecordUpdate { base, updates, .. } => {
             tree_mentions_ident(base, name)
                 || updates.iter().any(|(_, v)| tree_mentions_ident(v, name))

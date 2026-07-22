@@ -235,9 +235,9 @@ impl ExprTree {
         f(self);
         match self {
             ExprTree::Int(_) | ExprTree::Bool(_) | ExprTree::Path(_) => {}
-            ExprTree::Old(inner)
-            | ExprTree::Not(inner)
-            | ExprTree::Len(inner) => inner.for_each_node(f),
+            ExprTree::Old(inner) | ExprTree::Not(inner) | ExprTree::Len(inner) => {
+                inner.for_each_node(f)
+            }
             ExprTree::Sum { body, .. } | ExprTree::Quant { body, .. } => body.for_each_node(f),
             ExprTree::QuantIn { coll, body, .. } => {
                 coll.for_each_node(f);

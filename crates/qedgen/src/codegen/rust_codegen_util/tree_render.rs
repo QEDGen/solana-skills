@@ -1370,7 +1370,9 @@ pub fn contains_fallible_arith(e: &ExprTree) -> bool {
         ExprTree::Ctor { payload, .. } => {
             payload.as_ref().is_some_and(|p| contains_fallible_arith(p))
         }
-        ExprTree::RecordLit { fields, .. } => fields.iter().any(|(_, v)| contains_fallible_arith(v)),
+        ExprTree::RecordLit { fields, .. } => {
+            fields.iter().any(|(_, v)| contains_fallible_arith(v))
+        }
         ExprTree::RecordUpdate { base, updates, .. } => {
             contains_fallible_arith(base) || updates.iter().any(|(_, v)| contains_fallible_arith(v))
         }
