@@ -1811,16 +1811,33 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             // so the scaffold's handlers gate can't fire before the Lean
             // branch (#88): assembly targets emit only `--lean` and `--ci`.
             let is_assembly = parsed.is_assembly_target();
+            // #323: artifact flags select only the requested artifacts.
+            // Preserve the historical scaffold for the flagless default and
+            // for `--all`, but do not make a harness-only invocation rewrite
+            // a program crate or inherit the scaffold's `.qed/` prerequisite.
+            let explicit_artifact_requested = kani
+                || kani_impl
+                || kani_impl_brownfield
+                || kani_impl_context
+                || test
+                || proptest
+                || crucible
+                || integration
+                || lean
+                || ci;
+            let scaffold_requested = all || !explicit_artifact_requested;
+
             // #262: one preflight, every missing prerequisite in a single
             // message — previously the git gate and the .qed gate lived in
             // different layers and failed one round-trip at a time. The
             // .qed/ prerequisite applies only when the greenfield Rust
             // scaffold will run (where the gate historically lived):
             // assembly and brownfield/mirror specs never required it.
-            let scaffold_will_run = !(is_assembly
-                || kani_impl_brownfield
-                || kani_impl_context
-                || parsed.is_struct_mirror());
+            let scaffold_will_run = scaffold_requested
+                && !(is_assembly
+                    || kani_impl_brownfield
+                    || kani_impl_context
+                    || parsed.is_struct_mirror());
             let mut missing: Vec<String> = Vec::new();
             // Outputs resolve against the spec project, so the recovery
             // prerequisite must validate that project too. Requiring an
@@ -1865,7 +1882,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                     "note: brownfield spec (pragma state_struct / --kani-impl-brownfield) \
                      — skipping greenfield Rust scaffold; the program already exists."
                 );
-            } else {
+            } else if scaffold_will_run {
                 codegen_mir::generate(
                     &mir,
                     &parsed,
@@ -2058,7 +2075,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             // `compile_error!` fires on the next build. Skipped for
             // Pinocchio (no stamps), assembly targets (no scaffold), and a
             // missing output_dir.
-            if !is_pinocchio && !is_assembly && output_dir.exists() {
+            if scaffold_will_run && !is_pinocchio && output_dir.exists() {
                 match drift::check_stamped_drift(&output_dir) {
                     Ok(stamped) if !stamped.is_empty() => {
                         eprintln!(

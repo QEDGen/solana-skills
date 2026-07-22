@@ -994,9 +994,10 @@ pub(crate) enum Commands {
 
     /// Generate committed artifacts from a qedspec
     ///
-    /// Default (no flags): generates the Rust program skeleton for the
-    /// chosen `--target` (default: `anchor`). Use flags to generate
-    /// additional artifacts, or `--all` for everything.
+    /// Default (no artifact flags): generates the Rust program skeleton for
+    /// the chosen `--target` (default: `anchor`). Explicit artifact flags
+    /// generate only those artifacts; use `--all` for the scaffold and every
+    /// artifact.
     Codegen {
         /// Path to the spec file (.qedspec or a directory of fragments).
         /// Optional — falls back to the `spec` field in the nearest

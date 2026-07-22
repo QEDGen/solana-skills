@@ -662,9 +662,12 @@ $QEDGEN ratify --audit-dir .qed/audit/2026-07-17 --proptest
 ## Code generation
 
 ### `codegen`
-Generate committed artifacts from a qedspec. Default (no flags) generates
-the program Rust skeleton only (Anchor-compatible; see the generated
-`Cargo.toml` for dependency configuration).
+Generate committed artifacts from a qedspec. Default (no artifact flags)
+generates the program Rust skeleton only (Anchor-compatible; see the generated
+`Cargo.toml` for dependency configuration). Passing explicit artifact flags
+generates only those selected artifacts; `--all` emits the Rust scaffold plus
+every artifact. The `.qed/` prerequisite therefore applies to the default and
+`--all`, not to a harness-only invocation such as `--proptest`.
 
 Requires a git repo (see [Require-git guard](#require-git-guard)).
 
@@ -700,7 +703,7 @@ $QEDGEN codegen --force            # regen user-owned set wholesale; re-apply fi
 | `--output-dir` | Path | `./programs` | Output directory for Rust skeleton. Relative paths — this and every `--*-output` default below — resolve against the **spec's directory** (the project root), not the invoker's cwd (#279): `codegen --spec <elsewhere>/x.qedspec` from anywhere writes into `<elsewhere>/`. Absolute paths pass through untouched. |
 | `--force` | bool | false | **Destructive opt-in (#288):** regenerate the USER-OWNED files too (`src/lib.rs`, `src/instructions/*.rs`) — the rename workflow where regen + re-fill beats hand-merging. Every affected file must have a committed, unmodified git baseline (the recovery path); dirty or untracked files abort before anything is written. Conflicts with `--merge-accounts`. |
 | `--merge-accounts` | bool | false | **Surgical rename recovery (#288, Anchor only):** regenerate only the `#[derive(Accounts)]` structs inside the user-owned `lib.rs`, preserving handler fills and everything else (the Cargo.toml section-merge doctrine applied to Rust items). Hand-tuned constraints inside replaced structs are overwritten, so the same git-baseline guard applies. Structs with no matching spec handler (pre-rename leftovers, hand-added instructions) are left in place and reported. |
-| `--all` | bool | false | Generate all artifacts |
+| `--all` | bool | false | Generate the Rust scaffold and all artifacts |
 | `--lean` | bool | false | Generate Lean 4 proofs |
 | `--lean-output` | Path | `./formal_verification/Spec.lean` | Lean output path |
 | `--kani` | bool | false | Generate Kani proof harnesses (spec-model — verifies the spec's effect block against its own `ensures` clauses). |

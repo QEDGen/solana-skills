@@ -28,13 +28,45 @@ fn preflight_reports_all_missing_prerequisites_at_once() {
     )
     .expect("copy spec");
 
-    let out = qedgen_from(root, &["codegen", "--proptest", "--spec", "escrow.qedspec"]);
+    let out = qedgen_from(root, &["codegen", "--spec", "escrow.qedspec"]);
     assert!(!out.status.success(), "preflight must fail");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("git init") && stderr.contains("qedgen init"),
         "one message must name every missing prerequisite; stderr:\n{stderr}"
     );
+}
+
+/// #323: selecting a single text artifact must not implicitly regenerate the
+/// greenfield Rust scaffold or inherit its `.qed/` prerequisite.
+#[test]
+fn proptest_only_codegen_skips_scaffold_and_qed_prerequisite() {
+    common::ensure_qedgen_built();
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    std::fs::copy(
+        common::repo_root().join("crates/qedgen/tests/fixtures/regressions/issue-8/pool.qedspec"),
+        root.join("pool.qedspec"),
+    )
+    .expect("copy spec");
+    common::git_init(root);
+
+    let out = qedgen_from(root, &["codegen", "--proptest", "--spec", "pool.qedspec"]);
+    assert!(
+        out.status.success(),
+        "harness-only codegen failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        root.join("programs/tests/proptest.rs").is_file(),
+        "requested proptest harness was not emitted"
+    );
+    assert!(
+        !root.join("programs/Cargo.toml").exists() && !root.join("programs/src").exists(),
+        "harness-only codegen must not emit a Rust scaffold"
+    );
+    assert!(!root.join(".qed").exists(), "test must not stage .qed/");
 }
 
 /// #279: relative output paths (including the clap defaults) resolve
@@ -44,7 +76,7 @@ fn preflight_reports_all_missing_prerequisites_at_once() {
 fn relative_outputs_resolve_against_spec_dir_not_cwd() {
     common::ensure_qedgen_built();
 
-    // A real project: spec + git + qedgen init.
+    // A harness-only project: spec + git, deliberately without `.qed/`.
     let proj = tempfile::tempdir().expect("tempdir");
     let root = proj.path();
     std::fs::copy(
@@ -53,16 +85,6 @@ fn relative_outputs_resolve_against_spec_dir_not_cwd() {
     )
     .expect("copy spec");
     common::git_init(root);
-    let out = qedgen_from(
-        root,
-        &["init", "--name", "escrow", "--spec", "escrow.qedspec"],
-    );
-    assert!(
-        out.status.success(),
-        "init failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-
     // Drive codegen from a DIFFERENT, non-git cwd with an absolute --spec.
     // The spec project owns every relative output and is the repository
     // whose recovery baseline matters.

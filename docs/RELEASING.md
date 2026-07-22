@@ -24,7 +24,15 @@ Pre-release checklist. Run before cutting a new release or tag. (Moved out of `C
 
 8. *(folded into step 7 — kept numbered so 8a/8b references below stay stable)*
 
-8a. **`old(...)` preservation harnesses (v2.23+)** — for every bundled spec whose `property` body contains `old(...)` (`grep -rl '\bold(' examples crates/qedgen/tests/fixtures --include='*.qedspec'`), regen and confirm `tests/proptest.rs` emits the binary signature (`fn <prop>(pre: &State, post: &State) -> bool`) and the per-handler harness captures `let pre = s.clone(); let mut post = s;` before the handler call. Pre-v2.23 this lowered to a structural tautology silently. Bundled coverage today: `crates/qedgen/tests/fixtures/regressions/issue-8/pool.qedspec` is the canonical pre/post test corpus.
+8a. **`old(...)` preservation harnesses (v2.23+)** — for every bundled spec whose `property` body contains `old(...)` (`grep -rl '\bold(' examples crates/qedgen/tests/fixtures --include='*.qedspec'`), regen and confirm `tests/proptest.rs` emits the binary signature (`fn <prop>(pre: &State, post: &State) -> bool`) and the per-handler harness captures `let pre = s.clone(); let mut post = s;` before the handler call. Pre-v2.23 this lowered to a structural tautology silently. Bundled coverage today: `crates/qedgen/tests/fixtures/regressions/issue-8/pool.qedspec` is the canonical pre/post test corpus. Run the spot-check in a disposable git repo; harness-only codegen deliberately needs no `.qed/` initialization:
+
+   ```bash
+   spotcheck_dir="$(mktemp -d)"
+   cp crates/qedgen/tests/fixtures/regressions/issue-8/pool.qedspec "$spotcheck_dir/"
+   git -C "$spotcheck_dir" init --quiet
+   qedgen codegen --proptest --spec "$spotcheck_dir/pool.qedspec"
+   grep -nE 'fn .*\(pre: &State, post: &State\)|let pre = s\.clone\(\);|let mut post = s;' "$spotcheck_dir/programs/tests/proptest.rs"
+   ```
 
 8b. **Supply-chain gate** — run the exact CI command below, then `cargo deny check`; both must exit 0. Install once with `cargo install --locked cargo-audit cargo-deny`. New RustSec advisories on transitive deps are the actionable signal; the ignored IDs are documented in `deny.toml`'s `[advisories].ignore` array — keep this command, CI, README, and `deny.toml` in sync.
 
