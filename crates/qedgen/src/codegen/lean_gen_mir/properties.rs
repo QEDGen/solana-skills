@@ -322,11 +322,7 @@ pub(super) fn emit_invariants(out: &mut String, mir: &Mir) {
 /// `True := trivial` placeholder body — the inductive State needs
 /// variant-aware case analysis the flat `s'.f = s.f` form can't express
 /// (per-pre-variant reasoning is v3.0 roadmap).
-pub(super) fn emit_frame_conditions_adt(
-    out: &mut String,
-    mir: &Mir,
-    rec: &mut ObligationRecorder,
-) {
+pub(super) fn emit_frame_conditions_adt(out: &mut String, mir: &Mir, rec: &mut ObligationRecorder) {
     let has_modifies = mir.handlers.iter().any(|h| h.modifies.is_some());
     if !has_modifies {
         return;
@@ -348,7 +344,12 @@ pub(super) fn emit_frame_conditions_adt(
         let param_sig = param_sig_str(&h.params);
         let param_args = param_args_str(&h.params);
         let theorem_name = safe_name(&format!("{}_frame", h.name));
-        rec.emitted(ObligationKind::BackendExtra, &h.name, "frame", &theorem_name);
+        rec.emitted(
+            ObligationKind::BackendExtra,
+            &h.name,
+            "frame",
+            &theorem_name,
+        );
         out.push_str(&format!(
             "theorem {} (s s' : State) (signer : Pubkey){}\n",
             theorem_name, param_sig
@@ -407,7 +408,12 @@ pub(super) fn emit_frame_conditions(out: &mut String, mir: &Mir, rec: &mut Oblig
         let param_sig = param_sig_str(&h.params);
         let param_args = param_args_str(&h.params);
         let theorem_name = safe_name(&format!("{}_frame", h.name));
-        rec.emitted(ObligationKind::BackendExtra, &h.name, "frame", &theorem_name);
+        rec.emitted(
+            ObligationKind::BackendExtra,
+            &h.name,
+            "frame",
+            &theorem_name,
+        );
 
         out.push_str(&format!(
             "theorem {} (s s' : State) (signer : Pubkey){}\n",

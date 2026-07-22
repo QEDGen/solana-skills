@@ -81,7 +81,10 @@ pub(super) fn check_known_types(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
         for variant in &sum.variants {
             for (name, ty) in &variant.fields {
                 lint(
-                    format!("sum `{}` variant `{}` field `{}`", sum.name, variant.name, name),
+                    format!(
+                        "sum `{}` variant `{}` field `{}`",
+                        sum.name, variant.name, name
+                    ),
                     ty,
                 );
             }
