@@ -8,6 +8,7 @@ use super::*;
 mod arithmetic;
 mod auth;
 mod cpi;
+mod known_types;
 mod shared;
 mod state;
 mod structural;
@@ -33,6 +34,12 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let ctx = LintCtx::new(spec);
 
     let mut warnings = Vec::new();
+
+    // Every type-bearing string must resolve through the canonical type
+    // IR (#327) — undeclared / malformed spellings fail check here
+    // instead of surfacing as invalid Lean or a silent u64 proptest
+    // strategy at codegen time.
+    warnings.extend(known_types::check_known_types(spec));
 
     // ADT-state `WrongState` compile gate.
     warnings.extend(check_adt_state_missing_wrong_state(spec));

@@ -341,6 +341,17 @@ accounts : Map[MAX_ACCOUNTS] Account
 slots    : Map[16] (Option Pubkey)
 ```
 
+`Fin[N]` / `Map[N] T` bounds accept a numeric literal (`Fin[8]`,
+`Map[4] U64`), a declared `const` name, or a unit-only sum type name
+(variant count). Every parameterized form parses into the canonical type
+IR (#327): Lean renders `Fin N` / `List T` / `Option T`, proptest
+generates strategies over exactly the declared domain (`Fin[N]` samples
+`[0, N)`, #330), and a `Vec` state field is an explicit proptest
+capability error (no length-bound policy exists yet — model bounded
+collections as `Map[N] T`). Undeclared or malformed type spellings fail
+`qedgen check` with the `unknown_type` lint (Error severity) instead of
+surfacing later as invalid Lean or a wrong-domain test strategy.
+
 **Pubkey lowering (v2.21):** the user-facing Anchor / Quasar program
 target keeps `Pubkey` (Solana's 32-byte newtype) so on-chain accounts
 work normally. In the generated proptest / Kani harnesses, `Pubkey`

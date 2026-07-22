@@ -599,17 +599,48 @@ fn emit_value(ty: &Ty, ctx: &CtorCtx, depth: usize) -> Option<String> {
         return None; // recursion guard (mutually-recursive record/sum types)
     }
     Some(match ty {
-        Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::U128 | Ty::I64 | Ty::I128 | Ty::Bool => {
-            "kani::any()".to_string()
-        }
+        Ty::U8
+        | Ty::U16
+        | Ty::U32
+        | Ty::U64
+        | Ty::U128
+        | Ty::I8
+        | Ty::I16
+        | Ty::I32
+        | Ty::I64
+        | Ty::I128
+        | Ty::Bool => "kani::any()".to_string(),
         Ty::Pubkey => "anchor_lang::prelude::Pubkey::new_from_array(kani::any())".to_string(),
         // Opaque byte tokens (#191) — raw `[u8; N]` in the real struct;
         // arrays are `kani::any()`-constructible const-generically.
         Ty::Bytes32 | Ty::Bytes64 => "kani::any()".to_string(),
+        // Unconstrained symbolic `usize` for a `Fin` index would explore
+        // out-of-range values the real struct never holds — matches the
+        // pre-#327 behavior (Custom("Fin[N]") was unconstructible).
+        Ty::Fin { .. } => return None,
+        Ty::Option { value } => {
+            let inner_expr = emit_value(value, ctx, depth + 1)?;
+            format!("if kani::any() {{ Some({inner_expr}) }} else {{ None }}")
+        }
+        Ty::Vec { value } => {
+            let inner_expr = emit_value(value, ctx, depth + 1)?;
+            // FIXED-LENGTH-K symbolic Vec — `vec![<elem>, …]` with K
+            // independent symbolic elements, NOT a symbolic-length `while`
+            // loop. A symbolic length forces CBMC to unwind the build loop
+            // (and the real `invariant()`'s own iteration over the field) to
+            // the harness `#[kani::unwind]` bound and to model Vec
+            // growth/realloc — which dominates (OOMs) the proof even for a
+            // property that never reads the collection. K = `pragma
+            // kani_vec_bound` (default 1). Raise it for a property that DOES
+            // read the collection; a bounded (BMC) length is the trade-off.
+            let elems = std::iter::repeat_n(inner_expr, ctx.vec_bound)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("vec![{elems}]")
+        }
         Ty::Custom(s) => {
-            // `Option T` / `Vec T` ride as `Ty::Custom("Option T")` / `"Vec T"`
-            // (the MIR `Ty` enum has no first-class Option/Vec — see #173/#174);
-            // the inner is a single named type (scalar or record).
+            // Pre-#327 defensive producers may still hand us the string
+            // spellings; delegate to the structured arms via parse_ty.
             if let Some(inner) = s.strip_prefix("Option ") {
                 let inner_expr = emit_value(&parse_ty(inner.trim()), ctx, depth + 1)?;
                 format!("if kani::any() {{ Some({inner_expr}) }} else {{ None }}")

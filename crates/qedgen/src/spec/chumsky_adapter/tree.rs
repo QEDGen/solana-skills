@@ -417,17 +417,29 @@ fn path_leaf_type<'e>(p: &a::Path, env: &TypeEnv<'e>) -> Option<&'e a::TypeRef> 
 
 /// Source `TypeRef` → MIR `Ty`. Named forms route through the same
 /// string-level parser codegen uses (`mir::parse_ty`) so `Custom` spellings
-/// stay consistent; DSL-only forms `Ty` doesn't model natively (`Fin[N]`,
-/// parameterized types) land in `Custom` and are classified by
-/// `expr_tree::ty_num_kind`.
+/// stay consistent; `Fin` / `Vec` / `Option` map to their structured `Ty`
+/// variants (#327) — `Custom` is reserved for declared nominal types.
 fn ty_of_type_ref(t: &a::TypeRef, env: &TypeEnv<'_>) -> crate::mir::Ty {
     match t {
         a::TypeRef::Named(n) => crate::mir::parse_ty(&env.resolve_alias_name(n)),
-        a::TypeRef::Param(head, tail) => crate::mir::Ty::Custom(format!("{} {}", head, tail)),
+        a::TypeRef::Param(head, tail) => {
+            let inner = crate::mir::parse_ty(&env.resolve_alias_name(tail));
+            match head.as_str() {
+                "Vec" => crate::mir::Ty::Vec {
+                    value: Box::new(inner),
+                },
+                "Option" => crate::mir::Ty::Option {
+                    value: Box::new(inner),
+                },
+                _ => crate::mir::Ty::Custom(format!("{} {}", head, tail)),
+            }
+        }
         a::TypeRef::Map { bound, inner } => crate::mir::Ty::Map {
             capacity: bound.clone(),
             value: Box::new(ty_of_type_ref(inner, env)),
         },
-        a::TypeRef::Fin { bound } => crate::mir::Ty::Custom(format!("Fin[{}]", bound)),
+        a::TypeRef::Fin { bound } => crate::mir::Ty::Fin {
+            bound: bound.clone(),
+        },
     }
 }

@@ -547,6 +547,14 @@ pub struct InvariantMir {
 // Types
 // ----------------------------------------------------------------------
 
+/// The canonical DSL type IR (#327). Every advertised surface spelling
+/// parses into a structured variant; `Custom` means a user-declared
+/// nominal type (record, sum type, alias target, or imported type),
+/// never "the parser did not understand this" — undeclared spellings are
+/// rejected by the `unknown_type` check lint before codegen runs.
+/// Backends match this enum exhaustively (no `_` arms — the `Stmt`
+/// discipline), so a new type shape is a compile error at every
+/// consumer, not a silent string fallthrough.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ty {
     U8,
@@ -554,6 +562,9 @@ pub enum Ty {
     U32,
     U64,
     U128,
+    I8,
+    I16,
+    I32,
     I64,
     I128,
     Bool,
@@ -565,6 +576,16 @@ pub enum Ty {
     /// Opaque 64-byte token (`[u8; 64]`): ed25519/secp256k1 signature,
     /// recovered secp pubkey. Equality-only semantics (#191).
     Bytes64,
+    /// `Fin[N]` — bounded natural index domain. Bound carried verbatim
+    /// (numeric literal or constant name), resolved via the spec's
+    /// `const` table where a concrete value is needed.
+    Fin { bound: Symbol },
+    /// `Vec T` — growable sequence. No bound policy in the DSL yet:
+    /// Rust-facing backends render `Vec<T>`; proptest reports it as an
+    /// unsupported strategy target (#330) until a bound policy exists.
+    Vec { value: Box<Ty> },
+    /// `Option T`.
+    Option { value: Box<Ty> },
     /// User-declared type name (a record, sum type, or imported type).
     Custom(Symbol),
     /// Bounded map keyed by `Pubkey`; capacity carried verbatim as a string —
@@ -1663,6 +1684,9 @@ pub(crate) fn parse_ty(s: &str) -> Ty {
         "U32" => Ty::U32,
         "U64" => Ty::U64,
         "U128" => Ty::U128,
+        "I8" => Ty::I8,
+        "I16" => Ty::I16,
+        "I32" => Ty::I32,
         "I64" => Ty::I64,
         "I128" => Ty::I128,
         "Bool" => Ty::Bool,
@@ -1670,11 +1694,12 @@ pub(crate) fn parse_ty(s: &str) -> Ty {
         "Bytes32" => Ty::Bytes32,
         "Bytes64" => Ty::Bytes64,
         other => {
-            // `Map[N] T`: numeric literal or constant-name capacity, passed
-            // through as a string (see `Ty::Map`). Gated on the strict
-            // `Map[` prefix — a spaced `Map [N] T` stays `Ty::Custom`,
-            // matching the parser's canonical spelling.
-            if other.starts_with("Map[") {
+            // `Map[N] T` / `Map [N] T`: numeric literal or constant-name
+            // capacity, passed through as a string (see `Ty::Map`).
+            // `split_map_type` tolerates the spaced spelling, matching
+            // `map_type` — the Rust and Lean backends must agree on which
+            // spellings are structured (#327).
+            if other.starts_with("Map") {
                 if let Some((cap_str, inner)) = crate::codegen_shared::split_map_type(other) {
                     if !cap_str.is_empty() {
                         return Ty::Map {
@@ -1683,6 +1708,33 @@ pub(crate) fn parse_ty(s: &str) -> Ty {
                         };
                     }
                 }
+            }
+            // `Fin[N]` / `Fin [N]`.
+            if let Some(rest) = other.strip_prefix("Fin") {
+                let rest = rest.trim_start();
+                if let Some(bound) = rest
+                    .strip_prefix('[')
+                    .and_then(|r| r.strip_suffix(']'))
+                    .map(str::trim)
+                {
+                    if !bound.is_empty() {
+                        return Ty::Fin {
+                            bound: bound.to_string(),
+                        };
+                    }
+                }
+            }
+            // `Vec T` / `Option T` — whitespace-separated single argument,
+            // recursing so `Vec Map[4] U64` stays structured.
+            if let Some(inner) = other.strip_prefix("Vec ") {
+                return Ty::Vec {
+                    value: Box::new(parse_ty(inner)),
+                };
+            }
+            if let Some(inner) = other.strip_prefix("Option ") {
+                return Ty::Option {
+                    value: Box::new(parse_ty(inner)),
+                };
             }
             Ty::Custom(other.to_string())
         }
@@ -1874,6 +1926,51 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
             }
             other => panic!("expected Map, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn parse_ty_structured_forms() {
+        // #327 — every advertised parameterized spelling parses into a
+        // structured variant; `Custom` is reserved for declared nominals.
+        assert_eq!(parse_ty("I8"), Ty::I8);
+        assert_eq!(parse_ty("I32"), Ty::I32);
+        assert_eq!(
+            parse_ty("Fin[8]"),
+            Ty::Fin {
+                bound: "8".to_string()
+            }
+        );
+        assert_eq!(
+            parse_ty("Fin[MAX_ACCOUNTS]"),
+            Ty::Fin {
+                bound: "MAX_ACCOUNTS".to_string()
+            }
+        );
+        assert_eq!(
+            parse_ty("Vec U64"),
+            Ty::Vec {
+                value: Box::new(Ty::U64)
+            }
+        );
+        assert_eq!(
+            parse_ty("Option Pubkey"),
+            Ty::Option {
+                value: Box::new(Ty::Pubkey)
+            }
+        );
+        // Spaced Map spelling now agrees with `map_type`'s tolerance.
+        match parse_ty("Map [4] U64") {
+            Ty::Map { capacity, value } => {
+                assert_eq!(capacity, "4");
+                assert!(matches!(*value, Ty::U64));
+            }
+            other => panic!("expected Map, got {:?}", other),
+        }
+        // Head names that merely START with a structured keyword stay
+        // nominal — `Vector`, `Options`, `Finality`, `MapReduce`.
+        assert!(matches!(parse_ty("Vector"), Ty::Custom(s) if s == "Vector"));
+        assert!(matches!(parse_ty("Finality"), Ty::Custom(s) if s == "Finality"));
+        assert!(matches!(parse_ty("MapReduce"), Ty::Custom(s) if s == "MapReduce"));
     }
 
     // ---- Fixture-based lowering tests ----

@@ -325,15 +325,17 @@ pub enum NumKind {
     Other,
 }
 
-/// `Ty` → `NumKind`. `Custom` names that the DSL accepts but `Ty` doesn't
-/// model natively (`I8`/`I16`/`I32`, `Fin[N]`) classify here so kind
-/// inference matches `TypeEnv::type_ref_kind`.
+/// `Ty` → `NumKind`. Since #327 every advertised spelling is a
+/// structured variant; the `Custom` string arms remain only for
+/// defensively-built `Custom` values from pre-#327 producers.
 pub fn ty_num_kind(ty: &Ty) -> NumKind {
     match ty {
         Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::U128 => NumKind::Nat,
-        Ty::I64 | Ty::I128 => NumKind::Int,
+        Ty::I8 | Ty::I16 | Ty::I32 | Ty::I64 | Ty::I128 => NumKind::Int,
         Ty::Bool => NumKind::Bool,
         Ty::Pubkey | Ty::Bytes32 | Ty::Bytes64 => NumKind::Other,
+        Ty::Fin { .. } => NumKind::Nat,
+        Ty::Vec { .. } | Ty::Option { .. } => NumKind::Other,
         Ty::Map { .. } => NumKind::Other,
         Ty::Custom(name) => match name.as_str() {
             "I8" | "I16" | "I32" => NumKind::Int,

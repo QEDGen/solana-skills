@@ -161,65 +161,73 @@ pub fn collect_obligations(mir: &Mir, parsed: &ParsedSpec) -> Vec<ObligationEntr
     rec.into_entries()
 }
 
-/// Proptest strategy for a DSL primitive type; compound types go through
-/// `strategy_for_field`, which dispatches here once unwrapped.
-fn strategy_for_type(dsl_type: &str) -> StrategyExpr {
-    match dsl_type {
-        "U8" => StrategyExpr::range("0u8", "255u8"),
-        "U16" => StrategyExpr::range("0u16", "u16::MAX"),
-        "U32" => StrategyExpr::range("0u32", "u32::MAX"),
-        "U64" => StrategyExpr::range("0u64", "u64::MAX"),
-        "U128" => StrategyExpr::range("0u128", "u128::MAX"),
-        "I8" => StrategyExpr::range("i8::MIN", "i8::MAX"),
-        "I16" => StrategyExpr::range("i16::MIN", "i16::MAX"),
-        "I32" => StrategyExpr::range("i32::MIN", "i32::MAX"),
-        "I64" => StrategyExpr::range("i64::MIN", "i64::MAX"),
-        "I128" => StrategyExpr::call("any::<i128>", Vec::new()),
-        "Bool" => StrategyExpr::call("any::<bool>", Vec::new()),
-        "Pubkey" => StrategyExpr::call(
+/// Proptest strategy for a primitive scalar `Ty`. `None` means the type
+/// has no primitive strategy — the structural dispatch in
+/// `strategy_for_ty` owns those shapes, and unhandled ones are explicit
+/// errors, never a numeric default (#330: the old string-keyed match
+/// here ended `_ => 0u64..=u64::MAX`, silently sampling the wrong
+/// domain). No `_` arm: a new `Ty` variant is a compile error here.
+fn strategy_for_prim(ty: &crate::mir::Ty) -> Option<StrategyExpr> {
+    use crate::mir::Ty;
+    Some(match ty {
+        Ty::U8 => StrategyExpr::range("0u8", "255u8"),
+        Ty::U16 => StrategyExpr::range("0u16", "u16::MAX"),
+        Ty::U32 => StrategyExpr::range("0u32", "u32::MAX"),
+        Ty::U64 => StrategyExpr::range("0u64", "u64::MAX"),
+        Ty::U128 => StrategyExpr::range("0u128", "u128::MAX"),
+        Ty::I8 => StrategyExpr::range("i8::MIN", "i8::MAX"),
+        Ty::I16 => StrategyExpr::range("i16::MIN", "i16::MAX"),
+        Ty::I32 => StrategyExpr::range("i32::MIN", "i32::MAX"),
+        Ty::I64 => StrategyExpr::range("i64::MIN", "i64::MAX"),
+        Ty::I128 => StrategyExpr::call("any::<i128>", Vec::new()),
+        Ty::Bool => StrategyExpr::call("any::<bool>", Vec::new()),
+        Ty::Pubkey => StrategyExpr::call(
             "prop::array::uniform32",
             vec![StrategyExpr::range_from("0u8")],
         ),
         // Byte tokens (#191): `uniform32` maxes out at 32, so Bytes64 uses
         // proptest's const-generic array `Arbitrary` (proptest ≥ 1.0).
-        "Bytes32" => StrategyExpr::call(
+        Ty::Bytes32 => StrategyExpr::call(
             "prop::array::uniform32",
             vec![StrategyExpr::range_from("0u8")],
         ),
-        "Bytes64" => StrategyExpr::call("any::<[u8; 64]>", Vec::new()),
-        // Fin[N] arrives here with the wrapper stripped; modelled as a small
-        // usize range since real usage is as an index.
-        "Fin" => StrategyExpr::range("0usize", "1024usize"),
-        _ => StrategyExpr::range("0u64", "u64::MAX"),
-    }
+        Ty::Bytes64 => StrategyExpr::call("any::<[u8; 64]>", Vec::new()),
+        Ty::Fin { .. }
+        | Ty::Vec { .. }
+        | Ty::Option { .. }
+        | Ty::Map { .. }
+        | Ty::Custom(_) => return None,
+    })
 }
 
-/// Boundary-biased strategy for guard rejection tests: mixes near-0 and
-/// near-MAX values so both `> 0` and `<= LARGE_CONST` guards reject often.
-fn boundary_strategy_for_type(dsl_type: &str) -> StrategyExpr {
+/// Boundary-biased primitive strategy for guard rejection tests: mixes
+/// near-0 and near-MAX values so both `> 0` and `<= LARGE_CONST` guards
+/// reject often. Same `None` contract as `strategy_for_prim`.
+fn boundary_strategy_for_prim(ty: &crate::mir::Ty) -> Option<StrategyExpr> {
+    use crate::mir::Ty;
     let edge_ranges = |min: &str, low: &str, high: &str, max: &str| {
         StrategyExpr::one_of(vec![
             StrategyExpr::range(min, low),
             StrategyExpr::range(high, max),
         ])
     };
-    match dsl_type {
-        "U8" => edge_ranges("0u8", "3u8", "252u8", "255u8"),
-        "U16" => edge_ranges("0u16", "3u16", "(u16::MAX - 3)", "u16::MAX"),
-        "U32" => edge_ranges("0u32", "3u32", "(u32::MAX - 3)", "u32::MAX"),
-        "U64" => edge_ranges("0u64", "3u64", "(u64::MAX - 3)", "u64::MAX"),
-        "U128" => edge_ranges("0u128", "3u128", "(u128::MAX - 3)", "u128::MAX"),
-        "I8" => edge_ranges("i8::MIN", "(i8::MIN + 3)", "(i8::MAX - 3)", "i8::MAX"),
-        "I16" => edge_ranges("i16::MIN", "(i16::MIN + 3)", "(i16::MAX - 3)", "i16::MAX"),
-        "I32" => edge_ranges("i32::MIN", "(i32::MIN + 3)", "(i32::MAX - 3)", "i32::MAX"),
-        "I64" => edge_ranges("i64::MIN", "(i64::MIN + 3)", "(i64::MAX - 3)", "i64::MAX"),
-        "I128" => StrategyExpr::call("any::<i128>", Vec::new()),
-        "Bool" => StrategyExpr::call("any::<bool>", Vec::new()),
-        "Pubkey" | "Bytes32" => StrategyExpr::call(
+    Some(match ty {
+        Ty::U8 => edge_ranges("0u8", "3u8", "252u8", "255u8"),
+        Ty::U16 => edge_ranges("0u16", "3u16", "(u16::MAX - 3)", "u16::MAX"),
+        Ty::U32 => edge_ranges("0u32", "3u32", "(u32::MAX - 3)", "u32::MAX"),
+        Ty::U64 => edge_ranges("0u64", "3u64", "(u64::MAX - 3)", "u64::MAX"),
+        Ty::U128 => edge_ranges("0u128", "3u128", "(u128::MAX - 3)", "u128::MAX"),
+        Ty::I8 => edge_ranges("i8::MIN", "(i8::MIN + 3)", "(i8::MAX - 3)", "i8::MAX"),
+        Ty::I16 => edge_ranges("i16::MIN", "(i16::MIN + 3)", "(i16::MAX - 3)", "i16::MAX"),
+        Ty::I32 => edge_ranges("i32::MIN", "(i32::MIN + 3)", "(i32::MAX - 3)", "i32::MAX"),
+        Ty::I64 => edge_ranges("i64::MIN", "(i64::MIN + 3)", "(i64::MAX - 3)", "i64::MAX"),
+        Ty::I128 => StrategyExpr::call("any::<i128>", Vec::new()),
+        Ty::Bool => StrategyExpr::call("any::<bool>", Vec::new()),
+        Ty::Pubkey | Ty::Bytes32 => StrategyExpr::call(
             "prop::array::uniform32",
             vec![StrategyExpr::half_open_range("0u8", "1u8")],
         ),
-        "Bytes64" => StrategyExpr::call(
+        Ty::Bytes64 => StrategyExpr::call(
             "prop::collection::vec",
             vec![
                 StrategyExpr::half_open_range("0u8", "1u8"),
@@ -230,8 +238,38 @@ fn boundary_strategy_for_type(dsl_type: &str) -> StrategyExpr {
             "prop_map",
             vec![StrategyExpr::atom("|v| <[u8; 64]>::try_from(v).unwrap()")],
         ),
-        "Fin" => edge_ranges("0usize", "3usize", "1020usize", "1024usize"),
-        _ => edge_ranges("0u64", "3u64", "(u64::MAX - 3)", "u64::MAX"),
+        Ty::Fin { .. }
+        | Ty::Vec { .. }
+        | Ty::Option { .. }
+        | Ty::Map { .. }
+        | Ty::Custom(_) => return None,
+    })
+}
+
+/// Rust literal-suffix type for a primitive numeric `Ty` (bound-capped
+/// strategies interpolate it into range endpoints).
+fn prim_rust_suffix(ty: &crate::mir::Ty) -> Option<&'static str> {
+    use crate::mir::Ty;
+    match ty {
+        Ty::U8 => Some("u8"),
+        Ty::U16 => Some("u16"),
+        Ty::U32 => Some("u32"),
+        Ty::U64 => Some("u64"),
+        Ty::U128 => Some("u128"),
+        Ty::I8 => Some("i8"),
+        Ty::I16 => Some("i16"),
+        Ty::I32 => Some("i32"),
+        Ty::I64 => Some("i64"),
+        Ty::I128 => Some("i128"),
+        Ty::Bool
+        | Ty::Pubkey
+        | Ty::Bytes32
+        | Ty::Bytes64
+        | Ty::Fin { .. }
+        | Ty::Vec { .. }
+        | Ty::Option { .. }
+        | Ty::Map { .. }
+        | Ty::Custom(_) => None,
     }
 }
 
@@ -245,93 +283,167 @@ fn strategy_for_field(
     field_bound: Option<&str>,
 ) -> Result<StrategyExpr> {
     let dsl_type = dsl_type.trim();
-
-    // Map[BOUND] T → strict-length Vec<T> → [T; N] via TryInto.
-    // proptest's `prop::array::uniform*` combinators only go up to 32; the
-    // vec-with-prop_map form works for any N.
-    if let Some(rest) = dsl_type.strip_prefix("Map") {
-        let rest = rest.trim_start();
-        if let Some(rest) = rest.strip_prefix('[') {
-            if let Some(close) = rest.find(']') {
-                let bound_src = rest[..close].trim();
-                let inner_src = rest[close + 1..].trim();
-                let n = spec.resolve_map_bound(bound_src)?;
-                let inner_strategy = strategy_for_field(inner_src, spec, mode, None)?;
-                return Ok(StrategyExpr::call(
-                    "prop::collection::vec",
-                    vec![
-                        inner_strategy,
-                        StrategyExpr::range(n.to_string(), n.to_string()),
-                    ],
-                )
-                .method(
-                    "prop_map",
-                    vec![StrategyExpr::atom("|v| v.try_into().ok().unwrap()")],
-                ));
-            }
-        }
-        anyhow::bail!(
-            "malformed Map type in strategy: `{}` — expected `Map[BOUND] T`",
-            dsl_type
-        );
-    }
-
-    // Fin[N] → usize; bound is informational.
-    if dsl_type.starts_with("Fin[") {
-        return Ok(match mode {
-            StrategyMode::Full => strategy_for_type("Fin"),
-            StrategyMode::Boundary => boundary_strategy_for_type("Fin"),
-        });
-    }
-
-    // Record type → arb_<Name>() — emitted by emit_record_prop_composes.
-    if spec.records.iter().any(|r| r.name == dsl_type) {
-        return Ok(StrategyExpr::call(format!("arb_{}", dsl_type), Vec::new()));
-    }
-
-    // Unit-variant sum type → arb_<Name>() (emit_unit_sum_prop_oneofs).
-    // Payload-variant sums are flattened into the State struct and never
-    // appear as field types.
-    if spec.sum_types.iter().any(|s| {
-        s.name == dsl_type
-            && !s.variants.is_empty()
-            && s.variants.iter().all(|v| v.fields.is_empty())
-    }) {
-        return Ok(StrategyExpr::call(format!("arb_{}", dsl_type), Vec::new()));
-    }
-
-    // Type alias: resolve transitively and recurse.
+    // Type alias: resolve transitively, then dispatch structurally.
     if let Some((_, rhs)) = spec.type_aliases.iter().find(|(n, _)| n == dsl_type) {
         return strategy_for_field(rhs, spec, mode, field_bound);
     }
+    strategy_for_ty(&crate::mir::parse_ty(dsl_type), spec, mode, field_bound)
+}
 
-    // Primitive path — apply any bound extracted from property expressions.
-    if let Some(bound) = field_bound {
-        let rust_type = map_type(dsl_type, spec)?;
-        return Ok(match mode {
-            StrategyMode::Boundary => {
-                let n: u128 = bound.parse().unwrap_or(u128::MAX);
-                if n < 3 {
-                    StrategyExpr::range(format!("0{rust_type}"), format!("{bound}{rust_type}"))
-                } else {
-                    StrategyExpr::one_of(vec![
-                        StrategyExpr::range(format!("0{rust_type}"), format!("3{rust_type}")),
-                        StrategyExpr::range(
-                            format!("({bound} - 3)"),
+/// Structural strategy dispatch over the canonical type IR (#330).
+/// Exhaustive over `Ty` with no numeric fallback: every shape either
+/// generates a correctly-typed strategy or fails with an explicit error
+/// before any artifact is written.
+fn strategy_for_ty(
+    ty: &crate::mir::Ty,
+    spec: &ParsedSpec,
+    mode: StrategyMode,
+    field_bound: Option<&str>,
+) -> Result<StrategyExpr> {
+    use crate::mir::Ty;
+    match ty {
+        // Map[BOUND] T → strict-length Vec<T> → [T; N] via TryInto.
+        // proptest's `prop::array::uniform*` combinators only go up to 32;
+        // the vec-with-prop_map form works for any N.
+        Ty::Map { capacity, value } => {
+            let n = spec.resolve_map_bound(capacity)?;
+            let inner_strategy = strategy_for_ty(value, spec, mode, None)?;
+            Ok(StrategyExpr::call(
+                "prop::collection::vec",
+                vec![
+                    inner_strategy,
+                    StrategyExpr::range(n.to_string(), n.to_string()),
+                ],
+            )
+            .method(
+                "prop_map",
+                vec![StrategyExpr::atom("|v| v.try_into().ok().unwrap()")],
+            ))
+        }
+        // Fin[N] → exactly [0, N) after resolving the bound — never a
+        // value outside the declared domain (#330: the old path sampled
+        // a hard-coded 0..=1024 regardless of N).
+        Ty::Fin { bound } => {
+            let n: usize = spec.resolve_map_bound(bound)?.parse().map_err(|_| {
+                anyhow::anyhow!(
+                    "Fin bound `{}` did not resolve to a numeric value",
+                    bound
+                )
+            })?;
+            Ok(match mode {
+                StrategyMode::Full => {
+                    StrategyExpr::half_open_range("0usize", format!("{n}usize"))
+                }
+                StrategyMode::Boundary => {
+                    if n <= 8 {
+                        StrategyExpr::half_open_range("0usize", format!("{n}usize"))
+                    } else {
+                        StrategyExpr::one_of(vec![
+                            StrategyExpr::range("0usize", "3usize"),
+                            StrategyExpr::half_open_range(
+                                format!("{}usize", n - 4),
+                                format!("{n}usize"),
+                            ),
+                        ])
+                    }
+                }
+            })
+        }
+        Ty::Option { value } => {
+            let inner_strategy = strategy_for_ty(value, spec, mode, None)?;
+            Ok(StrategyExpr::call(
+                "prop::option::of",
+                vec![inner_strategy],
+            ))
+        }
+        // No bound policy exists for `Vec` in the DSL — an unbounded
+        // strategy would be a wrong-domain model, so this is an explicit
+        // capability error, not a default (#330).
+        Ty::Vec { .. } => anyhow::bail!(
+            "proptest cannot generate a strategy for a `Vec` field: the DSL \
+             has no length-bound policy yet. Model a bounded collection as \
+             `Map[N] T`."
+        ),
+        Ty::Custom(name) => {
+            // Record type → arb_<Name>() (emit_record_prop_composes).
+            if spec.records.iter().any(|r| &r.name == name) {
+                return Ok(StrategyExpr::call(format!("arb_{}", name), Vec::new()));
+            }
+            // Unit-variant sum type → arb_<Name>() (emit_unit_sum_prop_oneofs).
+            // Payload-variant sums are flattened into the State struct and
+            // never appear as field types.
+            if spec.sum_types.iter().any(|s| {
+                &s.name == name
+                    && !s.variants.is_empty()
+                    && s.variants.iter().all(|v| v.fields.is_empty())
+            }) {
+                return Ok(StrategyExpr::call(format!("arb_{}", name), Vec::new()));
+            }
+            // Aliases nested inside compound types reach here unresolved
+            // (top-level aliases resolve in `strategy_for_field`).
+            if spec.type_aliases.iter().any(|(n, _)| n == name) {
+                return strategy_for_field(name, spec, mode, field_bound);
+            }
+            anyhow::bail!(
+                "no proptest strategy for type `{}` — it is not a built-in, \
+                 record, unit sum type, or alias (`qedgen check` reports this \
+                 as unknown_type)",
+                name
+            )
+        }
+        Ty::U8
+        | Ty::U16
+        | Ty::U32
+        | Ty::U64
+        | Ty::U128
+        | Ty::I8
+        | Ty::I16
+        | Ty::I32
+        | Ty::I64
+        | Ty::I128
+        | Ty::Bool
+        | Ty::Pubkey
+        | Ty::Bytes32
+        | Ty::Bytes64 => {
+            // Primitive path — apply any bound extracted from property
+            // expressions before falling to the full-domain strategy.
+            if let Some(bound) = field_bound {
+                if let Some(rust_type) = prim_rust_suffix(ty) {
+                    return Ok(match mode {
+                        StrategyMode::Boundary => {
+                            let n: u128 = bound.parse().unwrap_or(u128::MAX);
+                            if n < 3 {
+                                StrategyExpr::range(
+                                    format!("0{rust_type}"),
+                                    format!("{bound}{rust_type}"),
+                                )
+                            } else {
+                                StrategyExpr::one_of(vec![
+                                    StrategyExpr::range(
+                                        format!("0{rust_type}"),
+                                        format!("3{rust_type}"),
+                                    ),
+                                    StrategyExpr::range(
+                                        format!("({bound} - 3)"),
+                                        format!("{bound}{rust_type}"),
+                                    ),
+                                ])
+                            }
+                        }
+                        StrategyMode::Full => StrategyExpr::range(
+                            format!("0{rust_type}"),
                             format!("{bound}{rust_type}"),
                         ),
-                    ])
+                    });
                 }
             }
-            StrategyMode::Full => {
-                StrategyExpr::range(format!("0{rust_type}"), format!("{bound}{rust_type}"))
-            }
-        });
+            let strategy = match mode {
+                StrategyMode::Boundary => boundary_strategy_for_prim(ty),
+                StrategyMode::Full => strategy_for_prim(ty),
+            };
+            Ok(strategy.expect("primitive arm covers exactly the prim-strategy domain"))
+        }
     }
-    Ok(match mode {
-        StrategyMode::Boundary => boundary_strategy_for_type(dsl_type),
-        StrategyMode::Full => strategy_for_type(dsl_type),
-    })
 }
 
 /// Emit a `prop_compose!` strategy per spec record. Order matters: after
@@ -810,7 +922,7 @@ fn emit_account_section(
     let guard_ops: Vec<&&ParsedHandler> = handlers.iter().filter(|op| op.has_guard()).collect();
     if !guard_ops.is_empty() {
         let guard_refs: Vec<&ParsedHandler> = guard_ops.iter().map(|op| **op).collect();
-        emit_guard_tests(out, &guard_refs, mutable_fields, all_fields, rec);
+        emit_guard_tests(out, &guard_refs, mutable_fields, all_fields, spec, rec)?;
     }
 
     // Overflow detection tests — the checked-add filter reads the lowered
@@ -1346,8 +1458,9 @@ fn emit_guard_tests(
     guard_ops: &[&ParsedHandler],
     _mutable_fields: &[&(String, String)],
     all_fields: &[(String, String)],
+    spec: &ParsedSpec,
     rec: &mut ObligationRecorder,
-) {
+) -> Result<()> {
     for op in guard_ops {
         // Skip handlers whose only guards reference handler-account pubkeys —
         // `collect_full_guard` filters those clauses (the simplified State
@@ -1379,14 +1492,16 @@ fn emit_guard_tests(
         // prop_assume!(negated guard) has a reasonable acceptance rate.
         let mut param_parts = vec!["s in arb_boundary_state()".to_string()];
         for (pname, ptype) in &op.takes_params {
-            let boundary = boundary_strategy_for_type(ptype);
+            // Typed dispatch (#330) — compound param types previously hit
+            // the string match's u64 catch-all here.
+            let boundary = strategy_for_field(ptype, spec, StrategyMode::Boundary, None)?;
             param_parts.push(format!("{} in {}", pname, boundary));
         }
         // Abstract binders: same strategy shape as takes_params; `requires`
         // clauses referencing the binder are negated in the prop_assume
         // below so the harness explores rejecting values.
         for (binder_name, binder_ty) in &op.abstract_binders {
-            let boundary = boundary_strategy_for_type(binder_ty);
+            let boundary = strategy_for_field(binder_ty, spec, StrategyMode::Boundary, None)?;
             param_parts.push(format!("{} in {}", binder_name, boundary));
         }
 
@@ -1417,6 +1532,7 @@ fn emit_guard_tests(
         out.push_str("}\n\n");
     }
     let _ = all_fields; // suppress unused
+    Ok(())
 }
 
 /// Emit overflow detection tests for add effects.
@@ -2150,8 +2266,9 @@ handler noop { }
 
     #[test]
     fn strategy_for_field_type_alias_resolves_transitively() {
-        // `type AccountIdx = Fin[N]` — strategy should route through the
-        // Fin[N] handler.
+        // `type AccountIdx = Fin[N]` — strategy routes through the Fin
+        // handler and honors the DECLARED bound: exactly [0, N), never
+        // the pre-#330 hard-coded 0..=1024.
         let src = r#"spec T
 const N = 4
 type AccountIdx = Fin[N]
@@ -2160,7 +2277,31 @@ handler noop { }
 "#;
         let spec = parse_str(src).expect("parse");
         let s = strategy_for_field("AccountIdx", &spec, StrategyMode::Full, None).unwrap();
-        assert_eq!(s.render(), "0usize..=1024usize");
+        assert_eq!(s.render(), "0usize..4usize");
+    }
+
+    #[test]
+    fn strategy_for_fin_literal_bound_and_option_are_typed() {
+        // `Fin[8]` (numeric-literal bound, #327 grammar) → [0, 8);
+        // `Option U64` → prop::option::of; `Vec U64` → explicit error,
+        // never a u64 fallback (#330).
+        let src = r#"spec T
+state { total : U64 }
+handler noop { }
+"#;
+        let spec = parse_str(src).expect("parse");
+        let fin = strategy_for_field("Fin[8]", &spec, StrategyMode::Full, None).unwrap();
+        assert_eq!(fin.render(), "0usize..8usize");
+        let opt = strategy_for_field("Option U64", &spec, StrategyMode::Full, None).unwrap();
+        assert_eq!(opt.render(), "prop::option::of(0u64..=u64::MAX)");
+        let vec_err = strategy_for_field("Vec U64", &spec, StrategyMode::Full, None)
+            .unwrap_err()
+            .to_string();
+        assert!(vec_err.contains("no length-bound policy"), "{}", vec_err);
+        let unknown_err = strategy_for_field("Mystery", &spec, StrategyMode::Full, None)
+            .unwrap_err()
+            .to_string();
+        assert!(unknown_err.contains("unknown_type"), "{}", unknown_err);
     }
 
     #[test]
