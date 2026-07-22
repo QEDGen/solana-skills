@@ -674,12 +674,34 @@ fn path_is_pod_field(style: PodStyle, p: &TreePath) -> bool {
         // Quasar: leaf-type width ≥ 16 (`u8`/`i8` stay native —
         // alignment 1 already, no Pod companion).
         PodStyle::Quasar => match &p.ty {
-            Some(Ty::U16 | Ty::U32 | Ty::U64 | Ty::U128 | Ty::I64 | Ty::I128 | Ty::Bool) => true,
-            // `I8` arrives as `Custom` (like `I16`/`I32` — `mir::Ty`
-            // doesn't model the narrow signed widths natively) but stays
-            // native: alignment 1 already, no Pod companion.
+            Some(
+                Ty::U16
+                | Ty::U32
+                | Ty::U64
+                | Ty::U128
+                | Ty::I16
+                | Ty::I32
+                | Ty::I64
+                | Ty::I128
+                | Ty::Bool,
+            ) => true,
+            // Pre-#327 `Custom("I16"/"I32")` spellings from defensive
+            // producers keep their Pod companions.
             Some(Ty::Custom(name)) => matches!(name.as_str(), "I16" | "I32"),
-            Some(Ty::U8 | Ty::Pubkey | Ty::Bytes32 | Ty::Bytes64 | Ty::Map { .. }) => false,
+            // `U8`/`I8` stay native: alignment 1 already, no Pod
+            // companion. `Fin` lowers to `usize` (native); `Vec`/`Option`
+            // are not Pod-eligible carriers.
+            Some(
+                Ty::U8
+                | Ty::I8
+                | Ty::Pubkey
+                | Ty::Bytes32
+                | Ty::Bytes64
+                | Ty::Fin { .. }
+                | Ty::Vec { .. }
+                | Ty::Option { .. }
+                | Ty::Map { .. },
+            ) => false,
             None => false,
         },
         // Zeropod: every simple scalar field reads `.get()` except raw

@@ -227,7 +227,7 @@ pub(super) fn render_ty(ty: &crate::mir::Ty) -> String {
     use crate::mir::Ty;
     match ty {
         Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::U128 => "Nat".to_string(),
-        Ty::I64 | Ty::I128 => "Int".to_string(),
+        Ty::I8 | Ty::I16 | Ty::I32 | Ty::I64 | Ty::I128 => "Int".to_string(),
         Ty::Bool => "Bool".to_string(),
         Ty::Pubkey => "Pubkey".to_string(),
         // Opaque byte tokens (#191): equality-only semantics, so both are
@@ -235,12 +235,28 @@ pub(super) fn render_ty(ty: &crate::mir::Ty) -> String {
         // (`QEDGen.Solana.Account`). Width is a Rust-side concern.
         Ty::Bytes32 => "Bytes32".to_string(),
         Ty::Bytes64 => "Bytes64".to_string(),
+        // #327 — structured parameterized forms render real Lean types
+        // (previously these arrived as `Custom` and printed verbatim,
+        // producing Lean that could not elaborate).
+        Ty::Fin { bound } => format!("Fin {}", bound),
+        Ty::Vec { value } => format!("List {}", paren_ty(&render_ty(value))),
+        Ty::Option { value } => format!("Option {}", paren_ty(&render_ty(value))),
         Ty::Custom(name) => name.clone(),
         Ty::Map { capacity: _, value } => {
             // Indexed-state has its own renderer; this codepath shouldn't
             // fire for single-account specs.
             format!("Map /* {} */", render_ty(value))
         }
+    }
+}
+
+/// Parenthesize a rendered type when it is itself an application
+/// (`List (Option Nat)`, not `List Option Nat`).
+fn paren_ty(rendered: &str) -> String {
+    if rendered.contains(' ') {
+        format!("({})", rendered)
+    } else {
+        rendered.to_string()
     }
 }
 

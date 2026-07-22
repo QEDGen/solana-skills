@@ -769,6 +769,16 @@ pub(crate) fn default_value_for_type(dsl_type: &str, spec: &ParsedSpec) -> Optio
         return None;
     }
 
+    // #327 — structured parameterized forms. Before the canonical type
+    // IR these fell to the trailing `"0"` fallback, seeding
+    // `field: 0` against a `Vec<T>` / `Option<T>` slot (E0308).
+    if dsl_type.strip_prefix("Vec ").is_some() {
+        return Some("Vec::new()".to_string());
+    }
+    if dsl_type.strip_prefix("Option ").is_some() {
+        return Some("None".to_string());
+    }
+
     if let Some((_, rhs)) = spec.type_aliases.iter().find(|(n, _)| n == dsl_type) {
         return default_value_for_type(rhs, spec);
     }

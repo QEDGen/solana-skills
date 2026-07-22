@@ -216,12 +216,22 @@ pub(super) fn doc_comments<'a>() -> impl Parser<'a, &'a str, Option<String>, Err
 // ----------------------------------------------------------------------------
 
 pub(super) fn type_ref<'a>() -> impl Parser<'a, &'a str, TypeRef, Err<'a>> + Clone {
+    // Bound position accepts a const/unit-sum ident OR a numeric literal —
+    // the documented `Fin[8]` / `Map[4] T` forms parse (#327; before this,
+    // only ident bounds like `Map[MAX_MEMBERS]` did).
+    let bound_lit = any::<&'a str, Err<'a>>()
+        .filter(|c: &char| c.is_ascii_digit())
+        .repeated()
+        .at_least(1)
+        .collect::<String>();
+    let bound = choice((non_keyword_ident(), bound_lit));
+
     // Map[N] T — bounded map keyed by an index domain of size `N`.
     let map_ty = just("Map")
         .then_ignore(wsc())
         .ignore_then(just('['))
         .then_ignore(wsc())
-        .ignore_then(non_keyword_ident())
+        .ignore_then(bound.clone())
         .then_ignore(wsc())
         .then_ignore(just(']'))
         .then_ignore(wsc())
@@ -236,7 +246,7 @@ pub(super) fn type_ref<'a>() -> impl Parser<'a, &'a str, TypeRef, Err<'a>> + Clo
         .then_ignore(wsc())
         .ignore_then(just('['))
         .then_ignore(wsc())
-        .ignore_then(non_keyword_ident())
+        .ignore_then(bound)
         .then_ignore(wsc())
         .then_ignore(just(']'))
         .map(|bound| TypeRef::Fin { bound });
