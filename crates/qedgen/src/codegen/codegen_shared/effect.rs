@@ -159,7 +159,7 @@ pub(crate) fn tree_bare_rhs(tree: &crate::mir::ExprTree) -> Option<String> {
         | ExprTree::MulDivRoundHalfUp { .. }
         | ExprTree::Match { .. }
         | ExprTree::Ctor { .. }
-        | ExprTree::RecordLit(_)
+        | ExprTree::RecordLit { .. }
         | ExprTree::RecordUpdate { .. }
         | ExprTree::IsVariant { .. }
         | ExprTree::App { .. }

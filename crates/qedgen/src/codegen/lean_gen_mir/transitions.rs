@@ -1086,14 +1086,14 @@ fn collect_tree_bound_guards(
             Some(p) => walk(p, conds),
             None => false,
         },
-        ExprTree::RecordLit(fields) => {
+        ExprTree::RecordLit { fields, .. } => {
             let mut growth = false;
             for (_, v) in fields {
                 growth |= walk(v, conds);
             }
             growth
         }
-        ExprTree::RecordUpdate { base, updates } => {
+        ExprTree::RecordUpdate { base, updates, .. } => {
             let mut growth = walk(base, conds);
             for (_, v) in updates {
                 growth |= walk(v, conds);

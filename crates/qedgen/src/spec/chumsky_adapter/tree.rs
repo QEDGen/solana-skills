@@ -287,17 +287,33 @@ fn build(e: &Expr, cx: &TreeCx, shadow: &mut Vec<String>) -> ExprTree {
                 enum_ty: enum_hint,
             }
         }
+        // #325 — the three constructor forms resolve their nominal type
+        // HERE, while the TypeEnv is in scope (mirroring `IsVariant` /
+        // `Match` below): the env-less Rust renderer needs a concrete
+        // type name, never a placeholder.
         Expr::Ctor { variant, payload } => ExprTree::Ctor {
             variant: variant.clone(),
             payload: payload.as_ref().map(|p| boxed(p, cx, shadow)),
+            ty: cx
+                .env
+                .resolve_variant(None, variant)
+                .map(|(enum_name, _)| enum_name),
         },
-        Expr::RecordLit(fields) => ExprTree::RecordLit(
-            fields
-                .iter()
-                .map(|(n, v)| (n.clone(), build(&v.node, cx, shadow)))
-                .collect(),
-        ),
+        Expr::RecordLit(fields) => {
+            let field_names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
+            ExprTree::RecordLit {
+                fields: fields
+                    .iter()
+                    .map(|(n, v)| (n.clone(), build(&v.node, cx, shadow)))
+                    .collect(),
+                ty: cx.env.record_for_fields(&field_names),
+            }
+        }
         Expr::RecordUpdate { base, updates } => ExprTree::RecordUpdate {
+            ty: match &base.node {
+                Expr::Path(p) => cx.env.path_type_name(p),
+                _ => None,
+            },
             base: boxed(base, cx, shadow),
             updates: updates
                 .iter()

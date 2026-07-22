@@ -162,13 +162,29 @@ pub enum ExprTree {
     Ctor {
         variant: Symbol,
         payload: Option<Box<ExprTree>>,
+        /// Resolved owning enum type name (#325) — resolved once at build
+        /// time (unique-variant search, like `IsVariant`) so the env-less
+        /// Rust renderer can emit `Enum::Variant` instead of a
+        /// placeholder. `None` when unresolvable; the
+        /// `unresolved_constructor_type` check lint gates that before
+        /// codegen.
+        ty: Option<Symbol>,
     },
-    /// `{ field := expr, … }` — anonymous record literal.
-    RecordLit(Vec<(Symbol, ExprTree)>),
+    /// `{ field := expr, … }` — record literal.
+    RecordLit {
+        fields: Vec<(Symbol, ExprTree)>,
+        /// Resolved nominal record type (#325), inferred at build time by
+        /// unique field-name match against the declared records. Lean
+        /// renders anonymously and ignores it; Rust requires it.
+        ty: Option<Symbol>,
+    },
     /// `{ base with field := expr, … }` — functional record update.
     RecordUpdate {
         base: Box<ExprTree>,
         updates: Vec<(Symbol, ExprTree)>,
+        /// Resolved nominal record type of `base` (#325), from the base
+        /// path's type when it is a path.
+        ty: Option<Symbol>,
     },
     /// `x is .Variant` — constructor test.
     IsVariant {
@@ -208,6 +224,88 @@ pub enum ExprTree {
         then_branch: Box<ExprTree>,
         else_branch: Box<ExprTree>,
     },
+}
+
+impl ExprTree {
+    /// Pre-order visit of this node and every sub-expression. Exhaustive
+    /// over the closed enum (no `_` arm) so a new variant is a compile
+    /// error here, not a silently unvisited subtree. Used by the
+    /// `unresolved_constructor_type` check lint (#325).
+    pub fn for_each_node<'a>(&'a self, f: &mut dyn FnMut(&'a ExprTree)) {
+        f(self);
+        match self {
+            ExprTree::Int(_) | ExprTree::Bool(_) | ExprTree::Path(_) => {}
+            ExprTree::Old(inner) | ExprTree::Not(inner) | ExprTree::Len(inner) => {
+                inner.for_each_node(f)
+            }
+            ExprTree::Sum { body, .. } | ExprTree::Quant { body, .. } => body.for_each_node(f),
+            ExprTree::QuantIn { coll, body, .. } => {
+                coll.for_each_node(f);
+                body.for_each_node(f);
+            }
+            ExprTree::BoolOp { lhs, rhs, .. }
+            | ExprTree::Cmp { lhs, rhs, .. }
+            | ExprTree::Arith { lhs, rhs, .. } => {
+                lhs.for_each_node(f);
+                rhs.for_each_node(f);
+            }
+            ExprTree::MulDivFloor { a, b, d }
+            | ExprTree::MulDivCeil { a, b, d }
+            | ExprTree::MulDivRoundHalfUp { a, b, d } => {
+                a.for_each_node(f);
+                b.for_each_node(f);
+                d.for_each_node(f);
+            }
+            ExprTree::Contains { coll, elem } => {
+                coll.for_each_node(f);
+                elem.for_each_node(f);
+            }
+            ExprTree::Match {
+                scrutinee, arms, ..
+            } => {
+                scrutinee.for_each_node(f);
+                for arm in arms {
+                    arm.body.for_each_node(f);
+                }
+            }
+            ExprTree::Ctor { payload, .. } => {
+                if let Some(payload) = payload {
+                    payload.for_each_node(f);
+                }
+            }
+            ExprTree::RecordLit { fields, .. } => {
+                for (_, v) in fields {
+                    v.for_each_node(f);
+                }
+            }
+            ExprTree::RecordUpdate { base, updates, .. } => {
+                base.for_each_node(f);
+                for (_, v) in updates {
+                    v.for_each_node(f);
+                }
+            }
+            ExprTree::IsVariant { scrutinee, .. } => scrutinee.for_each_node(f),
+            ExprTree::App { args, .. } => {
+                for a in args {
+                    a.for_each_node(f);
+                }
+            }
+            ExprTree::Field { base, .. } => base.for_each_node(f),
+            ExprTree::Let { value, body, .. } => {
+                value.for_each_node(f);
+                body.for_each_node(f);
+            }
+            ExprTree::IfThenElse {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                cond.for_each_node(f);
+                then_branch.for_each_node(f);
+                else_branch.for_each_node(f);
+            }
+        }
+    }
 }
 
 /// A name-resolved path. `root` preserves the source spelling of the head
@@ -485,20 +583,27 @@ fn map_paths_inner(
                 .collect(),
             enum_ty: enum_ty.clone(),
         },
-        ExprTree::Ctor { variant, payload } => ExprTree::Ctor {
+        ExprTree::Ctor {
+            variant,
+            payload,
+            ty,
+        } => ExprTree::Ctor {
             variant: variant.clone(),
             payload: payload
                 .as_ref()
                 .map(|p| Box::new(map_paths_inner(p, f, in_old))),
+            ty: ty.clone(),
         },
-        ExprTree::RecordLit(fields) => ExprTree::RecordLit(
-            fields
+        ExprTree::RecordLit { fields, ty } => ExprTree::RecordLit {
+            fields: fields
                 .iter()
                 .map(|(n, v)| (n.clone(), map_paths_inner(v, f, in_old)))
                 .collect(),
-        ),
-        ExprTree::RecordUpdate { base, updates } => ExprTree::RecordUpdate {
+            ty: ty.clone(),
+        },
+        ExprTree::RecordUpdate { base, updates, ty } => ExprTree::RecordUpdate {
             base: Box::new(map_paths_inner(base, f, in_old)),
+            ty: ty.clone(),
             updates: updates
                 .iter()
                 .map(|(n, v)| (n.clone(), map_paths_inner(v, f, in_old)))
@@ -590,7 +695,7 @@ impl ExprTree {
                 .map(|arm| arm.body.num_kind())
                 .unwrap_or(NumKind::Other),
             ExprTree::Ctor { .. } => NumKind::Other,
-            ExprTree::RecordLit(_) => NumKind::Other,
+            ExprTree::RecordLit { .. } => NumKind::Other,
             ExprTree::RecordUpdate { base, .. } => base.num_kind(),
             ExprTree::IsVariant { .. } => NumKind::Bool,
             ExprTree::App { .. } => NumKind::Other,

@@ -380,27 +380,40 @@ fn render(e: &ExprTree, cx: RustCx, inside_old: bool) -> (String, Prec) {
             out.push_str("\n}");
             (out, Prec::Atom)
         }
-        ExprTree::Ctor { variant, payload } => (
+        // #325 — the three constructor forms carry their nominal type,
+        // resolved at build time. `unresolved_ctor_ty` is the None
+        // backstop: a poison identifier that fails rustc loudly with a
+        // searchable name — never a comment placeholder that pretends to
+        // be code. The `unresolved_constructor_type` check lint reports
+        // the same gap before codegen runs.
+        ExprTree::Ctor {
+            variant,
+            payload,
+            ty,
+        } => (
             match payload {
-                None => format!("{}::{}", "/* ty */", variant),
+                None => format!("{}::{}", unresolved_ctor_ty(ty), variant),
                 Some(p) => format!(
                     "{}::{}({})",
-                    "/* ty */",
+                    unresolved_ctor_ty(ty),
                     variant,
                     render(p, cx, inside_old).0
                 ),
             },
             Prec::Atom,
         ),
-        ExprTree::RecordLit(fields) => {
+        ExprTree::RecordLit { fields, ty } => {
             let body = fields
                 .iter()
                 .map(|(n, v)| format!("{}: {}", n, render(v, cx, inside_old).0))
                 .collect::<Vec<_>>()
                 .join(", ");
-            (format!("{} {{ {} }}", "/* ty */", body), Prec::Atom)
+            (
+                format!("{} {{ {} }}", unresolved_ctor_ty(ty), body),
+                Prec::Atom,
+            )
         }
-        ExprTree::RecordUpdate { base, updates } => {
+        ExprTree::RecordUpdate { base, updates, ty } => {
             let base_str = render(base, cx, inside_old).0;
             let body = updates
                 .iter()
@@ -408,7 +421,7 @@ fn render(e: &ExprTree, cx: RustCx, inside_old: bool) -> (String, Prec) {
                 .collect::<Vec<_>>()
                 .join(", ");
             (
-                format!("{} {{ {}, ..{} }}", "/* ty */", body, base_str),
+                format!("{} {{ {}, ..{} }}", unresolved_ctor_ty(ty), body, base_str),
                 Prec::Atom,
             )
         }
@@ -662,6 +675,16 @@ fn render_path(p: &TreePath, cx: RustCx, inside_old: bool) -> String {
     out
 }
 
+/// The resolved nominal type of a constructor form, or the poison
+/// identifier for the unresolved case (#325). The poison is a guaranteed
+/// unresolved-ident rustc error with a greppable name — the check lint
+/// (`unresolved_constructor_type`) reports the same gap with a sited
+/// diagnostic before codegen, so reaching the poison means check was
+/// skipped.
+fn unresolved_ctor_ty(ty: &Option<crate::mir::Symbol>) -> &str {
+    ty.as_deref().unwrap_or("__QEDGEN_UNRESOLVED_TYPE")
+}
+
 /// Pod companion gate, per [`PodStyle`]. Tree-native replacement for
 /// `TypeEnv::path_is_pod_field` (Quasar) and `bind_pinocchio_expr`'s
 /// `.get()` dispatch (Zeropod).
@@ -790,7 +813,7 @@ fn rust_num_kind(e: &ExprTree) -> NumKind {
         | ExprTree::Arith { .. }
         | ExprTree::Match { .. }
         | ExprTree::Ctor { .. }
-        | ExprTree::RecordLit(_)
+        | ExprTree::RecordLit { .. }
         | ExprTree::RecordUpdate { .. }
         | ExprTree::IsVariant { .. }
         | ExprTree::App { .. }
@@ -826,7 +849,7 @@ fn spine_has_arith(e: &ExprTree) -> bool {
         | ExprTree::MulDivRoundHalfUp { .. }
         | ExprTree::Match { .. }
         | ExprTree::Ctor { .. }
-        | ExprTree::RecordLit(_)
+        | ExprTree::RecordLit { .. }
         | ExprTree::RecordUpdate { .. }
         | ExprTree::IsVariant { .. }
         | ExprTree::App { .. }
@@ -969,7 +992,7 @@ fn render_pred_wrapped_term(e: &ExprTree, cx: RustCx, inside_old: bool, wide: &s
         | ExprTree::MulDivRoundHalfUp { .. }
         | ExprTree::Match { .. }
         | ExprTree::Ctor { .. }
-        | ExprTree::RecordLit(_)
+        | ExprTree::RecordLit { .. }
         | ExprTree::RecordUpdate { .. }
         | ExprTree::IsVariant { .. }
         | ExprTree::App { .. }
@@ -1133,7 +1156,7 @@ fn render_widened_term(e: &ExprTree, cx: RustCx, inside_old: bool, wide: &str) -
         | ExprTree::Cmp { .. }
         | ExprTree::Match { .. }
         | ExprTree::Ctor { .. }
-        | ExprTree::RecordLit(_)
+        | ExprTree::RecordLit { .. }
         | ExprTree::RecordUpdate { .. }
         | ExprTree::IsVariant { .. }
         | ExprTree::App { .. }
@@ -1252,12 +1275,12 @@ pub fn for_each_path(e: &ExprTree, f: &mut impl FnMut(&TreePath)) {
                 for_each_path(p, f);
             }
         }
-        ExprTree::RecordLit(fields) => {
+        ExprTree::RecordLit { fields, .. } => {
             for (_, v) in fields {
                 for_each_path(v, f);
             }
         }
-        ExprTree::RecordUpdate { base, updates } => {
+        ExprTree::RecordUpdate { base, updates, .. } => {
             for_each_path(base, f);
             for (_, v) in updates {
                 for_each_path(v, f);
@@ -1347,8 +1370,10 @@ pub fn contains_fallible_arith(e: &ExprTree) -> bool {
         ExprTree::Ctor { payload, .. } => {
             payload.as_ref().is_some_and(|p| contains_fallible_arith(p))
         }
-        ExprTree::RecordLit(fields) => fields.iter().any(|(_, v)| contains_fallible_arith(v)),
-        ExprTree::RecordUpdate { base, updates } => {
+        ExprTree::RecordLit { fields, .. } => {
+            fields.iter().any(|(_, v)| contains_fallible_arith(v))
+        }
+        ExprTree::RecordUpdate { base, updates, .. } => {
             contains_fallible_arith(base) || updates.iter().any(|(_, v)| contains_fallible_arith(v))
         }
         ExprTree::IsVariant { scrutinee, .. } => contains_fallible_arith(scrutinee),
@@ -1372,6 +1397,55 @@ pub fn contains_fallible_arith(e: &ExprTree) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ------------------------------------------------------------------
+    // #325 — constructor forms render their resolved nominal type; no
+    // `/* ty */` placeholder survives in any production arm.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn ctor_forms_render_resolved_nominal_types() {
+        use crate::mir::ExprTree;
+        let entry_lit = ExprTree::RecordLit {
+            fields: vec![
+                ("who".to_string(), ExprTree::Int(1)),
+                ("amount".to_string(), ExprTree::Int(2)),
+            ],
+            ty: Some("Entry".to_string()),
+        };
+        let (rendered, _) = render(&entry_lit, RustCx::native(), false);
+        assert_eq!(rendered, "Entry { who: 1, amount: 2 }");
+
+        let ctor = ExprTree::Ctor {
+            variant: "Fast".to_string(),
+            payload: None,
+            ty: Some("Mode".to_string()),
+        };
+        let (rendered, _) = render(&ctor, RustCx::native(), false);
+        assert_eq!(rendered, "Mode::Fast");
+
+        let update = ExprTree::RecordUpdate {
+            base: Box::new(entry_lit.clone()),
+            updates: vec![("amount".to_string(), ExprTree::Int(3))],
+            ty: Some("Entry".to_string()),
+        };
+        let (rendered, _) = render(&update, RustCx::native(), false);
+        assert_eq!(
+            rendered,
+            "Entry { amount: 3, ..Entry { who: 1, amount: 2 } }"
+        );
+
+        // Unresolved backstop: a poison identifier (guaranteed rustc
+        // error, greppable), never a comment placeholder.
+        let unresolved = ExprTree::Ctor {
+            variant: "Fast".to_string(),
+            payload: None,
+            ty: None,
+        };
+        let (rendered, _) = render(&unresolved, RustCx::native(), false);
+        assert_eq!(rendered, "__QEDGEN_UNRESOLVED_TYPE::Fast");
+        assert!(!rendered.contains("/* ty */"));
+    }
 
     // ------------------------------------------------------------------
     // Corpus parity: for every expression the adapter carried a tree for,

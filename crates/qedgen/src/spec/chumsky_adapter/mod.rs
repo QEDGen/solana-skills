@@ -382,6 +382,31 @@ impl<'a> TypeEnv<'a> {
         Some(first)
     }
 
+    /// Infer the nominal record a `{ field := …, … }` literal constructs
+    /// (#325): the unique declared record whose field-name set exactly
+    /// matches the literal's. Exact-set matching keeps inference honest —
+    /// a partial literal is a spec error the `unresolved_constructor_type`
+    /// lint reports, not something to guess through. Ambiguity (two
+    /// records with identical field sets) declines rather than guessing.
+    /// The flat-state `State` mirror record is excluded — a literal is a
+    /// value expression, not a state constructor.
+    fn record_for_fields(&self, field_names: &[&str]) -> Option<String> {
+        let want: std::collections::BTreeSet<&str> = field_names.iter().copied().collect();
+        let mut hits = self.records.iter().filter_map(|(name, fields)| {
+            if name == "State" {
+                return None;
+            }
+            let have: std::collections::BTreeSet<&str> =
+                fields.keys().map(|k| k.as_str()).collect();
+            (have == want).then(|| name.clone())
+        });
+        let first = hits.next()?;
+        if hits.next().is_some() {
+            return None;
+        }
+        Some(first)
+    }
+
     /// Infer the kind of an Expr.
     fn infer(&self, e: &Expr) -> Kind {
         match e {
