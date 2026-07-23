@@ -572,22 +572,25 @@ fn emit_indexed_obligation_statements(
                 }))
                 .collect();
 
-            // Constraint hypotheses read the mutated fields' new values —
-            // same rewrite as the flat emitter, over app-subscript renders.
+            // Render constraints in a two-state context: `old(state.x)`
+            // reads the pre-state `s.x`, while current-state reads first
+            // render through `s'.x` and are then projected onto the
+            // environment's explicit post-state (`new_x` for mutated
+            // fields, `s.x` otherwise). Keeping those receivers distinct
+            // is load-bearing for monotonicity constraints.
             let constraints: Vec<String> = env
                 .typed_constraints
                 .iter()
                 .map(|constraint| {
-                    let mut expr = expr_lean(&constraint.predicate.0, app_guard);
-                    for (field, _) in &env.mutates {
-                        expr = expr
-                            .replace(&format!("s.{}", field), &format!("new_{}", field))
-                            .replace(&format!("state.{}", field), &format!("new_{}", field));
-                        let pat = format!(r"\b{}\b", regex::escape(field));
-                        let re = regex::Regex::new(&pat).expect("static regex");
-                        expr = re
-                            .replace_all(&expr, regex::NoExpand(&format!("new_{}", field)))
-                            .into_owned();
+                    let mut expr = expr_lean(&constraint.predicate.0, app_ensures);
+                    for (field, _) in flat_state_fields(mir) {
+                        let safe = safe_name(&field);
+                        let post = if env.mutates.iter().any(|(name, _)| name == &field) {
+                            format!("new_{}", field)
+                        } else {
+                            format!("s.{}", safe)
+                        };
+                        expr = expr.replace(&format!("s'.{}", safe), &post);
                     }
                     expr
                 })
