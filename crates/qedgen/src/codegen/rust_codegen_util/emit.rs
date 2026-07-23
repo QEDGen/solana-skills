@@ -804,8 +804,10 @@ pub fn emit_transition_fn_inner(
     // Ghost (spec-only) field updates: a ghost with `on <this handler>`
     // assigns after the normal effects; others are framed (unchanged).
     // Values read `s.<ghost>` + params, matching the Lean transition.
-    // Arithmetic wraps in release (the `verify --proptest` path), so an
-    // arbitrary-state aggregate never panics on model overflow.
+    // Arithmetic wraps in release (the `verify --proptest` path); the
+    // sequence harness additionally bounds `arb_op` numeric params so an
+    // aggregate cannot overflow across a run (see `emit_sequence_test_for`),
+    // which keeps the debug (`cargo test`) path panic-free too.
     for ghost in &spec.ghosts {
         for u in &ghost.updates {
             if u.handler == op.name {

@@ -863,12 +863,38 @@ fn emit_account_section(
     // so that relational invariants like `V >= C_tot + I` have valid input ranges.
     let mut field_bounds = extract_field_upper_bounds(properties, &spec.constants);
     if !field_bounds.is_empty() {
-        // Find the tightest bound and apply it to all unbounded numeric fields
-        // of the same type. This ensures relational properties hold in random states.
+        // A relational property like `V >= C_tot + I` is unsatisfiable in
+        // random states unless the fields it relates share a compatible
+        // upper bound: if `V <= MAX` but `C_tot` samples the full u64
+        // domain, `V >= C_tot + I` almost never holds and the harness
+        // rejects everything. So propagate the tightest explicit bound —
+        // but ONLY to fields that co-occur with an explicitly-bounded
+        // field in some property expression. Blanket-capping every numeric
+        // field (the old behavior) silently shrank the domain of fields in
+        // NO such property — e.g. a type discriminant with its own wide
+        // range became unreachable above the borrowed bound.
+        let explicit: std::collections::HashSet<String> = field_bounds.keys().cloned().collect();
         let min_bound = field_bounds.values().min_by_key(|v| v.len()).cloned();
         if let Some(ref bound) = min_bound {
+            let mut related: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for prop in properties {
+                if prop.expression.is_none() {
+                    continue;
+                }
+                let mentioned: Vec<&str> = mutable_fields
+                    .iter()
+                    .filter(|(f, _)| property_references_field(prop, f))
+                    .map(|(f, _)| f.as_str())
+                    .collect();
+                if mentioned.iter().any(|f| explicit.contains(*f)) {
+                    related.extend(mentioned.iter().map(|f| f.to_string()));
+                }
+            }
             for (fname, ftype) in mutable_fields {
-                if ftype.as_str() != "Pubkey" && !field_bounds.contains_key(fname.as_str()) {
+                if ftype.as_str() != "Pubkey"
+                    && related.contains(fname.as_str())
+                    && !field_bounds.contains_key(fname.as_str())
+                {
                     field_bounds.insert(fname.to_string(), bound.clone());
                 }
             }
@@ -1720,6 +1746,54 @@ fn emit_overflow_tests_for(
     Ok(())
 }
 
+/// Random op-sequence length for the state-machine harness, and the
+/// divisor for [`seq_param_bound`].
+const SEQ_LEN: usize = 20;
+
+/// Upper bound for an unsigned numeric `arb_op` param that feeds a ghost
+/// accumulator: `type_max / SEQ_LEN`. `None` (full domain) otherwise.
+///
+/// A ghost aggregate (`total := total + amount`) renders with plain
+/// arithmetic and has no reject path — unlike a checked state field it
+/// can't decline the transition on overflow. An unbounded `arb_op` amount
+/// (`u64::MAX`) therefore overflows it across a run: a debug-mode panic
+/// (`cargo test`, which the harness header prescribes) or a release wrap
+/// that spuriously violates a conservation property. Capping the feeding
+/// param so `SEQ_LEN` additions cannot exceed the type keeps the modeled
+/// aggregate in the domain where the spec's ℕ-arithmetic properties hold.
+///
+/// The bound applies ONLY to a param a ghost update on this handler reads —
+/// that is the unchecked accumulation. Indices, thresholds, and amounts
+/// that feed only checked state fields (which reject on overflow, never
+/// panic) keep the full domain, as do signed and non-numeric params: the
+/// dedicated per-handler overflow tests still drive full-range single
+/// steps, so overflow *rejection* stays covered — only the unchecked
+/// multi-step accumulation is tamed.
+fn seq_param_bound(
+    spec: &ParsedSpec,
+    handler: &str,
+    param: &str,
+    dsl_type: &str,
+) -> Option<String> {
+    let feeds_ghost_accumulator = spec.ghosts.iter().any(|g| {
+        g.updates
+            .iter()
+            .any(|u| u.handler == handler && rust_type_mentions(&u.value_rust, param))
+    });
+    if !feeds_ghost_accumulator {
+        return None;
+    }
+    let max: u128 = match dsl_type.trim() {
+        "U8" => u8::MAX as u128,
+        "U16" => u16::MAX as u128,
+        "U32" => u32::MAX as u128,
+        "U64" => u64::MAX as u128,
+        "U128" => u128::MAX,
+        _ => return None,
+    };
+    Some((max / SEQ_LEN as u128).to_string())
+}
+
 /// Emit state machine sequence test — random op sequences checking invariants.
 fn emit_sequence_test_for(
     out: &mut String,
@@ -1763,8 +1837,13 @@ fn emit_sequence_test_for(
             let strategies: Vec<String> = params
                 .iter()
                 // Type-dispatched strategy — see the effect-conformance
-                // site above (#295).
-                .map(|(_, t)| strategy_for_field(t, spec, StrategyMode::Full, None))
+                // site above (#295). A param feeding a ghost accumulator is
+                // bounded so multi-step accumulation can't overflow (see
+                // `seq_param_bound`).
+                .map(|(pname, t)| {
+                    let bound = seq_param_bound(spec, &op.name, pname, t);
+                    strategy_for_field(t, spec, StrategyMode::Full, bound.as_deref())
+                })
                 .collect::<Result<Vec<_>>>()?
                 .into_iter()
                 .map(|strategy| strategy.render())
@@ -1900,7 +1979,10 @@ fn emit_sequence_test_for(
         .filter(|p| p.expression.is_some() && p.class != crate::check::PropertyClass::Binary)
         .collect();
 
-    let seq_len = 20;
+    // `SEQ_LEN` is also `seq_param_bound`'s divisor — an unsigned
+    // accumulator fed one bounded param per step stays within its type
+    // across the whole run.
+    let seq_len = SEQ_LEN;
     out.push_str("proptest! {\n");
     out.push_str("    #![proptest_config(ProptestConfig::with_cases(256))]\n");
     out.push_str("    #[test]\n");
@@ -2582,7 +2664,11 @@ fn emit_product_sequence_test(
         if params.is_empty() {
             out.push_str(&format!("            Just(Op::{}),\n", variant));
         } else if params.len() == 1 {
-            let strategy = strategy_for_field(&params[0].1, spec, StrategyMode::Full, None)?;
+            // A param feeding a ghost accumulator is bounded so multi-step
+            // accumulation can't overflow (see `seq_param_bound`).
+            let bound = seq_param_bound(spec, &op.name, &params[0].0, &params[0].1);
+            let strategy =
+                strategy_for_field(&params[0].1, spec, StrategyMode::Full, bound.as_deref())?;
             // Parens are load-bearing: `0u64..=u64::MAX.prop_map(…)`
             // parses as a range whose end is the method call.
             out.push_str(&format!(
@@ -2592,8 +2678,10 @@ fn emit_product_sequence_test(
         } else {
             let strategies: Vec<String> = params
                 .iter()
-                .map(|(_, t)| {
-                    strategy_for_field(t, spec, StrategyMode::Full, None).map(|s| s.to_string())
+                .map(|(pname, t)| {
+                    let bound = seq_param_bound(spec, &op.name, pname, t);
+                    strategy_for_field(t, spec, StrategyMode::Full, bound.as_deref())
+                        .map(|s| s.to_string())
                 })
                 .collect::<Result<_>>()?;
             let binders: Vec<String> = (0..params.len()).map(|i| format!("p{}", i)).collect();
@@ -3556,6 +3644,153 @@ property settled_monotonic :
             !body.contains("balance_nonneg(&s)"),
             "unary post-assert must not still reference (&s); got: {}",
             body
+        );
+    }
+
+    /// An init handler transitions from the implicit `Uninitialized`
+    /// pre-state even when the State ADT does not declare it as a variant.
+    /// The lifecycle enums must still carry the variant the transition fns
+    /// reference (else the harness fails to compile, E0599), and the
+    /// sequence must seed that pre-state (else it runs non-init handlers
+    /// before init).
+    #[test]
+    fn init_from_undeclared_uninitialized_is_injected_into_lifecycle() {
+        let (spec, body) = emit_full_harness(
+            r#"
+spec Vault
+
+type Vault
+  | Live of { total : U64 }
+  | Closed
+
+type Error
+  | InvalidAmount
+
+handler init : Vault.Uninitialized -> Vault.Live {
+  effect { total := 0 }
+}
+
+handler deposit (amount : U64) : Vault.Live -> Vault.Live {
+  requires amount > 0 else InvalidAmount
+  effect { total += amount }
+}
+
+property total_nonneg :
+  state.total >= 0
+  preserved_by all
+"#,
+        );
+
+        // The adapter injects the sentinel as the initial lifecycle state.
+        assert_eq!(
+            spec.lifecycle_states.first().map(String::as_str),
+            Some("Uninitialized"),
+            "undeclared init pre-state must be injected first"
+        );
+        // Both enums the transition fns reference must carry the variant.
+        assert!(
+            body.contains("Status::Uninitialized") && body.contains("Lifecycle::Uninitialized"),
+            "Status/Lifecycle must include the injected Uninitialized:\n{body}"
+        );
+        // The transition table references it — with it declared, no E0599.
+        assert!(
+            body.contains("(Lifecycle::Uninitialized, Op::Init) => Some(Lifecycle::Live)"),
+            "transition table should key off the injected pre-state:\n{body}"
+        );
+        // The sequence seeds the pre-existence state, not `Live`.
+        assert!(
+            body.contains("let mut lifecycle = Lifecycle::Uninitialized;")
+                && body.contains("status: Status::Uninitialized,"),
+            "sequence must seed the injected initial state:\n{body}"
+        );
+    }
+
+    /// A `state.F <= CONST` property bounds `F`, but must not silently
+    /// shrink an *unrelated* numeric field's domain: a type discriminant
+    /// with no property of its own keeps its full range, so proptest can
+    /// still reach every value (regression: a `version <= 1` bound once
+    /// leaked onto every field, capping a `token_kind` discriminant to
+    /// `0..=1`).
+    #[test]
+    fn unrelated_field_keeps_full_domain_when_another_field_is_bounded() {
+        let (_spec, body) = emit_full_harness(
+            r#"
+spec Vault
+
+state { token_kind : U8, version : U8 }
+
+type Error
+  | InvalidAmount
+
+handler bump (v : U8) {
+  requires v > 0 else InvalidAmount
+  effect { version := v }
+}
+
+property version_bounded :
+  state.version <= 1
+  preserved_by all
+"#,
+        );
+
+        // `version` co-occurs with its own bound, so it stays capped.
+        assert!(
+            body.contains("version in 0u8..=1u8"),
+            "explicitly-bounded field should keep its bound:\n{body}"
+        );
+        // `token_kind` is in no bounded property — full domain, not `0..=1`.
+        assert!(
+            body.contains("token_kind in 0u8..=255u8"),
+            "unrelated discriminant must keep the full u8 domain:\n{body}"
+        );
+    }
+
+    /// A ghost accumulator (`total := total + amount`, plain arithmetic, no
+    /// reject path) overflows under a full-domain `arb_op` amount across a
+    /// sequence run. The feeding param is bounded so `SEQ_LEN` additions
+    /// stay in-domain; a param that feeds no ghost keeps the full range.
+    #[test]
+    fn ghost_feeding_arb_op_param_is_bounded_others_full_range() {
+        let (_spec, body) = emit_full_harness(
+            r#"
+spec Vol
+
+state { balance : U64 }
+
+type Error
+  | InvalidAmount
+
+ghost volume : U64 {
+  init { 0 }
+  on deposit { volume := state.volume + amount }
+}
+
+handler deposit (amount : U64) {
+  requires amount > 0 else InvalidAmount
+  effect { balance := state.balance + amount }
+}
+
+handler withdraw (amount : U64) {
+  requires amount > 0 else InvalidAmount
+  effect { balance := state.balance - amount }
+}
+
+property vol_ge_balance :
+  state.volume >= state.balance
+  preserved_by all
+"#,
+        );
+
+        let bound = (u64::MAX / SEQ_LEN as u64).to_string();
+        // deposit's amount feeds the `volume` ghost → bounded.
+        assert!(
+            body.contains(&format!("(0u64..={bound}u64).prop_map(|v| Op::Deposit(v))")),
+            "ghost-feeding param must be bounded to type_max/SEQ_LEN:\n{body}"
+        );
+        // withdraw's amount feeds no ghost → full domain preserved.
+        assert!(
+            body.contains("(0u64..=u64::MAX).prop_map(|v| Op::Withdraw(v))"),
+            "non-ghost param must keep the full domain:\n{body}"
         );
     }
 }
