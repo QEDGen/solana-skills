@@ -777,10 +777,19 @@ fn emit_account_section(
     // is required by the seed-state path (`default_value_for_type` emits
     // `<Name>::default()`); a non-Default field type fails at the record
     // struct itself — clearer than a cascading E0599 at the call site.
-    rust_codegen_util::emit_record_structs(out, spec, "Debug, Clone, Copy, Default", |t| {
-        map_type(t, spec)
-    })?;
-    rust_codegen_util::emit_unit_enum_sums(out, spec, "Debug, Clone, Copy, PartialEq, Eq")?;
+    rust_codegen_util::emit_record_structs(
+        out,
+        spec,
+        "Debug, Clone, Copy, Default",
+        rust_codegen_util::VIS_PRIVATE,
+        |t| map_type(t, spec),
+    )?;
+    rust_codegen_util::emit_unit_enum_sums(
+        out,
+        spec,
+        "Debug, Clone, Copy, PartialEq, Eq",
+        rust_codegen_util::VIS_PRIVATE,
+    )?;
     // Per-account `Status` from the `lifecycle_states` param, NOT
     // `spec.lifecycle_states` — in multi-ADT mode the caller passes
     // `&acct.lifecycle` so each module gets its own variants.
@@ -788,6 +797,7 @@ fn emit_account_section(
         out,
         lifecycle_states,
         "Debug, Clone, Copy, PartialEq, Eq",
+        rust_codegen_util::VIS_PRIVATE,
     );
     emit_record_prop_composes(out, spec)?;
     emit_unit_sum_prop_oneofs(out, spec)?;
@@ -803,6 +813,7 @@ fn emit_account_section(
         "Debug, Clone, Copy",
         |t| map_type(t, spec),
         section_has_lifecycle,
+        rust_codegen_util::VIS_PRIVATE,
     )?;
 
     // Extract constant upper bounds from properties to cap arb_state() ranges.
@@ -840,9 +851,12 @@ fn emit_account_section(
         .collect();
     let owned_props_for_predicates: Vec<ParsedProperty> =
         properties.iter().map(|p| (*p).clone()).collect();
-    rust_codegen_util::emit_property_predicates_with(out, &owned_props_for_predicates, |t| {
-        map_type(t, spec)
-    });
+    rust_codegen_util::emit_property_predicates_with(
+        out,
+        &owned_props_for_predicates,
+        rust_codegen_util::VIS_PRIVATE,
+        |t| map_type(t, spec),
+    );
 
     // Invariant predicates — only those referenced by at least one handler
     // AND carrying a rust_expr body (not description-only).
@@ -861,7 +875,7 @@ fn emit_account_section(
                 .any(|h| h.invariants.contains(&i.name) || h.establishes.contains(&i.name))
         })
         .collect();
-    rust_codegen_util::emit_invariant_predicates(out, &linked_invs);
+    rust_codegen_util::emit_invariant_predicates(out, &linked_invs, rust_codegen_util::VIS_PRIVATE);
 
     // Transition functions
     emit_transition_functions_for(out, mir, handlers, spec)?;
@@ -1078,7 +1092,15 @@ fn emit_transition_functions_for(
     spec: &ParsedSpec,
 ) -> Result<()> {
     for op in handlers {
-        rust_codegen_util::emit_transition_fn(out, mir, op, spec, false, |t| map_type(t, spec))?;
+        rust_codegen_util::emit_transition_fn(
+            out,
+            mir,
+            op,
+            spec,
+            false,
+            rust_codegen_util::VIS_PRIVATE,
+            |t| map_type(t, spec),
+        )?;
     }
     Ok(())
 }

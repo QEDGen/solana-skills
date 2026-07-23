@@ -109,7 +109,8 @@ pub enum ObligationKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UnsupportedReason {
-    /// #324 — multi-account Kani emits no file-level features.
+    /// #324 — a file-level feature the product-state lowering cannot
+    /// resolve to modeled account components.
     KaniMultiAccountFileLevel,
     /// #326 — Kani verifies a flat state model for `state_repr = adt`.
     KaniAdtStateRepr,
@@ -148,7 +149,7 @@ impl UnsupportedReason {
     pub fn describe(self) -> &'static str {
         match self {
             UnsupportedReason::KaniMultiAccountFileLevel => {
-                "multi-account Kani does not lower file-level cover/liveness/environment obligations yet (#324)"
+                "file-level obligation does not resolve to modeled account components; the product-state lowering cannot express this shape (#324)"
             }
             UnsupportedReason::KaniAdtStateRepr => {
                 "Kani verifies a flat state model for this shape; ADT parity covers single-account specs with defaultable variant payloads only (#326)"

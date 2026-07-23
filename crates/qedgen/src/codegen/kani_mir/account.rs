@@ -12,6 +12,7 @@ pub(crate) fn emit_account_section_structural(
     out: &mut String,
     mir: &Mir,
     parsed: &ParsedSpec,
+    vis: &str,
 ) -> Result<()> {
     use crate::codegen_shared::map_type;
     use crate::rust_codegen_util as util;
@@ -31,16 +32,22 @@ pub(crate) fn emit_account_section_structural(
     let mutable = util::field_refs(state_fields);
     let has_lifecycle = lifecycle.len() >= 2;
 
-    util::emit_record_structs(out, parsed, "Clone, Copy, kani::Arbitrary", |t| {
+    util::emit_record_structs(out, parsed, "Clone, Copy, kani::Arbitrary", vis, |t| {
         map_type(t, parsed)
     })?;
 
-    util::emit_unit_enum_sums(out, parsed, "Clone, Copy, PartialEq, Eq, kani::Arbitrary")?;
+    util::emit_unit_enum_sums(
+        out,
+        parsed,
+        "Clone, Copy, PartialEq, Eq, kani::Arbitrary",
+        vis,
+    )?;
 
     util::emit_lifecycle_status_enum_from(
         out,
         lifecycle,
         "Clone, Copy, PartialEq, Eq, kani::Arbitrary",
+        vis,
     );
 
     util::emit_state_struct_with_lifecycle(
@@ -49,6 +56,7 @@ pub(crate) fn emit_account_section_structural(
         "Clone, Copy",
         |t| map_type(t, parsed),
         has_lifecycle,
+        vis,
     )?;
     // #326 — ADT specs get the `state_repr_valid` invariant alongside the
     // flat struct; harness preambles assume it and transitions preserve it.
@@ -71,7 +79,7 @@ pub(crate) fn emit_account_section_structural(
         // `&[&_]` — rebuild an owned Vec.
         let owned: Vec<crate::check::ParsedProperty> =
             properties.iter().map(|p| (*p).clone()).collect();
-        util::emit_property_predicates_with(out, &owned, |t| map_type(t, parsed));
+        util::emit_property_predicates_with(out, &owned, vis, |t| map_type(t, parsed));
     }
 
     // Invariant predicates — only those linked from a handler in this section.
@@ -96,7 +104,7 @@ pub(crate) fn emit_account_section_structural(
         out.push_str(
             "// ============================================================================\n\n",
         );
-        util::emit_invariant_predicates(out, &linked_invs);
+        util::emit_invariant_predicates(out, &linked_invs, vis);
     }
 
     out.push_str(
@@ -110,7 +118,9 @@ pub(crate) fn emit_account_section_structural(
         "// ============================================================================\n\n",
     );
     for op in &handlers {
-        util::emit_transition_fn_for_kani(out, mir, op, parsed, false, |t| map_type(t, parsed))?;
+        util::emit_transition_fn_for_kani(out, mir, op, parsed, false, vis, |t| {
+            map_type(t, parsed)
+        })?;
     }
 
     // Reference implementations — pure-expression fns callable from

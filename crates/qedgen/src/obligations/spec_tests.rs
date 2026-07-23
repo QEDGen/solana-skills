@@ -44,12 +44,13 @@ fn failed_entries(entries: &[ObligationEntry]) -> Vec<&ObligationEntry> {
         .collect()
 }
 
-/// #324 — multi-account Kani drops covers / liveness / environment. The
-/// bundled lending example (Pool + Loan accounts, two covers, one
-/// liveness, one environment) must surface every file-level obligation as
-/// `unsupported(kani_multi_account_file_level)`, never absent.
+/// #324 — multi-account Kani lowers covers / liveness / environment over
+/// the product-state module. The bundled lending example (Pool + Loan
+/// accounts, two covers, one liveness, one environment) must record every
+/// file-level obligation as `emitted` — and none may go absent (reconcile
+/// would synthesize a status for a silent drop).
 #[test]
-fn kani_multi_account_file_level_obligations_surface() {
+fn kani_multi_account_file_level_obligations_emit_via_product_state() {
     let (mir, parsed) = lower_fixture("examples/rust/lending/lending.qedspec");
     assert!(parsed.account_types.len() > 1, "lending is multi-account");
     let entries = reconciled(
@@ -60,6 +61,12 @@ fn kani_multi_account_file_level_obligations_surface() {
     );
 
     let dropped = entries_with_reason(&entries, UnsupportedReason::KaniMultiAccountFileLevel);
+    assert!(
+        dropped.is_empty(),
+        "lending's file-level obligations all lower over the product state: {:#?}",
+        dropped
+    );
+
     let expected_file_level = parsed.covers.iter().map(|c| c.traces.len()).sum::<usize>()
         + parsed.liveness_props.len()
         + parsed.environments.len()
@@ -72,10 +79,18 @@ fn kani_multi_account_file_level_obligations_surface() {
         expected_file_level > 0,
         "lending declares file-level obligations"
     );
+    let emitted_file_level = entries
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.kind,
+                ObligationKind::Cover | ObligationKind::Liveness | ObligationKind::Environment
+            ) && matches!(e.status, ObligationStatus::Emitted { .. })
+        })
+        .count();
     assert_eq!(
-        dropped.len(),
-        expected_file_level,
-        "every file-level obligation must be reported: {:#?}",
+        emitted_file_level, expected_file_level,
+        "every file-level obligation must be emitted: {:#?}",
         entries
     );
 }
@@ -381,7 +396,10 @@ fn bundled_multi_account_example_has_no_failed_entries() {
 fn strict_gate_fires_on_known_gaps_only() {
     let (mir, parsed) = lower_fixture("examples/rust/lending/lending.qedspec");
     let counts = StatusCounts::of(&collect_all(&mir, &parsed));
-    assert!(counts.gates_strict(), "lending has known #324 gaps");
+    assert!(
+        counts.gates_strict(),
+        "lending still gates: cross-account property preservation stays unsupported (#331)"
+    );
 
     let (mir, parsed) = lower_inline(
         r#"

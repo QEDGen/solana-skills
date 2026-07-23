@@ -971,3 +971,192 @@ fn environment_constraints_bind_mutated_fields_to_state() {
         panic!("emitted Kani harness fails to parse as Rust: {e}\n{out}");
     }
 }
+
+/// #324 — multi-account file-level features lower over the product-state
+/// module: a cross-account cover trace steps both components through
+/// delegating wrappers, while a liveness whose endpoint states appear in
+/// more than one account lifecycle is unresolvable (the adapter strips
+/// the `Type.` qualifier) and must stay a reported unsupported, with a
+/// structured comment in the artifact.
+#[test]
+fn product_state_lowers_cross_account_cover_and_reports_ambiguous_liveness() {
+    let (mir, parsed) = lower_inline(
+        r#"
+spec Duo
+
+type Alpha
+  | Idle
+  | Running of { alpha_total : U64 }
+
+type Beta
+  | Idle
+  | Running of { beta_total : U64 }
+
+type Error
+  | InvalidAmount
+
+handler start_alpha : Alpha.Idle -> Alpha.Running {
+  takes amount : U64
+  requires amount > 0 else Err
+  effect { alpha_total := amount }
+}
+
+handler start_beta : Beta.Idle -> Beta.Running {
+  takes amount : U64
+  requires amount > 0 else Err
+  effect { beta_total := amount }
+}
+
+cover both_start [start_alpha, start_beta]
+
+liveness ambiguous_states : Alpha.Idle ~> Alpha.Running via [start_alpha] within 1
+"#,
+    );
+    assert!(parsed.account_types.len() > 1, "fixture is multi-account");
+    let out = render(&mir, &parsed);
+
+    // Cross-account cover: wrappers delegate into both account modules,
+    // the trace composes them over ProductState.
+    assert!(
+        out.contains("mod product {"),
+        "product module missing:\n{out}"
+    );
+    assert!(
+        out.contains("alpha::start_alpha(&mut s.alpha, amount)"),
+        "alpha wrapper must delegate:\n{out}"
+    );
+    assert!(
+        out.contains("beta::start_beta(&mut s.beta, amount)"),
+        "beta wrapper must delegate:\n{out}"
+    );
+    assert!(
+        out.contains("fn cover_both_start()"),
+        "cross-account cover harness missing:\n{out}"
+    );
+    assert!(
+        out.contains(
+            "kani::cover!(start_beta(&mut s, amount_1), \"both_start trace is reachable\");"
+        ),
+        "cover trace must cap with the last op:\n{out}"
+    );
+
+    // Ambiguous liveness (Idle/Running exist in BOTH lifecycles): no
+    // harness, a structured comment, and per-account items stay pub so
+    // the product module compiles.
+    assert!(
+        !out.contains("fn verify_liveness_ambiguous_states()"),
+        "ambiguous liveness must not guess an owner:\n{out}"
+    );
+    assert!(
+        out.contains("// liveness ambiguous_states: not lowered —"),
+        "ambiguous liveness needs a structured comment:\n{out}"
+    );
+
+    if let Err(e) = syn::parse_file(&out) {
+        panic!("emitted Kani harness fails to parse as Rust: {e}\n{out}");
+    }
+}
+
+/// Product harness calls must bind the same complete parameter list as
+/// their delegating wrappers. In particular, `abstract` binders are model
+/// inputs even though they are not deployed instruction parameters.
+#[test]
+fn product_state_binds_abstract_params_in_cover_and_liveness() {
+    let (mir, parsed) = lower_inline(
+        r#"
+spec ProductAbstract
+
+type Pool
+  | Idle
+  | Active of { total : U64 }
+
+type Loan
+  | Empty
+  | Open of { debt : U64 }
+
+type Error
+  | InvalidAmount
+
+handler activate : Pool.Idle -> Pool.Active {
+  takes amount : U64
+  abstract observed : U64
+  requires amount > 0 else InvalidAmount
+  requires observed > 0 else InvalidAmount
+  effect { total := amount }
+}
+
+handler open_loan : Loan.Empty -> Loan.Open {
+  takes amount : U64
+  requires amount > 0 else InvalidAmount
+  effect { debt := amount }
+}
+
+cover activated [activate]
+liveness activation_progress : Pool.Idle ~> Pool.Active via [activate] within 1
+"#,
+    );
+    let out = render(&mir, &parsed);
+
+    assert!(
+        out.contains("let observed_0: u64 = kani::any();"),
+        "cover must bind the abstract value:\n{out}"
+    );
+    assert!(
+        out.contains(
+            "kani::cover!(activate(&mut s, amount_0, observed_0), \"activated trace is reachable\");"
+        ),
+        "cover must pass the abstract value:\n{out}"
+    );
+    assert!(
+        out.contains("let observed: u64 = kani::any();"),
+        "liveness must bind the abstract value:\n{out}"
+    );
+    assert!(
+        out.contains("activate(&mut s, amount, observed);"),
+        "liveness must pass the abstract value:\n{out}"
+    );
+}
+
+/// Record/sum declarations live inside the account modules. A product
+/// wrapper must not accept a parameter whose rendered type mentions one,
+/// including through a compound wrapper or a type alias.
+#[test]
+fn product_state_rejects_nested_module_scoped_param_types() {
+    let (mir, parsed) = lower_inline(
+        r#"
+spec ProductRecordParam
+
+type Payload = { amount : U64 }
+type MaybePayload = Option Payload
+
+type Pool
+  | Idle
+  | Active of { total : U64 }
+
+type Loan
+  | Empty
+  | Open of { debt : U64 }
+
+handler activate : Pool.Idle -> Pool.Active {
+  takes payload : MaybePayload
+  effect { total := 1 }
+}
+
+handler open_loan : Loan.Empty -> Loan.Open {
+  effect { debt := 1 }
+}
+
+cover activated [activate]
+"#,
+    );
+    let out = render(&mir, &parsed);
+
+    assert!(
+        out.contains("// cover activated trace 0: not lowered —"),
+        "compound record parameter must stay reported unsupported:\n{out}"
+    );
+    assert!(
+        !out.contains("fn activate(s: &mut ProductState"),
+        "product module must not name a sibling module's record type:\n{out}"
+    );
+}

@@ -63,19 +63,19 @@ mod pool {
     use super::*;
 
     #[derive(Clone, Copy, PartialEq, Eq, kani::Arbitrary)]
-    enum Status {
+    pub enum Status {
         Uninitialized,
         Active,
         Paused,
     }
 
     #[derive(Clone, Copy)]
-    struct State {
-        authority: [u8; 32],
-        total_deposits: u64,
-        total_borrows: u64,
-        interest_rate: u64,
-        status: Status,
+    pub struct State {
+        pub authority: [u8; 32],
+        pub total_deposits: u64,
+        pub total_borrows: u64,
+        pub interest_rate: u64,
+        pub status: Status,
     }
 
     // ============================================================================
@@ -83,7 +83,7 @@ mod pool {
     // ============================================================================
 
     /// pool_solvency: s.total_deposits ≥ s.total_borrows
-    fn pool_solvency(s: &State) -> bool {
+    pub fn pool_solvency(s: &State) -> bool {
         s.total_deposits >= s.total_borrows
     }
 
@@ -94,7 +94,7 @@ mod pool {
     // false if the guard rejects the operation.
     // ============================================================================
 
-    fn init_pool(s: &mut State, rate: u64) -> bool {
+    pub fn init_pool(s: &mut State, rate: u64) -> bool {
         if !(rate > 0) {
             return false;
         }
@@ -108,7 +108,7 @@ mod pool {
         true
     }
 
-    fn deposit(s: &mut State, amount: u64) -> bool {
+    pub fn deposit(s: &mut State, amount: u64) -> bool {
         if !(amount > 0) {
             return false;
         }
@@ -358,19 +358,19 @@ mod loan {
     use super::*;
 
     #[derive(Clone, Copy, PartialEq, Eq, kani::Arbitrary)]
-    enum Status {
+    pub enum Status {
         Empty,
         Active,
         Liquidated,
     }
 
     #[derive(Clone, Copy)]
-    struct State {
-        borrower: [u8; 32],
-        pool: [u8; 32],
-        amount: u64,
-        collateral: u64,
-        status: Status,
+    pub struct State {
+        pub borrower: [u8; 32],
+        pub pool: [u8; 32],
+        pub amount: u64,
+        pub collateral: u64,
+        pub status: Status,
     }
 
     // ============================================================================
@@ -380,7 +380,7 @@ mod loan {
     // false if the guard rejects the operation.
     // ============================================================================
 
-    fn borrow(s: &mut State, amount: u64, collateral: u64) -> bool {
+    pub fn borrow(s: &mut State, amount: u64, collateral: u64) -> bool {
         if !(amount > 0 && collateral > 0) {
             return false;
         }
@@ -393,7 +393,7 @@ mod loan {
         true
     }
 
-    fn repay(s: &mut State) -> bool {
+    pub fn repay(s: &mut State) -> bool {
         if s.status != Status::Active {
             return false;
         }
@@ -403,7 +403,7 @@ mod loan {
         true
     }
 
-    fn liquidate(s: &mut State) -> bool {
+    pub fn liquidate(s: &mut State) -> bool {
         if !(s.amount > s.collateral) {
             return false;
         }
@@ -601,5 +601,163 @@ mod loan {
         }
     }
 } // mod loan
+
+// ============================================================================
+// Product state (#324) — file-level covers / liveness / environment
+// lowered once over the per-account components; transitions delegate
+// to the account modules so there is no second copy of the semantics.
+// ============================================================================
+
+mod product {
+    use super::*;
+
+    struct ProductState {
+        pool: pool::State,
+        loan: loan::State,
+    }
+
+    // Transition wrappers — delegate to the owning account module.
+    fn borrow(s: &mut ProductState, amount: u64, collateral: u64) -> bool {
+        loan::borrow(&mut s.loan, amount, collateral)
+    }
+
+    fn deposit(s: &mut ProductState, amount: u64) -> bool {
+        pool::deposit(&mut s.pool, amount)
+    }
+
+    fn init_pool(s: &mut ProductState, rate: u64) -> bool {
+        pool::init_pool(&mut s.pool, rate)
+    }
+
+    fn liquidate(s: &mut ProductState) -> bool {
+        loan::liquidate(&mut s.loan)
+    }
+
+    fn repay(s: &mut ProductState) -> bool {
+        loan::repay(&mut s.loan)
+    }
+
+    #[kani::proof]
+    #[kani::unwind(5)]
+    #[kani::solver(cadical)]
+    fn cover_borrow_repay_cycle() {
+        let mut s = ProductState {
+            pool: pool::State {
+                authority: kani::any(),
+                total_deposits: kani::any(),
+                total_borrows: kani::any(),
+                interest_rate: kani::any(),
+                status: kani::any(),
+            },
+            loan: loan::State {
+                borrower: kani::any(),
+                pool: kani::any(),
+                amount: kani::any(),
+                collateral: kani::any(),
+                status: kani::any(),
+            },
+        };
+        let rate_0: u64 = kani::any();
+        if init_pool(&mut s, rate_0) {
+            let amount_1: u64 = kani::any();
+            if deposit(&mut s, amount_1) {
+                let amount_2: u64 = kani::any();
+                let collateral_2: u64 = kani::any();
+                if borrow(&mut s, amount_2, collateral_2) {
+                    kani::cover!(repay(&mut s), "borrow_repay_cycle trace is reachable");
+                }
+            }
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(5)]
+    #[kani::solver(cadical)]
+    fn cover_liquidation_path() {
+        let mut s = ProductState {
+            pool: pool::State {
+                authority: kani::any(),
+                total_deposits: kani::any(),
+                total_borrows: kani::any(),
+                interest_rate: kani::any(),
+                status: kani::any(),
+            },
+            loan: loan::State {
+                borrower: kani::any(),
+                pool: kani::any(),
+                amount: kani::any(),
+                collateral: kani::any(),
+                status: kani::any(),
+            },
+        };
+        let rate_0: u64 = kani::any();
+        if init_pool(&mut s, rate_0) {
+            let amount_1: u64 = kani::any();
+            if deposit(&mut s, amount_1) {
+                let amount_2: u64 = kani::any();
+                let collateral_2: u64 = kani::any();
+                if borrow(&mut s, amount_2, collateral_2) {
+                    kani::cover!(liquidate(&mut s), "liquidation_path trace is reachable");
+                }
+            }
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(2)]
+    #[kani::solver(cadical)]
+    fn verify_liveness_loan_settles() {
+        let mut s = ProductState {
+            pool: pool::State {
+                authority: kani::any(),
+                total_deposits: kani::any(),
+                total_borrows: kani::any(),
+                interest_rate: kani::any(),
+                status: kani::any(),
+            },
+            loan: loan::State {
+                borrower: kani::any(),
+                pool: kani::any(),
+                amount: kani::any(),
+                collateral: kani::any(),
+                status: kani::any(),
+            },
+        };
+        kani::assume(s.loan.status == loan::Status::Active);
+        for _ in 0..1 {
+            let op: u8 = kani::any();
+            match op {
+                0 => {
+                    repay(&mut s);
+                }
+                _ => {}
+            }
+        }
+        kani::cover!(
+            s.loan.status == loan::Status::Empty,
+            "loan_settles reaches Empty within 1 steps"
+        );
+    }
+
+    #[kani::proof]
+    #[kani::unwind(2)]
+    #[kani::solver(cadical)]
+    fn verify_pool_solvency_under_interest_rate_change() {
+        let mut s = pool::State {
+            authority: kani::any(),
+            total_deposits: kani::any(),
+            total_borrows: kani::any(),
+            interest_rate: kani::any(),
+            status: kani::any(),
+        };
+        kani::assume(pool::pool_solvency(&s));
+        s.interest_rate = kani::any();
+        kani::assume(s.interest_rate > 0);
+        assert!(
+            pool::pool_solvency(&s),
+            "pool_solvency must hold after interest_rate_change"
+        );
+    }
+} // mod product
 
 // ---- GENERATED BY QEDGEN — DO NOT EDIT BELOW THIS LINE ----

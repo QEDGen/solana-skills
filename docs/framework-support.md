@@ -27,7 +27,7 @@ sBPF assembly is selected by `pragma sbpf` in the spec, not by a `Target`.
 | IDL → brownfield fuzz (`probe/crucible_brownfield`) | ✅ 0.30 | ✅ | ⚠️ needs on-disk Codama/0.30 IDL | ❌ deferred | ❌ parked |
 | Brownfield adapt → spec skeleton (`adapt/`) — *deprecated* | ✅ args + accounts + errors | ❌ no adapter | ⚠️ handlers-only skeleton | ⚠️ loose (no conventions) | ❌ |
 | Greenfield Rust scaffold (`codegen_mir`) | ✅ | ⚠️ generic CPI → `todo!()` | ⚠️ generic CPI → `todo!()`; imported mirrors error | n/a | n/a |
-| Kani spec-model (`kani_mir`) | ✅ ¹ | ✅ ¹ | ✅ ¹ | n/a | skip by design |
+| Kani spec-model (`kani_mir`) | ✅ ¹ ⁴ | ✅ ¹ ⁴ | ✅ ¹ ⁴ | n/a | skip by design |
 | impl-Kani (`kani_impl`) | ✅ greenfield + state-struct (#162) + Context (#169) | ⚠️ greenfield shape only | ⚠️ own `#[repr(C)]` shape; some ix-data field types TODO | ❌ | ❌ |
 | proptest (`proptest_gen_mir`) | ✅ | ✅ | ✅ | n/a | skip by design |
 | Lean (`lean_gen_mir`) | ✅ ² ³ | ✅ ² ³ | ✅ ² ³ | n/a | ✅ dedicated sBPF path |
@@ -60,6 +60,16 @@ user-owned `Proofs.lean`, ideally typed `theorem <name> : <name>_stmt` so
 a restated obligation no longer type-checks. The obligation manifest
 records each statement as emitted — the old blanket
 `lean_indexed_shape_proofs_external` status is gone.
+
+⁴ Multi-account file-level features (#324): covers, liveness, and
+environment obligations lower once over a generated `mod product` whose
+components delegate every transition to the per-account modules — no
+second copy of the semantics, no per-account duplication of a trace.
+Shapes that do not resolve to modeled components (trace ops needing a
+symbolic account env, record/sum-typed params, endpoint states declared
+by more than one lifecycle, cross-account or ghost-reading environment
+properties) stay `unsupported(kani_multi_account_file_level)` in the
+obligation manifest.
 
 ## Codegen ownership contract: CPIs, PDA creation, and events
 
