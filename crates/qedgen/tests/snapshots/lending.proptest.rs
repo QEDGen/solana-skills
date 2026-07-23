@@ -17,24 +17,24 @@ mod pool {
     use super::*;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum Status {
+    pub enum Status {
         Uninitialized,
         Active,
         Paused,
     }
 
     #[derive(Debug, Clone, Copy)]
-    struct State {
-        authority: [u8; 32],
-        total_deposits: u64,
-        total_borrows: u64,
-        interest_rate: u64,
-        status: Status,
+    pub struct State {
+        pub authority: [u8; 32],
+        pub total_deposits: u64,
+        pub total_borrows: u64,
+        pub interest_rate: u64,
+        pub status: Status,
     }
 
     /// Proptest strategy for generating arbitrary State values.
     prop_compose! {
-        fn arb_state()(
+        pub fn arb_state()(
             authority in prop::array::uniform32(0u8..),
             total_deposits in 0u64..=u64::MAX,
             total_borrows in 0u64..=u64::MAX,
@@ -53,7 +53,7 @@ mod pool {
 
     /// Boundary-biased strategy for guard rejection tests.
     prop_compose! {
-        fn arb_boundary_state()(
+        pub fn arb_boundary_state()(
             authority in prop::array::uniform32(0u8..1u8),
             total_deposits in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX],
             total_borrows in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX],
@@ -71,11 +71,11 @@ mod pool {
     }
 
     /// pool_solvency: s.total_deposits ≥ s.total_borrows
-    fn pool_solvency(s: &State) -> bool {
+    pub fn pool_solvency(s: &State) -> bool {
         s.total_deposits >= s.total_borrows
     }
 
-    fn init_pool(s: &mut State, rate: u64) -> bool {
+    pub fn init_pool(s: &mut State, rate: u64) -> bool {
         if !(rate > 0) {
             return false;
         }
@@ -89,7 +89,7 @@ mod pool {
         true
     }
 
-    fn deposit(s: &mut State, amount: u64) -> bool {
+    pub fn deposit(s: &mut State, amount: u64) -> bool {
         if !(amount > 0) {
             return false;
         }
@@ -252,24 +252,24 @@ mod loan {
     use super::*;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum Status {
+    pub enum Status {
         Empty,
         Active,
         Liquidated,
     }
 
     #[derive(Debug, Clone, Copy)]
-    struct State {
-        borrower: [u8; 32],
-        pool: [u8; 32],
-        amount: u64,
-        collateral: u64,
-        status: Status,
+    pub struct State {
+        pub borrower: [u8; 32],
+        pub pool: [u8; 32],
+        pub amount: u64,
+        pub collateral: u64,
+        pub status: Status,
     }
 
     /// Proptest strategy for generating arbitrary State values.
     prop_compose! {
-        fn arb_state()(
+        pub fn arb_state()(
             borrower in prop::array::uniform32(0u8..),
             pool in prop::array::uniform32(0u8..),
             amount in 0u64..=u64::MAX,
@@ -288,7 +288,7 @@ mod loan {
 
     /// Boundary-biased strategy for guard rejection tests.
     prop_compose! {
-        fn arb_boundary_state()(
+        pub fn arb_boundary_state()(
             borrower in prop::array::uniform32(0u8..1u8),
             pool in prop::array::uniform32(0u8..1u8),
             amount in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX],
@@ -305,7 +305,7 @@ mod loan {
         }
     }
 
-    fn borrow(s: &mut State, amount: u64, collateral: u64) -> bool {
+    pub fn borrow(s: &mut State, amount: u64, collateral: u64) -> bool {
         if !(amount > 0 && collateral > 0) {
             return false;
         }
@@ -318,7 +318,7 @@ mod loan {
         true
     }
 
-    fn repay(s: &mut State) -> bool {
+    pub fn repay(s: &mut State) -> bool {
         if s.status != Status::Active {
             return false;
         }
@@ -328,7 +328,7 @@ mod loan {
         true
     }
 
-    fn liquidate(s: &mut State) -> bool {
+    pub fn liquidate(s: &mut State) -> bool {
         if !(s.amount > s.collateral) {
             return false;
         }
@@ -362,3 +362,87 @@ mod loan {
         }
     }
 } // mod loan
+
+// ============================================================================
+// Product state (#331) — one component per account module plus the
+// spec-global ghosts; wrappers delegate to the account transitions and
+// apply ghost updates atomically.
+// ============================================================================
+
+mod product {
+    use super::*;
+
+    #[derive(Debug, Clone, Copy)]
+    struct ProductState {
+        pool: pool::State,
+        loan: loan::State,
+    }
+
+    prop_compose! {
+        fn arb_product_state()(
+            pool in pool::arb_state(),
+            loan in loan::arb_state(),
+        ) -> ProductState {
+            ProductState {
+                pool,
+                loan,
+            }
+        }
+    }
+
+    // Transition wrappers — delegate to the owning account module and
+    // apply ghost updates atomically with the account transition.
+    fn borrow(s: &mut ProductState, amount: u64, collateral: u64) -> bool {
+        loan::borrow(&mut s.loan, amount, collateral)
+    }
+
+    fn liquidate(s: &mut ProductState) -> bool {
+        loan::liquidate(&mut s.loan)
+    }
+
+    fn repay(s: &mut ProductState) -> bool {
+        loan::repay(&mut s.loan)
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { max_global_rejects: 65536, ..ProptestConfig::with_cases(256) })]
+        #[test]
+        fn borrow_preserves_pool_solvency(s in arb_product_state(), amount in 0u64..=u64::MAX, collateral in 0u64..=u64::MAX) {
+            let pre = s.clone();
+            let mut post = s;
+            prop_assume!(pool::pool_solvency(&pre.pool));
+            if borrow(&mut post, amount, collateral) {
+                prop_assert!(pool::pool_solvency(&post.pool),
+                    "pool_solvency must hold after borrow");
+            }
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { max_global_rejects: 65536, ..ProptestConfig::with_cases(256) })]
+        #[test]
+        fn repay_preserves_pool_solvency(s in arb_product_state()) {
+            let pre = s.clone();
+            let mut post = s;
+            prop_assume!(pool::pool_solvency(&pre.pool));
+            if repay(&mut post) {
+                prop_assert!(pool::pool_solvency(&post.pool),
+                    "pool_solvency must hold after repay");
+            }
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { max_global_rejects: 65536, ..ProptestConfig::with_cases(256) })]
+        #[test]
+        fn liquidate_preserves_pool_solvency(s in arb_product_state()) {
+            let pre = s.clone();
+            let mut post = s;
+            prop_assume!(pool::pool_solvency(&pre.pool));
+            if liquidate(&mut post) {
+                prop_assert!(pool::pool_solvency(&post.pool),
+                    "pool_solvency must hold after liquidate");
+            }
+        }
+    }
+} // mod product
