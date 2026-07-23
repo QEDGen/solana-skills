@@ -1056,3 +1056,107 @@ liveness ambiguous_states : Alpha.Idle ~> Alpha.Running via [start_alpha] within
         panic!("emitted Kani harness fails to parse as Rust: {e}\n{out}");
     }
 }
+
+/// Product harness calls must bind the same complete parameter list as
+/// their delegating wrappers. In particular, `abstract` binders are model
+/// inputs even though they are not deployed instruction parameters.
+#[test]
+fn product_state_binds_abstract_params_in_cover_and_liveness() {
+    let (mir, parsed) = lower_inline(
+        r#"
+spec ProductAbstract
+
+type Pool
+  | Idle
+  | Active of { total : U64 }
+
+type Loan
+  | Empty
+  | Open of { debt : U64 }
+
+type Error
+  | InvalidAmount
+
+handler activate : Pool.Idle -> Pool.Active {
+  takes amount : U64
+  abstract observed : U64
+  requires amount > 0 else InvalidAmount
+  requires observed > 0 else InvalidAmount
+  effect { total := amount }
+}
+
+handler open_loan : Loan.Empty -> Loan.Open {
+  takes amount : U64
+  requires amount > 0 else InvalidAmount
+  effect { debt := amount }
+}
+
+cover activated [activate]
+liveness activation_progress : Pool.Idle ~> Pool.Active via [activate] within 1
+"#,
+    );
+    let out = render(&mir, &parsed);
+
+    assert!(
+        out.contains("let observed_0: u64 = kani::any();"),
+        "cover must bind the abstract value:\n{out}"
+    );
+    assert!(
+        out.contains(
+            "kani::cover!(activate(&mut s, amount_0, observed_0), \"activated trace is reachable\");"
+        ),
+        "cover must pass the abstract value:\n{out}"
+    );
+    assert!(
+        out.contains("let observed: u64 = kani::any();"),
+        "liveness must bind the abstract value:\n{out}"
+    );
+    assert!(
+        out.contains("activate(&mut s, amount, observed);"),
+        "liveness must pass the abstract value:\n{out}"
+    );
+}
+
+/// Record/sum declarations live inside the account modules. A product
+/// wrapper must not accept a parameter whose rendered type mentions one,
+/// including through a compound wrapper or a type alias.
+#[test]
+fn product_state_rejects_nested_module_scoped_param_types() {
+    let (mir, parsed) = lower_inline(
+        r#"
+spec ProductRecordParam
+
+type Payload = { amount : U64 }
+type MaybePayload = Option Payload
+
+type Pool
+  | Idle
+  | Active of { total : U64 }
+
+type Loan
+  | Empty
+  | Open of { debt : U64 }
+
+handler activate : Pool.Idle -> Pool.Active {
+  takes payload : MaybePayload
+  effect { total := 1 }
+}
+
+handler open_loan : Loan.Empty -> Loan.Open {
+  effect { debt := 1 }
+}
+
+cover activated [activate]
+"#,
+    );
+    let out = render(&mir, &parsed);
+
+    assert!(
+        out.contains("// cover activated trace 0: not lowered —"),
+        "compound record parameter must stay reported unsupported:\n{out}"
+    );
+    assert!(
+        !out.contains("fn activate(s: &mut ProductState"),
+        "product module must not name a sibling module's record type:\n{out}"
+    );
+}

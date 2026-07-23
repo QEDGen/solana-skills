@@ -137,6 +137,7 @@ fn resolve_wrappable<'a>(
     parsed: &'a ParsedSpec,
     components: &'a [ProductComponent],
 ) -> Vec<WrappedHandler<'a>> {
+    use crate::codegen_shared::map_type;
     use crate::rust_codegen_util as util;
 
     let module_scoped_types: Vec<&str> = parsed
@@ -156,7 +157,13 @@ fn resolve_wrappable<'a>(
                 .takes_params
                 .iter()
                 .chain(op.abstract_binders.iter())
-                .all(|(_, t)| !module_scoped_types.contains(&t.as_str()));
+                .all(|(_, t)| {
+                    map_type(t, parsed).is_ok_and(|rust_ty| {
+                        !module_scoped_types
+                            .iter()
+                            .any(|name| rust_type_mentions(&rust_ty, name))
+                    })
+                });
             if !param_types_ok {
                 continue;
             }
@@ -167,6 +174,16 @@ fn resolve_wrappable<'a>(
         }
     }
     out
+}
+
+/// Whether a rendered Rust type contains `name` as an identifier. The
+/// product module is a sibling of each account module, so record/sum names
+/// nested under `Option`, `Vec`, arrays, or aliases are still unavailable
+/// unless qualified through their owning module.
+fn rust_type_mentions(rust_ty: &str, name: &str) -> bool {
+    rust_ty
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .any(|ident| ident == name)
 }
 
 fn wrapped<'a, 'b>(
@@ -558,7 +575,9 @@ fn emit_covers(
 
                 let mut indent = "        ".to_string();
                 for (j, w) in trace_ops.iter().enumerate() {
-                    for (pname, ptype) in &w.op.takes_params {
+                    for (pname, ptype) in
+                        w.op.takes_params.iter().chain(w.op.abstract_binders.iter())
+                    {
                         out.push_str(&format!(
                             "{}let {}_{}: {} = kani::any();\n",
                             indent,
@@ -570,6 +589,7 @@ fn emit_covers(
                     let args: String =
                         w.op.takes_params
                             .iter()
+                            .chain(w.op.abstract_binders.iter())
                             .map(|(n, _)| format!(", {}_{}", n, j))
                             .collect();
                     if j < trace_ops.len() - 1 {
@@ -638,7 +658,7 @@ fn emit_liveness(
                 out.push_str("            match op {\n");
                 for (i, w) in via.iter().enumerate() {
                     out.push_str(&format!("                {} => {{\n", i));
-                    for (n, t) in &w.op.takes_params {
+                    for (n, t) in w.op.takes_params.iter().chain(w.op.abstract_binders.iter()) {
                         out.push_str(&format!(
                             "                    let {}: {} = kani::any();\n",
                             n,
