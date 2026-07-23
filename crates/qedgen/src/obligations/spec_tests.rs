@@ -80,15 +80,80 @@ fn kani_multi_account_file_level_obligations_surface() {
     );
 }
 
-/// #326 — `pragma state_repr = adt` is invisible to Kani. The bundled
-/// cross-program-vault example must carry the representation-gap entry.
+/// #326 — single-account `pragma state_repr = adt` specs now verify over
+/// the ADT state space (`state_repr_valid` invariant); the bundled
+/// cross-program-vault example must record the representation obligation
+/// as emitted, not unsupported.
 #[test]
-fn kani_adt_state_repr_gap_is_reported() {
+fn kani_adt_state_repr_is_emitted_for_single_account() {
     let (mir, parsed) = lower_fixture("examples/rust/cross-program-vault/vault.qedspec");
     assert!(
         parsed.state_repr_is_adt(),
         "fixture declares adt state_repr"
     );
+    let entries = crate::kani_mir::collect_obligations(&mir, &parsed);
+    assert!(
+        entries_with_reason(&entries, UnsupportedReason::KaniAdtStateRepr).is_empty(),
+        "single-account ADT must not report the representation gap: {:#?}",
+        entries
+    );
+    let repr: Vec<&ObligationEntry> = entries
+        .iter()
+        .filter(|e| e.kind == ObligationKind::StateRepresentation)
+        .collect();
+    assert_eq!(repr.len(), 1);
+    assert_eq!(
+        repr[0].status,
+        ObligationStatus::Emitted {
+            artifact: "state_repr_valid".to_string()
+        }
+    );
+}
+
+/// #326 — shapes the validity invariant cannot express keep the flat model
+/// and stay reported. Multi-account ADT is the canonical remaining gap.
+#[test]
+fn kani_adt_state_repr_gap_still_reported_for_multi_account() {
+    let (mir, parsed) = lower_inline(
+        r#"
+spec AdtMulti
+
+pragma state_repr = adt
+
+type Pool
+  | Uninitialized
+  | Active of { total : U64 }
+
+type Loan
+  | Empty
+  | Open of { amount : U64 }
+
+type Error
+  | InvalidAmount
+  | MathOverflow
+
+handler init_pool : Pool.Uninitialized -> Pool.Active {
+  permissionless
+  accounts {
+    payer : signer, writable
+  }
+  effect {
+    state := .Active { total := 0 }
+  }
+}
+
+handler open_loan : Loan.Empty -> Loan.Open {
+  permissionless
+  accounts {
+    payer : signer, writable
+  }
+  effect {
+    state := .Open { amount := 0 }
+  }
+}
+"#,
+    );
+    assert!(parsed.account_types.len() > 1, "fixture is multi-account");
     let entries = crate::kani_mir::collect_obligations(&mir, &parsed);
     let gap = entries_with_reason(&entries, UnsupportedReason::KaniAdtStateRepr);
     assert_eq!(gap.len(), 1);

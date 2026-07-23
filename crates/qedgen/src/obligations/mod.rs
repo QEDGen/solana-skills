@@ -154,7 +154,7 @@ impl UnsupportedReason {
                 "multi-account Kani does not lower file-level cover/liveness/environment obligations yet (#324)"
             }
             UnsupportedReason::KaniAdtStateRepr => {
-                "Kani verifies a flat state model; `pragma state_repr = adt` parity is not implemented (#326)"
+                "Kani verifies a flat state model for this shape; ADT parity covers single-account specs with defaultable variant payloads only (#326)"
             }
             UnsupportedReason::KaniGuardNegationInexpressible => {
                 "no expressible negation for this guard; rejection harness skipped"

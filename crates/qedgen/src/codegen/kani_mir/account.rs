@@ -50,6 +50,11 @@ pub(crate) fn emit_account_section_structural(
         |t| map_type(t, parsed),
         has_lifecycle,
     )?;
+    // #326 — ADT specs get the `state_repr_valid` invariant alongside the
+    // flat struct; harness preambles assume it and transitions preserve it.
+    if let Some(acct) = util::kani_adt_view(parsed) {
+        util::emit_state_repr_validity_fn(out, parsed, acct);
+    }
     emit_kani_account_env_structs(out, parsed);
 
     let handlers: Vec<&crate::check::ParsedHandler> = parsed.handlers.iter().collect();
