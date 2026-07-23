@@ -198,9 +198,9 @@ fn account_state_field_rust_type(
     op.accounts
         .iter()
         .find(|a| a.name == acct)
-        .and_then(|a| a.account_type.as_deref())
-        .and_then(|ty| {
-            let (ns, tname) = ty.split_once('.')?;
+        .and_then(|a| {
+            let ns = a.imported_namespace.as_deref()?;
+            let tname = a.account_type.as_deref()?;
             let import = mir.imports.get(ns)?;
             let at = import.account_types.iter().find(|t| t.name == tname)?;
             at.fields
