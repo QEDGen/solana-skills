@@ -87,6 +87,9 @@ pub(crate) fn emit_proof_preamble(
         util::emit_state_init_zeroed(out, mutable, lifecycle, parsed);
     } else {
         util::emit_state_init_symbolic(out, mutable, lifecycle);
+        // #326 — ADT specs constrain the symbolic state to the declared
+        // variants before any status/property assume layers on top.
+        util::emit_state_repr_valid_assume(out, parsed, "s", "    ");
         if opts.pre_status_assume {
             if let Some(op) = op {
                 util::emit_pre_status_assume(out, op, lifecycle);

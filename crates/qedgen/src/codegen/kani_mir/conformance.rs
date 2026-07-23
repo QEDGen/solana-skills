@@ -281,11 +281,30 @@ pub(crate) fn emit_one_conformance_harness(
         );
     }
 
+    // #326 — under ADT canonical form, a variant-union sibling the
+    // post-variant does not carry resets to its type default instead of
+    // holding its pre value; the frame check below asserts the default and
+    // its `pre_<f>` snapshot would be unused.
+    let adt_dropped_default = |fname: &str| -> Option<String> {
+        let acct = util::kani_adt_view(parsed)?;
+        let post = op.post_status.as_deref()?;
+        let post_v = acct.variants.iter().find(|v| v.name == post)?;
+        if !acct.fields.iter().any(|(n, _)| n == fname) {
+            return None;
+        }
+        if post_v.fields.iter().any(|(n, _)| n == fname) {
+            return None;
+        }
+        let (_, ftype) = acct.fields.iter().find(|(n, _)| n == fname)?;
+        util::adt_absent_field_default(parsed, ftype)
+    };
+
     // Pre-state snapshot — every mutable field except the
-    // set-target.
+    // set-target and ADT-dropped siblings.
     let needs_pre_for: Vec<&&(String, String)> = mutable
         .iter()
         .filter(|(fname, _)| !(fname.as_str() == field && op_kind == "set"))
+        .filter(|(fname, _)| fname.as_str() == field || adt_dropped_default(fname).is_none())
         .collect();
     for (fname, _) in &needs_pre_for {
         out.push_str(&format!("    let pre_{} = s.{};\n", fname, fname));
@@ -380,21 +399,29 @@ pub(crate) fn emit_one_conformance_harness(
     }
 
     // Assert sibling fields unchanged (unless mutated by another
-    // effect in the same frame — the flat body, or this arm).
+    // effect in the same frame — the flat body, or this arm). Under ADT
+    // canonical form (#326), a sibling the post-variant does not carry is
+    // asserted against its type default instead — the transition resets it.
     for (fname, _) in mutable {
         if fname.as_str() != field {
             let sibling_mutated = sibling_triples
                 .iter()
                 .any(|(f, _, _)| util::effect_path_source(f) == fname.as_str());
             if !sibling_mutated {
-                let assertion = util::rewrite_kani_pubkey_comparisons(
-                    &format!("s.{fname} == pre_{fname}"),
-                    op,
-                    parsed,
-                );
+                let (expected, message) = match adt_dropped_default(fname) {
+                    Some(default) => (
+                        format!("s.{fname} == {default}"),
+                        format!("{fname} must reset to default (not carried by post-variant)"),
+                    ),
+                    None => (
+                        format!("s.{fname} == pre_{fname}"),
+                        format!("{fname} must not change"),
+                    ),
+                };
+                let assertion = util::rewrite_kani_pubkey_comparisons(&expected, op, parsed);
                 out.push_str(&format!(
-                    "        assert!({}, \"{} must not change\");\n",
-                    assertion, fname
+                    "        assert!({}, \"{}\");\n",
+                    assertion, message
                 ));
             }
         }
@@ -771,6 +798,11 @@ pub(crate) fn emit_file_level_features(
                 for (field, ftype) in &env.mutates {
                     out.push_str(&format!("    s.{} = kani::any();\n", field));
                     let _ = ftype;
+                }
+                // #326 — external mutation must not fabricate a state no
+                // ADT variant can inhabit.
+                if !env.mutates.is_empty() {
+                    util::emit_state_repr_valid_assume(out, parsed, "s", "    ");
                 }
                 if needs_post {
                     out.push_str("    let post = &s;\n");

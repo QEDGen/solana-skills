@@ -1350,6 +1350,17 @@ inner-enum shape. **Absent (the default), a multi-variant State lowers flat** �
 The flat form auto-discharges more proof obligations (abort / liveness / overflow), so
 prefer it unless you specifically want the inductive sum-type modeling.
 
+The Kani model keeps the flat struct as its carrier but constrains it to the declared
+variants (#326): codegen emits a `state_repr_valid` invariant that pins every field the
+active variant does not carry to its type default, every symbolic harness assumes it,
+and transitions reset dropped fields on a variant change. The reachable state space is
+therefore isomorphic to the inductive Lean model — Kani cannot fabricate cross-variant
+field combinations. This covers single-account specs whose variant payloads have
+comparable type defaults (numeric, `Bool`, `Pubkey`, `Bytes32`/`Bytes64`, `Fin[N]`);
+other shapes (multi-account ADT, record-typed payloads) stay on the unconstrained flat
+model and are reported in the obligation manifest as
+`unsupported(kani_adt_state_repr)`.
+
 > Before v2.33 this choice was keyed implicitly on whether the spec declared a
 > `WrongState` error variant — so adding or removing a lifecycle error silently flipped
 > the State representation. The pragma makes it explicit. `WrongState` keeps its
