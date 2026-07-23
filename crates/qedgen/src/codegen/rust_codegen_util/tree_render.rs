@@ -601,7 +601,20 @@ fn render_path(p: &TreePath, cx: RustCx, inside_old: bool) -> String {
                         return out;
                     }
                 }
-                out.push_str(name)
+                out.push_str(name);
+                // Product pre-state snapshots use `SelfAcct("pre")`
+                // with the same field→component routing as the live `s`
+                // binder. Ghosts remain direct product fields.
+                if matches!(p.binding, BindingKind::StateField) {
+                    if let (Some(map), Some(TreeSeg::Field(first))) =
+                        (cx.product_fields, p.segments.first())
+                    {
+                        if let Some(component) = map.get(first.as_str()) {
+                            out.push('.');
+                            out.push_str(component);
+                        }
+                    }
+                }
             }
             (Binder::PrePost, true) => out.push_str("pre"),
             (Binder::PrePost, false) => out.push_str("post"),

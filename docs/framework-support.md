@@ -76,8 +76,9 @@ become one field of the generated `ProductState`, updated atomically by
 delegating transition wrappers; ghost-reading properties run in the
 init-seeded product sequence harness, and cross-account or
 multi-component property pairs get product preservation tests. A ghost
-read by a handler guard is not liftable — that spec keeps per-account
-ghost copies and its ghost obligations stay
+read or written by a per-account transition (guard, let, effect, or
+branch scrutinee) is not liftable — that spec keeps per-account ghost
+copies and its ghost obligations stay
 `unsupported(proptest_multi_account_ghost)` in the manifest.
 
 ## Codegen ownership contract: CPIs, PDA creation, and events

@@ -644,8 +644,9 @@ fn mul_div_round_half_up_u128(a: u128, b: u128, d: u128) -> u128 {\n\
     rust_codegen_util::emit_constants(&mut out, &spec.constants);
 
     if is_multi {
-        // #331 — spec-global ghosts. When no handler GUARD reads a ghost
-        // ("liftable"), the ghost moves to the product-state module: the
+        // #331 — spec-global ghosts. When no per-account transition reads
+        // or writes a ghost ("liftable"), the ghost moves to the product
+        // state module: the
         // per-account sections drop it entirely (fields, strategies, and
         // the shared transition emitter ghost updates), and `mod
         // product` carries the single global value, updated atomically by
@@ -733,9 +734,10 @@ fn mul_div_round_half_up_u128(a: u128, b: u128, d: u128) -> u128 {\n\
                     // ghost-reading predicate cannot compile against the
                     // ghost-free per-account State.
                     let reads_ghost = ghosts_liftable
-                        && p.rust_expression.as_deref().is_some_and(|rust| {
-                            spec.ghosts.iter().any(|g| references_field(rust, &g.name))
-                        });
+                        && spec
+                            .ghosts
+                            .iter()
+                            .any(|g| property_references_field(p, &g.name));
                     scoped && !reads_ghost
                 })
                 .collect();
@@ -1160,6 +1162,32 @@ fn references_field(rust: &str, name: &str) -> bool {
     false
 }
 
+fn property_references_field(prop: &ParsedProperty, name: &str) -> bool {
+    if let Some(tree) = prop.tree.as_ref() {
+        let mut found = false;
+        tree.for_each_node(&mut |node| {
+            let crate::mir::ExprTree::Path(path) = node else {
+                return;
+            };
+            if !matches!(
+                path.binding,
+                crate::mir::expr_tree::BindingKind::StateField
+                    | crate::mir::expr_tree::BindingKind::Ghost
+            ) {
+                return;
+            }
+            found |= matches!(
+                path.segments.first(),
+                Some(crate::mir::expr_tree::TreeSeg::Field(field)) if field == name
+            );
+        });
+        return found;
+    }
+    prop.rust_expression
+        .as_deref()
+        .is_some_and(|rust| references_field(rust, name))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_preservation_tests_for(
     out: &mut String,
@@ -1231,10 +1259,9 @@ fn emit_preservation_tests_for(
             // binder via a fresh proptest variable so the post-assert
             // exercises a real value (not the silent `true` stub).
             let handler_takes_binder = match (&prop.per_slot, op) {
-                (Some(slot), Some(op)) => op
-                    .takes_params
-                    .iter()
-                    .any(|(n, t)| n == &slot.binder_name && t == &slot.binder_type),
+                (Some(slot), Some(op)) => {
+                    model_params(op).any(|(n, t)| n == &slot.binder_name && t == &slot.binder_type)
+                }
                 _ => false,
             };
             let local_binder = match &prop.per_slot {
@@ -1254,7 +1281,7 @@ fn emit_preservation_tests_for(
                 param_parts.push("s in arb_state()".to_string());
             }
             if let Some(op) = op {
-                for (pname, ptype) in &op.takes_params {
+                for (pname, ptype) in model_params(op) {
                     // Type-dispatched strategy, not a numeric range format:
                     // `0[u8; 32]..=[u8; 32]::MAX` for a Pubkey param is a
                     // syntax error (#295).
@@ -1438,7 +1465,7 @@ fn emit_invariant_preservation_tests_for(
             if !is_init {
                 param_parts.push("s in arb_state()".to_string());
             }
-            for (pname, ptype) in &op.takes_params {
+            for (pname, ptype) in model_params(op) {
                 // Type-dispatched strategy — see the effect-conformance
                 // site above (#295).
                 let strategy = strategy_for_field(ptype, spec, StrategyMode::Full, None)?;
@@ -1643,7 +1670,7 @@ fn emit_overflow_tests_for(
             out.push_str("    #[test]\n");
 
             let mut param_parts = vec!["s in arb_state()".to_string()];
-            for (pname, ptype) in &op.takes_params {
+            for (pname, ptype) in model_params(op) {
                 // Type-dispatched strategy — see the effect-conformance
                 // site above (#295).
                 let strategy = strategy_for_field(ptype, spec, StrategyMode::Full, None)?;
@@ -1661,7 +1688,9 @@ fn emit_overflow_tests_for(
 
             // Assume all properties hold (they constrain valid state space)
             for pre_prop in properties {
-                if pre_prop.expression.is_some() {
+                if pre_prop.expression.is_some()
+                    && pre_prop.class != crate::check::PropertyClass::Binary
+                {
                     out.push_str(&format!("        prop_assume!({}(&s));\n", pre_prop.name));
                 }
             }
@@ -1704,9 +1733,7 @@ fn emit_sequence_test_for(
     out.push_str("#[derive(Debug, Clone)]\n");
     out.push_str("enum Op {\n");
     for op in handlers {
-        let params: String = op
-            .takes_params
-            .iter()
+        let params: String = model_params(op)
             .map(|(_, t)| map_type(t, spec))
             .collect::<Result<Vec<_>>>()?
             .join(", ");
@@ -1729,11 +1756,11 @@ fn emit_sequence_test_for(
     out.push_str("    prop_oneof![\n");
     for op in handlers {
         let pascal = crate::codegen_shared::to_pascal_case(&op.name);
-        if op.takes_params.is_empty() {
+        let params: Vec<_> = model_params(op).collect();
+        if params.is_empty() {
             out.push_str(&format!("        Just(Op::{}),\n", pascal));
         } else {
-            let strategies: Vec<String> = op
-                .takes_params
+            let strategies: Vec<String> = params
                 .iter()
                 // Type-dispatched strategy — see the effect-conformance
                 // site above (#295).
@@ -1742,17 +1769,17 @@ fn emit_sequence_test_for(
                 .into_iter()
                 .map(|strategy| strategy.render())
                 .collect();
-            let names: Vec<&str> = op.takes_params.iter().map(|(n, _)| n.as_str()).collect();
+            let names: Vec<&str> = params.iter().map(|(n, _)| n.as_str()).collect();
             // proptest's tuple `Strategy` impl caps at arity 12; >12-arg
             // handlers (common for brownfield init handlers) hit E0599.
             // Chunk into sub-tuples of ≤12 with nested destructuring.
             const MAX_PROPTEST_TUPLE_ARITY: usize = 12;
-            if op.takes_params.len() == 1 {
+            if params.len() == 1 {
                 out.push_str(&format!(
                     "        ({}).prop_map(|v| Op::{}(v)),\n",
                     strategies[0], pascal
                 ));
-            } else if op.takes_params.len() <= MAX_PROPTEST_TUPLE_ARITY {
+            } else if params.len() <= MAX_PROPTEST_TUPLE_ARITY {
                 out.push_str(&format!(
                     "        ({}).prop_map(|({})| Op::{}({})),\n",
                     strategies.join(", "),
@@ -1786,10 +1813,11 @@ fn emit_sequence_test_for(
     out.push_str("    match op {\n");
     for op in handlers {
         let pascal = crate::codegen_shared::to_pascal_case(&op.name);
-        if op.takes_params.is_empty() {
+        let params: Vec<_> = model_params(op).collect();
+        if params.is_empty() {
             out.push_str(&format!("        Op::{} => {}(s),\n", pascal, op.name));
         } else {
-            let bindings: Vec<String> = op.takes_params.iter().map(|(n, _)| n.clone()).collect();
+            let bindings: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
             out.push_str(&format!(
                 "        Op::{}({}) => {}(s, {}),\n",
                 pascal,
@@ -1849,7 +1877,7 @@ fn emit_sequence_test_for(
         for op in handlers {
             if let (Some(ref pre), Some(ref post)) = (&op.pre_status, &op.post_status) {
                 let pascal = crate::codegen_shared::to_pascal_case(&op.name);
-                if op.takes_params.is_empty() {
+                if model_params(op).next().is_none() {
                     out.push_str(&format!(
                         "        (Lifecycle::{}, Op::{}) => Some(Lifecycle::{}),\n",
                         pre, pascal, post
@@ -1869,7 +1897,7 @@ fn emit_sequence_test_for(
 
     let all_props: Vec<&ParsedProperty> = properties
         .iter()
-        .filter(|p| p.expression.is_some())
+        .filter(|p| p.expression.is_some() && p.class != crate::check::PropertyClass::Binary)
         .collect();
 
     let seq_len = 20;
@@ -1969,6 +1997,16 @@ struct ProptestComponent {
     handler_names: Vec<String>,
 }
 
+fn model_params(op: &ParsedHandler) -> impl Iterator<Item = &(String, String)> {
+    op.takes_params.iter().chain(op.abstract_binders.iter())
+}
+
+fn rust_type_mentions(rust_ty: &str, name: &str) -> bool {
+    rust_ty
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .any(|ident| ident == name)
+}
+
 /// How a property relates to the product state.
 enum ProductPropScope<'a> {
     /// Owned by one component; only pairs with handlers routed to OTHER
@@ -2031,26 +2069,41 @@ fn emit_product_module(
     let wrappable = |name: &str| -> Option<(usize, &ParsedHandler)> {
         let comp = component_of_handler(name)?;
         let op = spec.handlers.iter().find(|h| h.name == name)?;
-        op.takes_params
-            .iter()
-            .all(|(_, t)| !module_scoped_types.contains(&t.as_str()))
+        model_params(op)
+            .all(|(_, t)| {
+                map_type(t, spec).is_ok_and(|rust_ty| {
+                    !module_scoped_types
+                        .iter()
+                        .any(|name| rust_type_mentions(&rust_ty, name))
+                })
+            })
             .then_some((comp, op))
     };
 
     // Classify every property with a body.
     let mut scopes: Vec<ProductPropScope> = Vec::new();
     for prop in &spec.properties {
-        let Some(rust) = prop.rust_expression.as_deref() else {
+        if prop.rust_expression.is_none() {
             continue;
-        };
-        let reads_ghost = spec.ghosts.iter().any(|g| references_field(rust, &g.name));
+        }
+        let reads_ghost = spec
+            .ghosts
+            .iter()
+            .any(|g| property_references_field(prop, &g.name));
         let comp_refs: Vec<usize> = components
             .iter()
             .enumerate()
-            .filter(|(_, c)| c.acct.fields.iter().any(|(f, _)| references_field(rust, f)))
+            .filter(|(_, c)| {
+                c.acct
+                    .fields
+                    .iter()
+                    .any(|(f, _)| property_references_field(prop, f))
+            })
             .map(|(i, _)| i)
             .collect();
-        let reads_ambiguous = ambiguous_fields.iter().any(|f| references_field(rust, f));
+        let reads_ambiguous = ambiguous_fields
+            .iter()
+            .any(|f| property_references_field(prop, f));
         if reads_ghost {
             if ghosts_liftable && !reads_ambiguous {
                 scopes.push(ProductPropScope::Ghost(prop));
@@ -2273,9 +2326,15 @@ fn emit_product_module(
         let comp = &components[comp_idx];
         let mut params = String::new();
         let mut args = String::new();
-        for (n, t) in op.takes_params.iter().chain(op.abstract_binders.iter()) {
+        for (n, t) in model_params(op) {
             params.push_str(&format!(", {}: {}", n, map_type(t, spec)?));
             args.push_str(&format!(", {}", n));
+        }
+        let mut update_fields = product_fields.clone();
+        for (field, _) in &comp.acct.fields {
+            // The update is attached to this handler, so an otherwise
+            // ambiguous field resolves to the handler's owning component.
+            update_fields.insert(field.clone(), comp.mod_name.clone());
         }
         let ghost_updates: Vec<String> = liftable_ghosts
             .iter()
@@ -2288,7 +2347,10 @@ fn emit_product_module(
                             rust_codegen_util::tree_render::render_rust(
                                 tree,
                                 rust_codegen_util::tree_render::RustCx::native()
-                                    .with_product_fields(Some(&product_fields)),
+                                    .with_binder(rust_codegen_util::tree_render::Binder::SelfAcct(
+                                        "pre",
+                                    ))
+                                    .with_product_fields(Some(&update_fields)),
                             )
                         })
                         .unwrap_or_else(|| u.value_rust.clone());
@@ -2307,6 +2369,7 @@ fn emit_product_module(
                 comp.mod_name, op.name, comp.mod_name, args
             ));
         } else {
+            out.push_str("        let pre = s.clone();\n");
             out.push_str(&format!(
                 "        if {}::{}(&mut s.{}{}) {{\n",
                 comp.mod_name, op.name, comp.mod_name, args
@@ -2369,6 +2432,7 @@ fn emit_product_module(
             &format!("{}::{}", owner.mod_name, pair.prop.name),
             &format!(".{}", owner.mod_name),
             &pair.prop.name,
+            pair.prop.class == crate::check::PropertyClass::Binary,
         )?;
     }
 
@@ -2390,6 +2454,7 @@ fn emit_product_module(
             &pair.prop.name,
             "",
             &pair.prop.name,
+            false,
         )?;
     }
 
@@ -2420,12 +2485,13 @@ fn emit_product_preservation_test(
     predicate_path: &str,
     receiver: &str,
     prop_name: &str,
+    binary: bool,
 ) -> Result<()> {
     out.push_str("    proptest! {\n");
     out.push_str("        #![proptest_config(ProptestConfig { max_global_rejects: 65536, ..ProptestConfig::with_cases(256) })]\n");
     out.push_str("        #[test]\n");
     let mut params = vec!["s in arb_product_state()".to_string()];
-    for (pname, ptype) in &op.takes_params {
+    for (pname, ptype) in model_params(op) {
         let strategy = strategy_for_field(ptype, spec, StrategyMode::Full, None)?;
         params.push(format!("{} in {}", pname, strategy));
     }
@@ -2436,23 +2502,23 @@ fn emit_product_preservation_test(
     ));
     out.push_str("            let pre = s.clone();\n");
     out.push_str("            let mut post = s;\n");
-    out.push_str(&format!(
-        "            prop_assume!({}(&pre{}));\n",
-        predicate_path, receiver
-    ));
-    let args: String = op
-        .takes_params
-        .iter()
-        .map(|(n, _)| format!(", {}", n))
-        .collect();
+    if !binary {
+        out.push_str(&format!(
+            "            prop_assume!({}(&pre{}));\n",
+            predicate_path, receiver
+        ));
+    }
+    let args: String = model_params(op).map(|(n, _)| format!(", {}", n)).collect();
     out.push_str(&format!(
         "            if {}(&mut post{}) {{\n",
         op.name, args
     ));
-    out.push_str(&format!(
-        "                prop_assert!({}(&post{}),\n",
-        predicate_path, receiver
-    ));
+    let assertion = if binary {
+        format!("{}(&pre{}, &post{})", predicate_path, receiver, receiver)
+    } else {
+        format!("{}(&post{})", predicate_path, receiver)
+    };
+    out.push_str(&format!("                prop_assert!({},\n", assertion));
     out.push_str(&format!(
         "                    \"{} must hold after {}\");\n",
         prop_name, op.name
@@ -2479,11 +2545,11 @@ fn emit_product_sequence_test(
     out.push_str("    #[derive(Debug, Clone)]\n");
     out.push_str("    enum Op {\n");
     for op in &spec.handlers {
-        let payload = if op.takes_params.is_empty() {
+        let params: Vec<_> = model_params(op).collect();
+        let payload = if params.is_empty() {
             String::new()
         } else {
-            let tys: Vec<String> = op
-                .takes_params
+            let tys: Vec<String> = params
                 .iter()
                 .map(|(_, t)| map_type(t, spec))
                 .collect::<Result<_>>()?;
@@ -2501,11 +2567,11 @@ fn emit_product_sequence_test(
     out.push_str("        prop_oneof![\n");
     for op in &spec.handlers {
         let variant = crate::codegen_shared::to_pascal_case(&op.name);
-        if op.takes_params.is_empty() {
+        let params: Vec<_> = model_params(op).collect();
+        if params.is_empty() {
             out.push_str(&format!("            Just(Op::{}),\n", variant));
-        } else if op.takes_params.len() == 1 {
-            let strategy =
-                strategy_for_field(&op.takes_params[0].1, spec, StrategyMode::Full, None)?;
+        } else if params.len() == 1 {
+            let strategy = strategy_for_field(&params[0].1, spec, StrategyMode::Full, None)?;
             // Parens are load-bearing: `0u64..=u64::MAX.prop_map(…)`
             // parses as a range whose end is the method call.
             out.push_str(&format!(
@@ -2513,16 +2579,13 @@ fn emit_product_sequence_test(
                 strategy, variant
             ));
         } else {
-            let strategies: Vec<String> = op
-                .takes_params
+            let strategies: Vec<String> = params
                 .iter()
                 .map(|(_, t)| {
                     strategy_for_field(t, spec, StrategyMode::Full, None).map(|s| s.to_string())
                 })
                 .collect::<Result<_>>()?;
-            let binders: Vec<String> = (0..op.takes_params.len())
-                .map(|i| format!("p{}", i))
-                .collect();
+            let binders: Vec<String> = (0..params.len()).map(|i| format!("p{}", i)).collect();
             out.push_str(&format!(
                 "            ({}).prop_map(|({})| Op::{}({})),\n",
                 strategies.join(", "),
@@ -2539,10 +2602,11 @@ fn emit_product_sequence_test(
     out.push_str("        match op {\n");
     for op in &spec.handlers {
         let variant = crate::codegen_shared::to_pascal_case(&op.name);
-        if op.takes_params.is_empty() {
+        let params: Vec<_> = model_params(op).collect();
+        if params.is_empty() {
             out.push_str(&format!("            Op::{} => {}(s),\n", variant, op.name));
         } else {
-            let binders: Vec<String> = op.takes_params.iter().map(|(n, _)| n.clone()).collect();
+            let binders: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
             let args: Vec<String> = binders.iter().map(|n| format!("*{}", n)).collect();
             out.push_str(&format!(
                 "            Op::{}({}) => {}(s, {}),\n",
@@ -2651,6 +2715,207 @@ mod tests {
             }],
             ..ParsedSpec::default()
         }
+    }
+
+    fn emit_full_harness(src: &str) -> (ParsedSpec, String) {
+        let spec = parse_str(src).expect("parse");
+        let mir = crate::mir::lower(&spec);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output = dir.path().join("proptest.rs");
+        let mut rec = ObligationRecorder::new(ObligationBackend::Proptest);
+        generate_impl(&mir, &spec, Some(&output), &mut rec).expect("generate");
+        let body = std::fs::read_to_string(output).expect("read harness");
+        (spec, body)
+    }
+
+    #[test]
+    fn product_harness_threads_abstract_binders_and_binary_component_properties() {
+        let (_spec, body) = emit_full_harness(
+            r#"
+spec ProductEdges
+
+type Pool
+  | Idle
+  | Active of { total : U64 }
+
+type Loan
+  | Empty
+  | Open of { debt : U64 }
+
+type Error
+  | InvalidAmount
+
+ghost lifetime_total : U64 {
+  init { 0 }
+  on deposit { lifetime_total += amount }
+}
+
+handler init_pool : Pool.Idle -> Pool.Active {
+  effect { total := 0 }
+}
+
+handler deposit : Pool.Active -> Pool.Active {
+  takes amount : U64
+  abstract observed : U64
+  requires amount > 0 else InvalidAmount
+  requires observed > 0 else InvalidAmount
+  effect { total += amount }
+}
+
+handler open_loan : Loan.Empty -> Loan.Open {
+  takes amount : U64
+  abstract oracle_debt : U64
+  requires amount > 0 else InvalidAmount
+  effect { debt := amount }
+}
+
+property ghost_tracks_total :
+  state.lifetime_total >= state.total
+  preserved_by [deposit]
+
+property total_unchanged :
+  state.total == old(state.total)
+  preserved_by [open_loan]
+"#,
+        );
+
+        assert!(
+            body.contains("fn open_loan_preserves_total_unchanged(")
+                && body.contains("oracle_debt in 0u64..=u64::MAX"),
+            "product preservation must generate abstract strategies:\n{body}"
+        );
+        assert!(
+            body.contains("prop_assert!(pool::total_unchanged(&pre.pool, &post.pool),"),
+            "binary component property must receive pre and post:\n{body}"
+        );
+        assert!(
+            body.contains("Deposit(u64, u64)")
+                && body.contains("OpenLoan(u64, u64)")
+                && body.contains("deposit(s, *amount, *observed)")
+                && body.contains("open_loan(s, *amount, *oracle_debt)"),
+            "product sequence must carry abstract binders in Op payloads:\n{body}"
+        );
+    }
+
+    #[test]
+    fn product_ghost_updates_use_pre_state_and_handler_owned_ambiguous_fields() {
+        let (spec, body) = emit_full_harness(
+            r#"
+spec ProductGhostPre
+
+type Pool
+  | Idle
+  | Active of { amount : U64 }
+
+type Loan
+  | Empty
+  | Open of { amount : U64 }
+
+ghost observed : U64 {
+  init { 0 }
+  on bump { observed := state.amount }
+}
+
+handler bump : Pool.Active -> Pool.Active {
+  effect { amount += 1 }
+}
+
+handler open_loan : Loan.Empty -> Loan.Open {
+  effect { amount := 1 }
+}
+
+property observed_nonnegative :
+  state.observed >= 0
+  preserved_by [bump]
+"#,
+        );
+
+        assert!(
+            body.contains(
+                "let pre = s.clone();\n        if pool::bump(&mut s.pool) {\n            s.observed = pre.pool.amount;"
+            ),
+            "ghost update must read the owning component's pre-state:\n{body}"
+        );
+        let warnings = crate::check::check_completeness(&spec);
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.rule == "ghost_unsupported_state_shape"),
+            "supported multi-account product ghosts must not trigger the old shape lint: {warnings:#?}"
+        );
+    }
+
+    #[test]
+    fn product_ghost_is_not_liftable_when_handler_effect_reads_it() {
+        let spec = parse_str(
+            r#"
+spec ProductGhostEffectRead
+
+type Pool
+  | Idle
+  | Active of { total : U64 }
+
+type Loan
+  | Empty
+  | Open of { debt : U64 }
+
+ghost observed : U64 {
+  init { 0 }
+}
+
+handler copy_observed : Pool.Active -> Pool.Active {
+  effect { total := state.observed }
+}
+
+handler open_loan : Loan.Empty -> Loan.Open {
+  effect { debt := 1 }
+}
+"#,
+        )
+        .expect("parse");
+
+        assert!(
+            !rust_codegen_util::multi_account_ghosts_liftable(&spec),
+            "effect RHS ghost read must retain per-account ghosts"
+        );
+    }
+
+    #[test]
+    fn product_rejects_aliased_nested_module_scoped_params() {
+        let (_spec, body) = emit_full_harness(
+            r#"
+spec ProductRecordParam
+
+type Payload = { value : U64 }
+type MaybePayload = Option Payload
+
+type Pool
+  | Idle
+  | Active of { total : U64 }
+
+type Loan
+  | Empty
+  | Open of { debt : U64 }
+
+handler apply_payload : Pool.Active -> Pool.Active {
+  takes payload : MaybePayload
+  effect { total := 1 }
+}
+
+handler open_loan : Loan.Empty -> Loan.Open {
+  effect { debt := 1 }
+}
+
+property debt_nonnegative :
+  state.debt >= 0
+  preserved_by [apply_payload]
+"#,
+        );
+
+        assert!(
+            !body.contains("fn apply_payload(s: &mut ProductState"),
+            "product wrapper must not name a record type owned by a sibling module:\n{body}"
+        );
     }
 
     /// Overflow-test names must strip the variant prefix — `Active.balance`

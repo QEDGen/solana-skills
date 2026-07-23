@@ -202,8 +202,9 @@ mod product {
     // Transition wrappers — delegate to the owning account module and
     // apply ghost updates atomically with the account transition.
     fn deposit(s: &mut ProductState, amount: u64) -> bool {
+        let pre = s.clone();
         if pool::deposit(&mut s.pool, amount) {
-            s.lifetime_total = s.lifetime_total + amount;
+            s.lifetime_total = pre.lifetime_total + amount;
             true
         } else {
             false

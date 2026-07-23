@@ -517,17 +517,16 @@ pub(super) fn check_ghost_declarations(spec: &ParsedSpec) -> Vec<CompletenessWar
                     | "Bool"
             )
         };
-        // Ghosts are only wired into the flat single-account verification
-        // State today. Indexed (`Map[N]`), multi-account, and explicit
-        // ADT-state shapes don't yet thread ghost fields through their
-        // renderers, so flag rather than silently drop them.
+        // Indexed (`Map[N]`) and explicit ADT-state shapes do not thread
+        // ghosts through their renderers. Multi-account proptest has a
+        // product-state lane; unsupported multi-account obligations are
+        // reported by the backend manifest rather than this shape lint.
         let is_indexed = spec
             .state_fields
             .iter()
             .any(|(_, t)| t.trim_start().starts_with("Map"));
-        let is_multi_account = spec.account_types.len() > 1;
         let is_adt = spec.state_repr_is_adt();
-        let unsupported_shape = is_indexed || is_multi_account || is_adt;
+        let unsupported_shape = is_indexed || is_adt;
         let handler_names: std::collections::BTreeSet<&str> =
             spec.handlers.iter().map(|h| h.name.as_str()).collect();
         for g in &spec.ghosts {
@@ -556,7 +555,7 @@ pub(super) fn check_ghost_declarations(spec: &ParsedSpec) -> Vec<CompletenessWar
             }
             if unsupported_shape {
                 warnings.push(warn("ghost_unsupported_state_shape", Severity::Warning, 2, format!(
-                        "ghost '{}' is declared with an indexed / multi-account / ADT state — ghost fields are only wired into the flat single-account verification State today",
+                        "ghost '{}' is declared with an indexed / ADT state — ghost fields are not wired into this verification State shape",
                         g.name
                     )).subject(g.name.clone()).fix("Move the ghost to a flat single-account spec, or track the quantity in a `property` (e.g. `sum i : Idx, accounts[i].x`) until ghost support lands for this shape."));
             }

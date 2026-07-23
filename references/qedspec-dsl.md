@@ -493,8 +493,9 @@ canonical token example) and, for proptest, into **multi-account** specs
 via the product-state module (#331): the ghost is one global field of the
 generated `ProductState`, updated atomically by the transition wrappers,
 and ghost-reading properties are exercised by the product sequence
-harness. Exception: a ghost read by a handler **guard** is not liftable —
-that spec keeps per-account ghost copies and the ghost obligations stay
+harness. Exception: a ghost read or written by a per-account transition
+(guard, let, effect, or branch scrutinee) is not liftable — that spec
+keeps per-account ghost copies and the ghost obligations stay
 `unsupported` in the manifest. Indexed (`Map[N]`) and explicit-ADT state
 shapes fire the `ghost_unsupported_state_shape` lint — track the
 aggregate in a `property` (`sum i : Idx, accounts[i].x`) instead, which
