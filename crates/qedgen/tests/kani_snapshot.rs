@@ -133,3 +133,12 @@ fn snapshot_kani_cpi_account_bindings() {
         "config.qedspec",
     );
 }
+
+#[test]
+fn snapshot_environment_constraints() {
+    assert_or_update_snapshot(
+        "environment-constraints",
+        "crates/qedgen/tests/fixtures/environment-constraints",
+        "env.qedspec",
+    );
+}

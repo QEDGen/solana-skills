@@ -28,6 +28,11 @@ pub(super) struct TreeCx<'a, 'env> {
     pub accounts: std::collections::BTreeSet<String>,
     pub externals: std::collections::BTreeSet<String>,
     pub abstracts: std::collections::BTreeSet<String>,
+    /// `mutates <field>` names of the enclosing `environment` block.
+    /// Constraints reference mutated state fields by bare name (the
+    /// documented DSL form: `constraint interest_rate > 0`); build_path
+    /// canonicalizes them to state-rooted paths.
+    pub env_mutates: std::collections::BTreeSet<String>,
 }
 
 /// Collect `ghost` names from the typed spec (order-independent — ghosts
@@ -59,6 +64,7 @@ impl<'a, 'env> TreeCx<'a, 'env> {
             accounts: Default::default(),
             externals: Default::default(),
             abstracts: Default::default(),
+            env_mutates: Default::default(),
         }
     }
 
@@ -70,8 +76,14 @@ impl<'a, 'env> TreeCx<'a, 'env> {
     ) -> Self {
         let mut cx = TreeCx::spec_level(env, consts, ghosts);
         for clause in &environment.clauses {
-            if let a::EnvClause::External { object, .. } = &clause.node {
-                cx.externals.insert(object.clone());
+            match &clause.node {
+                a::EnvClause::External { object, .. } => {
+                    cx.externals.insert(object.clone());
+                }
+                a::EnvClause::Mutates { field, .. } => {
+                    cx.env_mutates.insert(field.clone());
+                }
+                a::EnvClause::Constraint(_) => {}
             }
         }
         cx
@@ -376,6 +388,23 @@ fn build(e: &Expr, cx: &TreeCx, shadow: &mut Vec<String>) -> ExprTree {
 /// Resolution order: state-rooted → expression binders (lexical shadow) →
 /// params → consts → lets → accounts → abstract binders → unresolved.
 fn build_path(p: &a::Path, cx: &TreeCx, shadow: &[String]) -> TreePath {
+    // Environment constraints reference mutated state fields by bare name
+    // (`constraint interest_rate > 0` — the documented DSL form).
+    // Canonicalize to the state-rooted spelling so every backend renders
+    // the state receiver, exactly as if the spec wrote `state.<field>`.
+    // Quantifier binders shadow; nothing else can, because `mutates`
+    // names are state fields and environments bind no params/lets.
+    if p.root != "state" && cx.env_mutates.contains(&p.root) && !shadow.iter().any(|s| s == &p.root)
+    {
+        let canonical = a::Path {
+            root: "state".to_string(),
+            segments: std::iter::once(a::PathSeg::Field(p.root.clone()))
+                .chain(p.segments.iter().cloned())
+                .collect(),
+        };
+        return build_path(&canonical, cx, shadow);
+    }
+
     let segments: Vec<TreeSeg> = p
         .segments
         .iter()

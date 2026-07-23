@@ -935,3 +935,39 @@ fn compound_effect_rhs_and_arith_predicates_render_soundly() {
         panic!("emitted Kani harness fails to parse as Rust: {e}\n{out}");
     }
 }
+
+/// Environment constraints reference mutated state fields by bare name
+/// (`constraint rate > 0` — the documented DSL form). The tree builder
+/// canonicalizes them to state-rooted paths, so the rendered harness
+/// reads the state receiver — a bare `rate` is unresolvable Rust and
+/// shipped as an emitted-code compile error before this fix.
+#[test]
+fn environment_constraints_bind_mutated_fields_to_state() {
+    let (mir, parsed) =
+        lower_fixture("crates/qedgen/tests/fixtures/environment-constraints/env.qedspec");
+    let out = render(&mir, &parsed);
+
+    // Unary constraint, live-state binder.
+    assert!(
+        out.contains("kani::assume(s.rate > 0);"),
+        "mutated-field constraint must render with the state receiver:\n{out}"
+    );
+    assert!(
+        !out.contains("kani::assume(rate > 0);"),
+        "bare mutated-field reference must not survive rendering:\n{out}"
+    );
+    // External fields force the pre/post binder: the mutated field reads
+    // `post.<field>`, externals read their `pre_/post_` symbolic pairs.
+    assert!(
+        out.contains("kani::assume(post.rate == post_oracle_price);"),
+        "external-field constraint must render post receivers:\n{out}"
+    );
+    assert!(
+        out.contains("kani::assume(post_oracle_price >= pre_oracle_price);"),
+        "old(external) must render the pre_ symbolic value:\n{out}"
+    );
+
+    if let Err(e) = syn::parse_file(&out) {
+        panic!("emitted Kani harness fails to parse as Rust: {e}\n{out}");
+    }
+}
