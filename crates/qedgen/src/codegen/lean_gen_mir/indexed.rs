@@ -51,10 +51,12 @@ pub(super) fn default_value_for(t: &str) -> &'static str {
 ///     `voted := Function.update s.voted i (1)`. Multiple writes to
 ///     the same `(root, idx)` pair collapse into one
 ///     `Function.update` with a `{ … with … }` payload.
-///   * NO preservation theorems, NO aborts theorems, NO overflow
-///     theorems, NO covers / liveness / environments — only the
-///     property predicate `def`s land in `Spec.lean`. Proofs live
-///     in a sibling `Proofs.lean` (qedgen init seeds it).
+///   * NO proof bodies: `Spec.lean` carries the property predicate
+///     `def`s plus one machine-owned `def <name>_stmt : Prop` per
+///     obligation (#336 — preservation / abort / ensures / cover /
+///     liveness / environment). Proofs live in a sibling `Proofs.lean`
+///     (qedgen init seeds it), ideally typed against the `_stmt` Props
+///     so a restated obligation no longer type-checks.
 pub(super) fn render_indexed_state(mir: &Mir, rec: &mut ObligationRecorder) -> String {
     let mut out = String::new();
 
@@ -175,7 +177,7 @@ pub(super) fn render_indexed_state(mir: &Mir, rec: &mut ObligationRecorder) -> S
     // -- Operation inductive + applyOp --
     emit_indexed_operation_inductive(&mut out, mir, &map_roots);
 
-    // -- Property predicate defs (no theorems).
+    // -- Property predicate defs.
     //
     // Indexed-state proofs need quantifier-aware Mathlib lemmas that
     // qedgen's auto-discharge templates don't cover; ship the
@@ -193,8 +195,432 @@ pub(super) fn render_indexed_state(mir: &Mir, rec: &mut ObligationRecorder) -> S
         }
     }
 
+    // -- Obligation statements (#336).
+    emit_indexed_obligation_statements(&mut out, mir, &map_roots, emit_marker, rec);
+
     out.push_str(&format!("end {}\n", mir.name));
     out
+}
+
+/// #336 — machine-emitted obligation *statements* for the indexed shape.
+///
+/// Proof bodies stay user-owned in `Proofs.lean`, but the statement of
+/// every obligation is a generated `def <name>_stmt : Prop`, so the
+/// statement itself cannot drift from the spec. Prove each in
+/// `Proofs.lean` as `theorem <name> : <name>_stmt := by intro …` —
+/// restating the obligation differently no longer type-checks against
+/// the machine-owned Prop.
+///
+/// Every statement records `emitted` at its emission site; shapes the
+/// statement cannot express (handler-account pubkey reads, no-lifecycle
+/// liveness) record `unsupported` per obligation. The reconcile net turns
+/// anything missed here into `failed` — the blanket
+/// `lean_indexed_shape_proofs_external` synthesis is gone.
+fn emit_indexed_obligation_statements(
+    out: &mut String,
+    mir: &Mir,
+    map_roots: &std::collections::BTreeMap<String, String>,
+    emit_marker: bool,
+    rec: &mut ObligationRecorder,
+) {
+    let app_guard = tree_render::LeanCx::guard().with_application_subscripts();
+    let app_ensures = tree_render::LeanCx::ensures().with_application_subscripts();
+
+    // The transition body binds `let <who> := signer` for a non-state-field
+    // `auth <who>`; a standalone statement Prop has no such binding, so the
+    // alias substitutes to `signer` directly (same identity, word-bounded —
+    // the environment emitter uses the same rewrite pattern).
+    let substitute_auth_alias = |h: &crate::mir::HandlerMir, expr: String| -> String {
+        let Some(who) = handler_auth_name(h) else {
+            return expr;
+        };
+        let state_fields = flat_state_fields(mir);
+        if state_fields.iter().any(|(n, _)| n == &who) {
+            return expr;
+        }
+        let pat = format!(r"\b{}\b", regex::escape(&who));
+        let re = regex::Regex::new(&pat).expect("static regex");
+        re.replace_all(&expr, regex::NoExpand("signer"))
+            .into_owned()
+    };
+
+    out.push_str(
+        "-- ============================================================================\n",
+    );
+    out.push_str("-- Obligation statements (#336) — machine-owned `Prop`s.\n");
+    out.push_str("--\n");
+    out.push_str("-- Prove each in Proofs.lean as\n");
+    out.push_str("--   theorem <name> : <name>_stmt := by intro … \n");
+    out.push_str("-- The statement is generated from the spec; only the proof is yours.\n");
+    out.push_str(
+        "-- ============================================================================\n\n",
+    );
+
+    // -- Property preservation: per (property, preserved_by handler). --
+    for prop in &mir.properties {
+        if prop.expression.is_none() {
+            continue;
+        }
+        for h in mir
+            .handlers
+            .iter()
+            .filter(|h| prop.preserved_by.contains(&h.name))
+        {
+            let stmt_name = safe_name(&format!("{}_preserved_by_{}_stmt", prop.name, h.name));
+            let promotions = infer_idx_promotions_mir(h, map_roots);
+            let param_sig = indexed_param_sig(&h.params, &promotions);
+            let param_args = param_args_str(&h.params);
+            rec.emitted(
+                ObligationKind::PropertyPreservation,
+                &h.name,
+                &prop.name,
+                &stmt_name,
+            );
+            out.push_str(&format!("def {} : Prop :=\n", stmt_name));
+            out.push_str(&format!(
+                "  \u{2200} (s s' : State) (signer : Pubkey){},\n",
+                param_sig
+            ));
+            out.push_str(&format!(
+                "    {} s \u{2192} {}Transition s signer{} = some s' \u{2192} {} s'\n\n",
+                safe_name(&prop.name),
+                safe_name(&h.name),
+                param_args,
+                safe_name(&prop.name)
+            ));
+        }
+    }
+
+    // -- Abort statements: per `requires … else Err` clause. --
+    for h in &mir.handlers {
+        if h.requires_or_abort.is_empty() {
+            continue;
+        }
+        let promotions = infer_idx_promotions_mir(h, map_roots);
+        let param_sig = indexed_param_sig(&h.params, &promotions);
+        let param_args = param_args_str(&h.params);
+        let mut error_total: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for r in &h.requires_or_abort {
+            *error_total.entry(r.err.clone()).or_insert(0) += 1;
+        }
+        let mut error_seen: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for (i, r) in h.requires_or_abort.iter().enumerate() {
+            let pred = substitute_auth_alias(h, expr_lean(&r.pred.0, app_guard));
+            if mentions_handler_account_pubkey(&pred, &h.accounts) {
+                rec.unsupported(
+                    ObligationKind::Abort,
+                    &h.name,
+                    &format!("abort_{i}"),
+                    UnsupportedReason::LeanHandlerAccountPubkey,
+                );
+                continue;
+            }
+            let idx = {
+                let entry = error_seen.entry(r.err.clone()).or_insert(0);
+                let cur = *entry;
+                *entry += 1;
+                cur
+            };
+            let stmt_name = if error_total.get(&r.err).copied().unwrap_or(0) > 1 {
+                safe_name(&format!("{}_aborts_if_{}_{}_stmt", h.name, r.err, idx))
+            } else {
+                safe_name(&format!("{}_aborts_if_{}_stmt", h.name, r.err))
+            };
+            rec.emitted(
+                ObligationKind::Abort,
+                &h.name,
+                &format!("abort_{i}"),
+                &stmt_name,
+            );
+            out.push_str(&format!("def {} : Prop :=\n", stmt_name));
+            out.push_str(&format!(
+                "  \u{2200} (s : State) (signer : Pubkey){},\n",
+                param_sig
+            ));
+            out.push_str(&format!(
+                "    \u{00AC}({}) \u{2192} {}Transition s signer{} = none\n\n",
+                pred,
+                safe_name(&h.name),
+                param_args
+            ));
+        }
+    }
+
+    // -- Ensures statements: per handler `ensures` clause. --
+    for h in &mir.handlers {
+        if h.post.is_empty() {
+            continue;
+        }
+        let promotions = infer_idx_promotions_mir(h, map_roots);
+        let param_sig = indexed_param_sig(&h.params, &promotions);
+        let param_args = param_args_str(&h.params);
+        for (i, ens) in h.post.iter().enumerate() {
+            let body = substitute_auth_alias(h, expr_lean(&ens.0, app_ensures));
+            if mentions_handler_account_pubkey(&body, &h.accounts) {
+                rec.unsupported(
+                    ObligationKind::EnsuresPreservation,
+                    &h.name,
+                    &i.to_string(),
+                    UnsupportedReason::LeanHandlerAccountPubkey,
+                );
+                continue;
+            }
+            let stmt_name = safe_name(&format!("{}_ensures_{}_stmt", h.name, i));
+            rec.emitted(
+                ObligationKind::EnsuresPreservation,
+                &h.name,
+                &i.to_string(),
+                &stmt_name,
+            );
+            out.push_str(&format!("def {} : Prop :=\n", stmt_name));
+            out.push_str(&format!(
+                "  \u{2200} (s s' : State) (signer : Pubkey){},\n",
+                param_sig
+            ));
+            out.push_str(&format!(
+                "    {}Transition s signer{} = some s' \u{2192} {}\n\n",
+                safe_name(&h.name),
+                param_args,
+                body
+            ));
+        }
+    }
+
+    // -- Cover statements: per (cover, trace) + reachable entries. --
+    for cover in &mir.covers {
+        for (trace_idx, trace) in cover.traces.iter().enumerate() {
+            let suffix = if cover.traces.len() > 1 {
+                format!("_{}", trace_idx)
+            } else {
+                String::new()
+            };
+            let stmt_name = safe_name(&format!("cover_{}{}_stmt", cover.name, suffix));
+            rec.emitted(
+                ObligationKind::Cover,
+                "file",
+                &format!("{}::{}", cover.name, trace_idx),
+                &stmt_name,
+            );
+            out.push_str(&format!("def {} : Prop :=\n", stmt_name));
+            out.push_str("  \u{2203} (s0 : State) (signer : Pubkey),\n");
+            let mut indent = "    ".to_string();
+            for (j, op_name) in trace.iter().enumerate() {
+                let handler = mir.handlers.iter().find(|h| h.name == *op_name);
+                let (exists_binders, call_args) = match handler {
+                    Some(h) => {
+                        let promotions = infer_idx_promotions_mir(h, map_roots);
+                        let binders: Vec<String> = h
+                            .params
+                            .iter()
+                            .enumerate()
+                            .map(|(k, (n, t))| {
+                                let ty = promotions
+                                    .get(n)
+                                    .map(|b| format!("Fin {}", b))
+                                    .unwrap_or_else(|| render_ty(t));
+                                format!("(v{}_{} : {})", j, k, ty)
+                            })
+                            .collect();
+                        let args: Vec<String> = (0..h.params.len())
+                            .map(|k| format!("v{}_{}", j, k))
+                            .collect();
+                        (binders.join(" "), args.join(" "))
+                    }
+                    None => (String::new(), String::new()),
+                };
+                let s_var = if j == 0 {
+                    "s0".to_string()
+                } else {
+                    format!("s{}", j)
+                };
+                if !exists_binders.is_empty() {
+                    out.push_str(&format!("{}\u{2203} {}, ", indent, exists_binders));
+                }
+                let arg_str = if call_args.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", call_args)
+                };
+                if j < trace.len() - 1 {
+                    let s_next = format!("s{}", j + 1);
+                    out.push_str(&format!(
+                        "\u{2203} ({} : State), {}Transition {} signer{} = some {} \u{2227}\n",
+                        s_next,
+                        safe_name(op_name),
+                        s_var,
+                        arg_str,
+                        s_next
+                    ));
+                    indent.push_str("  ");
+                } else {
+                    out.push_str(&format!(
+                        "{}Transition {} signer{} \u{2260} none\n\n",
+                        safe_name(op_name),
+                        s_var,
+                        arg_str
+                    ));
+                }
+            }
+        }
+        for (op_name, when_pred) in &cover.reachable {
+            let stmt_name = safe_name(&format!("cover_{}_{}_stmt", cover.name, op_name));
+            rec.emitted(
+                ObligationKind::Cover,
+                "file",
+                &format!("{}::reachable::{}", cover.name, op_name),
+                &stmt_name,
+            );
+            let handler = mir.handlers.iter().find(|h| h.name == *op_name);
+            out.push_str(&format!("def {} : Prop :=\n", stmt_name));
+            out.push_str("  \u{2203} (s : State) (signer : Pubkey),\n");
+            out.push_str("    ");
+            if let Some(p) = when_pred {
+                out.push_str(&format!("{} \u{2227} ", expr_lean(&p.0, app_guard)));
+            }
+            let (exists_binders, call_args) = match handler {
+                Some(h) => {
+                    let promotions = infer_idx_promotions_mir(h, map_roots);
+                    let binders: Vec<String> = h
+                        .params
+                        .iter()
+                        .map(|(n, t)| {
+                            let ty = promotions
+                                .get(n)
+                                .map(|b| format!("Fin {}", b))
+                                .unwrap_or_else(|| render_ty(t));
+                            format!("({} : {})", n, ty)
+                        })
+                        .collect();
+                    (binders.join(" "), param_args_str(&h.params))
+                }
+                None => (String::new(), String::new()),
+            };
+            if !exists_binders.is_empty() {
+                out.push_str(&format!("\u{2203} {}, ", exists_binders));
+            }
+            out.push_str(&format!(
+                "{}Transition s signer{} \u{2260} none\n\n",
+                safe_name(op_name),
+                call_args
+            ));
+        }
+    }
+
+    // -- Liveness statements (need `applyOps` + a lifecycle). --
+    if !mir.liveness_props.is_empty() {
+        if emit_marker {
+            out.push_str(
+                "def applyOps (s : State) (signer : Pubkey) : List Operation \u{2192} Option State\n",
+            );
+            out.push_str("  | [] => some s\n");
+            out.push_str("  | op :: ops => match applyOp s signer op with\n");
+            out.push_str("    | some s' => applyOps s' signer ops\n");
+            out.push_str("    | none => none\n\n");
+        }
+        for liveness in &mir.liveness_props {
+            if !emit_marker {
+                // No lifecycle → no `.status` target predicate to state.
+                rec.unsupported(
+                    ObligationKind::Liveness,
+                    "file",
+                    &liveness.name,
+                    UnsupportedReason::UnsupportedPredicateBody,
+                );
+                continue;
+            }
+            let bound = liveness.within_steps.unwrap_or(10);
+            let stmt_name = safe_name(&format!("liveness_{}_stmt", liveness.name));
+            rec.emitted(ObligationKind::Liveness, "file", &liveness.name, &stmt_name);
+            out.push_str(&format!("def {} : Prop :=\n", stmt_name));
+            out.push_str(&format!(
+                "  \u{2200} (s : State) (signer : Pubkey), s.status = .{} \u{2192}\n",
+                safe_name(&liveness.from_state)
+            ));
+            out.push_str(&format!(
+                "    \u{2203} ops s', ops.length \u{2264} {} \u{2227} applyOps s signer ops = some s' \u{2227} s'.status = .{}\n\n",
+                bound,
+                safe_name(&liveness.leads_to_state)
+            ));
+        }
+    }
+
+    // -- Environment statements: per (property × environment). --
+    for env in &mir.environments {
+        for prop in &mir.properties {
+            if prop.expression.is_none() {
+                continue;
+            }
+            let stmt_name = safe_name(&format!("{}_under_{}_stmt", prop.name, env.name));
+            rec.emitted(
+                ObligationKind::Environment,
+                "file",
+                &format!("{}::{}", prop.name, env.name),
+                &stmt_name,
+            );
+
+            let binders: String = env
+                .mutates
+                .iter()
+                .map(|(name, ty)| format!(" (new_{} : {})", name, render_ty_indexed(ty)))
+                .chain(env.external_fields.iter().flat_map(|(object, field, ty)| {
+                    [
+                        format!(" (pre_{}_{} : {})", object, field, render_ty_indexed(ty)),
+                        format!(" (post_{}_{} : {})", object, field, render_ty_indexed(ty)),
+                    ]
+                }))
+                .collect();
+
+            // Render constraints in a two-state context: `old(state.x)`
+            // reads the pre-state `s.x`, while current-state reads first
+            // render through `s'.x` and are then projected onto the
+            // environment's explicit post-state (`new_x` for mutated
+            // fields, `s.x` otherwise). Keeping those receivers distinct
+            // is load-bearing for monotonicity constraints.
+            let constraints: Vec<String> = env
+                .typed_constraints
+                .iter()
+                .map(|constraint| {
+                    let mut expr = expr_lean(&constraint.predicate.0, app_ensures);
+                    for (field, _) in flat_state_fields(mir) {
+                        let safe = safe_name(&field);
+                        let post = if env.mutates.iter().any(|(name, _)| name == &field) {
+                            format!("new_{}", field)
+                        } else {
+                            format!("s.{}", safe)
+                        };
+                        expr = expr.replace(&format!("s'.{}", safe), &post);
+                    }
+                    expr
+                })
+                .collect();
+
+            let with_parts: String = env
+                .mutates
+                .iter()
+                .map(|(name, _)| format!("{} := new_{}", safe_name(name), name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let post_state = if with_parts.is_empty() {
+                "s".to_string()
+            } else {
+                format!("{{ s with {} }}", with_parts)
+            };
+
+            out.push_str(&format!("def {} : Prop :=\n", stmt_name));
+            out.push_str(&format!("  \u{2200} (s : State){},\n", binders));
+            for c in &constraints {
+                out.push_str(&format!("    ({}) \u{2192}\n", c));
+            }
+            out.push_str(&format!(
+                "    {} s \u{2192} {} {}\n\n",
+                safe_name(&prop.name),
+                safe_name(&prop.name),
+                post_state
+            ));
+        }
+    }
 }
 
 /// Render a MIR `Ty` in indexed-state form. Differs from

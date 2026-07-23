@@ -630,6 +630,49 @@ environment oracle_step {
     assert!(!out.contains("s'.new_rate"), "{out}");
 }
 
+/// #336 review follow-up — indexed environment statements must preserve
+/// the distinction between the pre-state read under `old(...)` and the
+/// explicit post-mutation value. Collapsing both to `new_rate` turns a
+/// monotonicity constraint into the tautology `new_rate ≥ new_rate`.
+#[test]
+fn indexed_environment_statement_keeps_old_and_new_state_distinct() {
+    let src = r#"
+spec IndexedEnvironment
+
+const MAX_SAMPLES = 4
+
+type State = {
+  rate : U64,
+  samples : Map[MAX_SAMPLES] U64,
+}
+
+property rate_nonnegative :
+  state.rate >= 0
+  preserved_by all
+
+environment rate_change {
+  mutates rate : U64
+  constraint state.rate >= old(state.rate)
+}
+"#;
+    let parsed = crate::chumsky_adapter::parse_str(src).expect("parse");
+    let mir = crate::mir::lower(&parsed);
+    let out = render(&mir);
+
+    assert!(
+        out.contains("(new_rate ≥ s.rate) →"),
+        "indexed environment constraint must relate post to pre:\n{out}"
+    );
+    assert!(
+        !out.contains("(new_rate ≥ new_rate) →"),
+        "old-state reads must not collapse to the post value:\n{out}"
+    );
+    assert!(
+        !out.contains("s'.rate"),
+        "the environment statement binds no free post-state receiver:\n{out}"
+    );
+}
+
 #[test]
 fn render_emits_overflow_theorems() {
     // Lending: `deposit` issues a `+=` effect, which MIR lowers to

@@ -30,7 +30,7 @@ sBPF assembly is selected by `pragma sbpf` in the spec, not by a `Target`.
 | Kani spec-model (`kani_mir`) | ✅ ¹ | ✅ ¹ | ✅ ¹ | n/a | skip by design |
 | impl-Kani (`kani_impl`) | ✅ greenfield + state-struct (#162) + Context (#169) | ⚠️ greenfield shape only | ⚠️ own `#[repr(C)]` shape; some ix-data field types TODO | ❌ | ❌ |
 | proptest (`proptest_gen_mir`) | ✅ | ✅ | ✅ | n/a | skip by design |
-| Lean (`lean_gen_mir`) | ✅ ² | ✅ ² | ✅ ² | n/a | ✅ dedicated sBPF path |
+| Lean (`lean_gen_mir`) | ✅ ² ³ | ✅ ² ³ | ✅ ² ³ | n/a | ✅ dedicated sBPF path |
 | Probe: runtime-agnostic scanners (`run_helpers`) | ✅ (#196) | ✅ (#196) | ✅ | ✅ (#196) | ❌ bootstrap only |
 | Probe: IDL-enrichment overlay (`probe/idl_overlay`) | ✅ enrich + narrow (#235); unbuilt → `derivable_idl` (#238) | ✅ enrich + narrow (#235); unbuilt → `derivable_idl` (#238) | ✅ enrich + handler fill | ⚠️ enrich only (declarative flags) | ❌ |
 | Probe: runtime-specific findings (`probe/`) | ❌ agent-layer (SKILL.md) | ❌ agent-layer | ✅ richest (`pinocchio_probe`) | ⚠️ Shank dispatcher discovery only | ❌ |
@@ -52,6 +52,14 @@ the abort theorem with a mechanical proof. The ADT and indexed lanes, and
 reads deeper than one projection, keep the clause out of the model and
 report `unsupported(lean_handler_account_pubkey)` in the obligation
 manifest.
+
+³ Indexed shapes (`Map[N]` fields, #336): `Spec.lean` carries a
+machine-owned `def <name>_stmt : Prop` for every obligation (preservation,
+aborts, ensures, covers, liveness, environments); proof bodies stay in the
+user-owned `Proofs.lean`, ideally typed `theorem <name> : <name>_stmt` so
+a restated obligation no longer type-checks. The obligation manifest
+records each statement as emitted — the old blanket
+`lean_indexed_shape_proofs_external` status is gone.
 
 ## Codegen ownership contract: CPIs, PDA creation, and events
 
