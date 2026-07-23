@@ -2429,10 +2429,12 @@ fn emit_product_module(
             spec,
             pair.op,
             &harness,
-            &format!("{}::{}", owner.mod_name, pair.prop.name),
-            &format!(".{}", owner.mod_name),
-            &pair.prop.name,
-            pair.prop.class == crate::check::PropertyClass::Binary,
+            ProductPreservationPredicate {
+                path: &format!("{}::{}", owner.mod_name, pair.prop.name),
+                receiver: &format!(".{}", owner.mod_name),
+                name: &pair.prop.name,
+                binary: pair.prop.class == crate::check::PropertyClass::Binary,
+            },
         )?;
     }
 
@@ -2451,10 +2453,12 @@ fn emit_product_module(
             spec,
             pair.op,
             &harness,
-            &pair.prop.name,
-            "",
-            &pair.prop.name,
-            false,
+            ProductPreservationPredicate {
+                path: &pair.prop.name,
+                receiver: "",
+                name: &pair.prop.name,
+                binary: false,
+            },
         )?;
     }
 
@@ -2477,15 +2481,19 @@ fn emit_product_module(
 /// predicate (`pool::pool_solvency` or a product predicate); `receiver`
 /// narrows the asserted value (`.pool` for component predicates, empty
 /// for product predicates).
+struct ProductPreservationPredicate<'a> {
+    path: &'a str,
+    receiver: &'a str,
+    name: &'a str,
+    binary: bool,
+}
+
 fn emit_product_preservation_test(
     out: &mut String,
     spec: &ParsedSpec,
     op: &ParsedHandler,
     harness: &str,
-    predicate_path: &str,
-    receiver: &str,
-    prop_name: &str,
-    binary: bool,
+    predicate: ProductPreservationPredicate<'_>,
 ) -> Result<()> {
     out.push_str("    proptest! {\n");
     out.push_str("        #![proptest_config(ProptestConfig { max_global_rejects: 65536, ..ProptestConfig::with_cases(256) })]\n");
@@ -2502,10 +2510,10 @@ fn emit_product_preservation_test(
     ));
     out.push_str("            let pre = s.clone();\n");
     out.push_str("            let mut post = s;\n");
-    if !binary {
+    if !predicate.binary {
         out.push_str(&format!(
             "            prop_assume!({}(&pre{}));\n",
-            predicate_path, receiver
+            predicate.path, predicate.receiver
         ));
     }
     let args: String = model_params(op).map(|(n, _)| format!(", {}", n)).collect();
@@ -2513,15 +2521,18 @@ fn emit_product_preservation_test(
         "            if {}(&mut post{}) {{\n",
         op.name, args
     ));
-    let assertion = if binary {
-        format!("{}(&pre{}, &post{})", predicate_path, receiver, receiver)
+    let assertion = if predicate.binary {
+        format!(
+            "{}(&pre{}, &post{})",
+            predicate.path, predicate.receiver, predicate.receiver
+        )
     } else {
-        format!("{}(&post{})", predicate_path, receiver)
+        format!("{}(&post{})", predicate.path, predicate.receiver)
     };
     out.push_str(&format!("                prop_assert!({},\n", assertion));
     out.push_str(&format!(
         "                    \"{} must hold after {}\");\n",
-        prop_name, op.name
+        predicate.name, op.name
     ));
     out.push_str("            }\n");
     out.push_str("        }\n");
