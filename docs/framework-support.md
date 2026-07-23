@@ -30,7 +30,7 @@ sBPF assembly is selected by `pragma sbpf` in the spec, not by a `Target`.
 | Kani spec-model (`kani_mir`) | ✅ ¹ | ✅ ¹ | ✅ ¹ | n/a | skip by design |
 | impl-Kani (`kani_impl`) | ✅ greenfield + state-struct (#162) + Context (#169) | ⚠️ greenfield shape only | ⚠️ own `#[repr(C)]` shape; some ix-data field types TODO | ❌ | ❌ |
 | proptest (`proptest_gen_mir`) | ✅ | ✅ | ✅ | n/a | skip by design |
-| Lean (`lean_gen_mir`) | ✅ | ✅ | ✅ | n/a | ✅ dedicated sBPF path |
+| Lean (`lean_gen_mir`) | ✅ ² | ✅ ² | ✅ ² | n/a | ✅ dedicated sBPF path |
 | Probe: runtime-agnostic scanners (`run_helpers`) | ✅ (#196) | ✅ (#196) | ✅ | ✅ (#196) | ❌ bootstrap only |
 | Probe: IDL-enrichment overlay (`probe/idl_overlay`) | ✅ enrich + narrow (#235); unbuilt → `derivable_idl` (#238) | ✅ enrich + narrow (#235); unbuilt → `derivable_idl` (#238) | ✅ enrich + handler fill | ⚠️ enrich only (declarative flags) | ❌ |
 | Probe: runtime-specific findings (`probe/`) | ❌ agent-layer (SKILL.md) | ❌ agent-layer | ✅ richest (`pinocchio_probe`) | ⚠️ Shank dispatcher discovery only | ❌ |
@@ -44,6 +44,14 @@ transition canonicalization), so Kani cannot construct cross-variant field
 combinations. Multi-account ADT and non-defaultable payload types stay on the
 unconstrained flat model, reported as `unsupported(kani_adt_state_repr)` in
 the obligation manifest.
+
+² Account-pubkey authorization clauses (#328): flat-state shapes bind the
+referenced account addresses and imported state fields in a generated
+`structure ActionCtx`, keep the clause in the transition guard, and emit
+the abort theorem with a mechanical proof. The ADT and indexed lanes, and
+reads deeper than one projection, keep the clause out of the model and
+report `unsupported(lean_handler_account_pubkey)` in the obligation
+manifest.
 
 ## Codegen ownership contract: CPIs, PDA creation, and events
 

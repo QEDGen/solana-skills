@@ -905,3 +905,175 @@ fn branch_arm_assign_sub_guard_gates_only_its_arm() {
         "untaken arm must stay unguarded:\n{out}"
     );
 }
+
+/// #328 — flat-shape account-pubkey authorization routes through
+/// `ActionCtx`: the structure is emitted, the transition takes `(ctx :
+/// ActionCtx)`, the guard carries the clause, and the abort theorem binds
+/// and passes ctx.
+#[test]
+fn action_ctx_routes_account_pubkey_guard() {
+    let mir = lower_fixture("examples/rust/escrow/escrow.qedspec");
+    let out = render(&mir);
+
+    assert!(
+        out.contains("structure ActionCtx where"),
+        "ActionCtx structure missing:\n{out}"
+    );
+    assert!(
+        out.contains("  initializer_ta : Pubkey"),
+        "ActionCtx field missing:\n{out}"
+    );
+    assert!(
+        out.contains("def cancelTransition (s : State) (signer : Pubkey) (ctx : ActionCtx)"),
+        "transition must take ctx:\n{out}"
+    );
+    assert!(
+        out.contains("ctx.initializer_ta = s.initializer_token_account"),
+        "authorization clause must be in the guard:\n{out}"
+    );
+    assert!(
+        out.contains(
+            "theorem cancel_aborts_if_Unauthorized (s : State) (signer : Pubkey) (ctx : ActionCtx)"
+        ),
+        "abort theorem must bind ctx:\n{out}"
+    );
+    assert!(
+        out.contains("def applyOp (s : State) (signer : Pubkey) (ctx : ActionCtx)"),
+        "applyOp must thread ctx:\n{out}"
+    );
+}
+
+/// #328 — dotted cross-program auth on a *flat* spec: the imported state
+/// field read becomes an `ActionCtx` member typed from the import.
+#[test]
+fn action_ctx_binds_imported_state_field_read() {
+    let spec = crate::chumsky_adapter::parse_str(
+        r#"
+spec FlatDottedAuth
+
+program_id "11111111111111111111111111111111"
+
+type State = {
+  paused : U8,
+}
+
+type Error
+  | Unauthorized
+
+handler pause {
+  auth registry.admin
+  accounts {
+    admin : signer
+    registry : writable
+  }
+  modifies [paused]
+  effect {
+    paused := 1
+  }
+}
+"#,
+    )
+    .expect("parse");
+    let mir = crate::mir::lower(&spec);
+    let out = render(&mir);
+
+    assert!(
+        out.contains("structure ActionCtx where"),
+        "ActionCtx structure missing:\n{out}"
+    );
+    assert!(
+        out.contains("registry_admin : Pubkey"),
+        "imported state-field member missing:\n{out}"
+    );
+    assert!(
+        out.contains("ctx.registry_admin"),
+        "guard must read the ctx member:\n{out}"
+    );
+}
+
+/// #328 review follow-up — imported state-field types are selected from
+/// the account binding's declared type (not the first namespace type with
+/// a same-named field), and cover witnesses use values matching each
+/// ActionCtx field type instead of filling every slot with a Pubkey.
+#[test]
+fn action_ctx_uses_declared_import_type_and_typed_cover_witness() {
+    let spec = crate::chumsky_adapter::parse_str(
+        r#"
+spec TypedActionCtx
+
+program_id "11111111111111111111111111111111"
+
+type State = {
+  counter : U64,
+}
+
+type Error
+  | Unauthorized
+
+handler advance {
+  permissionless
+  accounts {
+    caller : signer
+    registry : writable
+  }
+  requires registry.counter == state.counter else Unauthorized
+  modifies [counter]
+  effect {
+    counter += 1
+  }
+}
+
+cover advance_once [advance]
+"#,
+    )
+    .expect("parse");
+    let mut mir = crate::mir::lower(&spec);
+    let registry = mir.handlers[0]
+        .accounts
+        .iter_mut()
+        .find(|a| a.name == "registry")
+        .expect("registry binding");
+    registry.imported_namespace = Some("Registry".to_string());
+    registry.account_type = Some("CounterConfig".to_string());
+    mir.imports.insert(
+        "Registry".to_string(),
+        crate::mir::ImportedSpecMir {
+            alias: "Registry".to_string(),
+            origin: crate::mir::ImportOrigin::Inline,
+            account_types: vec![
+                crate::check::ParsedAccountType {
+                    name: "WrongFirstMatch".to_string(),
+                    fields: vec![("counter".to_string(), "Bool".to_string())],
+                    lifecycle: Vec::new(),
+                    pda_ref: None,
+                    variants: Vec::new(),
+                },
+                crate::check::ParsedAccountType {
+                    name: "CounterConfig".to_string(),
+                    fields: vec![("counter".to_string(), "U64".to_string())],
+                    lifecycle: Vec::new(),
+                    pda_ref: None,
+                    variants: Vec::new(),
+                },
+            ],
+            records: Vec::new(),
+            interfaces: std::collections::BTreeMap::new(),
+            upstream: None,
+            verified_pkg_root: None,
+        },
+    );
+
+    let out = render(&mir);
+    assert!(
+        out.contains("  registry_counter : Nat"),
+        "the declared imported account type must determine the ctx field:\n{out}"
+    );
+    assert!(
+        out.contains("let ctxw : ActionCtx := \u{27E8}0\u{27E9}"),
+        "numeric ctx fields need a numeric cover witness:\n{out}"
+    );
+    assert!(
+        !out.contains("let ctxw : ActionCtx := \u{27E8}pk\u{27E9}"),
+        "numeric ctx fields must not receive a Pubkey witness:\n{out}"
+    );
+}

@@ -163,6 +163,7 @@ fn render_single_account(mir: &Mir, rec: &mut ObligationRecorder) -> String {
     emit_constants(&mut out, mir);
     emit_lifecycle_marker(&mut out, mir);
     emit_state_struct(&mut out, mir);
+    emit_action_ctx(&mut out, mir);
     emit_transitions(&mut out, mir);
     // In-`Spec.lean` CPI theorems only; sibling axiom modules + lakefile
     // wiring are written by `lean_sidecars::write_spec_with_sidecars`,

@@ -205,6 +205,210 @@ pub(super) fn mentions_handler_account_pubkey(
     })
 }
 
+/// Any *free* handler-account projection in the rendered Lean — `.pubkey`
+/// / `.key()` or a state-field read (`admin_config.admin`). An occurrence
+/// preceded by a word character or `.` is not free (`ctx.admin_config.…`,
+/// `s.admin_config_admin`) and does not match.
+pub(super) fn mentions_handler_account(
+    expr: &str,
+    accounts: &[crate::mir::AccountBindingShape],
+) -> bool {
+    accounts.iter().any(|a| {
+        let needle = format!("{}.", a.name);
+        let mut start = 0;
+        while let Some(pos) = expr[start..].find(&needle) {
+            let abs = start + pos;
+            let free = match abs.checked_sub(1).map(|i| expr.as_bytes()[i]) {
+                None => true,
+                Some(prev) => !prev.is_ascii_alphanumeric() && prev != b'_' && prev != b'.',
+            };
+            if free {
+                return true;
+            }
+            start = abs + needle.len();
+        }
+        false
+    })
+}
+
+/// One `ActionCtx` field: `(name, lean_type)`.
+pub(super) type CtxField = (String, String);
+
+/// Decision for one guard predicate under the ActionCtx lane (#328).
+pub(super) enum PredRender {
+    /// No account references — the plain rendering.
+    Plain(String),
+    /// Account references resolved through `ctx.`; carries the fields the
+    /// rendering reads so the spec-level `ActionCtx` union can be built.
+    Ctx(String, Vec<CtxField>),
+    /// Account references survive even ctx routing (deep projections,
+    /// tree-less carriers) — keep the clause out of the model and its
+    /// obligation reported unsupported, exactly as before #328.
+    Dropped,
+}
+
+/// Render a guard predicate, routing handler-account reads through
+/// `ActionCtx` when needed. Both the transition guard builder and the
+/// abort-theorem emitter call this, so the guard conjunct and the theorem
+/// hypothesis stay byte-identical.
+pub(super) fn render_guard_pred(
+    mir: &Mir,
+    h: &crate::mir::HandlerMir,
+    pred: &crate::mir::Expr,
+) -> PredRender {
+    let plain = expr_lean(pred, super::tree_render::LeanCx::guard());
+    if !mentions_handler_account(&plain, &h.accounts) {
+        return PredRender::Plain(plain);
+    }
+    // Lane gate: ADT / indexed shapes keep the pre-#328 drop behavior.
+    // Tree-less predicates cannot be re-routed structurally.
+    if !ctx_lane_enabled(mir) || pred.tree.is_none() {
+        return PredRender::Dropped;
+    }
+    let routed = expr_lean(pred, super::tree_render::LeanCx::guard().with_action_ctx());
+    if mentions_handler_account(&routed, &h.accounts) {
+        return PredRender::Dropped;
+    }
+    PredRender::Ctx(routed, pred_ctx_fields(mir, h, pred))
+}
+
+/// The `ActionCtx` fields one routed predicate reads: `<acct> : Pubkey`
+/// for address reads, `<acct>_<field> : <ty>` for state-field reads (type
+/// resolved through the account binding's imported declaration; `Pubkey`
+/// fallback — the motivating shape is a pubkey comparison).
+fn pred_ctx_fields(
+    mir: &Mir,
+    h: &crate::mir::HandlerMir,
+    pred: &crate::mir::Expr,
+) -> Vec<CtxField> {
+    use crate::mir::expr_tree::{BindingKind, ExprTree, TreeSeg};
+
+    let mut fields = std::collections::BTreeSet::new();
+    if let Some(tree) = pred.tree.as_ref() {
+        tree.for_each_node(&mut |node| {
+            if let ExprTree::Path(p) = node {
+                if p.binding != BindingKind::Account {
+                    return;
+                }
+                match p.segments.as_slice() {
+                    [] => {
+                        fields.insert((p.root.clone(), "Pubkey".to_string()));
+                    }
+                    [TreeSeg::Field(f)] if f == "pubkey" || f == "key()" || f == "key" => {
+                        fields.insert((p.root.clone(), "Pubkey".to_string()));
+                    }
+                    [TreeSeg::Field(f)] => {
+                        fields.insert((
+                            format!("{}_{}", p.root, f),
+                            imported_state_field_lean_ty(mir, h, &p.root, f),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        });
+    }
+    fields.into_iter().collect()
+}
+
+/// Lean type for an account state-field read, resolved through the
+/// account binding's imported namespace (`AdminConfig.State.admin :
+/// Pubkey`). `Pubkey` fallback.
+fn imported_state_field_lean_ty(
+    mir: &Mir,
+    h: &crate::mir::HandlerMir,
+    acct: &str,
+    field: &str,
+) -> String {
+    h.accounts
+        .iter()
+        .find(|a| a.name == acct)
+        .and_then(|a| {
+            let ns = a.imported_namespace.as_ref()?;
+            let account_type = a.account_type.as_ref()?;
+            let import = mir.imports.get(ns)?;
+            let declared = import
+                .account_types
+                .iter()
+                .find(|candidate| &candidate.name == account_type)?;
+            declared
+                .fields
+                .iter()
+                .find(|(n, _)| n == field)
+                .map(|(_, t)| render_ty(&crate::mir::parse_ty(t)))
+        })
+        .unwrap_or_else(|| "Pubkey".to_string())
+}
+
+/// Whether the ActionCtx lane applies to this Mir (#328): flat-state
+/// shapes only. The multi-variant ADT and indexed lanes keep the
+/// drop-and-report behavior — their transitions bind pattern binders, not
+/// `s.` receivers, and have their own guard emitters.
+pub(super) fn ctx_lane_enabled(mir: &Mir) -> bool {
+    let multi_variant_adt = mir.adt_state && mir.state.variants.len() > 1;
+    !multi_variant_adt && !super::uses_indexed_shape(mir)
+}
+
+/// Union of `ActionCtx` fields across every handler's guard predicates —
+/// the spec-level structure. Empty ⇒ no `ActionCtx` is emitted and no
+/// signature changes anywhere.
+pub(super) fn spec_action_ctx_fields(mir: &Mir) -> Vec<CtxField> {
+    let mut fields = std::collections::BTreeSet::new();
+    for h in &mir.handlers {
+        for f in handler_ctx_fields(mir, h) {
+            fields.insert(f);
+        }
+    }
+    fields.into_iter().collect()
+}
+
+/// The `ActionCtx` fields this handler's routed guard predicates read.
+/// Non-empty ⇒ the handler's transition takes `(ctx : ActionCtx)`.
+pub(super) fn handler_ctx_fields(mir: &Mir, h: &crate::mir::HandlerMir) -> Vec<CtxField> {
+    if !ctx_lane_enabled(mir) {
+        return Vec::new();
+    }
+    let mut fields = std::collections::BTreeSet::new();
+    for pred in h
+        .pre
+        .iter()
+        .map(|p| &p.0)
+        .chain(h.body.stmts.iter().filter_map(|st| match st {
+            crate::mir::Stmt::RequireOrAbort { pred, .. } => Some(&pred.0),
+            _ => None,
+        }))
+    {
+        if let PredRender::Ctx(_, f) = render_guard_pred(mir, h, pred) {
+            fields.extend(f);
+        }
+    }
+    fields.into_iter().collect()
+}
+
+/// Whether this handler's transition signature carries `(ctx : ActionCtx)`.
+pub(super) fn handler_uses_ctx(mir: &Mir, h: &crate::mir::HandlerMir) -> bool {
+    !handler_ctx_fields(mir, h).is_empty()
+}
+
+/// ` (ctx : ActionCtx)` when the handler's transition takes it; `""`
+/// otherwise. Signature-side companion to [`ctx_arg`].
+pub(super) fn ctx_sig(mir: &Mir, h: &crate::mir::HandlerMir) -> &'static str {
+    if handler_uses_ctx(mir, h) {
+        " (ctx : ActionCtx)"
+    } else {
+        ""
+    }
+}
+
+/// ` ctx` when the handler's transition takes it; `""` otherwise.
+pub(super) fn ctx_arg(mir: &Mir, h: &crate::mir::HandlerMir) -> &'static str {
+    if handler_uses_ctx(mir, h) {
+        " ctx"
+    } else {
+        ""
+    }
+}
+
 /// Build the call-side argument string for transition function
 /// invocations: `" p1 p2 ..."`. Empty when `params` is empty.
 pub(super) fn param_args_str(params: &[(crate::mir::Symbol, crate::mir::Ty)]) -> String {
