@@ -115,6 +115,50 @@ fn lean_handler_account_pubkey_drops_are_reported() {
     );
 }
 
+/// #336 — indexed-state Lean emits a machine-owned `def <name>_stmt :
+/// Prop` per obligation instead of delegating everything to Proofs.lean.
+/// The bundled multisig example (29 Lean obligations) must report every
+/// one emitted with a `_stmt` artifact — zero unsupported, zero failed.
+#[test]
+fn lean_indexed_shape_emits_statement_props() {
+    let (mir, parsed) = lower_fixture("examples/rust/multisig/multisig.qedspec");
+    assert!(
+        crate::lean_gen_mir::uses_indexed_shape(&mir),
+        "multisig is the indexed fixture"
+    );
+    let entries = reconciled(
+        ObligationBackend::Lean,
+        &mir,
+        &parsed,
+        crate::lean_gen_mir::collect_obligations(&mir),
+    );
+    assert!(!entries.is_empty());
+    assert!(
+        failed_entries(&entries).is_empty(),
+        "reconcile must stay quiet: {:#?}",
+        entries
+    );
+    for e in &entries {
+        match &e.status {
+            ObligationStatus::Emitted { artifact } => {
+                if e.kind != ObligationKind::TransitionGuard {
+                    assert!(
+                        artifact.ends_with("_stmt"),
+                        "indexed-Lean artifact must be a statement Prop: {:#?}",
+                        e
+                    );
+                }
+            }
+            ObligationStatus::Unsupported { .. } | ObligationStatus::Failed { .. } => {
+                panic!(
+                    "multisig must have no unsupported/failed Lean entries: {:#?}",
+                    e
+                );
+            }
+        }
+    }
+}
+
 /// #331 — multi-account proptest cannot model spec-global ghosts. A
 /// ghost-reading property on a two-account spec must be reported per
 /// preserved_by handler, not silently filtered.

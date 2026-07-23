@@ -124,9 +124,10 @@ pub(crate) fn render_with_obligations(mir: &Mir, rec: &mut ObligationRecorder) -
 // ----------------------------------------------------------------------
 
 /// Whether this spec routes to the indexed-state Lean renderer
-/// (`Map[N]` fields) — the shape whose theorems live in the user-owned
-/// `Proofs.lean` skeleton, not `Spec.lean`. The obligation reconcile
-/// (#332) keys the `lean_indexed_shape_proofs_external` status on this.
+/// (`Map[N]` fields). Since #336 the renderer emits a machine-owned
+/// `def <name>_stmt : Prop` per obligation (recorded at the emission
+/// sites); proof bodies stay in the user-owned `Proofs.lean` skeleton.
+#[cfg_attr(not(test), allow(dead_code))] // test-suite seam since #336 removed the reconcile consumer
 pub(crate) fn uses_indexed_shape(mir: &Mir) -> bool {
     is_indexed(mir)
 }

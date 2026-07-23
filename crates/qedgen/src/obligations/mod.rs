@@ -34,7 +34,10 @@ use std::path::{Path, PathBuf};
 
 /// Bump when the JSON shape changes. `load` rejects unknown versions
 /// (the `qed_lock` pattern) rather than misreading them.
-pub const OBLIGATIONS_SCHEMA_VERSION: u32 = 1;
+/// v2 (#336): `lean_indexed_shape_proofs_external` removed — indexed-Lean
+/// obligations are now emitted `_stmt` Props recorded at their emission
+/// sites, and a v1 manifest carrying the old tag no longer parses.
+pub const OBLIGATIONS_SCHEMA_VERSION: u32 = 2;
 pub const OBLIGATIONS_FILENAME: &str = "obligations.json";
 
 /// The model-level backends the manifest tracks. `kani_impl`, unit tests,
@@ -138,12 +141,6 @@ pub enum UnsupportedReason {
     /// Predicate body is missing or uses an unsupported construct
     /// (e.g. an untranslatable quantifier).
     UnsupportedPredicateBody,
-    /// Indexed-state Lean (`Map[N]` fields) emits predicate definitions
-    /// only; preservation / abort / cover / liveness theorems are
-    /// delegated to the user-owned `Proofs.lean` skeleton
-    /// (`proofs_bootstrap`), so the generated `Spec.lean` carries no
-    /// machine-emitted obligation for them.
-    LeanIndexedShapeProofsExternal,
 }
 
 impl UnsupportedReason {
@@ -191,9 +188,6 @@ impl UnsupportedReason {
             }
             UnsupportedReason::UnsupportedPredicateBody => {
                 "predicate body is missing or uses an unsupported construct"
-            }
-            UnsupportedReason::LeanIndexedShapeProofsExternal => {
-                "indexed-state Lean delegates theorems to the user-owned Proofs.lean skeleton; Spec.lean has no machine-emitted obligation"
             }
         }
     }
@@ -355,10 +349,13 @@ impl ObligationRecorder {
 /// Reconcile one backend's recorded entries against its expected
 /// inventory. An expected obligation the backend never reported gets a
 /// status matched to the known capability boundary:
-///   * Lean on an indexed-shape spec (`Map[N]` fields) → theorems are
-///     delegated to the user-owned `Proofs.lean` skeleton;
 ///   * multi-account specs → cross-module scoping drops (#324/#331);
 ///   * otherwise → `failed`: a genuine silent skip.
+///
+/// #336 — the indexed-Lean blanket is gone: the indexed renderer emits a
+/// machine-owned `def <name>_stmt : Prop` per obligation and records each
+/// at its emission site, so a missing indexed-Lean obligation is a real
+/// `failed`, not a delegated one.
 pub fn reconciled(
     backend: ObligationBackend,
     mir: &crate::mir::Mir,
@@ -366,23 +363,18 @@ pub fn reconciled(
     recorded: Vec<ObligationEntry>,
 ) -> Vec<ObligationEntry> {
     let expected = inventory::expected_obligations(mir, parsed, backend);
-    let missing_status =
-        if backend == ObligationBackend::Lean && crate::lean_gen_mir::uses_indexed_shape(mir) {
-            ObligationStatus::Unsupported {
-                reason: UnsupportedReason::LeanIndexedShapeProofsExternal,
-            }
-        } else if parsed.account_types.len() > 1 {
-            ObligationStatus::Unsupported {
-                reason: UnsupportedReason::MultiAccountCrossAccountObligation,
-            }
-        } else {
-            ObligationStatus::Failed {
-                reason: format!(
-                    "requested by the spec but not reported by the {} backend",
-                    backend.name()
-                ),
-            }
-        };
+    let missing_status = if parsed.account_types.len() > 1 {
+        ObligationStatus::Unsupported {
+            reason: UnsupportedReason::MultiAccountCrossAccountObligation,
+        }
+    } else {
+        ObligationStatus::Failed {
+            reason: format!(
+                "requested by the spec but not reported by the {} backend",
+                backend.name()
+            ),
+        }
+    };
     inventory::reconcile(backend, expected, recorded, missing_status)
 }
 
