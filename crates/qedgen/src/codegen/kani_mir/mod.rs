@@ -4,9 +4,10 @@
 //!
 //! `generate` emits: structural prefix (banner / math helpers / state-model
 //! header / file-scoped constants), per-account sections (multi-account wraps
-//! each in `mod <lowercase>`; covers/liveness/env emit in single mode only),
-//! then the `DO NOT EDIT BELOW` footer. sBPF specs never reach this module —
-//! `qedgen codegen --kani` skips assembly targets (Lean + client tests instead).
+//! each in `mod <lowercase>` and lowers covers/liveness/env once over the
+//! `mod product` state, #324), then the `DO NOT EDIT BELOW` footer. sBPF
+//! specs never reach this module — `qedgen codegen --kani` skips assembly
+//! targets (Lean + client tests instead).
 
 use anyhow::Result;
 use std::path::Path;
@@ -26,6 +27,7 @@ mod driver;
 mod guards;
 mod prefix;
 mod preservation;
+mod product;
 
 pub(crate) use account::*;
 pub(crate) use conformance::*;

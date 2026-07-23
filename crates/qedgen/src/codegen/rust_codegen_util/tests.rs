@@ -114,7 +114,7 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
     let mir = crate::mir::lower(&spec);
     let op = &spec.handlers[0];
     let mut out = String::new();
-    emit_transition_fn(&mut out, &mir, op, &spec, false, |t| {
+    emit_transition_fn(&mut out, &mir, op, &spec, false, VIS_PRIVATE, |t| {
         crate::codegen_shared::map_type(t, &spec)
     })
     .expect("emit");
@@ -223,7 +223,7 @@ handler buy (amount : U64) { effect { pool += amount } }
     let mir = crate::mir::lower(&spec);
     let op = &spec.handlers[0];
     let mut out = String::new();
-    emit_transition_fn(&mut out, &mir, op, &spec, false, |t| {
+    emit_transition_fn(&mut out, &mir, op, &spec, false, VIS_PRIVATE, |t| {
         crate::codegen_shared::map_type(t, &spec)
     })
     .expect("emit");
@@ -251,7 +251,7 @@ handler buy (amount : U64) { effect { pool +=! amount } }
     let mir = crate::mir::lower(&spec);
     let op = &spec.handlers[0];
     let mut out = String::new();
-    emit_transition_fn(&mut out, &mir, op, &spec, false, |t| {
+    emit_transition_fn(&mut out, &mir, op, &spec, false, VIS_PRIVATE, |t| {
         crate::codegen_shared::map_type(t, &spec)
     })
     .expect("emit");
@@ -275,7 +275,7 @@ handler buy (amount : U64) { effect { pool +=? amount } }
     let mir = crate::mir::lower(&spec);
     let op = &spec.handlers[0];
     let mut out = String::new();
-    emit_transition_fn(&mut out, &mir, op, &spec, false, |t| {
+    emit_transition_fn(&mut out, &mir, op, &spec, false, VIS_PRIVATE, |t| {
         crate::codegen_shared::map_type(t, &spec)
     })
     .expect("emit");
@@ -304,7 +304,7 @@ fn emit_transition_fn_sub_three_tiers() {
         let mir = crate::mir::lower(&spec);
         let op = &spec.handlers[0];
         let mut out = String::new();
-        emit_transition_fn(&mut out, &mir, op, &spec, false, |t| {
+        emit_transition_fn(&mut out, &mir, op, &spec, false, VIS_PRIVATE, |t| {
             crate::codegen_shared::map_type(t, &spec)
         })
         .expect("emit");
@@ -333,7 +333,7 @@ handler close : State.Open -> State.Closed { effect { x := 0 } }
     let mir = crate::mir::lower(&spec);
     let op = &spec.handlers[0];
     let mut out = String::new();
-    emit_transition_fn(&mut out, &mir, op, &spec, false, |t| {
+    emit_transition_fn(&mut out, &mir, op, &spec, false, VIS_PRIVATE, |t| {
         crate::codegen_shared::map_type(t, &spec)
     })
     .expect("emit");
@@ -360,7 +360,7 @@ handler deposit (amount : U64) { effect { balance += amount } }
     let mir = crate::mir::lower(&spec);
     let op = &spec.handlers[0];
     let mut out = String::new();
-    emit_transition_fn(&mut out, &mir, op, &spec, false, |t| {
+    emit_transition_fn(&mut out, &mir, op, &spec, false, VIS_PRIVATE, |t| {
         crate::codegen_shared::map_type(t, &spec)
     })
     .expect("emit");
@@ -387,6 +387,7 @@ handler close : State.Open -> State.Closed { effect { x := 0 } }
         "Clone, Copy",
         |t| Ok(t.to_string()),
         has_lifecycle(&spec),
+        VIS_PRIVATE,
     )
     .expect("emit");
     assert!(
@@ -639,7 +640,7 @@ handler deposit (amount : U64) {
     let mir = crate::mir::lower(&spec);
     let op = spec.handlers.first().expect("handler");
     let mut out = String::new();
-    emit_transition_fn(&mut out, &mir, op, &spec, false, |t| {
+    emit_transition_fn(&mut out, &mir, op, &spec, false, VIS_PRIVATE, |t| {
         crate::codegen_shared::map_type(t, &spec)
     })
     .expect("emit");
@@ -677,7 +678,7 @@ handler deposit (amount : U64) {
     let mir = crate::mir::lower(&spec);
     let op = spec.handlers.first().expect("handler");
     let mut out = String::new();
-    emit_transition_fn(&mut out, &mir, op, &spec, false, |t| {
+    emit_transition_fn(&mut out, &mir, op, &spec, false, VIS_PRIVATE, |t| {
         crate::codegen_shared::map_type(t, &spec)
     })
     .expect("emit");

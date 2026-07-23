@@ -209,6 +209,14 @@ pub fn emit_constants(out: &mut String, constants: &[(String, String)]) {
     }
 }
 
+/// Item visibility for the shared struct/enum/fn emitters: `""` at file
+/// scope (single-account artifacts), `"pub "` inside a per-account `mod`
+/// so the sibling `mod product` (#324/#331) can name the items. A plain
+/// prefix, not an enum: the only two values are compile-checked at the
+/// emission sites and anything else fails the generated-artifact gate.
+pub const VIS_PRIVATE: &str = "";
+pub const VIS_PUB: &str = "pub ";
+
 /// Emit struct declarations for user-defined record types. Called before
 /// `emit_state_struct` so records are in scope when State references them.
 /// `derives` is the per-backend `#[derive(...)]` list. Empty records are
@@ -217,6 +225,7 @@ pub fn emit_record_structs(
     out: &mut String,
     spec: &crate::check::ParsedSpec,
     derives: &str,
+    vis: &str,
     map_type_fn: impl Fn(&str) -> anyhow::Result<String>,
 ) -> anyhow::Result<()> {
     for rec in &spec.records {
@@ -230,9 +239,9 @@ pub fn emit_record_structs(
             continue;
         }
         out.push_str(&format!("#[derive({})]\n", derives));
-        out.push_str(&format!("struct {} {{\n", rec.name));
+        out.push_str(&format!("{}struct {} {{\n", vis, rec.name));
         for (fname, ftype) in &rec.fields {
-            out.push_str(&format!("    {}: {},\n", fname, map_type_fn(ftype)?));
+            out.push_str(&format!("    {}{}: {},\n", vis, fname, map_type_fn(ftype)?));
         }
         out.push_str("}\n\n");
     }
@@ -247,6 +256,7 @@ pub fn emit_unit_enum_sums(
     out: &mut String,
     spec: &crate::check::ParsedSpec,
     derives: &str,
+    vis: &str,
 ) -> anyhow::Result<()> {
     for sum in &spec.sum_types {
         let all_unit = sum.variants.iter().all(|v| v.fields.is_empty());
@@ -254,7 +264,7 @@ pub fn emit_unit_enum_sums(
             continue;
         }
         out.push_str(&format!("#[derive({})]\n", derives));
-        out.push_str(&format!("enum {} {{\n", sum.name));
+        out.push_str(&format!("{}enum {} {{\n", vis, sum.name));
         for variant in &sum.variants {
             out.push_str(&format!("    {},\n", variant.name));
         }
@@ -280,12 +290,13 @@ pub fn emit_lifecycle_status_enum_from(
     out: &mut String,
     lifecycle_states: &[String],
     derives: &str,
+    vis: &str,
 ) {
     if lifecycle_states.len() < 2 {
         return;
     }
     out.push_str(&format!("#[derive({})]\n", derives));
-    out.push_str("enum Status {\n");
+    out.push_str(&format!("{}enum Status {{\n", vis));
     for state in lifecycle_states {
         out.push_str(&format!("    {},\n", state));
     }
@@ -303,14 +314,15 @@ pub fn emit_state_struct_with_lifecycle(
     derives: &str,
     map_type_fn: impl Fn(&str) -> anyhow::Result<String>,
     has_lifecycle: bool,
+    vis: &str,
 ) -> anyhow::Result<()> {
     out.push_str(&format!("#[derive({})]\n", derives));
-    out.push_str("struct State {\n");
+    out.push_str(&format!("{}struct State {{\n", vis));
     for (fname, ftype) in fields {
-        out.push_str(&format!("    {}: {},\n", fname, map_type_fn(ftype)?));
+        out.push_str(&format!("    {}{}: {},\n", vis, fname, map_type_fn(ftype)?));
     }
     if has_lifecycle && !fields.iter().any(|(n, _)| n == "status") {
-        out.push_str("    status: Status,\n");
+        out.push_str(&format!("    {}status: Status,\n", vis));
     }
     out.push_str("}\n\n");
     Ok(())
@@ -320,7 +332,11 @@ pub fn emit_state_struct_with_lifecycle(
 /// with a Rust body. Description-only invariants and unsupported
 /// quantifier bodies are skipped silently; callers pre-filter to the
 /// invariants relevant for the current account section / state shape.
-pub fn emit_invariant_predicates(out: &mut String, invariants: &[&crate::check::ParsedInvariant]) {
+pub fn emit_invariant_predicates(
+    out: &mut String,
+    invariants: &[&crate::check::ParsedInvariant],
+    vis: &str,
+) {
     for inv in invariants {
         let Some(rust_expr) = inv.rust_expr.as_deref() else {
             continue;
@@ -334,7 +350,7 @@ pub fn emit_invariant_predicates(out: &mut String, invariants: &[&crate::check::
             .map(|le| format!(" — {}", le))
             .unwrap_or_default();
         out.push_str(&format!("/// Invariant: {}{}\n", inv.name, doc_body));
-        out.push_str(&format!("fn {}(s: &State) -> bool {{\n", inv.name));
+        out.push_str(&format!("{}fn {}(s: &State) -> bool {{\n", vis, inv.name));
         out.push_str(&format!("    {}\n", rust_expr));
         out.push_str("}\n\n");
     }
@@ -354,6 +370,7 @@ pub fn emit_invariant_predicates(out: &mut String, invariants: &[&crate::check::
 pub fn emit_property_predicates_with(
     out: &mut String,
     properties: &[ParsedProperty],
+    vis: &str,
     map_type_fn: impl Fn(&str) -> anyhow::Result<String>,
 ) {
     for prop in properties {
@@ -372,16 +389,19 @@ pub fn emit_property_predicates_with(
         // on `prop.class`.
         let is_binary = prop.class == crate::check::PropertyClass::Binary;
         let sig = if is_binary {
-            format!("fn {}(pre: &State, post: &State) -> bool", prop.name)
+            format!("{}fn {}(pre: &State, post: &State) -> bool", vis, prop.name)
         } else {
-            format!("fn {}(s: &State) -> bool", prop.name)
+            format!("{}fn {}(s: &State) -> bool", vis, prop.name)
         };
         // Stubs underscore the params so the body `true` doesn't trip
         // `unused_variables`.
         let stub_sig = if is_binary {
-            format!("fn {}(_pre: &State, _post: &State) -> bool", prop.name)
+            format!(
+                "{}fn {}(_pre: &State, _post: &State) -> bool",
+                vis, prop.name
+            )
         } else {
-            format!("fn {}(_s: &State) -> bool", prop.name)
+            format!("{}fn {}(_s: &State) -> bool", vis, prop.name)
         };
         if crate::check::rust_expr_is_unsupported(&rust_expr) {
             // Quantifier body: emit a `true` stub; the harness preamble
@@ -410,8 +430,8 @@ pub fn emit_property_predicates_with(
             ));
             out.push_str("#[allow(unused_variables)]\n");
             out.push_str(&format!(
-                "fn {}_at(s: &State, {}: {}) -> bool {{\n",
-                prop.name, slot.binder_name, rust_ty
+                "{}fn {}_at(s: &State, {}: {}) -> bool {{\n",
+                vis, prop.name, slot.binder_name, rust_ty
             ));
             out.push_str(&format!("    {}\n", slot.rust_body));
             out.push_str("}\n\n");
@@ -457,9 +477,10 @@ pub fn emit_transition_fn(
     op: &ParsedHandler,
     spec: &ParsedSpec,
     wrapping: bool,
+    vis: &str,
     map_type_fn: impl Fn(&str) -> anyhow::Result<String>,
 ) -> anyhow::Result<()> {
-    emit_transition_fn_inner(out, mir, op, spec, wrapping, None, false, map_type_fn)
+    emit_transition_fn_inner(out, mir, op, spec, wrapping, None, false, vis, map_type_fn)
 }
 
 pub fn emit_transition_fn_for_kani(
@@ -468,6 +489,7 @@ pub fn emit_transition_fn_for_kani(
     op: &ParsedHandler,
     spec: &ParsedSpec,
     wrapping: bool,
+    vis: &str,
     map_type_fn: impl Fn(&str) -> anyhow::Result<String>,
 ) -> anyhow::Result<()> {
     let account_env =
@@ -480,6 +502,7 @@ pub fn emit_transition_fn_for_kani(
         wrapping,
         account_env.as_deref(),
         true,
+        vis,
         map_type_fn,
     )
 }
@@ -493,6 +516,7 @@ pub fn emit_transition_fn_inner(
     wrapping: bool,
     account_env_struct: Option<&str>,
     rewrite_pubkey_comparisons: bool,
+    vis: &str,
     map_type_fn: impl Fn(&str) -> anyhow::Result<String>,
 ) -> anyhow::Result<()> {
     let body = mir
@@ -517,8 +541,8 @@ pub fn emit_transition_fn_inner(
     // Abstract binders ride alongside real handler params; callers pass a
     // symbolic / arbitrary value for each.
     out.push_str(&format!(
-        "fn {}(s: &mut State{}) -> bool {{\n",
-        op.name, params
+        "{}fn {}(s: &mut State{}) -> bool {{\n",
+        vis, op.name, params
     ));
 
     // Guard check (requires clauses)

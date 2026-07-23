@@ -840,7 +840,7 @@ pub(crate) fn emit_file_level_features(
 /// constraint over `state.x` once the environment has external fields, which
 /// forces the two-state (`PrePost`) binder. The caller must emit exactly the
 /// bindings the constraints reference, or the harness fails to compile.
-fn render_environment_constraints(
+pub(crate) fn render_environment_constraints(
     mir_env: Option<&crate::mir::EnvironmentMir>,
     has_external_fields: bool,
 ) -> (Vec<String>, bool, bool) {

@@ -101,7 +101,7 @@ pub(crate) fn render_inner(
 
     if parsed.account_types.len() > 1 {
         // Multi-account: per-account `mod <lowercase>` blocks; file-level
-        // features (covers / liveness / env) emit in single mode only.
+        // features lower once over the product-state module (#324).
         if let Err(e) =
             emit_multi_account_sections(&mut out, mir, parsed, progress, skip_guard_proofs, rec)
         {
@@ -143,7 +143,7 @@ pub(crate) fn emit_single_account_sections(
     if progress {
         eprintln!("Rendering Kani section: state model");
     }
-    emit_account_section_structural(out, mir, parsed)?;
+    emit_account_section_structural(out, mir, parsed, crate::rust_codegen_util::VIS_PRIVATE)?;
     if skip_guard_proofs {
         if progress {
             eprintln!(
@@ -178,8 +178,8 @@ pub(crate) fn emit_single_account_sections(
         eprintln!("Rendering Kani section: overflow proofs");
     }
     emit_overflow_detection_harnesses(out, mir, parsed, rec)?;
-    // File-level features (covers / liveness / environment) —
-    // single-mode only; multi-account specs skip these entirely.
+    // File-level features (covers / liveness / environment) — the
+    // multi-account path lowers these over the product module instead.
     if progress {
         eprintln!("Rendering Kani section: cover/liveness/environment proofs");
     }
@@ -190,8 +190,9 @@ pub(crate) fn emit_single_account_sections(
 /// Multi-account dispatch — one `mod <lowercase> { use super::*; ... }`
 /// per account_type, each driven by a per-account scoped `ParsedSpec`
 /// (see `scope_parsed_to_account`). Sections follow the same order as
-/// single-mode; file-level features (covers / liveness / environment)
-/// are not emitted in multi-mode at all.
+/// single-mode. File-level features (covers / liveness / environment)
+/// are lowered once, over the product-state module (#324); shapes the
+/// product lowering cannot resolve stay `unsupported` in the manifest.
 pub(crate) fn emit_multi_account_sections(
     out: &mut String,
     mir: &Mir,
@@ -201,6 +202,8 @@ pub(crate) fn emit_multi_account_sections(
     rec: &mut ObligationRecorder,
 ) -> Result<()> {
     use crate::rust_codegen_util as util;
+
+    let mut components: Vec<product::ProductComponent> = Vec::new();
 
     for acct in &parsed.account_types {
         let acct_fields_view = util::field_refs(&acct.fields);
@@ -233,7 +236,7 @@ pub(crate) fn emit_multi_account_sections(
         out.push_str(&format!("mod {} {{\n", mod_name));
         out.push_str("    use super::*;\n\n");
 
-        emit_account_section_structural(out, mir, &scoped)?;
+        emit_account_section_structural(out, mir, &scoped, util::VIS_PUB)?;
         if skip_guard_proofs {
             if progress {
                 eprintln!(
@@ -250,44 +253,20 @@ pub(crate) fn emit_multi_account_sections(
         emit_overflow_detection_harnesses(out, mir, &scoped, rec)?;
 
         out.push_str(&format!("}} // mod {}\n\n", mod_name));
+
+        components.push(product::ProductComponent {
+            acct: acct.clone(),
+            mod_name,
+            scoped_handlers: scoped.handlers.clone(),
+        });
     }
 
-    // #324 — file-level features (covers / liveness / environment) are
-    // never lowered in multi-account mode: a trace may span accounts and
-    // per-account duplication would change its semantics. Report every
-    // requested file-level obligation as unsupported instead of letting
-    // it disappear.
-    for cover in &parsed.covers {
-        for i in 0..cover.traces.len() {
-            rec.unsupported(
-                ObligationKind::Cover,
-                "file",
-                &format!("{}::{}", cover.name, i),
-                UnsupportedReason::KaniMultiAccountFileLevel,
-            );
-        }
-    }
-    for liveness in &parsed.liveness_props {
-        rec.unsupported(
-            ObligationKind::Liveness,
-            "file",
-            &liveness.name,
-            UnsupportedReason::KaniMultiAccountFileLevel,
-        );
-    }
-    for env in &parsed.environments {
-        for prop in &parsed.properties {
-            if prop.expression.is_none() {
-                continue;
-            }
-            rec.unsupported(
-                ObligationKind::Environment,
-                "file",
-                &format!("{}::{}", prop.name, env.name),
-                UnsupportedReason::KaniMultiAccountFileLevel,
-            );
-        }
-    }
+    // #324 — file-level features (covers / liveness / environment) lower
+    // once, over the product-state module: per-account duplication would
+    // change trace semantics. Obligations the product lowering cannot
+    // resolve to modeled components are recorded unsupported there — a
+    // requested obligation never disappears silently.
+    product::emit_product_module(out, mir, parsed, &components, progress, rec)?;
 
     Ok(())
 }

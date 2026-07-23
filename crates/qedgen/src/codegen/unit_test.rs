@@ -62,12 +62,14 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
         &mut out,
         &spec,
         "Debug, Clone, Copy, PartialEq",
+        crate::rust_codegen_util::VIS_PRIVATE,
         |t| map_type(t, &spec),
     )?;
     crate::rust_codegen_util::emit_unit_enum_sums(
         &mut out,
         &spec,
         "Debug, Clone, Copy, PartialEq, Eq",
+        crate::rust_codegen_util::VIS_PRIVATE,
     )?;
 
     if is_multi {
