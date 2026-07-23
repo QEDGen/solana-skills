@@ -513,8 +513,10 @@ pub(super) fn emit_handler_transition(out: &mut String, mir: &Mir, h: &crate::mi
     let param_sig = param_sig_str(&h.params);
 
     out.push_str(&format!(
-        "def {} (s : State) (signer : Pubkey){} : Option State :=\n",
-        trans_name, param_sig
+        "def {} (s : State) (signer : Pubkey){}{} : Option State :=\n",
+        trans_name,
+        ctx_sig(mir, h),
+        param_sig
     ));
 
     let conds = build_guard_cond_parts(mir, h);
@@ -887,11 +889,13 @@ pub(super) fn build_guard_cond_parts(mir: &Mir, h: &crate::mir::HandlerMir) -> V
 
     for stmt in &h.body.stmts {
         if let Stmt::RequireOrAbort { pred, .. } = stmt {
-            let lean = expr_lean(&pred.0, tree_render::LeanCx::guard());
-            if mentions_handler_account_pubkey(&lean, &h.accounts) {
-                continue;
+            // #328 — account-reading predicates route through `ActionCtx`
+            // instead of dropping; only shapes ctx cannot express stay out
+            // (the aborts emitter records those unsupported).
+            match render_guard_pred(mir, h, &pred.0) {
+                PredRender::Plain(lean) | PredRender::Ctx(lean, _) => conds.push(lean),
+                PredRender::Dropped => continue,
             }
-            conds.push(lean);
         }
     }
 

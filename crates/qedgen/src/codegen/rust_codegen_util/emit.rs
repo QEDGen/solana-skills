@@ -23,6 +23,121 @@ pub fn emit_abstract_binders(
     Ok(())
 }
 
+/// Single-account multi-variant ADT view for the Kani model lane (#326).
+/// `Some(account)` when the flat `State` carrier can be constrained to the
+/// declared variants via a `state_repr_valid` invariant:
+///   * `pragma state_repr = adt` is declared;
+///   * exactly one account type, with ≥ 2 variants (mirrors
+///     `lean_gen_mir::is_multi_variant_adt`; multi-account sections strip
+///     the pragma in `scope_parsed_to_account`);
+///   * no `Map`-typed state field (indexed shapes have their own lane);
+///   * every field absent from at least one variant has an `==`-comparable
+///     type default, so the invariant is expressible.
+///
+/// `None` keeps the flat model AND the recorded `kani_adt_state_repr`
+/// unsupported status — never a silent fallback.
+pub fn kani_adt_view(spec: &ParsedSpec) -> Option<&crate::check::ParsedAccountType> {
+    if !spec.state_repr_is_adt() || spec.account_types.len() != 1 {
+        return None;
+    }
+    let acct = &spec.account_types[0];
+    if acct.variants.len() < 2 {
+        return None;
+    }
+    if acct
+        .fields
+        .iter()
+        .any(|(_, t)| t.trim_start().starts_with("Map"))
+    {
+        return None;
+    }
+    for (fname, ftype) in &acct.fields {
+        let absent_somewhere = acct
+            .variants
+            .iter()
+            .any(|v| !v.fields.iter().any(|(n, _)| n == fname));
+        if absent_somewhere && adt_absent_field_default(spec, ftype).is_none() {
+            return None;
+        }
+    }
+    Some(acct)
+}
+
+/// Default literal for a variant-absent field in the ADT canonical form —
+/// the same value the Lean ADT field accessors return for variants that do
+/// not carry the field. Restricted to `==`-comparable primitives; `None`
+/// means the validity invariant is not expressible for this type and the
+/// spec stays on the flat model (reported unsupported).
+pub(crate) fn adt_absent_field_default(spec: &ParsedSpec, dsl_ty: &str) -> Option<String> {
+    let mut ty = dsl_ty.trim();
+    let mut seen = std::collections::BTreeSet::new();
+    while seen.insert(ty.to_string()) {
+        match spec.type_aliases.iter().find(|(n, _)| n == ty) {
+            Some((_, rhs)) => ty = rhs.trim(),
+            None => break,
+        }
+    }
+    match ty {
+        "U8" | "U16" | "U32" | "U64" | "U128" | "I8" | "I16" | "I32" | "I64" | "I128" => {
+            Some("0".to_string())
+        }
+        "Bool" => Some("false".to_string()),
+        "Pubkey" | "Bytes32" => Some("[0u8; 32]".to_string()),
+        "Bytes64" => Some("[0u8; 64]".to_string()),
+        t if t.starts_with("Fin[") => Some("0".to_string()),
+        _ => None,
+    }
+}
+
+/// Emit the `state_repr_valid` predicate for a single-account ADT spec
+/// (#326): under `pragma state_repr = adt` the flat `State` struct is a
+/// tagged product, and this invariant pins every field the active variant
+/// does not carry to its type default. With the harness preamble assuming
+/// it and transitions preserving it (see the canonicalization step in
+/// `emit_transition_fn_inner`), the reachable state space is isomorphic to
+/// the declared variants — Kani cannot construct cross-variant field
+/// combinations the inductive Lean model excludes.
+pub fn emit_state_repr_validity_fn(
+    out: &mut String,
+    spec: &ParsedSpec,
+    acct: &crate::check::ParsedAccountType,
+) {
+    out.push_str("/// ADT canonical form (#326): fields the active variant does not carry\n");
+    out.push_str("/// hold their type defaults, matching the Lean field-accessor semantics.\n");
+    out.push_str("fn state_repr_valid(s: &State) -> bool {\n");
+    out.push_str("    match s.status {\n");
+    for v in &acct.variants {
+        let conjuncts: Vec<String> = acct
+            .fields
+            .iter()
+            .filter(|(fname, _)| !v.fields.iter().any(|(n, _)| n == fname))
+            .map(|(fname, ftype)| {
+                let default = adt_absent_field_default(spec, ftype)
+                    .expect("kani_adt_view checked absent-field defaults");
+                format!("s.{} == {}", fname, default)
+            })
+            .collect();
+        let body = if conjuncts.is_empty() {
+            "true".to_string()
+        } else {
+            conjuncts.join(" && ")
+        };
+        out.push_str(&format!("        Status::{} => {},\n", v.name, body));
+    }
+    out.push_str("    }\n");
+    out.push_str("}\n\n");
+}
+
+/// Append `kani::assume(state_repr_valid(&<var>));` after a symbolic state
+/// init when the spec is in ADT mode; no-op otherwise.
+pub fn emit_state_repr_valid_assume(out: &mut String, spec: &ParsedSpec, var: &str, indent: &str) {
+    if kani_adt_view(spec).is_some() {
+        out.push_str(&format!(
+            "{indent}kani::assume(state_repr_valid(&{var}));\n"
+        ));
+    }
+}
+
 /// Emit `let mut s = State { ... };` with every mutable field bound to
 /// `kani::any()`. When the per-account lifecycle has ≥2 states, the
 /// synthetic `status` field is also `kani::any()` so callers can layer
@@ -635,6 +750,30 @@ pub fn emit_transition_fn_inner(
     if has_lifecycle(spec) {
         if let Some(ref post) = op.post_status {
             out.push_str(&format!("    s.status = Status::{};\n", post));
+        }
+    }
+
+    // #326 — ADT canonical form (Kani model lane only): fields the
+    // post-variant does not carry reset to their type defaults, so
+    // transitions preserve `state_repr_valid` and the flat carrier stays
+    // isomorphic to the declared variants. Ghosts are not variant fields
+    // and are never reset.
+    if rewrite_pubkey_comparisons {
+        if let Some(acct) = kani_adt_view(spec) {
+            if let Some(ref post) = op.post_status {
+                if let Some(post_v) = acct.variants.iter().find(|v| &v.name == post) {
+                    for (fname, ftype) in &acct.fields {
+                        if !post_v.fields.iter().any(|(n, _)| n == fname) {
+                            let default = adt_absent_field_default(spec, ftype)
+                                .expect("kani_adt_view checked absent-field defaults");
+                            out.push_str(&format!(
+                                "    s.{} = {}; // State::{} does not carry this field\n",
+                                fname, default, post
+                            ));
+                        }
+                    }
+                }
+            }
         }
     }
 

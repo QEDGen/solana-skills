@@ -763,8 +763,19 @@ handler deposit (amount : U64) : State.Active -> State.Active {
 
 `<account>.pubkey` lowers to `ctx.<account>.key()` in Anchor handlers and to
 the symbolic `Pubkey` slot in proptest / Kani. Inside a Lean transition
-body it disappears — account-pubkey writes are dropped from the Lean
-model (the proof obligation is about account identity, not byte value).
+body an account-pubkey *write* disappears — the proof obligation is about
+account identity, not byte value.
+
+Account-pubkey *reads* in `requires` clauses reach the Lean model through
+`ActionCtx` (#328): codegen emits one `structure ActionCtx` carrying every
+account address (and imported cross-program state field, for dotted `auth
+acct.field`) the guards read; transitions that read any take
+`(ctx : ActionCtx)`, the authorization clause stays in the guard
+(`ctx.initializer_ta = s.initializer_token_account`), and the matching
+abort theorem is emitted with a mechanical proof. This covers flat-state
+shapes with single-projection reads; the ADT and indexed lanes, and deeper
+projections, keep the clause out of the model and report it in the
+obligation manifest as `unsupported(lean_handler_account_pubkey)`.
 
 ### `effect` block
 
@@ -1349,6 +1360,17 @@ inner-enum shape. **Absent (the default), a multi-variant State lowers flat** �
 `structure State` carrying every variant's fields plus a `status : Status` discriminant.
 The flat form auto-discharges more proof obligations (abort / liveness / overflow), so
 prefer it unless you specifically want the inductive sum-type modeling.
+
+The Kani model keeps the flat struct as its carrier but constrains it to the declared
+variants (#326): codegen emits a `state_repr_valid` invariant that pins every field the
+active variant does not carry to its type default, every symbolic harness assumes it,
+and transitions reset dropped fields on a variant change. The reachable state space is
+therefore isomorphic to the inductive Lean model — Kani cannot fabricate cross-variant
+field combinations. This covers single-account specs whose variant payloads have
+comparable type defaults (numeric, `Bool`, `Pubkey`, `Bytes32`/`Bytes64`, `Fin[N]`);
+other shapes (multi-account ADT, record-typed payloads) stay on the unconstrained flat
+model and are reported in the obligation manifest as
+`unsupported(kani_adt_state_repr)`.
 
 > Before v2.33 this choice was keyed implicitly on whether the spec declared a
 > `WrongState` error variant — so adding or removing a lifecycle error silently flipped

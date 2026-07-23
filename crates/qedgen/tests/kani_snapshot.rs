@@ -76,13 +76,20 @@ fn assert_or_update_snapshot(fixture: &str, fixture_dir: &str, spec_arg: &str) {
 // shape + run `UPDATE_SNAPSHOTS=1 cargo test --test kani_snapshot
 // <new_fixture_name>` once to seed.
 //
-// `cross-program-vault` is omitted from this set (the spec exists
-// but has no kani.rs reference output today; the mir_snapshot test
-// covers it for Lean).
-
 #[test]
 fn snapshot_escrow() {
     assert_or_update_snapshot("escrow", "examples/rust/escrow", "escrow.qedspec");
+}
+
+// #326 — the sole bundled ADT example: pins the `state_repr_valid`
+// invariant, the harness assumes, and the transition canonicalization.
+#[test]
+fn snapshot_cross_program_vault() {
+    assert_or_update_snapshot(
+        "cross-program-vault",
+        "examples/rust/cross-program-vault",
+        "vault.qedspec",
+    );
 }
 
 #[test]

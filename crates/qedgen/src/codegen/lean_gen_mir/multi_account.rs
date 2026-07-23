@@ -38,6 +38,9 @@ pub(super) fn render_multi_account(mir: &Mir, rec: &mut ObligationRecorder) -> S
         let mut block = String::new();
         emit_lifecycle_marker(&mut block, &scoped);
         emit_state_struct(&mut block, &scoped);
+        // #328 — per-account ActionCtx; `rename_state_idents` prefixes it
+        // (`PoolActionCtx`) like every other per-account type.
+        emit_action_ctx(&mut block, &scoped);
         emit_transitions(&mut block, &scoped);
         let _pinned = emit_cpi_theorems(&mut block, &scoped, rec);
         emit_operation_inductive(&mut block, &scoped);
@@ -213,12 +216,25 @@ pub(super) fn emit_liveness_inner_body(
     let mut buf = String::new();
     let helper_key = format!("apply{}Ops", account_name);
     if !emitted_helpers.contains(&helper_key) {
-        buf.push_str(
-            "def applyOps (s : State) (signer : Pubkey) : List Operation \u{2192} Option State\n",
-        );
+        // #328 — mirror the single-account applyOps ctx threading.
+        let (ctx_bind, ctx_pass) = if spec_action_ctx_fields(scoped).is_empty() {
+            ("", "")
+        } else {
+            (" (ctx : ActionCtx)", " ctx")
+        };
+        buf.push_str(&format!(
+            "def applyOps (s : State) (signer : Pubkey){} : List Operation \u{2192} Option State\n",
+            ctx_bind
+        ));
         buf.push_str("  | [] => some s\n");
-        buf.push_str("  | op :: ops => match applyOp s signer op with\n");
-        buf.push_str("    | some s' => applyOps s' signer ops\n");
+        buf.push_str(&format!(
+            "  | op :: ops => match applyOp s signer{} op with\n",
+            ctx_pass
+        ));
+        buf.push_str(&format!(
+            "    | some s' => applyOps s' signer{} ops\n",
+            ctx_pass
+        ));
         buf.push_str("    | none => none\n\n");
         emitted_helpers.insert(helper_key);
     }
@@ -340,11 +356,12 @@ pub(super) fn scope_mir_to_account(mir: &Mir, acct: &crate::mir::AccountStateMir
 /// the type names (`State`, `Status`, `Operation`) never appear as
 /// values inside Lean expressions emitted by these helpers.
 pub(super) fn rename_state_idents(text: &str, account_name: &str) -> String {
-    let renames: [(&str, String); 5] = [
+    let renames: [(&str, String); 6] = [
         (r"\bapplyOps\b", format!("apply{}Ops", account_name)),
         (r"\bapplyOp\b", format!("apply{}Op", account_name)),
         (r"\bOperation\b", format!("{}Operation", account_name)),
         (r"\bStatus\b", format!("{}Status", account_name)),
+        (r"\bActionCtx\b", format!("{}ActionCtx", account_name)),
         (r"\bState\b", format!("{}State", account_name)),
     ];
 

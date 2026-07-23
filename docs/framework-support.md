@@ -27,17 +27,33 @@ sBPF assembly is selected by `pragma sbpf` in the spec, not by a `Target`.
 | IDL → brownfield fuzz (`probe/crucible_brownfield`) | ✅ 0.30 | ✅ | ⚠️ needs on-disk Codama/0.30 IDL | ❌ deferred | ❌ parked |
 | Brownfield adapt → spec skeleton (`adapt/`) — *deprecated* | ✅ args + accounts + errors | ❌ no adapter | ⚠️ handlers-only skeleton | ⚠️ loose (no conventions) | ❌ |
 | Greenfield Rust scaffold (`codegen_mir`) | ✅ | ⚠️ generic CPI → `todo!()` | ⚠️ generic CPI → `todo!()`; imported mirrors error | n/a | n/a |
-| Kani spec-model (`kani_mir`) | ✅ | ✅ | ✅ | n/a | skip by design |
+| Kani spec-model (`kani_mir`) | ✅ ¹ | ✅ ¹ | ✅ ¹ | n/a | skip by design |
 | impl-Kani (`kani_impl`) | ✅ greenfield + state-struct (#162) + Context (#169) | ⚠️ greenfield shape only | ⚠️ own `#[repr(C)]` shape; some ix-data field types TODO | ❌ | ❌ |
 | proptest (`proptest_gen_mir`) | ✅ | ✅ | ✅ | n/a | skip by design |
-| Lean (`lean_gen_mir`) | ✅ ² | ✅ ² | ✅ ² | n/a | ✅ dedicated sBPF path |
+| Lean (`lean_gen_mir`) | ✅ ² ³ | ✅ ² ³ | ✅ ² ³ | n/a | ✅ dedicated sBPF path |
 | Probe: runtime-agnostic scanners (`run_helpers`) | ✅ (#196) | ✅ (#196) | ✅ | ✅ (#196) | ❌ bootstrap only |
 | Probe: IDL-enrichment overlay (`probe/idl_overlay`) | ✅ enrich + narrow (#235); unbuilt → `derivable_idl` (#238) | ✅ enrich + narrow (#235); unbuilt → `derivable_idl` (#238) | ✅ enrich + handler fill | ⚠️ enrich only (declarative flags) | ❌ |
 | Probe: runtime-specific findings (`probe/`) | ❌ agent-layer (SKILL.md) | ❌ agent-layer | ✅ richest (`pinocchio_probe`) | ⚠️ Shank dispatcher discovery only | ❌ |
 | Miri divergence repros (`verify/miri_verify`) | ❌ | ❌ | ✅ | ❌ | n/a |
 | Ratchet / readiness (`verify/ratchet`) | ✅ | ✅ | ❌ no ratchet crate | ❌ | ❌ |
 
-² Indexed shapes (`Map[N]` fields, #336): `Spec.lean` carries a
+¹ `pragma state_repr = adt` (#326): single-account specs with defaultable
+variant payloads verify over the ADT state space — the flat carrier gains a
+`state_repr_valid` invariant (assumed at every symbolic init, preserved by
+transition canonicalization), so Kani cannot construct cross-variant field
+combinations. Multi-account ADT and non-defaultable payload types stay on the
+unconstrained flat model, reported as `unsupported(kani_adt_state_repr)` in
+the obligation manifest.
+
+² Account-pubkey authorization clauses (#328): flat-state shapes bind the
+referenced account addresses and imported state fields in a generated
+`structure ActionCtx`, keep the clause in the transition guard, and emit
+the abort theorem with a mechanical proof. The ADT and indexed lanes, and
+reads deeper than one projection, keep the clause out of the model and
+report `unsupported(lean_handler_account_pubkey)` in the obligation
+manifest.
+
+³ Indexed shapes (`Map[N]` fields, #336): `Spec.lean` carries a
 machine-owned `def <name>_stmt : Prop` for every obligation (preservation,
 aborts, ensures, covers, liveness, environments); proof bodies stay in the
 user-owned `Proofs.lean`, ideally typed `theorem <name> : <name>_stmt` so

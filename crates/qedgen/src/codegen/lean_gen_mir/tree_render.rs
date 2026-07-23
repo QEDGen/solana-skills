@@ -52,6 +52,12 @@ pub enum LeanSubscript {
 pub struct LeanCx {
     pub binder: LeanBinder,
     pub subscript: LeanSubscript,
+    /// #328 — route handler-account reads through the `ActionCtx` binder:
+    /// `<acct>` / `<acct>.pubkey` render `ctx.<acct>`, `<acct>.<field>`
+    /// renders `ctx.<acct>_<field>`. Off by default; the guard emitters
+    /// enable it per predicate when the plain rendering would carry a
+    /// free account identifier.
+    pub action_ctx: bool,
 }
 
 impl LeanCx {
@@ -59,17 +65,25 @@ impl LeanCx {
         LeanCx {
             binder: LeanBinder::S,
             subscript: LeanSubscript::Brackets,
+            action_ctx: false,
         }
     }
     pub fn ensures() -> Self {
         LeanCx {
             binder: LeanBinder::SPrime,
             subscript: LeanSubscript::Brackets,
+            action_ctx: false,
         }
     }
     pub fn with_application_subscripts(self) -> Self {
         LeanCx {
             subscript: LeanSubscript::Application,
+            ..self
+        }
+    }
+    pub fn with_action_ctx(self) -> Self {
+        LeanCx {
+            action_ctx: true,
             ..self
         }
     }
@@ -496,6 +510,22 @@ fn render_path(p: &TreePath, cx: LeanCx, inside_old: bool) -> String {
                     }
                 }
                 return out;
+            }
+        }
+        BindingKind::Account if cx.action_ctx => {
+            // #328 — ActionCtx routing. `<acct>` and `<acct>.pubkey` both
+            // mean the account's address; `<acct>.<field>` reads the
+            // account's state (imported cross-program auth). Deeper
+            // projections fall through bare — the guard emitters detect
+            // the leftover free identifier and keep the clause reported
+            // unsupported instead of emitting a non-elaborating module.
+            match p.segments.as_slice() {
+                [] => return format!("ctx.{}", p.root),
+                [TreeSeg::Field(f)] if f == "pubkey" || f == "key()" || f == "key" => {
+                    return format!("ctx.{}", p.root)
+                }
+                [TreeSeg::Field(f)] => return format!("ctx.{}_{}", p.root, f),
+                _ => out.push_str(&p.root),
             }
         }
         BindingKind::Param

@@ -151,7 +151,7 @@ impl UnsupportedReason {
                 "multi-account Kani does not lower file-level cover/liveness/environment obligations yet (#324)"
             }
             UnsupportedReason::KaniAdtStateRepr => {
-                "Kani verifies a flat state model; `pragma state_repr = adt` parity is not implemented (#326)"
+                "Kani verifies a flat state model for this shape; ADT parity covers single-account specs with defaultable variant payloads only (#326)"
             }
             UnsupportedReason::KaniGuardNegationInexpressible => {
                 "no expressible negation for this guard; rejection harness skipped"
@@ -160,7 +160,7 @@ impl UnsupportedReason {
                 "spec has no lifecycle, so the liveness target predicate cannot be stated"
             }
             UnsupportedReason::LeanHandlerAccountPubkey => {
-                "predicate names a handler account pubkey, which the Lean transition signature does not bind (#328)"
+                "predicate reads a handler account the transition cannot bind; ActionCtx routing covers flat shapes with single-projection reads only (#328)"
             }
             UnsupportedReason::CpiMissingStateBinders => {
                 "callee ensures not composed: call site lacks `state_binders` for the referenced fields"

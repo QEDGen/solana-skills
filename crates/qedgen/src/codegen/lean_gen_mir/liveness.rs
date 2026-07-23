@@ -241,6 +241,38 @@ pub(super) fn cover_trace_proof(
     proof.push_str(" := by\n");
     proof.push_str("  let pk : Pubkey := \u{27E8}0, 0, 0, 0\u{27E9}\n");
 
+    // #328 — ctx witness. Same convention as the state witness: pubkey
+    // fields keep their `⟨0, 0, 0, 0⟩` default, so an all-`pk` ActionCtx
+    // satisfies `ctx.<f> = s.<pubkey-field>` guards over default-valued
+    // witness states exactly as `signer = s.<who>` already does. The
+    // per-step `by decide` verifies it on the concrete literals.
+    let trace_uses_ctx = trace.iter().any(|op_name| {
+        mir.handlers
+            .iter()
+            .find(|h| &h.name == op_name)
+            .is_some_and(|h| handler_uses_ctx(mir, h))
+    });
+    if trace_uses_ctx {
+        let fields = spec_action_ctx_fields(mir)
+            .iter()
+            .map(|(_, ty)| match ty.as_str() {
+                "Pubkey" => Some("pk"),
+                "Nat" | "Int" => Some("0"),
+                "Bool" => Some("false"),
+                "Bytes32" | "Bytes64" => Some("default"),
+                ty if ty.starts_with("Fin ") => Some("0"),
+                ty if ty.starts_with("List ") => Some("[]"),
+                ty if ty.starts_with("Option ") => Some("none"),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?
+            .join(", ");
+        proof.push_str(&format!(
+            "  let ctxw : ActionCtx := \u{27E8}{}\u{27E9}\n",
+            fields
+        ));
+    }
+
     if let Some((_, _, ref s0)) = steps.first() {
         let s0_lean = render_witness(s0)?;
         proof.push_str(&format!("  let s0 : State := {}\n", s0_lean));
@@ -261,6 +293,9 @@ pub(super) fn cover_trace_proof(
     let mut exact_parts: Vec<String> = Vec::new();
     exact_parts.push("s0".to_string());
     exact_parts.push("pk".to_string());
+    if trace_uses_ctx {
+        exact_parts.push("ctxw".to_string());
+    }
     for (i, (_, param_values, _)) in steps.iter().enumerate() {
         for (_, val) in param_values {
             exact_parts.push(val.clone());
@@ -345,14 +380,29 @@ pub(super) fn emit_covers_body(
                 &format!("{}::{}", cover.name, trace_idx),
                 &format!("cover_{}{}", cover.name, suffix),
             );
+            // #328 — when any trace handler reads invocation context, the
+            // reachability existential also picks a ctx witness. The
+            // closed-term witness machinery doesn't synthesize ctx values,
+            // so those traces fall back to `:= sorry`.
+            let trace_uses_ctx = trace.iter().any(|op_name| {
+                mir.handlers
+                    .iter()
+                    .find(|h| h.name == *op_name)
+                    .is_some_and(|h| handler_uses_ctx(mir, h))
+            });
+            let ctx_exists = if trace_uses_ctx {
+                " (ctx : ActionCtx)"
+            } else {
+                ""
+            };
             out.push_str(&format!(
                 "/-- {} \u{2014} trace [{}] is reachable. -/\n",
                 cover.name,
                 trace.join(", ")
             ));
             out.push_str(&format!(
-                "theorem cover_{}{} : \u{2203} (s0 : State) (signer : Pubkey),\n",
-                cover.name, suffix
+                "theorem cover_{}{} : \u{2203} (s0 : State) (signer : Pubkey){},\n",
+                cover.name, suffix, ctx_exists
             ));
 
             // Nested `∃ s_{j+1}, <trans> s_j signer args = some s_{j+1}
@@ -394,6 +444,7 @@ pub(super) fn emit_covers_body(
                     out.push_str(&format!("{}\u{2203} {}, ", indent, extra_exists));
                 }
 
+                let step_ctx = handler.map(|h| ctx_arg(mir, h)).unwrap_or("");
                 if j < trace.len() - 1 {
                     let s_next = format!("s{}", j + 1);
                     let arg_str = if positional_args.is_empty() {
@@ -402,8 +453,8 @@ pub(super) fn emit_covers_body(
                         format!(" {}", positional_args)
                     };
                     out.push_str(&format!(
-                        "\u{2203} ({} : State), {} {} signer{} = some {} \u{2227}\n",
-                        s_next, trans, s_var, arg_str, s_next
+                        "\u{2203} ({} : State), {} {} signer{}{} = some {} \u{2227}\n",
+                        s_next, trans, s_var, step_ctx, arg_str, s_next
                     ));
                     indent.push_str("  ");
                 } else {
@@ -415,19 +466,19 @@ pub(super) fn emit_covers_body(
                     // Try witness construction; fall back to `:= sorry`
                     // when the witness machinery can't synthesize a
                     // closed term (handler not found, unsupported
-                    // effect shape, etc.).
+                    // effect shape).
                     let proof_script = cover_trace_proof(mir, trace, adt_form);
                     match proof_script {
                         Some(script) => {
                             out.push_str(&format!(
-                                "{} {} signer{} \u{2260} none{}\n",
-                                trans, s_var, arg_str, script
+                                "{} {} signer{}{} \u{2260} none{}\n",
+                                trans, s_var, step_ctx, arg_str, script
                             ));
                         }
                         None => {
                             out.push_str(&format!(
-                                "{} {} signer{} \u{2260} none := sorry\n\n",
-                                trans, s_var, arg_str
+                                "{} {} signer{}{} \u{2260} none := sorry\n\n",
+                                trans, s_var, step_ctx, arg_str
                             ));
                         }
                     }
@@ -469,10 +520,12 @@ pub(super) fn emit_covers_body(
             } else {
                 out.push_str(". -/\n");
             }
+            let reach_ctx = handler.map(|h| ctx_sig(mir, h)).unwrap_or("");
             out.push_str(&format!(
-                "theorem cover_{}_{} : \u{2203} (s : State) (signer : Pubkey),\n",
+                "theorem cover_{}_{} : \u{2203} (s : State) (signer : Pubkey){},\n",
                 cover.name,
-                safe_name(op_name)
+                safe_name(op_name),
+                reach_ctx
             ));
             if let Some(p) = when_pred {
                 out.push_str(&format!(
@@ -486,8 +539,10 @@ pub(super) fn emit_covers_body(
                 out.push_str(&format!("\u{2203} {}, ", param_exists));
             }
             out.push_str(&format!(
-                "{} s signer{} \u{2260} none := sorry\n\n",
-                trans, param_args
+                "{} s signer{}{} \u{2260} none := sorry\n\n",
+                trans,
+                handler.map(|h| ctx_arg(mir, h)).unwrap_or(""),
+                param_args
             ));
         }
     }
@@ -526,15 +581,28 @@ pub(super) fn emit_liveness_inner(
     );
 
     // One shared `applyOps` helper; indexed and multi-account variants
-    // manage their own.
+    // manage their own. #328 — threads the invocation context alongside
+    // `signer` when any handler reads one.
     let needs_helper = mir.handlers.iter().any(|_| true);
     if needs_helper {
-        out.push_str(
-            "def applyOps (s : State) (signer : Pubkey) : List Operation \u{2192} Option State\n",
-        );
+        let (ctx_bind, ctx_pass) = if spec_action_ctx_fields(mir).is_empty() {
+            ("", "")
+        } else {
+            (" (ctx : ActionCtx)", " ctx")
+        };
+        out.push_str(&format!(
+            "def applyOps (s : State) (signer : Pubkey){} : List Operation \u{2192} Option State\n",
+            ctx_bind
+        ));
         out.push_str("  | [] => some s\n");
-        out.push_str("  | op :: ops => match applyOp s signer op with\n");
-        out.push_str("    | some s' => applyOps s' signer ops\n");
+        out.push_str(&format!(
+            "  | op :: ops => match applyOp s signer{} op with\n",
+            ctx_pass
+        ));
+        out.push_str(&format!(
+            "    | some s' => applyOps s' signer{} ops\n",
+            ctx_pass
+        ));
         out.push_str("    | none => none\n\n");
     }
 
@@ -551,6 +619,13 @@ pub(super) fn emit_liveness_body(
     adt_form: bool,
     rec: &mut ObligationRecorder,
 ) {
+    // #328 — `applyOps` threads ctx when any handler reads one; the
+    // theorem binds it universally.
+    let (live_ctx_sig, live_ctx_arg) = if spec_action_ctx_fields(mir).is_empty() {
+        ("", "")
+    } else {
+        (" (ctx : ActionCtx)", " ctx")
+    };
     for liveness in &mir.liveness_props {
         let bound = liveness.within_steps.unwrap_or(10);
         rec.emitted(
@@ -568,8 +643,8 @@ pub(super) fn emit_liveness_body(
             liveness.via_ops.join(", ")
         ));
         out.push_str(&format!(
-            "theorem liveness_{} (s : State) (signer : Pubkey)\n",
-            liveness.name
+            "theorem liveness_{} (s : State) (signer : Pubkey){}\n",
+            liveness.name, live_ctx_sig
         ));
         out.push_str(&format!(
             "    (h : s.status = .{}) :\n",
@@ -581,16 +656,18 @@ pub(super) fn emit_liveness_body(
             // on flat-state if-guards and isn't valid against the
             // per-variant pattern-match transitions.
             out.push_str(&format!(
-                "    \u{2203} ops, ops.length \u{2264} {} \u{2227} \u{2200} s', applyOps s signer ops = some s' \u{2192} s'.status = .{} := by sorry\n\n",
-                bound, liveness.leads_to_state
+                "    \u{2203} ops, ops.length \u{2264} {} \u{2227} \u{2200} s', applyOps s signer{} ops = some s' \u{2192} s'.status = .{} := by sorry\n\n",
+                bound, live_ctx_arg, liveness.leads_to_state
             ));
             continue;
         }
 
         // Flat-state path: when a concrete via-op path through the
         // lifecycle exists, emit the universal-implication form +
-        // auto-proof script; else fall back to the existential form
-        // with sorry (non-vacuous obligation).
+        // auto-proof script; else fall back to the existential form with
+        // sorry (non-vacuous obligation). A ctx binder is auto-proof-safe:
+        // the split-based script never needs the guard to reduce — the
+        // taken branch rewrites, the untaken branch contradicts.
         let path = find_liveness_path(
             &liveness.from_state,
             &liveness.leads_to_state,
@@ -601,13 +678,13 @@ pub(super) fn emit_liveness_body(
         if let Some(ref ops_path) = path {
             let proof = liveness_proof_script(ops_path, &mir.handlers);
             out.push_str(&format!(
-                "    \u{2203} ops, ops.length \u{2264} {} \u{2227} \u{2200} s', applyOps s signer ops = some s' \u{2192} s'.status = .{}{}\n",
-                bound, liveness.leads_to_state, proof
+                "    \u{2203} ops, ops.length \u{2264} {} \u{2227} \u{2200} s', applyOps s signer{} ops = some s' \u{2192} s'.status = .{}{}\n",
+                bound, live_ctx_arg, liveness.leads_to_state, proof
             ));
         } else {
             out.push_str(&format!(
-                "    \u{2203} ops s', ops.length \u{2264} {} \u{2227} applyOps s signer ops = some s' \u{2227} s'.status = .{} := by sorry\n\n",
-                bound, liveness.leads_to_state
+                "    \u{2203} ops s', ops.length \u{2264} {} \u{2227} applyOps s signer{} ops = some s' \u{2227} s'.status = .{} := by sorry\n\n",
+                bound, live_ctx_arg, liveness.leads_to_state
             ));
         }
     }

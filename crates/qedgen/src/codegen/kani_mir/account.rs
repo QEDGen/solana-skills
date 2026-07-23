@@ -50,7 +50,12 @@ pub(crate) fn emit_account_section_structural(
         |t| map_type(t, parsed),
         has_lifecycle,
     )?;
-    emit_kani_account_env_structs(out, parsed);
+    // #326 — ADT specs get the `state_repr_valid` invariant alongside the
+    // flat struct; harness preambles assume it and transitions preserve it.
+    if let Some(acct) = util::kani_adt_view(parsed) {
+        util::emit_state_repr_validity_fn(out, parsed, acct);
+    }
+    emit_kani_account_env_structs(out, mir, parsed);
 
     let handlers: Vec<&crate::check::ParsedHandler> = parsed.handlers.iter().collect();
     let properties: Vec<&crate::check::ParsedProperty> = parsed.properties.iter().collect();
@@ -140,7 +145,7 @@ pub(crate) fn emit_account_section_structural(
     Ok(())
 }
 
-pub(crate) fn emit_kani_account_env_structs(out: &mut String, parsed: &ParsedSpec) {
+pub(crate) fn emit_kani_account_env_structs(out: &mut String, mir: &Mir, parsed: &ParsedSpec) {
     use crate::rust_codegen_util as util;
 
     let handlers: Vec<&crate::check::ParsedHandler> = parsed
@@ -166,8 +171,45 @@ pub(crate) fn emit_kani_account_env_structs(out: &mut String, parsed: &ParsedSpe
         for account in &op.accounts {
             out.push_str(&format!("    {}: KaniAccount,\n", account.name));
         }
+        // #337 — flattened symbolic members for account state-field reads
+        // (`admin_config.admin` → `admin_config_admin`): external state the
+        // guard compares against, modeled as an arbitrary value.
+        for (acct, field) in util::collect_account_state_field_reads(op) {
+            let ty = account_state_field_rust_type(mir, parsed, op, &acct, &field);
+            out.push_str(&format!("    {}_{}: {},\n", acct, field, ty));
+        }
         out.push_str("}\n\n");
     }
+}
+
+/// Rust type for a handler-account state-field read (#337), resolved from
+/// the account binding's declared type through the imported spec's
+/// account-type declarations. Falls back to `[u8; 32]` — the guard shape
+/// that motivates these reads is a pubkey comparison.
+fn account_state_field_rust_type(
+    mir: &Mir,
+    parsed: &ParsedSpec,
+    op: &crate::check::ParsedHandler,
+    acct: &str,
+    field: &str,
+) -> String {
+    use crate::codegen_shared::map_type;
+
+    op.accounts
+        .iter()
+        .find(|a| a.name == acct)
+        .and_then(|a| {
+            let ns = a.imported_namespace.as_deref()?;
+            let tname = a.account_type.as_deref()?;
+            let import = mir.imports.get(ns)?;
+            let at = import.account_types.iter().find(|t| t.name == tname)?;
+            at.fields
+                .iter()
+                .find(|(n, _)| n == field)
+                .map(|(_, t)| t.clone())
+        })
+        .and_then(|dsl_ty| map_type(&dsl_ty, parsed).ok())
+        .unwrap_or_else(|| "[u8; 32]".to_string())
 }
 
 pub(crate) fn emit_kani_account_env_binding(
@@ -191,6 +233,10 @@ pub(crate) fn emit_kani_account_env_binding(
             "{indent}    {}: KaniAccount {{ pubkey: kani::any() }},\n",
             account.name
         ));
+    }
+    // #337 — symbolic external-state members, matching the struct emission.
+    for (acct, field) in util::collect_account_state_field_reads(op) {
+        out.push_str(&format!("{indent}    {}_{}: kani::any(),\n", acct, field));
     }
     out.push_str(&format!("{indent}}};\n"));
 }
