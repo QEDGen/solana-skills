@@ -323,15 +323,19 @@ fn imported_state_field_lean_ty(
     h.accounts
         .iter()
         .find(|a| a.name == acct)
-        .and_then(|a| a.imported_namespace.as_ref())
-        .and_then(|ns| mir.imports.get(ns))
-        .and_then(|import| {
-            import.account_types.iter().find_map(|at| {
-                at.fields
-                    .iter()
-                    .find(|(n, _)| n == field)
-                    .map(|(_, t)| render_ty(&crate::mir::parse_ty(t)))
-            })
+        .and_then(|a| {
+            let ns = a.imported_namespace.as_ref()?;
+            let account_type = a.account_type.as_ref()?;
+            let import = mir.imports.get(ns)?;
+            let declared = import
+                .account_types
+                .iter()
+                .find(|candidate| &candidate.name == account_type)?;
+            declared
+                .fields
+                .iter()
+                .find(|(n, _)| n == field)
+                .map(|(_, t)| render_ty(&crate::mir::parse_ty(t)))
         })
         .unwrap_or_else(|| "Pubkey".to_string())
 }

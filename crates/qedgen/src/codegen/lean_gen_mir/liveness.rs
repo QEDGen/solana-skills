@@ -253,8 +253,20 @@ pub(super) fn cover_trace_proof(
             .is_some_and(|h| handler_uses_ctx(mir, h))
     });
     if trace_uses_ctx {
-        let arity = spec_action_ctx_fields(mir).len();
-        let fields = vec!["pk"; arity].join(", ");
+        let fields = spec_action_ctx_fields(mir)
+            .iter()
+            .map(|(_, ty)| match ty.as_str() {
+                "Pubkey" => Some("pk"),
+                "Nat" | "Int" => Some("0"),
+                "Bool" => Some("false"),
+                "Bytes32" | "Bytes64" => Some("default"),
+                ty if ty.starts_with("Fin ") => Some("0"),
+                ty if ty.starts_with("List ") => Some("[]"),
+                ty if ty.starts_with("Option ") => Some("none"),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?
+            .join(", ");
         proof.push_str(&format!(
             "  let ctxw : ActionCtx := \u{27E8}{}\u{27E9}\n",
             fields
