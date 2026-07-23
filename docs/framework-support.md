@@ -56,9 +56,11 @@ manifest.
 ³ Indexed shapes (`Map[N]` fields, #336): `Spec.lean` carries a
 machine-owned `def <name>_stmt : Prop` for every obligation (preservation,
 aborts, ensures, covers, liveness, environments); proof bodies stay in the
-user-owned `Proofs.lean`, ideally typed `theorem <name> : <name>_stmt` so
-a restated obligation no longer type-checks. The obligation manifest
-records each statement as emitted — the old blanket
+user-owned `Proofs.lean`, typed `theorem <name> : <name>_stmt` so
+a restated obligation no longer type-checks. `qedgen check` nudges any
+theorem that restates its obligation instead of typing against the
+`_stmt` (#349, informational). The obligation manifest records each
+statement as emitted — the old blanket
 `lean_indexed_shape_proofs_external` status is gone.
 
 ⁴ Multi-account file-level features (#324): covers, liveness, and

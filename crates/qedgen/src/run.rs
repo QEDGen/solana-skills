@@ -1332,9 +1332,16 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                     // A foreign Proofs.lean (generated from a DIFFERENT spec,
                     // #166) is informational — a Kani-first workflow may
                     // legitimately never regenerate Lean — so it must not
-                    // fail the check. Real same-spec drift still does.
-                    let only_foreign = findings.iter().all(|f| {
-                        matches!(f, proofs_bootstrap::OrphanFinding::ForeignProofs { .. })
+                    // fail the check. A restated-statement nudge (#349) is
+                    // likewise informational: the proof is valid, only the
+                    // statement guard is missing. Real same-spec drift
+                    // (orphan/missing) still fails.
+                    let only_informational = findings.iter().all(|f| {
+                        matches!(
+                            f,
+                            proofs_bootstrap::OrphanFinding::ForeignProofs { .. }
+                                | proofs_bootstrap::OrphanFinding::RestatedStatement { .. }
+                        )
                     });
                     if json {
                         let as_json: Vec<serde_json::Value> = findings
@@ -1354,6 +1361,12 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                                     "declared": declared,
                                     "expected": expected,
                                 }),
+                                proofs_bootstrap::OrphanFinding::RestatedStatement { theorem } => {
+                                    serde_json::json!({
+                                        "kind": "restated_statement",
+                                        "theorem": theorem,
+                                    })
+                                }
                             })
                             .collect();
                         println!("{}", serde_json::to_string_pretty(&as_json)?);
@@ -1363,7 +1376,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                             eprintln!("  {}", f);
                         }
                     }
-                    if !only_foreign {
+                    if !only_informational {
                         has_issues = true;
                     }
                 }

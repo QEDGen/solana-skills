@@ -5,6 +5,10 @@ Proofs.lean — user-owned preservation proofs for Multisig.
 Spec.lean is regenerated; this file is durable. `qedgen check`
 (and `qedgen reconcile`) flag orphan theorems (handler removed from
 spec) and missing obligations (new `preserved_by` declared).
+
+Spec.lean owns each obligation statement as `def <name>_stmt : Prop`;
+every theorem here types against its `_stmt`, so a statement cannot
+drift from the spec — only the proof body is hand-written.
 -/
 import Spec
 
@@ -19,75 +23,71 @@ open QEDGen.Solana
 -- them untouched or only decrements member_count under a guard that proves
 -- the new value still ≥ threshold.
 
-theorem threshold_bounded_preserved_by_create_vault
-    (s s' : State) (signer : Pubkey) (threshold member_count : Nat)
-    (_h_inv : threshold_bounded s)
-    (h : create_vaultTransition s signer threshold member_count = some s') :
-    threshold_bounded s' := by
+theorem threshold_bounded_preserved_by_create_vault :
+    threshold_bounded_preserved_by_create_vault_stmt := by
+  intro s s' signer threshold member_count _h_inv h
   unfold create_vaultTransition at h
   split_ifs at h with hg
   cases h
   unfold threshold_bounded
   exact ⟨hg.2.2.1.2, hg.2.2.1.1⟩
 
-theorem threshold_bounded_preserved_by_propose
-    (s s' : State) (signer : Pubkey)
-    (h_inv : threshold_bounded s)
-    (h : proposeTransition s signer = some s') :
-    threshold_bounded s' := by
+theorem threshold_bounded_preserved_by_propose :
+    threshold_bounded_preserved_by_propose_stmt := by
+  intro s s' signer h_inv h
   unfold proposeTransition at h
   split_ifs at h
   cases h
   exact h_inv
 
-theorem threshold_bounded_preserved_by_approve
-    (s s' : State) (signer : Pubkey) (member_index : Fin MAX_MEMBERS)
-    (h_inv : threshold_bounded s)
-    (h : approveTransition s signer member_index = some s') :
-    threshold_bounded s' := by
+theorem threshold_bounded_preserved_by_approve :
+    threshold_bounded_preserved_by_approve_stmt := by
+  intro s s' signer member_index h_inv h
   unfold approveTransition at h
   simp only at h
   split_ifs at h
   cases h
   exact h_inv
 
-theorem threshold_bounded_preserved_by_reject
-    (s s' : State) (signer : Pubkey) (member_index : Fin MAX_MEMBERS)
-    (h_inv : threshold_bounded s)
-    (h : rejectTransition s signer member_index = some s') :
-    threshold_bounded s' := by
+theorem threshold_bounded_preserved_by_reject :
+    threshold_bounded_preserved_by_reject_stmt := by
+  intro s s' signer member_index h_inv h
   unfold rejectTransition at h
   simp only at h
   split_ifs at h
   cases h
   exact h_inv
 
-theorem threshold_bounded_preserved_by_execute
-    (s s' : State) (signer : Pubkey) (member_index : Fin MAX_MEMBERS)
-    (h_inv : threshold_bounded s)
-    (h : executeTransition s signer member_index = some s') :
-    threshold_bounded s' := by
+theorem threshold_bounded_preserved_by_execute :
+    threshold_bounded_preserved_by_execute_stmt := by
+  intro s s' signer member_index h_inv h
   unfold executeTransition at h
   simp only at h
   split_ifs at h
   cases h
   exact h_inv
 
-theorem threshold_bounded_preserved_by_cancel_proposal
-    (s s' : State) (signer : Pubkey)
-    (h_inv : threshold_bounded s)
-    (h : cancel_proposalTransition s signer = some s') :
-    threshold_bounded s' := by
+theorem threshold_bounded_preserved_by_cancel_proposal :
+    threshold_bounded_preserved_by_cancel_proposal_stmt := by
+  intro s s' signer h_inv h
   unfold cancel_proposalTransition at h
   split_ifs at h
   cases h
   exact h_inv
 
-theorem threshold_bounded_preserved_by_remove_member
-    (s s' : State) (signer : Pubkey)
-    (h_inv : threshold_bounded s)
-    (h : remove_memberTransition s signer = some s') :
-    threshold_bounded s' := by
+theorem threshold_bounded_preserved_by_add_member :
+    threshold_bounded_preserved_by_add_member_stmt := by
+  intro s s' signer member_index member_pubkey h_inv h
+  -- add_member rewrites `members`/`status` only; threshold and member_count
+  -- pass through untouched.
+  unfold add_memberTransition at h
+  split_ifs at h
+  cases h
+  exact h_inv
+
+theorem threshold_bounded_preserved_by_remove_member :
+    threshold_bounded_preserved_by_remove_member_stmt := by
+  intro s s' signer h_inv h
   unfold remove_memberTransition at h
   split_ifs at h with hg
   cases h
@@ -110,11 +110,9 @@ theorem threshold_bounded_preserved_by_remove_member
 -- per-slot `voted` bitmap; see the comment on `votes_bounded` in
 -- multisig.qedspec for why those obligations are excluded.
 
-theorem votes_bounded_preserved_by_create_vault
-    (s s' : State) (signer : Pubkey) (threshold member_count : Nat)
-    (_h_inv : votes_bounded s)
-    (h : create_vaultTransition s signer threshold member_count = some s') :
-    votes_bounded s' := by
+theorem votes_bounded_preserved_by_create_vault :
+    votes_bounded_preserved_by_create_vault_stmt := by
+  intro s s' signer threshold member_count _h_inv h
   unfold create_vaultTransition at h
   split_ifs at h
   cases h
@@ -122,22 +120,18 @@ theorem votes_bounded_preserved_by_create_vault
   -- s'.approval_count = 0, s'.rejection_count = 0 ⇒ 0 ≤ s'.member_count
   dsimp only; omega
 
-theorem votes_bounded_preserved_by_propose
-    (s s' : State) (signer : Pubkey)
-    (_h_inv : votes_bounded s)
-    (h : proposeTransition s signer = some s') :
-    votes_bounded s' := by
+theorem votes_bounded_preserved_by_propose :
+    votes_bounded_preserved_by_propose_stmt := by
+  intro s s' signer _h_inv h
   unfold proposeTransition at h
   split_ifs at h
   cases h
   unfold votes_bounded
   dsimp only; omega
 
-theorem votes_bounded_preserved_by_execute
-    (s s' : State) (signer : Pubkey) (member_index : Fin MAX_MEMBERS)
-    (_h_inv : votes_bounded s)
-    (h : executeTransition s signer member_index = some s') :
-    votes_bounded s' := by
+theorem votes_bounded_preserved_by_execute :
+    votes_bounded_preserved_by_execute_stmt := by
+  intro s s' signer member_index _h_inv h
   unfold executeTransition at h
   simp only at h
   split_ifs at h
@@ -145,22 +139,18 @@ theorem votes_bounded_preserved_by_execute
   unfold votes_bounded
   dsimp only; omega
 
-theorem votes_bounded_preserved_by_cancel_proposal
-    (s s' : State) (signer : Pubkey)
-    (_h_inv : votes_bounded s)
-    (h : cancel_proposalTransition s signer = some s') :
-    votes_bounded s' := by
+theorem votes_bounded_preserved_by_cancel_proposal :
+    votes_bounded_preserved_by_cancel_proposal_stmt := by
+  intro s s' signer _h_inv h
   unfold cancel_proposalTransition at h
   split_ifs at h
   cases h
   unfold votes_bounded
   dsimp only; omega
 
-theorem votes_bounded_preserved_by_remove_member
-    (s s' : State) (signer : Pubkey)
-    (_h_inv : votes_bounded s)
-    (h : remove_memberTransition s signer = some s') :
-    votes_bounded s' := by
+theorem votes_bounded_preserved_by_remove_member :
+    votes_bounded_preserved_by_remove_member_stmt := by
+  intro s s' signer _h_inv h
   unfold remove_memberTransition at h
   split_ifs at h with hg
   cases h

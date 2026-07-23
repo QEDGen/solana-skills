@@ -178,7 +178,10 @@ pub fn reconcile(spec_path: &Path, code_dir: &Path, proofs_dir: &Path) -> Result
                 }
                 // #166: a Proofs.lean from a DIFFERENT spec is a workspace-
                 // hygiene note, not per-theorem drift — surface as a warning.
-                f @ OrphanFinding::ForeignProofs { .. } => {
+                // #349: a theorem restating its machine-owned `_stmt` is the
+                // same class — valid proof, missing statement guard.
+                f @ (OrphanFinding::ForeignProofs { .. }
+                | OrphanFinding::RestatedStatement { .. }) => {
                     warnings.push(f.to_string());
                 }
             }
