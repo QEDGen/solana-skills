@@ -30,6 +30,73 @@ pub fn property_predicate_rust(prop: &ParsedProperty) -> Option<String> {
         .map(|r| r.to_string())
 }
 
+/// Product-state variant of [`property_predicate_rust`] (#331): renders
+/// the predicate from its typed tree with state fields routed through
+/// their owning product component (`s.<component>.<field>`); ghosts stay
+/// direct product-struct fields (`s.<ghost>`). Tree-less properties
+/// return `None` — a flat string cannot be re-receivered safely.
+pub fn property_predicate_rust_product(
+    prop: &ParsedProperty,
+    product_fields: &std::collections::BTreeMap<String, String>,
+) -> Option<String> {
+    use super::tree_render::{render_rust, ArithMode, Binder, RustCx};
+    let tree = prop.tree.as_ref()?;
+    let binder = match prop.class {
+        crate::check::PropertyClass::Unary => Binder::S,
+        crate::check::PropertyClass::Binary => Binder::PrePost,
+    };
+    Some(render_rust(
+        tree,
+        RustCx::native()
+            .with_binder(binder)
+            .with_arith(ArithMode::Widened)
+            .with_product_fields(Some(product_fields)),
+    ))
+}
+
+/// True iff `rust` references the state field `name` as `s.<name>`,
+/// word-bounded so `s.total` does not match `s.total_supply`. Shared by
+/// the proptest ghost classification and the product-state lowerings
+/// (#324/#331).
+pub fn references_state_field(rust: &str, name: &str) -> bool {
+    let needle = format!("s.{}", name);
+    let mut start = 0;
+    while let Some(pos) = rust[start..].find(&needle) {
+        let end = start + pos + needle.len();
+        let boundary = rust[end..]
+            .chars()
+            .next()
+            .map(|c| !c.is_alphanumeric() && c != '_')
+            .unwrap_or(true);
+        if boundary {
+            return true;
+        }
+        start = end;
+    }
+    false
+}
+
+/// #331 — a multi-account spec's ghosts are "liftable" to the product
+/// state when no handler GUARD reads a ghost: per-account transitions
+/// then need no ghost fields at all (updates move to the product
+/// wrappers), and the product state carries the single global value.
+/// A guard-ghost spec keeps the per-account ghost copy instead — that
+/// shape compiles but stays reported unsupported in the manifest.
+pub fn multi_account_ghosts_liftable(spec: &ParsedSpec) -> bool {
+    if spec.ghosts.is_empty() {
+        return true;
+    }
+    spec.handlers.iter().all(|op| {
+        match super::collect_full_guard_with_account_env(op, false, None) {
+            None => true,
+            Some(guard) => spec
+                .ghosts
+                .iter()
+                .all(|g| !references_state_field(&guard, &g.name)),
+        }
+    })
+}
+
 /// For a field with an "add" effect, find its upper-bound field in property expressions.
 /// Property expressions are in Lean form (e.g. `s.approval_count ≤ s.member_count`).
 /// Returns the bounding field name if a `field ≤ bound` pattern is found.

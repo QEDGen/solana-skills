@@ -147,6 +147,13 @@ pub struct RustCx<'a> {
     /// positions only (the `ctx` receiver is baked in, like
     /// [`AcctKeyStyle`]); `None` elsewhere.
     pub acct_mirror: Option<&'a std::collections::HashMap<String, bool>>,
+    /// Product-state component routing (#324/#331): state-field name →
+    /// component field of the product struct. Under `Binder::S`, a state
+    /// field in this map renders `s.<component>.<field>` instead of
+    /// `s.<field>`. Ghosts are direct product-struct fields and keep the
+    /// plain `s.<ghost>` spelling. `None` everywhere outside the
+    /// generated `mod product`.
+    pub product_fields: Option<&'a std::collections::BTreeMap<String, String>>,
 }
 
 impl<'a> RustCx<'a> {
@@ -159,6 +166,7 @@ impl<'a> RustCx<'a> {
             acct_key: None,
             adt_accessors: None,
             acct_mirror: None,
+            product_fields: None,
         }
     }
     /// Test-only convenience (corpus parity + mode tests); non-test
@@ -200,6 +208,15 @@ impl<'a> RustCx<'a> {
     ) -> Self {
         RustCx {
             acct_mirror,
+            ..self
+        }
+    }
+    pub fn with_product_fields(
+        self,
+        product_fields: Option<&'a std::collections::BTreeMap<String, String>>,
+    ) -> Self {
+        RustCx {
+            product_fields,
             ..self
         }
     }
@@ -543,7 +560,22 @@ fn render_path(p: &TreePath, cx: RustCx, inside_old: bool) -> String {
     let mut segs: &[TreeSeg] = &p.segments;
     match &p.binding {
         BindingKind::StateField | BindingKind::Ghost => match (cx.binder, inside_old) {
-            (Binder::S, _) => out.push('s'),
+            (Binder::S, _) => {
+                out.push('s');
+                // Product-state routing (#324/#331): state fields read
+                // through their owning component; ghosts stay direct
+                // product-struct fields.
+                if matches!(p.binding, BindingKind::StateField) {
+                    if let (Some(map), Some(TreeSeg::Field(first))) =
+                        (cx.product_fields, p.segments.first())
+                    {
+                        if let Some(component) = map.get(first.as_str()) {
+                            out.push('.');
+                            out.push_str(component);
+                        }
+                    }
+                }
+            }
             (Binder::SelfAcct(name), _) => {
                 // Multi-variant ADT wrapper: consistent variant fields
                 // read through the generated accessor.

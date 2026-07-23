@@ -95,3 +95,12 @@ fn snapshot_let_bindings_fee_split() {
 fn snapshot_escrow_split() {
     assert_or_update_snapshot("escrow-split", "examples/rust/escrow-split", ".");
 }
+
+#[test]
+fn snapshot_product_state_ghosts() {
+    assert_or_update_snapshot(
+        "product-state-ghosts",
+        "crates/qedgen/tests/fixtures/product-state-ghosts",
+        "ghost_pool.qedspec",
+    );
+}

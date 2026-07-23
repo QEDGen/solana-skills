@@ -29,7 +29,7 @@ sBPF assembly is selected by `pragma sbpf` in the spec, not by a `Target`.
 | Greenfield Rust scaffold (`codegen_mir`) | ✅ | ⚠️ generic CPI → `todo!()` | ⚠️ generic CPI → `todo!()`; imported mirrors error | n/a | n/a |
 | Kani spec-model (`kani_mir`) | ✅ ¹ ⁴ | ✅ ¹ ⁴ | ✅ ¹ ⁴ | n/a | skip by design |
 | impl-Kani (`kani_impl`) | ✅ greenfield + state-struct (#162) + Context (#169) | ⚠️ greenfield shape only | ⚠️ own `#[repr(C)]` shape; some ix-data field types TODO | ❌ | ❌ |
-| proptest (`proptest_gen_mir`) | ✅ | ✅ | ✅ | n/a | skip by design |
+| proptest (`proptest_gen_mir`) | ✅ ⁵ | ✅ ⁵ | ✅ ⁵ | n/a | skip by design |
 | Lean (`lean_gen_mir`) | ✅ ² ³ | ✅ ² ³ | ✅ ² ³ | n/a | ✅ dedicated sBPF path |
 | Probe: runtime-agnostic scanners (`run_helpers`) | ✅ (#196) | ✅ (#196) | ✅ | ✅ (#196) | ❌ bootstrap only |
 | Probe: IDL-enrichment overlay (`probe/idl_overlay`) | ✅ enrich + narrow (#235); unbuilt → `derivable_idl` (#238) | ✅ enrich + narrow (#235); unbuilt → `derivable_idl` (#238) | ✅ enrich + handler fill | ⚠️ enrich only (declarative flags) | ❌ |
@@ -70,6 +70,15 @@ symbolic account env, record/sum-typed params, endpoint states declared
 by more than one lifecycle, cross-account or ghost-reading environment
 properties) stay `unsupported(kani_multi_account_file_level)` in the
 obligation manifest.
+
+⁵ Multi-account product state, proptest lane (#331): spec-global ghosts
+become one field of the generated `ProductState`, updated atomically by
+delegating transition wrappers; ghost-reading properties run in the
+init-seeded product sequence harness, and cross-account or
+multi-component property pairs get product preservation tests. A ghost
+read by a handler guard is not liftable — that spec keeps per-account
+ghost copies and its ghost obligations stay
+`unsupported(proptest_multi_account_ghost)` in the manifest.
 
 ## Codegen ownership contract: CPIs, PDA creation, and events
 

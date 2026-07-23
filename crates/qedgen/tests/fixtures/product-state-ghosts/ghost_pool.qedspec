@@ -1,0 +1,54 @@
+spec GhostPool
+
+type Pool
+  | Uninitialized
+  | Active of { total : U64 }
+
+type Loan
+  | Empty
+  | Open of { amount : U64 }
+
+type Error
+  | InvalidAmount
+  | MathOverflow
+
+ghost lifetime_total : U64 {
+  init { 0 }
+  on deposit { lifetime_total += amount }
+}
+
+handler init_pool : Pool.Uninitialized -> Pool.Active {
+  auth authority
+  accounts {
+    authority : signer, writable
+  }
+  effect {
+    total := 0
+  }
+}
+
+handler deposit (amount : U64) : Pool.Active -> Pool.Active {
+  permissionless
+  accounts {
+    depositor : signer
+  }
+  requires amount > 0 else InvalidAmount
+  effect {
+    total += amount
+  }
+}
+
+handler open_loan (amount : U64) : Loan.Empty -> Loan.Open {
+  permissionless
+  accounts {
+    borrower : signer
+  }
+  requires amount > 0 else InvalidAmount
+  effect {
+    amount := amount
+  }
+}
+
+property ghost_tracks_total :
+  state.lifetime_total >= state.total
+  preserved_by [deposit]

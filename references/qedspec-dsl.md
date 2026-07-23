@@ -488,11 +488,17 @@ properties (an arbitrary pre-state ghost value rarely satisfies the
 invariant, so rejection sampling would exhaust). The Lean preservation
 proof is written in `Proofs.lean` like any other.
 
-**Scope.** v1 wires ghosts into the **flat single-account** State shape
-(the canonical token example). Indexed (`Map[N]`), multi-account, and
-explicit-ADT state shapes fire the `ghost_unsupported_state_shape` lint —
-track the aggregate in a `property` (`sum i : Idx, accounts[i].x`)
-instead, which is fully supported there. Ghosts must be **scalar**
+**Scope.** Ghosts wire into the **flat single-account** State shape (the
+canonical token example) and, for proptest, into **multi-account** specs
+via the product-state module (#331): the ghost is one global field of the
+generated `ProductState`, updated atomically by the transition wrappers,
+and ghost-reading properties are exercised by the product sequence
+harness. Exception: a ghost read by a handler **guard** is not liftable —
+that spec keeps per-account ghost copies and the ghost obligations stay
+`unsupported` in the manifest. Indexed (`Map[N]`) and explicit-ADT state
+shapes fire the `ghost_unsupported_state_shape` lint — track the
+aggregate in a `property` (`sum i : Idx, accounts[i].x`) instead, which
+is fully supported there. Ghosts must be **scalar**
 (`U8…U128` / `I8…I128` / `Bool`); a non-scalar fires
 `ghost_non_scalar_type`, and an `on` clause naming a missing handler
 fires `ghost_update_unknown_handler`.

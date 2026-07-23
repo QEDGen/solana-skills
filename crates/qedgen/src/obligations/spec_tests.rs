@@ -268,11 +268,12 @@ fn lean_indexed_shape_emits_statement_props() {
     }
 }
 
-/// #331 — multi-account proptest cannot model spec-global ghosts. A
-/// ghost-reading property on a two-account spec must be reported per
-/// preserved_by handler, not silently filtered.
+/// #331 — liftable multi-account ghosts (no handler guard reads one)
+/// move to the product-state module: the ghost-reading property is
+/// exercised by the product sequence harness and recorded emitted, per
+/// preserved_by handler — never absent.
 #[test]
-fn proptest_multi_account_ghost_is_reported() {
+fn proptest_multi_account_ghost_emits_via_product_state() {
     let (mir, parsed) = lower_inline(
         r#"
 spec GhostMulti
@@ -341,8 +342,107 @@ property ghost_tracks_total :
     );
     let ghost_dropped = entries_with_reason(&entries, UnsupportedReason::ProptestMultiAccountGhost);
     assert!(
+        ghost_dropped.is_empty(),
+        "liftable ghost must not be reported unsupported: {:#?}",
+        ghost_dropped
+    );
+    let ghost_pair: Vec<&ObligationEntry> = entries
+        .iter()
+        .filter(|e| {
+            e.kind == ObligationKind::PropertyPreservation
+                && e.key == "ghost_tracks_total"
+                && e.scope == "deposit"
+        })
+        .collect();
+    assert_eq!(ghost_pair.len(), 1, "one recorded pair: {:#?}", entries);
+    assert_eq!(
+        ghost_pair[0].status,
+        ObligationStatus::Emitted {
+            artifact: "product_state_machine_sequence".to_string()
+        },
+        "ghost pair rides the product sequence harness"
+    );
+}
+
+/// #331 — a ghost read by a handler GUARD is not liftable: the
+/// per-account modules keep the Kani-parity ghost copy (the artifact
+/// still compiles) and the ghost-reading property stays reported
+/// unsupported, exactly as before the product-state lowering.
+#[test]
+fn proptest_guard_ghost_stays_reported_unsupported() {
+    let (mir, parsed) = lower_inline(
+        r#"
+spec GhostGuard
+
+type Pool
+  | Uninitialized
+  | Active of { total : U64 }
+
+type Loan
+  | Empty
+  | Open of { amount : U64 }
+
+type Error
+  | InvalidAmount
+
+ghost lifetime_total : U64 {
+  init { 0 }
+  on deposit { lifetime_total += amount }
+}
+
+handler init_pool : Pool.Uninitialized -> Pool.Active {
+  auth authority
+  accounts {
+    authority : signer, writable
+  }
+  effect {
+    total := 0
+  }
+}
+
+handler deposit (amount : U64) : Pool.Active -> Pool.Active {
+  permissionless
+  accounts {
+    depositor : signer
+  }
+  requires amount > 0 else InvalidAmount
+  requires state.lifetime_total < 1000000 else InvalidAmount
+  effect {
+    total += amount
+  }
+}
+
+handler open_loan (amount : U64) : Loan.Empty -> Loan.Open {
+  permissionless
+  accounts {
+    borrower : signer
+  }
+  requires amount > 0 else InvalidAmount
+  effect {
+    amount := amount
+  }
+}
+
+property ghost_tracks_total :
+  state.lifetime_total >= state.total
+  preserved_by [deposit]
+"#,
+    );
+    assert!(parsed.account_types.len() > 1, "fixture is multi-account");
+    assert!(
+        !crate::rust_codegen_util::multi_account_ghosts_liftable(&parsed),
+        "guard-ghost spec is not liftable"
+    );
+    let entries = reconciled(
+        ObligationBackend::Proptest,
+        &mir,
+        &parsed,
+        crate::proptest_gen_mir::collect_obligations(&mir, &parsed),
+    );
+    let ghost_dropped = entries_with_reason(&entries, UnsupportedReason::ProptestMultiAccountGhost);
+    assert!(
         !ghost_dropped.is_empty(),
-        "ghost property must be reported unsupported: {:#?}",
+        "guard-ghost property must stay reported unsupported: {:#?}",
         entries
     );
     assert!(ghost_dropped

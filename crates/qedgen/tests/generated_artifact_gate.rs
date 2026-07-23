@@ -161,3 +161,60 @@ fn lending_generated_artifacts_compile_and_run() {
 fn multisig_generated_artifacts_compile_and_run() {
     gate_anchor_example("multisig");
 }
+
+/// #331 — the product-state proptest artifact for a multi-account +
+/// ghost spec must COMPILE AND RUN, not just match a snapshot: the
+/// product module composes per-account strategies, delegating wrappers
+/// with atomic ghost updates, and the init-seeded sequence harness.
+#[test]
+#[ignore = "compile-heavy: codegen --proptest + cargo test against the proptest crate"]
+fn product_state_ghost_proptest_compiles_and_runs() {
+    common::ensure_qedgen_built();
+    let tmp = common::stage_fixture("crates/qedgen/tests/fixtures/product-state-ghosts");
+
+    run_ok(
+        Command::new(common::qedgen_bin())
+            .arg("codegen")
+            .arg("--spec")
+            .arg("ghost_pool.qedspec")
+            .arg("--proptest")
+            .arg("--proptest-output")
+            .arg("harness/tests/proptest.rs")
+            .current_dir(tmp.path()),
+    );
+
+    // Minimal crate around the generated test target.
+    let harness = tmp.path().join("harness");
+    std::fs::create_dir_all(harness.join("src")).expect("mkdir src");
+    std::fs::write(harness.join("src/lib.rs"), "").expect("write lib.rs");
+    std::fs::write(
+        harness.join("Cargo.toml"),
+        "[package]\n\
+         name = \"product-state-ghosts-harness\"\n\
+         version = \"0.1.0\"\n\
+         edition = \"2021\"\n\
+         \n\
+         [dev-dependencies]\n\
+         proptest = \"1\"\n\
+         \n\
+         [workspace]\n",
+    )
+    .expect("write Cargo.toml");
+
+    let out = run_capture_ok(
+        Command::new("cargo")
+            .arg("test")
+            .arg("--test")
+            .arg("proptest")
+            .env("CARGO_TARGET_DIR", gate_target_dir())
+            .current_dir(&harness),
+    );
+    assert!(
+        out.contains("product::product_state_machine_sequence"),
+        "product sequence harness must run:\n{out}"
+    );
+    assert!(
+        !out.contains("FAILED"),
+        "generated product proptests must pass:\n{out}"
+    );
+}
