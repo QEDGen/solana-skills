@@ -241,6 +241,26 @@ pub(super) fn cover_trace_proof(
     proof.push_str(" := by\n");
     proof.push_str("  let pk : Pubkey := \u{27E8}0, 0, 0, 0\u{27E9}\n");
 
+    // #328 — ctx witness. Same convention as the state witness: pubkey
+    // fields keep their `⟨0, 0, 0, 0⟩` default, so an all-`pk` ActionCtx
+    // satisfies `ctx.<f> = s.<pubkey-field>` guards over default-valued
+    // witness states exactly as `signer = s.<who>` already does. The
+    // per-step `by decide` verifies it on the concrete literals.
+    let trace_uses_ctx = trace.iter().any(|op_name| {
+        mir.handlers
+            .iter()
+            .find(|h| &h.name == op_name)
+            .is_some_and(|h| handler_uses_ctx(mir, h))
+    });
+    if trace_uses_ctx {
+        let arity = spec_action_ctx_fields(mir).len();
+        let fields = vec!["pk"; arity].join(", ");
+        proof.push_str(&format!(
+            "  let ctxw : ActionCtx := \u{27E8}{}\u{27E9}\n",
+            fields
+        ));
+    }
+
     if let Some((_, _, ref s0)) = steps.first() {
         let s0_lean = render_witness(s0)?;
         proof.push_str(&format!("  let s0 : State := {}\n", s0_lean));
@@ -261,6 +281,9 @@ pub(super) fn cover_trace_proof(
     let mut exact_parts: Vec<String> = Vec::new();
     exact_parts.push("s0".to_string());
     exact_parts.push("pk".to_string());
+    if trace_uses_ctx {
+        exact_parts.push("ctxw".to_string());
+    }
     for (i, (_, param_values, _)) in steps.iter().enumerate() {
         for (_, val) in param_values {
             exact_parts.push(val.clone());
@@ -431,12 +454,8 @@ pub(super) fn emit_covers_body(
                     // Try witness construction; fall back to `:= sorry`
                     // when the witness machinery can't synthesize a
                     // closed term (handler not found, unsupported
-                    // effect shape, ctx-reading trace handlers).
-                    let proof_script = if trace_uses_ctx {
-                        None
-                    } else {
-                        cover_trace_proof(mir, trace, adt_form)
-                    };
+                    // effect shape).
+                    let proof_script = cover_trace_proof(mir, trace, adt_form);
                     match proof_script {
                         Some(script) => {
                             out.push_str(&format!(
@@ -633,26 +652,18 @@ pub(super) fn emit_liveness_body(
 
         // Flat-state path: when a concrete via-op path through the
         // lifecycle exists, emit the universal-implication form +
-        // auto-proof script; else fall back to the existential form
-        // with sorry (non-vacuous obligation). Paths through a
-        // ctx-reading handler keep the sorry form — the auto-script
-        // cannot reduce guards over a symbolic ctx.
+        // auto-proof script; else fall back to the existential form with
+        // sorry (non-vacuous obligation). A ctx binder is auto-proof-safe:
+        // the split-based script never needs the guard to reduce — the
+        // taken branch rewrites, the untaken branch contradicts.
         let path = find_liveness_path(
             &liveness.from_state,
             &liveness.leads_to_state,
             &liveness.via_ops,
             &mir.handlers,
         );
-        let path_uses_ctx = path.as_ref().is_some_and(|ops| {
-            ops.iter().any(|op| {
-                mir.handlers
-                    .iter()
-                    .find(|h| h.name == *op)
-                    .is_some_and(|h| handler_uses_ctx(mir, h))
-            })
-        });
 
-        if let (Some(ref ops_path), false) = (&path, path_uses_ctx) {
+        if let Some(ref ops_path) = path {
             let proof = liveness_proof_script(ops_path, &mir.handlers);
             out.push_str(&format!(
                 "    \u{2203} ops, ops.length \u{2264} {} \u{2227} \u{2200} s', applyOps s signer{} ops = some s' \u{2192} s'.status = .{}{}\n",
