@@ -81,6 +81,111 @@ fn lower_inline(src: &str) -> (Mir, ParsedSpec) {
     (mir, parsed)
 }
 
+/// #337 — dotted cross-program auth (`auth admin_config.admin`) reads an
+/// imported account's state field. The Kani model must bind it as a
+/// flattened symbolic member on the account-env struct and route the
+/// guard through it — never emit the bare (unbound) identifier.
+#[test]
+fn imported_state_field_guard_binds_symbolic_env_member() {
+    let (mir, parsed) = lower_fixture("examples/rust/cross-program-vault/vault.qedspec");
+    let out = render(&mir, &parsed);
+
+    // Env struct member, typed from the imported AdminConfig.State.admin.
+    assert!(
+        out.contains("admin_config_admin: [u8; 32],"),
+        "flattened env member missing:\n{out}"
+    );
+    // Binding site mirrors the struct.
+    assert!(
+        out.contains("admin_config_admin: kani::any(),"),
+        "symbolic binding missing:\n{out}"
+    );
+    // Guard routes through the env; the bare identifier must be gone.
+    assert!(
+        out.contains("accounts.admin_config_admin == accounts.admin.pubkey"),
+        "guard must read the env member:\n{out}"
+    );
+    assert!(
+        !out.contains("(admin_config.admin"),
+        "bare unbound identifier must not appear:\n{out}"
+    );
+}
+
+/// #337 review follow-up — dotted imported types are split by the parser
+/// into `imported_namespace` + `account_type`. Resolve both fields and use
+/// the binding's declared account type rather than the Pubkey fallback.
+#[test]
+fn imported_numeric_state_field_uses_declared_account_type() {
+    let mut parsed = crate::chumsky_adapter::parse_str(
+        r#"
+spec ImportedCounterGuard
+
+program_id "11111111111111111111111111111111"
+
+type State = {
+  counter : U64,
+}
+
+type Error
+  | CounterMismatch
+
+handler check_counter {
+  permissionless
+  accounts {
+    registry : writable
+  }
+  requires registry.counter == state.counter else CounterMismatch
+}
+"#,
+    )
+    .expect("parse");
+    let registry = parsed.handlers[0]
+        .accounts
+        .iter_mut()
+        .find(|a| a.name == "registry")
+        .expect("registry binding");
+    registry.imported_namespace = Some("Registry".to_string());
+    registry.account_type = Some("CounterConfig".to_string());
+    parsed.imported_namespaces.insert(
+        "Registry".to_string(),
+        crate::check::ImportedNamespace {
+            dep_key: "registry".to_string(),
+            account_types: vec![
+                crate::check::ParsedAccountType {
+                    name: "WrongFirstMatch".to_string(),
+                    fields: vec![("counter".to_string(), "Bool".to_string())],
+                    lifecycle: Vec::new(),
+                    pda_ref: None,
+                    variants: Vec::new(),
+                },
+                crate::check::ParsedAccountType {
+                    name: "CounterConfig".to_string(),
+                    fields: vec![("counter".to_string(), "U64".to_string())],
+                    lifecycle: Vec::new(),
+                    pda_ref: None,
+                    variants: Vec::new(),
+                },
+            ],
+            records: Vec::new(),
+        },
+    );
+    let mir = crate::mir::lower(&parsed);
+    let out = render(&mir, &parsed);
+
+    assert!(
+        out.contains("registry_counter: u64,"),
+        "numeric imported field must use the declared account type:\n{out}"
+    );
+    assert!(
+        out.contains("accounts.registry_counter == s.counter"),
+        "guard must read the typed symbolic env member:\n{out}"
+    );
+    assert!(
+        !out.contains("registry_counter: [u8; 32],"),
+        "numeric imported field must not fall back to Pubkey:\n{out}"
+    );
+}
+
 /// #326 — single-account ADT spec with a variant-dropping transition:
 /// the flat carrier gains the `state_repr_valid` invariant, symbolic
 /// inits assume it, the dropping transition resets the dropped field,

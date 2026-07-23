@@ -625,13 +625,19 @@ fn render_path(p: &TreePath, cx: RustCx, inside_old: bool) -> String {
                 }
             }
             // Pubkey reads route through the generated account env when
-            // one is bound (`owner.pubkey` → `accounts.owner.pubkey`) —
-            // scoped to the exact `.pubkey` shape the legacy string
-            // rewrite handled; other account projections pass through.
+            // one is bound (`owner.pubkey` → `accounts.owner.pubkey`).
+            // Account *state-field* reads (`admin_config.admin` — the
+            // imported account's state, not its address) route to the
+            // flattened symbolic member the env struct carries for them
+            // (#337: `accounts.admin_config_admin`); without the binding
+            // the identifier is free and the harness cannot compile.
+            // Deeper projections pass through unchanged.
             if let (Some(env), [TreeSeg::Field(f)]) = (cx.acct_env, p.segments.as_slice()) {
                 if f == "pubkey" {
                     out.push_str(env);
                     out.push('.');
+                } else {
+                    return format!("{env}.{}_{}", p.root, f);
                 }
             }
             out.push_str(&p.root);

@@ -8,6 +8,7 @@ pub fn handler_needs_account_env(op: &ParsedHandler) -> bool {
     op.requires
         .iter()
         .any(|r| mentions_handler_account_pubkey(&r.rust_expr, &op.accounts))
+        || !collect_account_state_field_reads(op).is_empty()
         || op
             .effects
             .iter()
@@ -19,6 +20,36 @@ pub fn handler_needs_account_env(op: &ParsedHandler) -> bool {
                     .any(|e| is_account_pubkey_ref(e.value.trim(), &op.accounts))
             })
         })
+}
+
+/// Handler-account *state-field* reads in the requires clauses (#337):
+/// `admin_config.admin` reads the imported account's state, not its
+/// address. The Kani model carries each as a flattened symbolic member on
+/// the handler's account-env struct (`accounts.admin_config_admin`) —
+/// external state has no model identity beyond "some value", and without
+/// a binding the identifier is free and the harness cannot compile.
+/// Returns sorted, deduplicated `(account, field)` pairs.
+pub fn collect_account_state_field_reads(op: &ParsedHandler) -> Vec<(String, String)> {
+    use crate::mir::expr_tree::{BindingKind, ExprTree, TreeSeg};
+
+    let mut refs = std::collections::BTreeSet::new();
+    for req in &op.requires {
+        let Some(tree) = req.tree.as_ref() else {
+            continue;
+        };
+        tree.for_each_node(&mut |node| {
+            if let ExprTree::Path(p) = node {
+                if p.binding == BindingKind::Account {
+                    if let [TreeSeg::Field(f)] = p.segments.as_slice() {
+                        if f != "pubkey" {
+                            refs.insert((p.root.clone(), f.clone()));
+                        }
+                    }
+                }
+            }
+        });
+    }
+    refs.into_iter().collect()
 }
 
 pub fn handler_account_env_struct_name(op_name: &str) -> String {
