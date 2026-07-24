@@ -1084,19 +1084,22 @@ fn render_arith(
         let (l, r) = render_pair_with_coercion(lhs, rhs, cx, inside_old, Prec::Or);
         return (format!("({}).{}({})?", l, method, r), Prec::Atom);
     }
-    // Effect-RHS saturating mode: bare arithmetic lowers to `saturating_*`
-    // (no `?` — the value can't fail, it clamps). Ghost aggregate updates
-    // use this so a full-domain accumulator never overflow-panics under
-    // the debug-mode sequence harness. `div`/`rem` have no saturating
-    // form and can't overflow, but a zero divisor would panic — clamp to 0.
+    // Effect-RHS saturating mode: `+`/`-`/`*` lower to `saturating_*` (no
+    // `?` — the value can't fail, it clamps), so a full-domain ghost
+    // aggregate never overflow-panics under the debug-mode sequence
+    // harness. `div`/`rem` have no saturating form and can't overflow on
+    // magnitude, but a zero divisor (or signed `MIN / -1`) would panic;
+    // they follow the SAME total-function convention as `render_widened_term`
+    // and Lean — `x / 0 = 0`, `x % 0 = x` — so the ghost model stays
+    // consistent with the proofs rather than inventing a saturating rule.
     if cx.arith == ArithMode::SaturatingEffect {
         let (l, r) = render_pair_with_coercion(lhs, rhs, cx, inside_old, Prec::Or);
         let expr = match op {
-            TreeArithOp::Add => format!("({}).saturating_add({})", l, r),
-            TreeArithOp::Sub => format!("({}).saturating_sub({})", l, r),
-            TreeArithOp::Mul => format!("({}).saturating_mul({})", l, r),
-            TreeArithOp::Div => format!("({}).checked_div({}).unwrap_or(0)", l, r),
-            TreeArithOp::Mod => format!("({}).checked_rem({}).unwrap_or(0)", l, r),
+            TreeArithOp::Add => format!("({l}).saturating_add({r})"),
+            TreeArithOp::Sub => format!("({l}).saturating_sub({r})"),
+            TreeArithOp::Mul => format!("({l}).saturating_mul({r})"),
+            TreeArithOp::Div => format!("({l}).checked_div({r}).unwrap_or(0)"),
+            TreeArithOp::Mod => format!("({l}).checked_rem({r}).unwrap_or({l})"),
         };
         return (expr, Prec::Atom);
     }
@@ -1745,6 +1748,41 @@ mod tests {
         assert_eq!(
             render_rust(&e, RustCx::native().with_arith(ArithMode::Checked)),
             "(s.balance).checked_sub(amount)?"
+        );
+    }
+
+    #[test]
+    fn saturating_effect_saturates_addsubmul_and_keeps_total_div_mod() {
+        let sat = RustCx::native().with_arith(ArithMode::SaturatingEffect);
+        let g = || Box::new(state_field("g", Ty::U64));
+        let x = || Box::new(param("x", Ty::U64));
+        let bin = |op| ExprTree::Arith {
+            op,
+            lhs: g(),
+            rhs: x(),
+        };
+        // +/-/* clamp at the type bound (a ghost aggregate has no reject path).
+        assert_eq!(
+            render_rust(&bin(TreeArithOp::Add), sat),
+            "(s.g).saturating_add(x)"
+        );
+        assert_eq!(
+            render_rust(&bin(TreeArithOp::Sub), sat),
+            "(s.g).saturating_sub(x)"
+        );
+        assert_eq!(
+            render_rust(&bin(TreeArithOp::Mul), sat),
+            "(s.g).saturating_mul(x)"
+        );
+        // div/mod follow the Lean total-function convention, matching
+        // `render_widened_term`: `x / 0 = 0`, `x % 0 = x` (NOT `% 0 = 0`).
+        assert_eq!(
+            render_rust(&bin(TreeArithOp::Div), sat),
+            "(s.g).checked_div(x).unwrap_or(0)"
+        );
+        assert_eq!(
+            render_rust(&bin(TreeArithOp::Mod), sat),
+            "(s.g).checked_rem(x).unwrap_or(s.g)"
         );
     }
 
