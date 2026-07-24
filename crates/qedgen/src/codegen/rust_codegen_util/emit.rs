@@ -804,12 +804,34 @@ pub fn emit_transition_fn_inner(
     // Ghost (spec-only) field updates: a ghost with `on <this handler>`
     // assigns after the normal effects; others are framed (unchanged).
     // Values read `s.<ghost>` + params, matching the Lean transition.
-    // Arithmetic wraps in release (the `verify --proptest` path), so an
-    // arbitrary-state aggregate never panics on model overflow.
+    //
+    // Rendered with SATURATING arithmetic. A ghost is an abstract aggregate
+    // with no reject path — unlike a checked state field it can't decline
+    // the transition on overflow — so its accumulation must never panic:
+    // the sequence harness feeds full-domain params (up to `u64::MAX`) from
+    // `arb_op` and its header runs in debug (`cargo test`), where a plain
+    // `+` panics on overflow — a false failure on a correct spec.
+    // Saturation clamps at the type bound, so it never panics and (unlike a
+    // wrapping form, which would drop below a co-tracked value) keeps the
+    // aggregate ≥ (add) / ≤ (sub) that value — preserving the monotone
+    // conservation properties (`ghost >= field`) these ghosts exist to
+    // state. Falls back to the pre-rendered string only for the rare update
+    // with no typed tree (a literal `:=`, which cannot overflow).
     for ghost in &spec.ghosts {
         for u in &ghost.updates {
             if u.handler == op.name {
-                out.push_str(&format!("    s.{} = {};\n", ghost.name, u.value_rust));
+                let rhs = u
+                    .value_tree
+                    .as_ref()
+                    .map(|t| {
+                        super::tree_render::render_rust(
+                            t,
+                            super::tree_render::RustCx::native()
+                                .with_arith(super::tree_render::ArithMode::SaturatingEffect),
+                        )
+                    })
+                    .unwrap_or_else(|| u.value_rust.clone());
+                out.push_str(&format!("    s.{} = {};\n", ghost.name, rhs));
             }
         }
     }

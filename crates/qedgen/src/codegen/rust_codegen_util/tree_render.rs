@@ -64,6 +64,17 @@ pub enum ArithMode {
     /// keeps the plain `Widened` form. Byte-compatible with
     /// `wrap_arithmetic(translate_guard_to_rust(rust_expr_math))`.
     Wrapping,
+    /// Effect-RHS saturating: bare arithmetic lowers to `saturating_*` (no
+    /// `?`, unlike `Checked`). For an abstract aggregate with no reject
+    /// path — a ghost accumulator — whose model saturates rather than
+    /// rejects: the sequence harness feeds full-domain params and runs in
+    /// debug, where a plain `+` panics on overflow. Saturation clamps at
+    /// the type max/min, so it never panics AND keeps the aggregate above
+    /// (add) / below (sub) any co-tracked value — preserving the monotone
+    /// `>=` / `<=` conservation properties a wrapping form would break.
+    /// Recurses so nested arithmetic saturates too. Distinct from
+    /// `Wrapping`, which only rewrites a predicate's comparison spine.
+    SaturatingEffect,
 }
 
 /// How handler-account reads lower in scaffold guard positions (#151
@@ -1073,6 +1084,25 @@ fn render_arith(
         let (l, r) = render_pair_with_coercion(lhs, rhs, cx, inside_old, Prec::Or);
         return (format!("({}).{}({})?", l, method, r), Prec::Atom);
     }
+    // Effect-RHS saturating mode: `+`/`-`/`*` lower to `saturating_*` (no
+    // `?` — the value can't fail, it clamps), so a full-domain ghost
+    // aggregate never overflow-panics under the debug-mode sequence
+    // harness. `div`/`rem` have no saturating form and can't overflow on
+    // magnitude, but a zero divisor (or signed `MIN / -1`) would panic;
+    // they follow the SAME total-function convention as `render_widened_term`
+    // and Lean — `x / 0 = 0`, `x % 0 = x` — so the ghost model stays
+    // consistent with the proofs rather than inventing a saturating rule.
+    if cx.arith == ArithMode::SaturatingEffect {
+        let (l, r) = render_pair_with_coercion(lhs, rhs, cx, inside_old, Prec::Or);
+        let expr = match op {
+            TreeArithOp::Add => format!("({l}).saturating_add({r})"),
+            TreeArithOp::Sub => format!("({l}).saturating_sub({r})"),
+            TreeArithOp::Mul => format!("({l}).saturating_mul({r})"),
+            TreeArithOp::Div => format!("({l}).checked_div({r}).unwrap_or(0)"),
+            TreeArithOp::Mod => format!("({l}).checked_rem({r}).unwrap_or({l})"),
+        };
+        return (expr, Prec::Atom);
+    }
     // `Wrapping` only rewrites the comparison-side spine (see
     // `render_pred_wrapped_term`); an `Arith` outside any comparison
     // renders native — matching the legacy pass, which never touched
@@ -1718,6 +1748,41 @@ mod tests {
         assert_eq!(
             render_rust(&e, RustCx::native().with_arith(ArithMode::Checked)),
             "(s.balance).checked_sub(amount)?"
+        );
+    }
+
+    #[test]
+    fn saturating_effect_saturates_addsubmul_and_keeps_total_div_mod() {
+        let sat = RustCx::native().with_arith(ArithMode::SaturatingEffect);
+        let g = || Box::new(state_field("g", Ty::U64));
+        let x = || Box::new(param("x", Ty::U64));
+        let bin = |op| ExprTree::Arith {
+            op,
+            lhs: g(),
+            rhs: x(),
+        };
+        // +/-/* clamp at the type bound (a ghost aggregate has no reject path).
+        assert_eq!(
+            render_rust(&bin(TreeArithOp::Add), sat),
+            "(s.g).saturating_add(x)"
+        );
+        assert_eq!(
+            render_rust(&bin(TreeArithOp::Sub), sat),
+            "(s.g).saturating_sub(x)"
+        );
+        assert_eq!(
+            render_rust(&bin(TreeArithOp::Mul), sat),
+            "(s.g).saturating_mul(x)"
+        );
+        // div/mod follow the Lean total-function convention, matching
+        // `render_widened_term`: `x / 0 = 0`, `x % 0 = x` (NOT `% 0 = 0`).
+        assert_eq!(
+            render_rust(&bin(TreeArithOp::Div), sat),
+            "(s.g).checked_div(x).unwrap_or(0)"
+        );
+        assert_eq!(
+            render_rust(&bin(TreeArithOp::Mod), sat),
+            "(s.g).checked_rem(x).unwrap_or(s.g)"
         );
     }
 

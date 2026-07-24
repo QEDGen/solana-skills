@@ -859,18 +859,63 @@ fn emit_account_section(
 
     // Extract constant upper bounds from properties to cap arb_state() ranges.
     // E.g., `state.V <= MAX_VAULT_TVL` caps V to 10^16 instead of u128::MAX.
-    // When bounds exist, also apply them to other numeric fields of the same type
-    // so that relational invariants like `V >= C_tot + I` have valid input ranges.
     let mut field_bounds = extract_field_upper_bounds(properties, &spec.constants);
     if !field_bounds.is_empty() {
-        // Find the tightest bound and apply it to all unbounded numeric fields
-        // of the same type. This ensures relational properties hold in random states.
-        let min_bound = field_bounds.values().min_by_key(|v| v.len()).cloned();
-        if let Some(ref bound) = min_bound {
-            for (fname, ftype) in mutable_fields {
-                if ftype.as_str() != "Pubkey" && !field_bounds.contains_key(fname.as_str()) {
-                    field_bounds.insert(fname.to_string(), bound.clone());
+        // A relational property like `V >= C_tot + I` is unsatisfiable in
+        // random states unless the fields it relates share a compatible
+        // upper bound: if `V <= MAX` but `C_tot` samples the full u64
+        // domain, `V >= C_tot + I` almost never holds and the harness
+        // rejects everything. Propagate each explicit `state.F <= CONST`
+        // bound to the OTHER fields in F's connected component — fields
+        // transitively linked by co-occurring in a property expression —
+        // using that component's own tightest bound. A single global
+        // minimum leaks a tight bound from one relational group into an
+        // unrelated one (`a <= 10; a >= b` next to `c <= 1000; c >= d`
+        // would cap `d` at 10, not 1000); capping every field leaks it
+        // further still, onto fields in NO relational property (a type
+        // discriminant with its own wide range).
+        let names: Vec<&str> = mutable_fields
+            .iter()
+            .filter(|(_, t)| t.as_str() != "Pubkey")
+            .map(|(f, _)| f.as_str())
+            .collect();
+        // Union-find: join fields that co-occur in a property expression.
+        let mut parent: Vec<usize> = (0..names.len()).collect();
+        for prop in properties {
+            if prop.expression.is_none() {
+                continue;
+            }
+            let mentioned: Vec<usize> = names
+                .iter()
+                .enumerate()
+                .filter(|(_, n)| property_references_field(prop, n))
+                .map(|(i, _)| i)
+                .collect();
+            for pair in mentioned.windows(2) {
+                let (a, b) = (uf_find(&mut parent, pair[0]), uf_find(&mut parent, pair[1]));
+                if a != b {
+                    parent[a] = b;
                 }
+            }
+        }
+        // Tightest explicit bound per component (numeric compare, not
+        // string length — `"9"` is not tighter than `"1000"`).
+        let mut comp_bound: std::collections::HashMap<usize, u128> = Default::default();
+        for (i, name) in names.iter().enumerate() {
+            if let Some(b) = field_bounds.get(*name).and_then(|v| v.parse::<u128>().ok()) {
+                let root = uf_find(&mut parent, i);
+                let slot = comp_bound.entry(root).or_insert(u128::MAX);
+                *slot = (*slot).min(b);
+            }
+        }
+        // Apply each component's bound to its still-unbounded members.
+        for (i, name) in names.iter().enumerate() {
+            if field_bounds.contains_key(*name) {
+                continue;
+            }
+            let root = uf_find(&mut parent, i);
+            if let Some(bound) = comp_bound.get(&root) {
+                field_bounds.insert(name.to_string(), bound.to_string());
             }
         }
     }
@@ -2001,6 +2046,17 @@ fn model_params(op: &ParsedHandler) -> impl Iterator<Item = &(String, String)> {
     op.takes_params.iter().chain(op.abstract_binders.iter())
 }
 
+/// Union-find root with path halving, over a flat `parent` slice. Used to
+/// group state fields into connected components for per-component bound
+/// propagation (`emit_account_section`).
+fn uf_find(parent: &mut [usize], mut x: usize) -> usize {
+    while parent[x] != x {
+        parent[x] = parent[parent[x]];
+        x = parent[x];
+    }
+    x
+}
+
 fn rust_type_mentions(rust_ty: &str, name: &str) -> bool {
     rust_ty
         .split(|c: char| !c.is_alphanumeric() && c != '_')
@@ -2350,7 +2406,13 @@ fn emit_product_module(
                                     .with_binder(rust_codegen_util::tree_render::Binder::SelfAcct(
                                         "pre",
                                     ))
-                                    .with_product_fields(Some(&update_fields)),
+                                    .with_product_fields(Some(&update_fields))
+                                    // Ghost aggregate: saturate rather than
+                                    // overflow-panic under the debug sequence
+                                    // harness (see the single-account emit).
+                                    .with_arith(
+                                        rust_codegen_util::tree_render::ArithMode::SaturatingEffect,
+                                    ),
                             )
                         })
                         .unwrap_or_else(|| u.value_rust.clone());
@@ -3556,6 +3618,193 @@ property settled_monotonic :
             !body.contains("balance_nonneg(&s)"),
             "unary post-assert must not still reference (&s); got: {}",
             body
+        );
+    }
+
+    /// An init handler transitions from the implicit `Uninitialized`
+    /// pre-state even when the State ADT does not declare it as a variant.
+    /// The lifecycle enums must still carry the variant the transition fns
+    /// reference (else the harness fails to compile, E0599), and the
+    /// sequence must seed that pre-state (else it runs non-init handlers
+    /// before init).
+    #[test]
+    fn init_from_undeclared_uninitialized_is_injected_into_lifecycle() {
+        let (spec, body) = emit_full_harness(
+            r#"
+spec Vault
+
+type Vault
+  | Live of { total : U64 }
+  | Closed
+
+type Error
+  | InvalidAmount
+
+handler init : Vault.Uninitialized -> Vault.Live {
+  effect { total := 0 }
+}
+
+handler deposit (amount : U64) : Vault.Live -> Vault.Live {
+  requires amount > 0 else InvalidAmount
+  effect { total += amount }
+}
+
+property total_nonneg :
+  state.total >= 0
+  preserved_by all
+"#,
+        );
+
+        // The adapter injects the sentinel as the initial lifecycle state.
+        assert_eq!(
+            spec.lifecycle_states.first().map(String::as_str),
+            Some("Uninitialized"),
+            "undeclared init pre-state must be injected first"
+        );
+        // Both enums the transition fns reference must carry the variant.
+        assert!(
+            body.contains("Status::Uninitialized") && body.contains("Lifecycle::Uninitialized"),
+            "Status/Lifecycle must include the injected Uninitialized:\n{body}"
+        );
+        // The transition table references it — with it declared, no E0599.
+        assert!(
+            body.contains("(Lifecycle::Uninitialized, Op::Init) => Some(Lifecycle::Live)"),
+            "transition table should key off the injected pre-state:\n{body}"
+        );
+        // The sequence seeds the pre-existence state, not `Live`.
+        assert!(
+            body.contains("let mut lifecycle = Lifecycle::Uninitialized;")
+                && body.contains("status: Status::Uninitialized,"),
+            "sequence must seed the injected initial state:\n{body}"
+        );
+    }
+
+    /// A `state.F <= CONST` property bounds `F`, but must not silently
+    /// shrink an *unrelated* numeric field's domain: a type discriminant
+    /// with no property of its own keeps its full range, so proptest can
+    /// still reach every value (regression: a `version <= 1` bound once
+    /// leaked onto every field, capping a `token_kind` discriminant to
+    /// `0..=1`).
+    #[test]
+    fn unrelated_field_keeps_full_domain_when_another_field_is_bounded() {
+        let (_spec, body) = emit_full_harness(
+            r#"
+spec Vault
+
+state { token_kind : U8, version : U8 }
+
+type Error
+  | InvalidAmount
+
+handler bump (v : U8) {
+  requires v > 0 else InvalidAmount
+  effect { version := v }
+}
+
+property version_bounded :
+  state.version <= 1
+  preserved_by all
+"#,
+        );
+
+        // `version` co-occurs with its own bound, so it stays capped.
+        assert!(
+            body.contains("version in 0u8..=1u8"),
+            "explicitly-bounded field should keep its bound:\n{body}"
+        );
+        // `token_kind` is in no bounded property — full domain, not `0..=1`.
+        assert!(
+            body.contains("token_kind in 0u8..=255u8"),
+            "unrelated discriminant must keep the full u8 domain:\n{body}"
+        );
+    }
+
+    /// A ghost accumulator has no reject path, so a full-domain `arb_op`
+    /// amount would overflow-panic it in the debug sequence harness. The
+    /// update renders SATURATING arithmetic — clamping at the type bound,
+    /// never panicking — including a multiplicative term (`amount * 21`)
+    /// that a `type_max/SEQ_LEN` input bound could not have tamed. No input
+    /// bounding, so every param keeps its full domain.
+    #[test]
+    fn ghost_accumulator_saturates_and_params_stay_full_range() {
+        let (_spec, body) = emit_full_harness(
+            r#"
+spec Vol
+
+state { balance : U64 }
+
+type Error
+  | InvalidAmount
+
+ghost volume : U64 {
+  init { 0 }
+  on deposit { volume := state.volume + amount * 21 }
+}
+
+handler deposit (amount : U64) {
+  requires amount > 0 else InvalidAmount
+  effect { balance := state.balance + amount }
+}
+
+handler noop {
+  effect { balance := state.balance }
+}
+
+property vol_ge_balance :
+  state.volume >= state.balance
+  preserved_by all
+"#,
+        );
+
+        // Nested saturating: `amount * 21` and the accumulation both clamp.
+        assert!(
+            body.contains("s.volume = (s.volume).saturating_add((amount).saturating_mul(21));"),
+            "ghost accumulator must render nested saturating arithmetic:\n{body}"
+        );
+        // No input bounding — the param keeps its full domain (a pure
+        // assignment `last := amount` would otherwise lose 95% of it).
+        assert!(
+            body.contains("(0u64..=u64::MAX).prop_map(|v| Op::Deposit(v))"),
+            "arb_op param must keep the full domain (no accumulator bounding):\n{body}"
+        );
+    }
+
+    /// Bound propagation is per connected-component, not one global
+    /// minimum: `a <= 10; a >= b` and `c <= 1000; c >= d` are unrelated
+    /// property groups, so `d` borrows `c`'s 1000 — not `a`'s tighter 10.
+    #[test]
+    fn bound_propagation_is_per_component_not_global_minimum() {
+        let (_spec, body) = emit_full_harness(
+            r#"
+spec Groups
+
+state { a : U64, b : U64, c : U64, d : U64 }
+
+type Error
+  | Bad
+
+handler touch (x : U64) {
+  requires x > 0 else Bad
+  effect { a := x }
+}
+
+property a_cap : state.a <= 10 preserved_by all
+property a_ge_b : state.a >= state.b preserved_by all
+property c_cap : state.c <= 1000 preserved_by all
+property c_ge_d : state.c >= state.d preserved_by all
+"#,
+        );
+
+        // Grab the `arb_state` body so we assert on the full-domain strategy.
+        let start = body.find("fn arb_state").expect("arb_state present");
+        let arb = &body[start..start + body[start..].find("-> State").unwrap_or(400)];
+        assert!(
+            arb.contains("a in 0u64..=10u64") && arb.contains("b in 0u64..=10u64"),
+            "component {{a,b}} must use its own bound 10:\n{arb}"
+        );
+        assert!(
+            arb.contains("c in 0u64..=1000u64") && arb.contains("d in 0u64..=1000u64"),
+            "component {{c,d}} must borrow c's 1000, not the global min 10:\n{arb}"
         );
     }
 }

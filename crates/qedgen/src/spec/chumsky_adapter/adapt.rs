@@ -806,6 +806,54 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
         }
     }
 
+    // Init handlers transition from an implicit pre-state ("Uninitialized"
+    // or "Empty") that models "the account does not exist yet". These
+    // sentinels are valid handler pre/post states even when the State ADT
+    // does not declare them as variants — `qedgen check` accepts them and
+    // the state lints treat them as implicit init states. But `lifecycle`
+    // here is built purely from declared variant names, so a sentinel a
+    // handler references but the ADT omits was silently dropped. The
+    // generated `Status` / `Lifecycle` enums then lacked the variant the
+    // transition fns and the sequence transition table reference (E0599,
+    // the harness did not compile), and the proptest sequence seeded the
+    // wrong initial state (it ran non-init handlers before init). Inject
+    // any referenced-but-undeclared sentinel: a pre-state sentinel becomes
+    // the initial (first) state; a post-only sentinel becomes terminal.
+    const INIT_SENTINELS: [&str; 2] = ["Uninitialized", "Empty"];
+    for acct in &mut out.account_types {
+        // Record-form state (no variants) emits no lifecycle enum — nothing
+        // to keep consistent, and prepending would fabricate a status field.
+        if acct.lifecycle.is_empty() {
+            continue;
+        }
+        let targets_acct = |h: &ParsedHandler| match h.on_account.as_deref() {
+            Some(name) => name.eq_ignore_ascii_case(&acct.name),
+            None => true, // single-account spec: every handler drives it
+        };
+        let missing =
+            |st: &str| INIT_SENTINELS.contains(&st) && !acct.lifecycle.iter().any(|s| s == st);
+        let (mut pre_states, mut post_only): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
+        for h in out.handlers.iter().filter(|h| targets_acct(h)) {
+            if let Some(pre) = h.pre_status.as_deref() {
+                if missing(pre) && !pre_states.iter().any(|s| s == pre) {
+                    pre_states.push(pre.to_string());
+                }
+            }
+            if let Some(post) = h.post_status.as_deref() {
+                if missing(post) && !post_only.iter().any(|s| s == post) {
+                    post_only.push(post.to_string());
+                }
+            }
+        }
+        // A sentinel that is any handler's pre-state is an initial state,
+        // not a terminal one — don't double-list it on the tail.
+        post_only.retain(|s| !pre_states.contains(s));
+        for st in pre_states.into_iter().rev() {
+            acct.lifecycle.insert(0, st);
+        }
+        acct.lifecycle.extend(post_only);
+    }
+
     if let Some(first) = out.account_types.first() {
         out.state_fields = first.fields.clone();
         out.lifecycle_states = first.lifecycle.clone();

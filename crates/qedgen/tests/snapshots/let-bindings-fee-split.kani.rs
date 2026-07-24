@@ -53,7 +53,7 @@ fn collect(s: &mut State, total: u64) -> bool {
         Some(__v) => s.fees = __v,
         None => return false,
     }
-    s.lifetime_collected = s.lifetime_collected + (total);
+    s.lifetime_collected = (s.lifetime_collected).saturating_add(total);
     true
 }
 

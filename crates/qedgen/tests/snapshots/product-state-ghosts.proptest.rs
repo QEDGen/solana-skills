@@ -204,7 +204,7 @@ mod product {
     fn deposit(s: &mut ProductState, amount: u64) -> bool {
         let pre = s.clone();
         if pool::deposit(&mut s.pool, amount) {
-            s.lifetime_total = pre.lifetime_total + amount;
+            s.lifetime_total = (pre.lifetime_total).saturating_add(amount);
             true
         } else {
             false
