@@ -90,19 +90,14 @@ pub(crate) fn resolve_deploy_so(project_root: &Path, prog: &str) -> PathBuf {
     candidate(&root)
 }
 
-/// True when the manifest contains a `[workspace]` or `[workspace.*]`
-/// table header. Member crates never carry these headers (they opt in
-/// via `dependency.workspace = true` keys), so a match identifies the
-/// workspace root without a TOML parse.
+/// True when the manifest declares a Cargo workspace table. Parse TOML
+/// instead of scanning header text so valid formatting such as
+/// `[workspace] # root workspace` and `[ workspace ]` is recognized.
 fn manifest_declares_workspace(manifest: &Path) -> bool {
     std::fs::read_to_string(manifest)
-        .map(|text| {
-            text.lines().any(|line| {
-                let t = line.trim();
-                t == "[workspace]" || t.starts_with("[workspace.")
-            })
-        })
-        .unwrap_or(false)
+        .ok()
+        .and_then(|text| text.parse::<toml::Value>().ok())
+        .is_some_and(|manifest| manifest.get("workspace").is_some())
 }
 
 /// Canonicalize the `--program` root once at the probe entry (#289).
@@ -1183,10 +1178,16 @@ mod tests {
         let ws = tempfile::tempdir().unwrap();
         let crate_root = ws.path().join("programs").join("my-program");
         std::fs::create_dir_all(&crate_root).unwrap();
-        std::fs::write(ws.path().join("Cargo.toml"), "[workspace]\nmembers = [\"programs/*\"]\n")
-            .unwrap();
-        std::fs::write(crate_root.join("Cargo.toml"), "[package]\nname = \"my-program\"\n")
-            .unwrap();
+        std::fs::write(
+            ws.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"programs/*\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            crate_root.join("Cargo.toml"),
+            "[package]\nname = \"my-program\"\n",
+        )
+        .unwrap();
         let deploy = ws.path().join("target").join("deploy");
         std::fs::create_dir_all(&deploy).unwrap();
         std::fs::write(deploy.join("my_program.so"), b"elf").unwrap();
@@ -1194,7 +1195,9 @@ mod tests {
         let resolved = super::resolve_deploy_so(&crate_root, "my_program");
         assert_eq!(
             resolved,
-            std::fs::canonicalize(ws.path()).unwrap().join("target/deploy/my_program.so"),
+            std::fs::canonicalize(ws.path())
+                .unwrap()
+                .join("target/deploy/my_program.so"),
             "must pick the workspace-rooted built artifact"
         );
     }
@@ -1213,13 +1216,46 @@ mod tests {
             "[workspace]\nmembers = [\"programs/*\"]\n\n[workspace.dependencies]\nanchor-lang = \"0.31\"\n",
         )
         .unwrap();
-        std::fs::write(crate_root.join("Cargo.toml"), "[package]\nname = \"my-program\"\n")
-            .unwrap();
+        std::fs::write(
+            crate_root.join("Cargo.toml"),
+            "[package]\nname = \"my-program\"\n",
+        )
+        .unwrap();
 
         let resolved = super::resolve_deploy_so(&crate_root, "my_program");
         assert_eq!(
             resolved,
-            std::fs::canonicalize(ws.path()).unwrap().join("target/deploy/my_program.so"),
+            std::fs::canonicalize(ws.path())
+                .unwrap()
+                .join("target/deploy/my_program.so"),
+        );
+    }
+
+    /// Cargo permits comments after table headers. A textual equality
+    /// check for `[workspace]` misses this valid manifest and sends
+    /// budget-0 harnesses back to the crate-rooted path.
+    #[test]
+    fn deploy_so_recognizes_commented_workspace_header() {
+        let ws = tempfile::tempdir().unwrap();
+        let crate_root = ws.path().join("programs").join("my-program");
+        std::fs::create_dir_all(&crate_root).unwrap();
+        std::fs::write(
+            ws.path().join("Cargo.toml"),
+            "[workspace] # root workspace\nmembers = [\"programs/*\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            crate_root.join("Cargo.toml"),
+            "[package]\nname = \"my-program\"\n",
+        )
+        .unwrap();
+
+        let resolved = super::resolve_deploy_so(&crate_root, "my_program");
+        assert_eq!(
+            resolved,
+            std::fs::canonicalize(ws.path())
+                .unwrap()
+                .join("target/deploy/my_program.so"),
         );
     }
 
@@ -1230,13 +1266,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let crate_root = dir.path().join("standalone");
         std::fs::create_dir_all(&crate_root).unwrap();
-        std::fs::write(crate_root.join("Cargo.toml"), "[package]\nname = \"standalone\"\n")
-            .unwrap();
+        std::fs::write(
+            crate_root.join("Cargo.toml"),
+            "[package]\nname = \"standalone\"\n",
+        )
+        .unwrap();
 
         let resolved = super::resolve_deploy_so(&crate_root, "standalone");
         assert_eq!(
             resolved,
-            std::fs::canonicalize(&crate_root).unwrap().join("target/deploy/standalone.so"),
+            std::fs::canonicalize(&crate_root)
+                .unwrap()
+                .join("target/deploy/standalone.so"),
         );
     }
 
