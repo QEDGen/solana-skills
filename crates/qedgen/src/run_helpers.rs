@@ -61,6 +61,50 @@ pub(crate) fn resolve_output_against_spec(spec_dir: &Path, p: PathBuf) -> PathBu
     }
 }
 
+/// Resolve the built program `.so` the Crucible harness loads (#342).
+/// `cargo build-sbf` writes to the WORKSPACE `target/deploy/`, so a
+/// crate-rooted join never exists in the standard Anchor
+/// `programs/<name>/` layout and the harness panics at `setup()`.
+/// Walk the ancestor chain of the program root:
+/// 1. the first `target/deploy/<prog>.so` that already exists wins
+///    (works for any layout once the program is built);
+/// 2. else the nearest ancestor whose `Cargo.toml` declares a
+///    `[workspace]` table (covers the budget-0 emit before any build);
+/// 3. else fall back to the crate root itself (standalone crate — the
+///    pre-#342 behavior, correct there).
+pub(crate) fn resolve_deploy_so(project_root: &Path, prog: &str) -> PathBuf {
+    let root = std::fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
+    let so_name = format!("{prog}.so");
+    let candidate = |dir: &Path| dir.join("target").join("deploy").join(&so_name);
+    for dir in root.ancestors() {
+        let built = candidate(dir);
+        if built.exists() {
+            return built;
+        }
+    }
+    for dir in root.ancestors() {
+        if manifest_declares_workspace(&dir.join("Cargo.toml")) {
+            return candidate(dir);
+        }
+    }
+    candidate(&root)
+}
+
+/// True when the manifest contains a `[workspace]` or `[workspace.*]`
+/// table header. Member crates never carry these headers (they opt in
+/// via `dependency.workspace = true` keys), so a match identifies the
+/// workspace root without a TOML parse.
+fn manifest_declares_workspace(manifest: &Path) -> bool {
+    std::fs::read_to_string(manifest)
+        .map(|text| {
+            text.lines().any(|line| {
+                let t = line.trim();
+                t == "[workspace]" || t.starts_with("[workspace.")
+            })
+        })
+        .unwrap_or(false)
+}
+
 /// Canonicalize the `--program` root once at the probe entry (#289).
 /// `--program .` is the natural invocation from inside a program root,
 /// but every downstream name — the skeleton `spec` name, the
@@ -1127,6 +1171,72 @@ mod tests {
         assert_eq!(
             missing.file_name().and_then(|n| n.to_str()),
             Some("no-such-dir-289")
+        );
+    }
+
+    /// #342: in the standard Anchor workspace layout (`programs/<name>/`),
+    /// `cargo build-sbf` writes the `.so` to the WORKSPACE `target/deploy/`.
+    /// The resolver must return that path, not the crate-rooted join that
+    /// never exists.
+    #[test]
+    fn deploy_so_resolves_workspace_rooted_built_artifact() {
+        let ws = tempfile::tempdir().unwrap();
+        let crate_root = ws.path().join("programs").join("my-program");
+        std::fs::create_dir_all(&crate_root).unwrap();
+        std::fs::write(ws.path().join("Cargo.toml"), "[workspace]\nmembers = [\"programs/*\"]\n")
+            .unwrap();
+        std::fs::write(crate_root.join("Cargo.toml"), "[package]\nname = \"my-program\"\n")
+            .unwrap();
+        let deploy = ws.path().join("target").join("deploy");
+        std::fs::create_dir_all(&deploy).unwrap();
+        std::fs::write(deploy.join("my_program.so"), b"elf").unwrap();
+
+        let resolved = super::resolve_deploy_so(&crate_root, "my_program");
+        assert_eq!(
+            resolved,
+            std::fs::canonicalize(ws.path()).unwrap().join("target/deploy/my_program.so"),
+            "must pick the workspace-rooted built artifact"
+        );
+    }
+
+    /// #342: budget-0 emit — nothing is built yet, so no `.so` exists
+    /// anywhere. The resolver must still anchor on the workspace root
+    /// (the dir whose Cargo.toml declares `[workspace]`), because that
+    /// is where `cargo build-sbf` will write.
+    #[test]
+    fn deploy_so_prefers_workspace_manifest_when_nothing_is_built() {
+        let ws = tempfile::tempdir().unwrap();
+        let crate_root = ws.path().join("programs").join("my-program");
+        std::fs::create_dir_all(&crate_root).unwrap();
+        std::fs::write(
+            ws.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"programs/*\"]\n\n[workspace.dependencies]\nanchor-lang = \"0.31\"\n",
+        )
+        .unwrap();
+        std::fs::write(crate_root.join("Cargo.toml"), "[package]\nname = \"my-program\"\n")
+            .unwrap();
+
+        let resolved = super::resolve_deploy_so(&crate_root, "my_program");
+        assert_eq!(
+            resolved,
+            std::fs::canonicalize(ws.path()).unwrap().join("target/deploy/my_program.so"),
+        );
+    }
+
+    /// #342: a standalone crate (no workspace anywhere above) keeps the
+    /// crate-rooted path — the pre-#342 behavior, correct there.
+    #[test]
+    fn deploy_so_falls_back_to_crate_root_for_standalone_crate() {
+        let dir = tempfile::tempdir().unwrap();
+        let crate_root = dir.path().join("standalone");
+        std::fs::create_dir_all(&crate_root).unwrap();
+        std::fs::write(crate_root.join("Cargo.toml"), "[package]\nname = \"standalone\"\n")
+            .unwrap();
+
+        let resolved = super::resolve_deploy_so(&crate_root, "standalone");
+        assert_eq!(
+            resolved,
+            std::fs::canonicalize(&crate_root).unwrap().join("target/deploy/standalone.so"),
         );
     }
 

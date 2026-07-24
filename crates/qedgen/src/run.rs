@@ -696,14 +696,10 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 }
                 // Absolute path to the built program so the harness loads it
                 // from any location (a `--harness-dir` outside the project
-                // can't reach it with the layout-relative fallback). The `.so`
-                // need not exist yet (budget-0 emit), so anchor on the project
-                // root — which does — rather than canonicalizing the `.so`.
-                let deploy_so = std::fs::canonicalize(&project_root_for_idl)
-                    .unwrap_or_else(|_| project_root_for_idl.clone())
-                    .join("target")
-                    .join("deploy")
-                    .join(format!("{prog}.so"));
+                // can't reach it with the layout-relative fallback).
+                // `cargo build-sbf` writes to the WORKSPACE target dir, so
+                // the resolver walks up from the program crate (#342).
+                let deploy_so = run_helpers::resolve_deploy_so(&project_root_for_idl, &prog);
                 if generate_harness {
                     std::fs::create_dir_all(&harness_parent)?;
                     crucible_gen::generate_with_account_overlay(
