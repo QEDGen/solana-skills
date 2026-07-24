@@ -37,21 +37,24 @@ pub fn lint_with_opts(
 
 /// `qedgen check --anchor-project <path>`: spec handler list vs the
 /// existing Anchor program — catches stale specs and uncovered handlers
-/// as a CI gate. Renders JSON or the human report; returns true when any
-/// finding fired (the caller gates the exit code). Parses the spec with
-/// default opts, as this stage always has — folding it into the caller's
-/// lock/cache-aware parse would change gating under `--frozen`. Moved
-/// out of the dispatch arm (T7c).
+/// as a CI gate. Returns (fired, payload): `fired` is true when any
+/// finding exists (the caller gates the exit code); `payload` is the
+/// JSON section under `--json` (#355: the caller folds it into the
+/// single check document instead of this function printing its own).
+/// Parses the spec with default opts, as this stage always has —
+/// folding it into the caller's lock/cache-aware parse would change
+/// gating under `--frozen`. Moved out of the dispatch arm (T7c).
 pub fn render_anchor_project_report(
     spec_path: &std::path::Path,
     project_path: &std::path::Path,
     json: bool,
-) -> Result<bool> {
+) -> Result<(bool, Option<serde_json::Value>)> {
     let parsed = parse_spec_file(spec_path)?;
     let findings = crate::anchor_check::check_anchor_coverage(&parsed, project_path)?;
     let effect_findings = crate::anchor_check::check_effect_coverage(&parsed, project_path)?;
+    let mut payload = None;
     if json {
-        let payload = serde_json::json!({
+        payload = Some(serde_json::json!({
             "handler_coverage": findings
                 .iter()
                 .map(|f| serde_json::json!({
@@ -68,8 +71,7 @@ pub fn render_anchor_project_report(
                     "message": f.message(),
                 }))
                 .collect::<Vec<_>>(),
-        });
-        println!("{}", serde_json::to_string_pretty(&payload)?);
+        }));
     } else {
         if findings.is_empty() {
             eprintln!(
@@ -100,5 +102,5 @@ pub fn render_anchor_project_report(
             }
         }
     }
-    Ok(!findings.is_empty() || !effect_findings.is_empty())
+    Ok((!findings.is_empty() || !effect_findings.is_empty(), payload))
 }
