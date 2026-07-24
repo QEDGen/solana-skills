@@ -109,22 +109,26 @@ pub enum ObligationKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UnsupportedReason {
-    /// #324 — a file-level feature the product-state lowering cannot
-    /// resolve to modeled account components.
+    /// A file-level feature the product-state lowering cannot resolve
+    /// to modeled account components (residual shape after the
+    /// file-level product-state lowering).
     KaniMultiAccountFileLevel,
-    /// #326 — Kani verifies a flat state model for `state_repr = adt`.
+    /// Kani falls back to the flat state model for this ADT shape;
+    /// parity covers defaultable variant payloads only.
     KaniAdtStateRepr,
     /// Kani guard-rejection: no expressible negation for this guard.
     KaniGuardNegationInexpressible,
     /// Kani liveness: spec has no lifecycle, no target predicate.
     KaniLivenessNoLifecycle,
-    /// #328 — Lean drops predicates naming a handler account's pubkey.
+    /// A handler-account read the Lean transition cannot bind; ActionCtx
+    /// routing covers flat shapes with single-projection reads only.
     LeanHandlerAccountPubkey,
     /// CPI callee ensures not composed: call site lacks `state_binders`.
     CpiMissingStateBinders,
     /// Lean transfer envelope: no authority declared on the transfer.
     LeanTransferNoAuthority,
-    /// #331 — multi-account proptest cannot model spec-global ghosts.
+    /// A spec-global ghost shape the product-state proptest model
+    /// cannot express.
     ProptestMultiAccountGhost,
     /// Proptest overflow: effect target is not a bounded numeric field.
     ProptestNonNumericOverflowTarget,
@@ -137,7 +141,8 @@ pub enum UnsupportedReason {
     AccountHasNoHandlers,
     /// Multi-account: the obligation spans accounts (property scoped to
     /// one account module, handler routed to another; unrouted handler).
-    /// Product-state lowering (#324/#331) is the real fix.
+    /// Cross-module routing in the product-state lowering is the real
+    /// fix.
     MultiAccountCrossAccountObligation,
     /// Predicate body is missing or uses an unsupported construct
     /// (e.g. an untranslatable quantifier).
@@ -149,10 +154,10 @@ impl UnsupportedReason {
     pub fn describe(self) -> &'static str {
         match self {
             UnsupportedReason::KaniMultiAccountFileLevel => {
-                "file-level obligation does not resolve to modeled account components; the product-state lowering cannot express this shape (#324)"
+                "file-level obligation does not resolve to modeled account components; the product-state lowering cannot express this shape"
             }
             UnsupportedReason::KaniAdtStateRepr => {
-                "Kani verifies a flat state model for this shape; ADT parity covers single-account specs with defaultable variant payloads only (#326)"
+                "Kani falls back to the flat state model for this shape; ADT parity covers single-account specs with defaultable variant payloads only"
             }
             UnsupportedReason::KaniGuardNegationInexpressible => {
                 "no expressible negation for this guard; rejection harness skipped"
@@ -161,7 +166,7 @@ impl UnsupportedReason {
                 "spec has no lifecycle, so the liveness target predicate cannot be stated"
             }
             UnsupportedReason::LeanHandlerAccountPubkey => {
-                "predicate reads a handler account the transition cannot bind; ActionCtx routing covers flat shapes with single-projection reads only (#328)"
+                "predicate reads a handler account the transition cannot bind; ActionCtx routing covers flat shapes with single-projection reads only"
             }
             UnsupportedReason::CpiMissingStateBinders => {
                 "callee ensures not composed: call site lacks `state_binders` for the referenced fields"
@@ -170,7 +175,7 @@ impl UnsupportedReason {
                 "transfer declares no authority; envelope theorem skipped"
             }
             UnsupportedReason::ProptestMultiAccountGhost => {
-                "multi-account proptest cannot model spec-global ghosts yet (#331)"
+                "spec-global ghost has a shape the product-state proptest model cannot express"
             }
             UnsupportedReason::ProptestNonNumericOverflowTarget => {
                 "overflow target field has no numeric bound; strategy cannot be constructed"
@@ -185,7 +190,7 @@ impl UnsupportedReason {
                 "no handler routes to this account; per-account model skipped"
             }
             UnsupportedReason::MultiAccountCrossAccountObligation => {
-                "obligation spans account modules; product-state lowering is not implemented (#324/#331)"
+                "obligation spans account modules (property scoped to one account, handler routed to another); the product-state lowering does not yet cover cross-module obligations"
             }
             UnsupportedReason::UnsupportedPredicateBody => {
                 "predicate body is missing or uses an unsupported construct"
@@ -590,6 +595,66 @@ mod tests {
             scope: "deposit".to_string(),
             key: "solvent".to_string(),
             status,
+        }
+    }
+
+    /// #354 — `describe()` strings are user-facing capability text. An
+    /// issue number in them goes stale the day the issue closes (the
+    /// v2.48.0 strings cited four closed issues as open gaps), so the
+    /// strings must name the unsupported shape and nothing else. The
+    /// exhaustive match makes a new variant a compile error here, so it
+    /// cannot ship an unchecked string.
+    #[test]
+    fn describe_strings_cite_no_issue_numbers() {
+        use UnsupportedReason::*;
+        let all = [
+            KaniMultiAccountFileLevel,
+            KaniAdtStateRepr,
+            KaniGuardNegationInexpressible,
+            KaniLivenessNoLifecycle,
+            LeanHandlerAccountPubkey,
+            CpiMissingStateBinders,
+            LeanTransferNoAuthority,
+            ProptestMultiAccountGhost,
+            ProptestNonNumericOverflowTarget,
+            ProptestGuardNotExpressible,
+            AccountHasNoFields,
+            AccountHasNoHandlers,
+            MultiAccountCrossAccountObligation,
+            UnsupportedPredicateBody,
+        ];
+        // Compile-time exhaustiveness: adding a variant breaks this match
+        // until it is also added to `all` above.
+        for r in all {
+            match r {
+                KaniMultiAccountFileLevel
+                | KaniAdtStateRepr
+                | KaniGuardNegationInexpressible
+                | KaniLivenessNoLifecycle
+                | LeanHandlerAccountPubkey
+                | CpiMissingStateBinders
+                | LeanTransferNoAuthority
+                | ProptestMultiAccountGhost
+                | ProptestNonNumericOverflowTarget
+                | ProptestGuardNotExpressible
+                | AccountHasNoFields
+                | AccountHasNoHandlers
+                | MultiAccountCrossAccountObligation
+                | UnsupportedPredicateBody => {}
+            }
+            let text = r.describe();
+            assert!(
+                !text.contains('#'),
+                "describe() for {:?} cites an issue number or '#': {:?}",
+                r,
+                text
+            );
+            assert!(
+                !text.to_lowercase().contains("not implemented"),
+                "describe() for {:?} claims 'not implemented'; name the unsupported shape instead: {:?}",
+                r,
+                text
+            );
         }
     }
 
