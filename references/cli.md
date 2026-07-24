@@ -274,7 +274,7 @@ $QEDGEN check --regen-drift --examples-root examples/rust
 |---|---|---|---|
 | `--spec` | Path | optional | Spec file or directory. Defaults to `.qed/config.json spec` |
 | `--proofs` | Path | `./formal_verification` | Proofs directory |
-| `--coverage` | bool | false | Show operation × property matrix (spec coverage) plus the per-backend obligation rollup (backend coverage, #332): for each of kani / lean / proptest, how many requested obligations are `emitted` vs `unsupported(reason)` vs `failed`, recomputed in memory from the current spec. `--json` adds a `backend_coverage` key next to the existing matrix fields. |
+| `--coverage` | bool | false | Show operation × property matrix (spec coverage) plus the per-backend obligation rollup (backend coverage, #332): for each of kani / lean / proptest, how many requested obligations are `emitted` vs `unsupported(reason)` vs `failed`, recomputed in memory from the current spec. Under `--json` the matrix fields and the `backend_coverage` key form the `coverage` section of the single check document (#355). |
 | `--explain` | bool | false | Generate Markdown verification report |
 | `--output` | Path | stdout | Output file for --explain |
 | `--drift` | Path | - | Rust source path for #[qed(verified)] drift detection |
@@ -290,7 +290,7 @@ $QEDGEN check --regen-drift --examples-root examples/rust
 | `--regen-drift` | bool | false | Regenerate bundled examples into temporary directories and fail if committed generated support code, harnesses, or `Spec.lean` drift. Also fails when an example has `.qed/` state or generated artifacts but no `qed.toml`. |
 | `--examples-root` | Path | `examples/rust` | Example root scanned by `--regen-drift` |
 | `--write` | bool | false | With `--regen-drift`, also write the regenerated content into the repo so committed example outputs match current codegen. Useful for rebasing PRs across codegen-touching releases. Never touches user-owned files (handler bodies, Spec.lean proofs) — only the codegen-owned set `--regen-drift` already compares. |
-| `--json` | bool | false | Machine-readable output |
+| `--json` | bool | false | Machine-readable output. Stdout is exactly one JSON document (#355). Plain `check --json` prints the bare lint-findings array. When any other section prints (`--coverage`, `--explain` without `--output`, `--anchor-project`, or Proofs.lean drift), the document is one object with a key per section — `coverage` (matrix fields + `backend_coverage`), `explain`, `anchor_project`, `proofs_drift` — plus the `findings` array. |
 
 Lints fired by `check` include `[shape_only_cpi]` for `call
 Interface.handler(...)` sites whose target declares no `ensures` —

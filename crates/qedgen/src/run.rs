@@ -1262,20 +1262,48 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 }
             }
 
+            // Single-document JSON accumulator (#355). Under --json every
+            // section below inserts into this map and exactly one JSON
+            // document reaches stdout at the end of the lint block. The one
+            // back-compat exception: when only lint findings print (plain
+            // `qedgen check --json`), the document stays the bare findings
+            // array existing consumers parse.
+            let mut json_sections = serde_json::Map::new();
+
             // Anchor cross-check (--anchor-project) — spec handler list vs
             // the existing program; catches stale specs and uncovered
             // handlers as a CI gate.
             if let Some(ref project_path) = anchor_project {
-                if check::render_anchor_project_report(&spec, project_path, json)? {
+                let (fired, payload) =
+                    check::render_anchor_project_report(&spec, project_path, json)?;
+                if let Some(payload) = payload {
+                    json_sections.insert("anchor_project".to_string(), payload);
+                }
+                if fired {
                     has_issues = true;
                 }
             }
 
             // Verification report (--explain). `--json` emits the
             // verification-status data layer for the agent to render; without
-            // it the CLI prints the inline Markdown human fallback.
+            // it the CLI prints the inline Markdown human fallback. With
+            // --json and no --output the payload joins the single document;
+            // an explicit --output still writes the report to that file.
             if explain {
-                check::render_explain_report(&spec, &spec_name, &proofs, json, output.as_deref())?;
+                if json && output.is_none() {
+                    json_sections.insert(
+                        "explain".to_string(),
+                        check::explain_report_payload(&spec, &spec_name, &proofs)?,
+                    );
+                } else {
+                    check::render_explain_report(
+                        &spec,
+                        &spec_name,
+                        &proofs,
+                        json,
+                        output.as_deref(),
+                    )?;
+                }
             }
 
             // One parse shared by every remaining ParsedSpec consumer
@@ -1306,11 +1334,11 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 let entries = crate::obligations::collect_all(&mir, parsed);
                 let backend_reports = crate::obligations::backend_coverage_reports(&entries);
                 if json {
-                    // Additive JSON shape: the matrix keys stay top-level
-                    // (existing consumers), `backend_coverage` is new.
+                    // Matrix fields plus `backend_coverage`, together under
+                    // the `coverage` key of the single document (#355).
                     let mut value = serde_json::to_value(&matrix)?;
                     value["backend_coverage"] = serde_json::to_value(&backend_reports)?;
-                    println!("{}", serde_json::to_string_pretty(&value)?);
+                    json_sections.insert("coverage".to_string(), value);
                 } else {
                     check::print_coverage_table(&matrix);
                     crate::obligations::print_backend_coverage(&entries);
@@ -1365,7 +1393,10 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                                 }
                             })
                             .collect();
-                        println!("{}", serde_json::to_string_pretty(&as_json)?);
+                        json_sections.insert(
+                            "proofs_drift".to_string(),
+                            serde_json::Value::Array(as_json),
+                        );
                     } else {
                         eprintln!("Proofs.lean drift:");
                         for f in &findings {
@@ -1389,7 +1420,20 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                     warnings.extend(check::check_handler_todos(parsed, code_dir)?);
                 }
                 if json {
-                    println!("{}", serde_json::to_string_pretty(&warnings)?);
+                    let findings = serde_json::to_value(&warnings)?;
+                    if json_sections.is_empty() {
+                        // Plain `check --json`: the bare findings array,
+                        // unchanged for existing consumers.
+                        println!("{}", serde_json::to_string_pretty(&findings)?);
+                    } else {
+                        json_sections.insert("findings".to_string(), findings);
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::Value::Object(
+                                json_sections
+                            ))?
+                        );
+                    }
                 } else if warnings.is_empty() {
                     eprintln!("Spec is complete — no issues found.");
                 } else {

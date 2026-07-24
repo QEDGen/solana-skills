@@ -39,6 +39,36 @@ pub fn check(spec_path: &Path, proofs_dir: &Path) -> Result<Vec<PropertyStatus>>
     Ok(results)
 }
 
+/// The `--explain` JSON data layer as a value (#355): the check dispatch
+/// folds it into the single `--json` document instead of printing a
+/// second one.
+pub fn explain_report_payload(
+    spec_path: &Path,
+    spec_name: &str,
+    proofs_dir: &Path,
+) -> Result<serde_json::Value> {
+    let results = check(spec_path, proofs_dir)?;
+    let proven = results
+        .iter()
+        .filter(|r| r.status == Status::Proven)
+        .count();
+    let sorry = results.iter().filter(|r| r.status == Status::Sorry).count();
+    let missing = results
+        .iter()
+        .filter(|r| r.status == Status::Missing)
+        .count();
+    Ok(serde_json::json!({
+        "spec": spec_name,
+        "summary": {
+            "proven": proven,
+            "sorry": sorry,
+            "missing": missing,
+            "total": results.len(),
+        },
+        "properties": results,
+    }))
+}
+
 /// `qedgen check --explain`: render the verification-status report.
 /// `--json` emits the data layer for the agent to render; without it the
 /// CLI prints the inline Markdown human fallback. Written to `output`
@@ -63,17 +93,12 @@ pub fn render_explain_report(
     let total = results.len();
 
     let (rendered, what) = if json {
-        let payload = serde_json::json!({
-            "spec": spec_name,
-            "summary": {
-                "proven": proven,
-                "sorry": sorry,
-                "missing": missing,
-                "total": total,
-            },
-            "properties": results,
-        });
-        (serde_json::to_string_pretty(&payload)?, "report (JSON)")
+        (
+            serde_json::to_string_pretty(&explain_report_payload(
+                spec_path, spec_name, proofs_dir,
+            )?)?,
+            "report (JSON)",
+        )
     } else {
         let mut md = format!("# {} Verification Report\n\n", spec_name);
         md.push_str(&format!(
