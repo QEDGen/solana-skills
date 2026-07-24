@@ -217,9 +217,12 @@ pub(crate) fn discover_pinocchio_idl(project_root: &Path) -> Result<Option<Strin
 /// `defaultValueStrategy: "omitted"` (e.g. discriminators) are skipped;
 /// the macro doesn't surface them as struct fields.
 ///
-/// Unrecognised types map to a `"u64"` placeholder: it compiles, but a
-/// type-coercion failure in the macro's field is the signal that the type
-/// isn't supported yet (refine the IDL or accept the compile error).
+/// Compound arg types are preserved as structured encodings —
+/// `Array(U8,97)`, `Vec(U8)`, `Option(U64)`, `Defined(PolicyType)`,
+/// `String` — so the emitter can render a type-correct expression at the
+/// `.call(...)` site instead of a bare `u64` shorthand (#340: every
+/// non-primitive arg was an E0308). Types the mapper cannot classify
+/// become `Opaque`, which the emitter fills with `Default::default()`.
 pub(crate) fn handlers_with_args_from_idl(idl_text: &str) -> Vec<(String, Vec<(String, String)>)> {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(idl_text) else {
         return Vec::new();
@@ -450,6 +453,23 @@ fn idl_arg_type(ty: &serde_json::Value) -> String {
     if let Some(s) = ty.as_str() {
         return anchor_str_to_dsl(s);
     }
+    // Anchor JSON compound forms: {"array": [elem, N]}, {"vec": elem},
+    // {"option": inner}, {"defined": "X"} / {"defined": {"name": "X"}}.
+    if let Some(arr) = ty.get("array").and_then(|v| v.as_array()) {
+        if let (Some(elem), Some(n)) = (arr.first(), arr.get(1).and_then(|n| n.as_u64())) {
+            return format!("Array({},{n})", idl_arg_type(elem));
+        }
+    }
+    if let Some(elem) = ty.get("vec") {
+        return format!("Vec({})", idl_arg_type(elem));
+    }
+    if let Some(inner) = ty.get("option") {
+        return format!("Option({})", idl_arg_type(inner));
+    }
+    if let Some(defined) = ty.get("defined") {
+        return format!("Defined({})", defined_type_name(defined));
+    }
+    // Codama IR node kinds.
     let kind = ty.get("kind").and_then(|k| k.as_str()).unwrap_or("");
     match kind {
         "numberTypeNode" => ty
@@ -459,8 +479,40 @@ fn idl_arg_type(ty: &serde_json::Value) -> String {
             .unwrap_or_else(|| "U64".to_string()),
         "publicKeyTypeNode" => "Pubkey".to_string(),
         "booleanTypeNode" => "Bool".to_string(),
-        _ => "U64".to_string(),
+        "stringTypeNode" => "String".to_string(),
+        "bytesTypeNode" => "Vec(U8)".to_string(),
+        "optionTypeNode" => ty
+            .get("item")
+            .map(|item| format!("Option({})", idl_arg_type(item)))
+            .unwrap_or_else(|| "Opaque".to_string()),
+        "definedTypeLinkNode" => format!("Defined({})", defined_type_name(ty)),
+        "arrayTypeNode" => {
+            let count = ty
+                .get("count")
+                .and_then(|c| c.get("value"))
+                .and_then(|v| v.as_u64());
+            match (ty.get("item"), count) {
+                (Some(item), Some(n)) => format!("Array({},{n})", idl_arg_type(item)),
+                (Some(item), None) => format!("Vec({})", idl_arg_type(item)),
+                _ => "Opaque".to_string(),
+            }
+        }
+        // Anything else (structs inlined as struct nodes, tuples, maps,
+        // amounts, ...) is not fuzzable as a primitive — the emitter
+        // renders `Default::default()` for it.
+        _ => "Opaque".to_string(),
     }
+}
+
+/// Type name from an Anchor `defined` value (`"X"` or `{"name": "X"}`)
+/// or a Codama `definedTypeLinkNode` (`{"name": "x"}`). The name is
+/// carried for readability of the encoding only; the emitter renders
+/// `Default::default()` regardless and never uses it in an expression.
+fn defined_type_name(v: &serde_json::Value) -> String {
+    v.as_str()
+        .or_else(|| v.get("name").and_then(|n| n.as_str()))
+        .unwrap_or("?")
+        .to_string()
 }
 
 fn anchor_str_to_dsl(s: &str) -> String {
@@ -477,7 +529,11 @@ fn anchor_str_to_dsl(s: &str) -> String {
         "i128" => "I128".to_string(),
         "pubkey" | "publicKey" => "Pubkey".to_string(),
         "bool" => "Bool".to_string(),
-        _ => "U64".to_string(),
+        "string" => "String".to_string(),
+        "bytes" => "Vec(U8)".to_string(),
+        // f32/f64 and future scalar spellings: not fuzzable as-is, the
+        // emitter renders `Default::default()`.
+        _ => "Opaque".to_string(),
     }
 }
 
@@ -866,6 +922,83 @@ version = "0.1.0"
                 .as_ref()
                 .map(|seeds| seeds.iter().map(String::as_str).collect::<Vec<_>>()),
             Some(vec!["\"vault\"", "authority", "laneId"])
+        );
+    }
+
+    /// #340: compound IDL arg types must survive into `takes_params` as
+    /// structured encodings — collapsing them to a `U64` placeholder
+    /// made the emitter forward a bare `u64` into every typed
+    /// `instruction::X { .. }` field (one E0308 per arg).
+    #[test]
+    fn anchor_idl_compound_arg_types_are_preserved() {
+        let idl = r#"{
+  "metadata": { "name": "pull_payments" },
+  "instructions": [{
+    "name": "createPolicy",
+    "accounts": [],
+    "args": [
+      { "name": "policyType", "type": { "defined": { "name": "PolicyType" } } },
+      { "name": "memo", "type": { "array": ["u8", 97] } },
+      { "name": "forwardConfig", "type": { "defined": "ForwardConfig" } },
+      { "name": "payload", "type": { "vec": "u8" } },
+      { "name": "paymentAmount", "type": { "option": "u64" } },
+      { "name": "label", "type": "string" },
+      { "name": "rate", "type": "f64" },
+      { "name": "count", "type": "u32" }
+    ]
+  }]
+}"#;
+        let handlers = handlers_with_args_from_idl(idl);
+        let (_, args) = handlers.first().expect("one handler");
+        let types: Vec<&str> = args.iter().map(|(_, t)| t.as_str()).collect();
+        assert_eq!(
+            types,
+            vec![
+                "Defined(PolicyType)",
+                "Array(U8,97)",
+                "Defined(ForwardConfig)",
+                "Vec(U8)",
+                "Option(U64)",
+                "String",
+                "Opaque",
+                "U32",
+            ]
+        );
+    }
+
+    /// #340: the Codama IR spellings of the same compound shapes.
+    #[test]
+    fn codama_compound_arg_types_are_preserved() {
+        let idl = r#"{
+  "kind": "rootNode",
+  "program": {
+    "name": "pull_payments",
+    "instructions": [{
+      "kind": "instructionNode",
+      "name": "createPolicy",
+      "accounts": [],
+      "arguments": [
+        { "name": "policyType", "type": { "kind": "definedTypeLinkNode", "name": "policyType" } },
+        { "name": "memo", "type": { "kind": "arrayTypeNode", "item": { "kind": "numberTypeNode", "format": "u8" }, "count": { "kind": "fixedCountNode", "value": 97 } } },
+        { "name": "paymentAmount", "type": { "kind": "optionTypeNode", "item": { "kind": "numberTypeNode", "format": "u64" } } },
+        { "name": "payload", "type": { "kind": "bytesTypeNode" } },
+        { "name": "label", "type": { "kind": "stringTypeNode" } }
+      ]
+    }]
+  }
+}"#;
+        let handlers = handlers_with_args_from_idl(idl);
+        let (_, args) = handlers.first().expect("one handler");
+        let types: Vec<&str> = args.iter().map(|(_, t)| t.as_str()).collect();
+        assert_eq!(
+            types,
+            vec![
+                "Defined(policyType)",
+                "Array(U8,97)",
+                "Option(U64)",
+                "Vec(U8)",
+                "String",
+            ]
         );
     }
 

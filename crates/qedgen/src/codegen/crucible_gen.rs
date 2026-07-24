@@ -1044,6 +1044,89 @@ fn map_simple_type(dsl_type: &str) -> &'static str {
     }
 }
 
+/// How one instruction argument reaches the `.call(instruction::X { .. })`
+/// literal (#340: forwarding a bare `u64` into a typed field is an E0308
+/// per non-primitive arg).
+enum FuzzParamKind {
+    /// Fuzzable primitive: action param + field shorthand at the call.
+    Fuzzed(&'static str),
+    /// `Option(<fuzzable primitive>)`: the INNER value is the action
+    /// param; the call site wraps it in `Some(..)`.
+    OptionFuzzed(&'static str),
+    /// Not fuzzable (Pubkey, enum/struct, array, vec, string, unknown):
+    /// no action param; this expression is inlined at the call site.
+    Inline(String),
+}
+
+/// Classify a `takes_params` type. Primitive names are qedspec DSL types
+/// (`U64`, `Bool`, ...); compound shapes arrive from the IDL as the
+/// structured encodings built by `crucible_brownfield::idl_arg_type`
+/// (`Array(U8,97)`, `Vec(U8)`, `Option(U64)`, `Defined(X)`, `String`,
+/// `Opaque`). `Defined` and `Opaque` render `Default::default()` — the
+/// `declare_fuzz_program!` macro derives `Default` for every IDL type
+/// (its derive has its own >32-byte-array limitation, tracked upstream
+/// as issue #341's root cause).
+fn fuzz_param_kind(dsl_type: &str) -> FuzzParamKind {
+    // Pubkey args are deliberately fixed: `#[fuzz_fixture]` cannot derive
+    // Arbitrary for Solana's `Address` wrapper, so one in the action
+    // signature breaks the build. Real PDAs / signer pubkeys belong in
+    // the `.accounts(...)` literal, not the fuzzed payload.
+    if dsl_type == "Pubkey" {
+        return FuzzParamKind::Inline("Pubkey::default()".to_string());
+    }
+    let mapped = map_simple_type(dsl_type);
+    if !mapped.starts_with("()") {
+        return FuzzParamKind::Fuzzed(mapped);
+    }
+    if let Some(inner) = strip_type_wrap(dsl_type, "Option(") {
+        if inner != "Pubkey" {
+            let inner_mapped = map_simple_type(inner);
+            if !inner_mapped.starts_with("()") {
+                return FuzzParamKind::OptionFuzzed(inner_mapped);
+            }
+        }
+        // Option of a non-fuzzable payload: `None` always type-checks.
+        return FuzzParamKind::Inline("None".to_string());
+    }
+    if let Some(body) = strip_type_wrap(dsl_type, "Array(") {
+        // `Array(<elem>,<len>)` — the len is the LAST comma field, so
+        // nested element encodings split correctly.
+        if let Some((elem, len)) = body.rsplit_once(',') {
+            if len.bytes().all(|b| b.is_ascii_digit()) && !len.is_empty() {
+                let elem_mapped = map_simple_type(elem);
+                if elem_mapped.starts_with('u') || elem_mapped.starts_with('i') {
+                    return FuzzParamKind::Inline(format!("[0{elem_mapped}; {len}]"));
+                }
+                if elem == "Bool" {
+                    return FuzzParamKind::Inline(format!("[false; {len}]"));
+                }
+                if elem == "Pubkey" {
+                    return FuzzParamKind::Inline(format!("[Pubkey::default(); {len}]"));
+                }
+                // Non-Copy / defined elements: `from_fn` needs no
+                // `Default` on the ARRAY, only on the element.
+                return FuzzParamKind::Inline(
+                    "core::array::from_fn(|_| Default::default())".to_string(),
+                );
+            }
+        }
+    }
+    if dsl_type.starts_with("Vec(") {
+        return FuzzParamKind::Inline("Vec::new()".to_string());
+    }
+    if dsl_type == "String" {
+        return FuzzParamKind::Inline("String::new()".to_string());
+    }
+    // `Defined(X)`, `Opaque`, and any legacy spec type without a
+    // primitive shadow.
+    FuzzParamKind::Inline("Default::default()".to_string())
+}
+
+/// `strip_type_wrap("Option(U64)", "Option(")` → `Some("U64")`.
+fn strip_type_wrap<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+    s.strip_prefix(prefix)?.strip_suffix(')')
+}
+
 fn collect_signer_idents(spec: &ParsedSpec) -> Vec<String> {
     let mut seen = std::collections::BTreeSet::new();
     for h in &spec.handlers {
@@ -1217,22 +1300,27 @@ fn emit_action_fn(
         out.push_str("    /// at the project root to auto-fill it).\n");
     }
 
-    // Pubkey-typed args are NOT exposed as action params: #[fuzz_fixture]
-    // can't derive Arbitrary for Pubkey (no Arbitrary on its `Address`
-    // wrapper), so one in the signature breaks the build. The call literal
-    // inlines `Pubkey::default()`; real PDAs / signer pubkeys belong in the
-    // agent-filled `.accounts(...)` literal, not the fuzzed payload.
+    // Only fuzzable primitives are exposed as action params (see
+    // `fuzz_param_kind`): Pubkey breaks the `#[fuzz_fixture]` Arbitrary
+    // derive, and compound IDL types (enum/struct/array/vec) have no
+    // primitive shadow — both get a type-correct expression inlined at
+    // the `.call(...)` site instead (#340). `Option(<primitive>)` keeps
+    // its inner value fuzzable and wraps it in `Some(..)` at the call.
     let mut params = String::new();
     for (pname, ptype) in &op.takes_params {
-        if ptype == "Pubkey" {
-            continue;
+        match fuzz_param_kind(ptype) {
+            FuzzParamKind::Fuzzed(rust_ty) => {
+                let range_attr = infer_range_attr(spec, ptype);
+                if !range_attr.is_empty() {
+                    params.push_str(&format!("        {range_attr}\n"));
+                }
+                params.push_str(&format!("        {pname}: {rust_ty},\n"));
+            }
+            FuzzParamKind::OptionFuzzed(rust_ty) => {
+                params.push_str(&format!("        {pname}: {rust_ty},\n"));
+            }
+            FuzzParamKind::Inline(_) => {}
         }
-        let rust_ty = map_simple_type(ptype);
-        let range_attr = infer_range_attr(spec, ptype);
-        if !range_attr.is_empty() {
-            params.push_str(&format!("        {range_attr}\n"));
-        }
-        params.push_str(&format!("        {pname}: {rust_ty},\n"));
     }
 
     out.push_str(&format!(
@@ -1299,17 +1387,15 @@ fn emit_action_fn(
     // `Result<TxOutcome, ...>`; both layers collapse into one bool —
     // transport errors count as failed actions, same as program errors.
     let ix_name = pascal_case(&op.name);
-    // Pubkey fields get `Pubkey::default()` (see param-list note above);
-    // other params pass through via field shorthand.
+    // Fuzzed primitives pass through via field shorthand; everything
+    // else gets a type-correct expression (see `fuzz_param_kind`).
     let arg_inits: String = op
         .takes_params
         .iter()
-        .map(|(n, t)| {
-            if t == "Pubkey" {
-                format!("{n}: Pubkey::default(), ")
-            } else {
-                format!("{n}, ")
-            }
+        .map(|(n, t)| match fuzz_param_kind(t) {
+            FuzzParamKind::Fuzzed(_) => format!("{n}, "),
+            FuzzParamKind::OptionFuzzed(_) => format!("{n}: Some({n}), "),
+            FuzzParamKind::Inline(expr) => format!("{n}: {expr}, "),
         })
         .collect();
     // Snapshot wallet lamports before .send() (Protocol / Both only). Tracked
@@ -1948,6 +2034,90 @@ handler resume : State.Inactive -> State.Active {
         assert!(out.contains("pub fn action_increment(\n        &mut self,\n    ) -> bool"));
         // todo!() agent-fill site for the accounts struct literal
         assert!(out.contains("todo!(\"agent-fill: accounts::Increment"));
+    }
+
+    /// #340: compound-typed instruction args (enum/struct, `[u8; N]`,
+    /// `Vec<u8>`, `Option<u64>`, `String`) must reach the
+    /// `.call(instruction::X { .. })` literal as type-correct
+    /// expressions, never as bare `u64` shorthand (E0308 per arg).
+    /// Only fuzzable primitives may appear in the action signature.
+    #[test]
+    fn action_fn_renders_type_correct_call_exprs_for_compound_args() {
+        let mut spec = ParsedSpec {
+            program_name: "PullPayments".into(),
+            ..Default::default()
+        };
+        spec.handlers.push(crate::check::ParsedHandler {
+            name: "create_policy".into(),
+            takes_params: vec![
+                ("policy_type".into(), "Defined(PolicyType)".into()),
+                ("memo".into(), "Array(U8,97)".into()),
+                ("payload".into(), "Vec(U8)".into()),
+                ("payment_amount".into(), "Option(U64)".into()),
+                ("label".into(), "String".into()),
+                ("rate".into(), "Opaque".into()),
+                ("recipient".into(), "Pubkey".into()),
+                ("count".into(), "U32".into()),
+            ],
+            ..synthetic_handler()
+        });
+        let mut out = String::new();
+        emit_fixture_impl(
+            &mut out,
+            &spec,
+            "PullPaymentsFixture",
+            InvariantMode::Spec,
+            None,
+            None,
+        )
+        .expect("emit");
+
+        // Signature: only the fuzzable primitives (Option's inner value
+        // is lifted to a plain primitive param).
+        let sig_start = out.find("pub fn action_create_policy").expect("action fn");
+        let sig = &out[sig_start..out[sig_start..].find(") -> bool").unwrap() + sig_start];
+        assert!(sig.contains("payment_amount: u64,"), "sig: {sig}");
+        assert!(sig.contains("count: u32,"), "sig: {sig}");
+        for absent in ["policy_type:", "memo:", "payload:", "label:", "rate:", "recipient:"] {
+            assert!(!sig.contains(absent), "`{absent}` must not be fuzzed: {sig}");
+        }
+
+        // Call literal: type-correct expression per arg.
+        let call_start = out.find(".call(instruction::CreatePolicy").expect("call literal");
+        let call = &out[call_start..out[call_start..].find(")\n").unwrap() + call_start];
+        assert!(call.contains("policy_type: Default::default(), "), "call: {call}");
+        assert!(call.contains("memo: [0u8; 97], "), "call: {call}");
+        assert!(call.contains("payload: Vec::new(), "), "call: {call}");
+        assert!(call.contains("payment_amount: Some(payment_amount), "), "call: {call}");
+        assert!(call.contains("label: String::new(), "), "call: {call}");
+        assert!(call.contains("rate: Default::default(), "), "call: {call}");
+        assert!(call.contains("recipient: Pubkey::default(), "), "call: {call}");
+        // The one fuzzable primitive still uses field shorthand.
+        assert!(call.contains(" count, "), "call: {call}");
+    }
+
+    /// #340: array-element coverage beyond `u8` — signed ints, bool,
+    /// Pubkey, and defined elements each need a different zero-value
+    /// spelling ([u8; N>32] has no `Default`, so `Default::default()`
+    /// is never an option for arrays).
+    #[test]
+    fn array_and_option_call_exprs_cover_element_kinds() {
+        let expr_of = |ty: &str| match fuzz_param_kind(ty) {
+            FuzzParamKind::Inline(expr) => expr,
+            FuzzParamKind::Fuzzed(t) => format!("<fuzzed {t}>"),
+            FuzzParamKind::OptionFuzzed(t) => format!("<option-fuzzed {t}>"),
+        };
+        assert_eq!(expr_of("Array(I64,4)"), "[0i64; 4]");
+        assert_eq!(expr_of("Array(Bool,8)"), "[false; 8]");
+        assert_eq!(expr_of("Array(Pubkey,3)"), "[Pubkey::default(); 3]");
+        assert_eq!(
+            expr_of("Array(Defined(Tier),5)"),
+            "core::array::from_fn(|_| Default::default())"
+        );
+        assert_eq!(expr_of("Option(Pubkey)"), "None");
+        assert_eq!(expr_of("Option(Defined(Tier))"), "None");
+        assert_eq!(expr_of("Option(Bool)"), "<option-fuzzed bool>");
+        assert_eq!(expr_of("Vec(Defined(Tier))"), "Vec::new()");
     }
 
     #[test]
