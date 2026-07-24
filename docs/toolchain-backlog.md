@@ -1412,3 +1412,105 @@ the §9 doc sweep found zero drift (every PR in the cycle updated
 cli.md/SKILL.md/framework-support.md alongside). Recorded as evidence the
 #294 executable-artifact gates and the docs-alongside-PR discipline work;
 nothing to change, no issue.
+
+---
+
+## Session: v2.48.0 release cut (2026-07-24)
+
+Source: running the full docs/RELEASING.md checklist for v2.48.0. All gates
+green. The §9 sweep caught (manually) that the `verify --strict` docs listed
+four closed issues as open gaps; the release commit (449cb88) fixed
+references/cli.md and the clap help text but left the equivalent drift in the
+emitted reason strings (B10) and left §9 without a step that would catch this
+class next time (F11). A `--json` scripting check surfaced B11.
+
+### 🐞 B10 — `UnsupportedReason::describe()` strings claim shipped features "are not implemented" and cite closed issues  [FIXED]
+
+`check --coverage` and `verify --strict` print unsupported-obligation reasons
+whose text still describes the pre-v2.48.0 world: the cross-module reason says
+"product-state lowering is not implemented (#324/#331)" although product-state
+lowering shipped this release (for file-level features and ghosts — the
+residual cross-module PropertyPreservation shape is real, but the text
+overstates the gap); three sibling reasons cite #324, #326, #328, #331 as if
+open — all four are CLOSED. The release commit fixed the same drift in
+references/cli.md and the clap help but the emitted strings live in source.
+- **Evidence:** `bin/qedgen check --spec examples/rust/lending/lending.qedspec
+  --coverage` → `kani: PropertyPreservation borrow/pool_solvency: unsupported —
+  obligation spans account modules; product-state lowering is not implemented
+  (#324/#331)` (×8 lines); `check --spec
+  examples/rust/cross-program-vault/vault.qedspec --coverage` → lean Abort
+  reason citing `(#328)`. `gh issue view` confirms #324/#326/#328/#331 CLOSED.
+- **Root cause:** `crates/qedgen/src/obligations/mod.rs:147-195` —
+  `UnsupportedReason::describe()` hardcodes the reason prose; :188 is the
+  "is not implemented (#324/#331)" string; :152/:155/:164/:173 cite the other
+  closed numbers. Doc comments at mod.rs:140 and inventory.rs:8 carry the same
+  stale claim.
+- **Proposed:** reword the five `describe()` strings to name the precise
+  residual unsupported shape with no issue numbers (e.g.
+  `MultiAccountCrossAccountObligation` → "property is scoped to one account
+  module but the handler routes to another; the product-state lowering does
+  not yet route cross-module property preservation"), and update the stale
+  doc comments. Gate: extend the coverage snapshot / obligations spec_tests
+  to pin the new strings, plus a repo-wide check that reason strings never
+  cite issue numbers (see F11 for the doc-side twin).
+- **Verdict:** FILE (bug). High leverage: these strings are what the agent
+  and user read to decide whether to escalate or re-shape a spec — a string
+  claiming a shipped feature is missing sends every multi-account spec author
+  down a dead end. Same class as #260's docs-carried caveat.
+- **Issue:** #354 — FIXED same day (PR #357, main 435a195): strings reworded, exhaustive-match regression test bans issue numbers and "not implemented" in describe().
+
+### 🐞 B11 — `check --coverage --json` emits concatenated JSON documents; stdout is not parseable as one document  [FIXED]
+
+Under `--json`, `check` prints each section as its own pretty-printed JSON
+document (coverage object, then optionally the Proofs.lean drift array, then
+the lint-findings array). With `--coverage` the stream is two-plus documents,
+so `json.load` / `serde_json::from_str` / `jq` without `-s`-stream handling
+fail; the `backend_coverage` rollup IS in the first document, but no strict
+parser can reach it. This also answers the "is `--json` sufficient for
+scripting the rollup?" question: no.
+- **Evidence:** `bin/qedgen check --spec examples/rust/lending/lending.qedspec
+  --coverage --json | python3 -m json.tool` → `Extra data: line 492 column 1
+  (char 13948)`, exit 1 (qedgen 2.48.0). Doc 1 keys:
+  `[backend_coverage, cells, coverage_pct, gaps, operations, properties]`;
+  doc 2 = the 6 lint findings.
+- **Root cause:** `crates/qedgen/src/run.rs` — three independent `println!`
+  sites under the same `json` flag: coverage object (:1313), proofs-drift
+  array (:1368), lint warnings (:1392). Nothing aggregates them.
+- **Proposed:** accumulate the sections and print ONE document at the end:
+  `{"coverage": {...}, "proofs_drift": [...], "findings": [...]}` with
+  absent sections omitted. The comment at run.rs:1309 says existing consumers
+  expect the matrix keys top-level — either keep the plain-`check` shape
+  (findings array alone, unchanged) and only wrap when >1 section would
+  print, or take the one-time break since the agent is the only consumer.
+  Gate: a CLI test that pipes `check --coverage --json` through
+  `serde_json::from_str::<Value>` and asserts a single document.
+- **Verdict:** FILE (bug). Medium-high leverage: `--json` is the agent-facing
+  surface (agent-first UX); every scripted consumer of the backend-coverage
+  rollup hits this.
+- **Issue:** #355 — FIXED same day (PR #358, main aaa6c03): one document under --json; bare findings array kept for plain check --json; check_json_single_doc test gates it.
+
+### 🩹 F11 — RELEASING.md §9 has no check for capability-gap docs citing closed issues
+
+The §9 sweep caught the `verify --strict` doc drift only because the releaser
+happened to re-read the flag table; nothing mechanical flags issue numbers
+referenced in `references/*.md`, clap help text, or emitted reason strings
+that are CLOSED on GitHub. RELEASING.md carried #260 as a caveat for ten
+releases the same way; B10 (above) is the string-side instance this release.
+- **Evidence:** release commit 449cb88 message: "They listed #324, #326,
+  #328, and #331 as open capability gaps. All four closed in this release
+  wave." — found manually. `docs/RELEASING.md:51-57` (§9) has no bullet for
+  known-gaps lists or issue-number liveness.
+- **Root cause:** process gap — §9 enumerates symbol/flag drift checks but
+  not "capability gaps we document" drift; no script exists.
+- **Proposed:** (a) script `scripts/check-closed-issue-refs.sh`: grep
+  `#[0-9]+` in `references/*.md`, `crates/qedgen/src/cli.rs` doc comments,
+  and `UnsupportedReason::describe()` / other user-visible strings; `gh issue
+  view --json state` each; fail on CLOSED ones cited as open gaps (allowlist
+  for historical "shipped in #N" mentions). (b) a §9 bullet: re-verify every
+  "known gaps" list against `check --coverage` output on the bundled
+  examples. Long-term, B10's "no issue numbers in emitted strings" rule
+  shrinks the surface this script must cover.
+- **Verdict:** FILE (friction). Recurs every release; the drift class has now
+  bitten three separate surfaces (RELEASING.md caveat, cli.md flag table,
+  emitted reasons).
+- **Issue:** #356 — DONE same day (PR #359, main c3d220a): scripts/check-closed-issue-refs.sh + two RELEASING.md section 9 bullets.
