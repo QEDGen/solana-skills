@@ -485,7 +485,17 @@ fn idl_arg_type(ty: &serde_json::Value) -> String {
             .get("item")
             .map(|item| format!("Option({})", idl_arg_type(item)))
             .unwrap_or_else(|| "Opaque".to_string()),
-        "definedTypeLinkNode" => format!("Defined({})", defined_type_name(ty)),
+        "definedTypeLinkNode" => {
+            let name = defined_type_name(ty);
+            // Keep parity with Crucible's Codama converter: these links
+            // are built-in scalar aliases, not generated compound types.
+            // Preserving their primitive shape keeps them fuzzer-mutated.
+            match name.as_str() {
+                "epoch" | "slot" | "lamports" => "U64".to_string(),
+                "unixTimestamp" | "unix_timestamp" => "I64".to_string(),
+                _ => format!("Defined({name})"),
+            }
+        }
         "arrayTypeNode" => {
             let count = ty
                 .get("count")
@@ -982,7 +992,10 @@ version = "0.1.0"
         { "name": "memo", "type": { "kind": "arrayTypeNode", "item": { "kind": "numberTypeNode", "format": "u8" }, "count": { "kind": "fixedCountNode", "value": 97 } } },
         { "name": "paymentAmount", "type": { "kind": "optionTypeNode", "item": { "kind": "numberTypeNode", "format": "u64" } } },
         { "name": "payload", "type": { "kind": "bytesTypeNode" } },
-        { "name": "label", "type": { "kind": "stringTypeNode" } }
+        { "name": "label", "type": { "kind": "stringTypeNode" } },
+        { "name": "epoch", "type": { "kind": "definedTypeLinkNode", "name": "epoch" } },
+        { "name": "timestamp", "type": { "kind": "definedTypeLinkNode", "name": "unixTimestamp" } },
+        { "name": "amount", "type": { "kind": "definedTypeLinkNode", "name": "lamports" } }
       ]
     }]
   }
@@ -998,6 +1011,9 @@ version = "0.1.0"
                 "Option(U64)",
                 "Vec(U8)",
                 "String",
+                "U64",
+                "I64",
+                "U64",
             ]
         );
     }

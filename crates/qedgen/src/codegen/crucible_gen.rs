@@ -1051,10 +1051,13 @@ enum FuzzParamKind {
     /// Fuzzable primitive: action param + field shorthand at the call.
     Fuzzed(&'static str),
     /// `Option(<fuzzable primitive>)`: the INNER value is the action
-    /// param; the call site wraps it in `Some(..)`.
+    /// param; a companion bool lets the fuzzer choose `None` or `Some`.
     OptionFuzzed(&'static str),
+    /// `Option(<non-fuzzable payload>)`: a companion bool still fuzzes
+    /// the discriminant, while `Some` carries this type-correct default.
+    OptionInline(String),
     /// Not fuzzable (Pubkey, enum/struct, array, vec, string, unknown):
-    /// no action param; this expression is inlined at the call site.
+    /// no payload action param; this expression is inlined at the call site.
     Inline(String),
 }
 
@@ -1079,14 +1082,15 @@ fn fuzz_param_kind(dsl_type: &str) -> FuzzParamKind {
         return FuzzParamKind::Fuzzed(mapped);
     }
     if let Some(inner) = strip_type_wrap(dsl_type, "Option(") {
-        if inner != "Pubkey" {
-            let inner_mapped = map_simple_type(inner);
-            if !inner_mapped.starts_with("()") {
-                return FuzzParamKind::OptionFuzzed(inner_mapped);
+        return match fuzz_param_kind(inner) {
+            FuzzParamKind::Fuzzed(inner_mapped) => FuzzParamKind::OptionFuzzed(inner_mapped),
+            FuzzParamKind::Inline(expr) => FuzzParamKind::OptionInline(expr),
+            // Nested options: `Default::default()` supplies the inner
+            // option (`None`) without inventing another action-field layer.
+            FuzzParamKind::OptionFuzzed(_) | FuzzParamKind::OptionInline(_) => {
+                FuzzParamKind::OptionInline("Default::default()".to_string())
             }
-        }
-        // Option of a non-fuzzable payload: `None` always type-checks.
-        return FuzzParamKind::Inline("None".to_string());
+        };
     }
     if let Some(body) = strip_type_wrap(dsl_type, "Array(") {
         // `Array(<elem>,<len>)` — the len is the LAST comma field, so
@@ -1125,6 +1129,16 @@ fn fuzz_param_kind(dsl_type: &str) -> FuzzParamKind {
 /// `strip_type_wrap("Option(U64)", "Option(")` → `Some("U64")`.
 fn strip_type_wrap<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
     s.strip_prefix(prefix)?.strip_suffix(')')
+}
+
+/// Collision-free synthetic action parameter controlling an Option's
+/// discriminant. IDL argument names remain untouched at the call site.
+fn option_presence_param(op: &ParsedHandler, pname: &str) -> String {
+    let mut candidate = format!("__qedgen_{pname}_is_some");
+    while op.takes_params.iter().any(|(name, _)| name == &candidate) {
+        candidate.insert(0, '_');
+    }
+    candidate
 }
 
 fn collect_signer_idents(spec: &ParsedSpec) -> Vec<String> {
@@ -1300,12 +1314,12 @@ fn emit_action_fn(
         out.push_str("    /// at the project root to auto-fill it).\n");
     }
 
-    // Only fuzzable primitives are exposed as action params (see
+    // Fuzzable primitives are exposed as action params (see
     // `fuzz_param_kind`): Pubkey breaks the `#[fuzz_fixture]` Arbitrary
     // derive, and compound IDL types (enum/struct/array/vec) have no
     // primitive shadow — both get a type-correct expression inlined at
-    // the `.call(...)` site instead (#340). `Option(<primitive>)` keeps
-    // its inner value fuzzable and wraps it in `Some(..)` at the call.
+    // the `.call(...)` site instead (#340). Every Option gets a fuzzed
+    // presence bool; primitive inners additionally remain fuzzable.
     let mut params = String::new();
     for (pname, ptype) in &op.takes_params {
         match fuzz_param_kind(ptype) {
@@ -1317,7 +1331,13 @@ fn emit_action_fn(
                 params.push_str(&format!("        {pname}: {rust_ty},\n"));
             }
             FuzzParamKind::OptionFuzzed(rust_ty) => {
+                let presence = option_presence_param(op, pname);
+                params.push_str(&format!("        {presence}: bool,\n"));
                 params.push_str(&format!("        {pname}: {rust_ty},\n"));
+            }
+            FuzzParamKind::OptionInline(_) => {
+                let presence = option_presence_param(op, pname);
+                params.push_str(&format!("        {presence}: bool,\n"));
             }
             FuzzParamKind::Inline(_) => {}
         }
@@ -1394,7 +1414,14 @@ fn emit_action_fn(
         .iter()
         .map(|(n, t)| match fuzz_param_kind(t) {
             FuzzParamKind::Fuzzed(_) => format!("{n}, "),
-            FuzzParamKind::OptionFuzzed(_) => format!("{n}: Some({n}), "),
+            FuzzParamKind::OptionFuzzed(_) => {
+                let presence = option_presence_param(op, n);
+                format!("{n}: if {presence} {{ Some({n}) }} else {{ None }}, ")
+            }
+            FuzzParamKind::OptionInline(expr) => {
+                let presence = option_presence_param(op, n);
+                format!("{n}: if {presence} {{ Some({expr}) }} else {{ None }}, ")
+            }
             FuzzParamKind::Inline(expr) => format!("{n}: {expr}, "),
         })
         .collect();
@@ -2054,6 +2081,10 @@ handler resume : State.Inactive -> State.Active {
                 ("memo".into(), "Array(U8,97)".into()),
                 ("payload".into(), "Vec(U8)".into()),
                 ("payment_amount".into(), "Option(U64)".into()),
+                (
+                    "optional_policy".into(),
+                    "Option(Defined(PolicyType))".into(),
+                ),
                 ("label".into(), "String".into()),
                 ("rate".into(), "Opaque".into()),
                 ("recipient".into(), "Pubkey".into()),
@@ -2076,22 +2107,60 @@ handler resume : State.Inactive -> State.Active {
         // is lifted to a plain primitive param).
         let sig_start = out.find("pub fn action_create_policy").expect("action fn");
         let sig = &out[sig_start..out[sig_start..].find(") -> bool").unwrap() + sig_start];
+        assert!(
+            sig.contains("__qedgen_payment_amount_is_some: bool,"),
+            "sig: {sig}"
+        );
         assert!(sig.contains("payment_amount: u64,"), "sig: {sig}");
+        assert!(
+            sig.contains("__qedgen_optional_policy_is_some: bool,"),
+            "sig: {sig}"
+        );
         assert!(sig.contains("count: u32,"), "sig: {sig}");
-        for absent in ["policy_type:", "memo:", "payload:", "label:", "rate:", "recipient:"] {
-            assert!(!sig.contains(absent), "`{absent}` must not be fuzzed: {sig}");
+        for absent in [
+            "policy_type:",
+            "memo:",
+            "payload:",
+            "optional_policy:",
+            "label:",
+            "rate:",
+            "recipient:",
+        ] {
+            assert!(
+                !sig.contains(absent),
+                "`{absent}` must not be fuzzed: {sig}"
+            );
         }
 
         // Call literal: type-correct expression per arg.
-        let call_start = out.find(".call(instruction::CreatePolicy").expect("call literal");
+        let call_start = out
+            .find(".call(instruction::CreatePolicy")
+            .expect("call literal");
         let call = &out[call_start..out[call_start..].find(")\n").unwrap() + call_start];
-        assert!(call.contains("policy_type: Default::default(), "), "call: {call}");
+        assert!(
+            call.contains("policy_type: Default::default(), "),
+            "call: {call}"
+        );
         assert!(call.contains("memo: [0u8; 97], "), "call: {call}");
         assert!(call.contains("payload: Vec::new(), "), "call: {call}");
-        assert!(call.contains("payment_amount: Some(payment_amount), "), "call: {call}");
+        assert!(
+            call.contains(
+                "payment_amount: if __qedgen_payment_amount_is_some { Some(payment_amount) } else { None }, "
+            ),
+            "call: {call}"
+        );
+        assert!(
+            call.contains(
+                "optional_policy: if __qedgen_optional_policy_is_some { Some(Default::default()) } else { None }, "
+            ),
+            "call: {call}"
+        );
         assert!(call.contains("label: String::new(), "), "call: {call}");
         assert!(call.contains("rate: Default::default(), "), "call: {call}");
-        assert!(call.contains("recipient: Pubkey::default(), "), "call: {call}");
+        assert!(
+            call.contains("recipient: Pubkey::default(), "),
+            "call: {call}"
+        );
         // The one fuzzable primitive still uses field shorthand.
         assert!(call.contains(" count, "), "call: {call}");
     }
@@ -2106,6 +2175,7 @@ handler resume : State.Inactive -> State.Active {
             FuzzParamKind::Inline(expr) => expr,
             FuzzParamKind::Fuzzed(t) => format!("<fuzzed {t}>"),
             FuzzParamKind::OptionFuzzed(t) => format!("<option-fuzzed {t}>"),
+            FuzzParamKind::OptionInline(expr) => format!("<option-inline {expr}>"),
         };
         assert_eq!(expr_of("Array(I64,4)"), "[0i64; 4]");
         assert_eq!(expr_of("Array(Bool,8)"), "[false; 8]");
@@ -2114,10 +2184,29 @@ handler resume : State.Inactive -> State.Active {
             expr_of("Array(Defined(Tier),5)"),
             "core::array::from_fn(|_| Default::default())"
         );
-        assert_eq!(expr_of("Option(Pubkey)"), "None");
-        assert_eq!(expr_of("Option(Defined(Tier))"), "None");
+        assert_eq!(
+            expr_of("Option(Pubkey)"),
+            "<option-inline Pubkey::default()>"
+        );
+        assert_eq!(
+            expr_of("Option(Defined(Tier))"),
+            "<option-inline Default::default()>"
+        );
         assert_eq!(expr_of("Option(Bool)"), "<option-fuzzed bool>");
         assert_eq!(expr_of("Vec(Defined(Tier))"), "Vec::new()");
+    }
+
+    #[test]
+    fn option_presence_param_avoids_idl_name_collisions() {
+        let mut op = synthetic_handler();
+        op.takes_params = vec![
+            ("value".into(), "Option(U64)".into()),
+            ("__qedgen_value_is_some".into(), "Bool".into()),
+        ];
+        assert_eq!(
+            option_presence_param(&op, "value"),
+            "___qedgen_value_is_some"
+        );
     }
 
     #[test]
