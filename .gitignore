@@ -103,3 +103,4 @@ LEARNINGS_*.md
 !.claude/agents/
 \n# Generated proof artifacts\nlean_project/\nqedgen_*/
 tests/kani.rs
+.superstack/

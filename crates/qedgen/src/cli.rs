@@ -906,9 +906,10 @@ pub(crate) enum Commands {
         /// memory (kani / lean / proptest) and exits 1 on any
         /// `unsupported` or `failed` entry: a passing strict verify
         /// means no requested obligation was silently dropped by a
-        /// backend. Off by default because known capability gaps
-        /// (multi-account file-level features, ADT Kani parity,
-        /// pubkey-guard Lean clauses) would fail every affected spec.
+        /// backend. Off by default because some obligation shapes are
+        /// still unsupported (cross-module property preservation,
+        /// multi-projection Lean abort reads, CPI ensures without
+        /// `state_binders`) and would fail every affected spec.
         #[arg(long)]
         strict: bool,
     },
