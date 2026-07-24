@@ -5,7 +5,8 @@
 //! inventory against what the backend's recorder actually captured: an
 //! expected obligation the backend never reported becomes `failed` (or
 //! `unsupported(multi_account_cross_account_obligation)` on multi-account
-//! specs, where cross-module drops are the known #324/#331 gap). This is
+//! specs, where cross-module drops are the known residual gap in the
+//! product-state lowering). This is
 //! the safety net that turns a FUTURE silent skip red instead of absent.
 //!
 //! Two obligation classes exist on purpose:
