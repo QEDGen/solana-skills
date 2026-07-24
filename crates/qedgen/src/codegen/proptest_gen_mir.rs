@@ -859,44 +859,63 @@ fn emit_account_section(
 
     // Extract constant upper bounds from properties to cap arb_state() ranges.
     // E.g., `state.V <= MAX_VAULT_TVL` caps V to 10^16 instead of u128::MAX.
-    // When bounds exist, also apply them to other numeric fields of the same type
-    // so that relational invariants like `V >= C_tot + I` have valid input ranges.
     let mut field_bounds = extract_field_upper_bounds(properties, &spec.constants);
     if !field_bounds.is_empty() {
         // A relational property like `V >= C_tot + I` is unsatisfiable in
         // random states unless the fields it relates share a compatible
         // upper bound: if `V <= MAX` but `C_tot` samples the full u64
         // domain, `V >= C_tot + I` almost never holds and the harness
-        // rejects everything. So propagate the tightest explicit bound —
-        // but ONLY to fields that co-occur with an explicitly-bounded
-        // field in some property expression. Blanket-capping every numeric
-        // field (the old behavior) silently shrank the domain of fields in
-        // NO such property — e.g. a type discriminant with its own wide
-        // range became unreachable above the borrowed bound.
-        let explicit: std::collections::HashSet<String> = field_bounds.keys().cloned().collect();
-        let min_bound = field_bounds.values().min_by_key(|v| v.len()).cloned();
-        if let Some(ref bound) = min_bound {
-            let mut related: std::collections::HashSet<String> = std::collections::HashSet::new();
-            for prop in properties {
-                if prop.expression.is_none() {
-                    continue;
-                }
-                let mentioned: Vec<&str> = mutable_fields
-                    .iter()
-                    .filter(|(f, _)| property_references_field(prop, f))
-                    .map(|(f, _)| f.as_str())
-                    .collect();
-                if mentioned.iter().any(|f| explicit.contains(*f)) {
-                    related.extend(mentioned.iter().map(|f| f.to_string()));
+        // rejects everything. Propagate each explicit `state.F <= CONST`
+        // bound to the OTHER fields in F's connected component — fields
+        // transitively linked by co-occurring in a property expression —
+        // using that component's own tightest bound. A single global
+        // minimum leaks a tight bound from one relational group into an
+        // unrelated one (`a <= 10; a >= b` next to `c <= 1000; c >= d`
+        // would cap `d` at 10, not 1000); capping every field leaks it
+        // further still, onto fields in NO relational property (a type
+        // discriminant with its own wide range).
+        let names: Vec<&str> = mutable_fields
+            .iter()
+            .filter(|(_, t)| t.as_str() != "Pubkey")
+            .map(|(f, _)| f.as_str())
+            .collect();
+        // Union-find: join fields that co-occur in a property expression.
+        let mut parent: Vec<usize> = (0..names.len()).collect();
+        for prop in properties {
+            if prop.expression.is_none() {
+                continue;
+            }
+            let mentioned: Vec<usize> = names
+                .iter()
+                .enumerate()
+                .filter(|(_, n)| property_references_field(prop, n))
+                .map(|(i, _)| i)
+                .collect();
+            for pair in mentioned.windows(2) {
+                let (a, b) = (uf_find(&mut parent, pair[0]), uf_find(&mut parent, pair[1]));
+                if a != b {
+                    parent[a] = b;
                 }
             }
-            for (fname, ftype) in mutable_fields {
-                if ftype.as_str() != "Pubkey"
-                    && related.contains(fname.as_str())
-                    && !field_bounds.contains_key(fname.as_str())
-                {
-                    field_bounds.insert(fname.to_string(), bound.clone());
-                }
+        }
+        // Tightest explicit bound per component (numeric compare, not
+        // string length — `"9"` is not tighter than `"1000"`).
+        let mut comp_bound: std::collections::HashMap<usize, u128> = Default::default();
+        for (i, name) in names.iter().enumerate() {
+            if let Some(b) = field_bounds.get(*name).and_then(|v| v.parse::<u128>().ok()) {
+                let root = uf_find(&mut parent, i);
+                let slot = comp_bound.entry(root).or_insert(u128::MAX);
+                *slot = (*slot).min(b);
+            }
+        }
+        // Apply each component's bound to its still-unbounded members.
+        for (i, name) in names.iter().enumerate() {
+            if field_bounds.contains_key(*name) {
+                continue;
+            }
+            let root = uf_find(&mut parent, i);
+            if let Some(bound) = comp_bound.get(&root) {
+                field_bounds.insert(name.to_string(), bound.to_string());
             }
         }
     }
@@ -1746,54 +1765,6 @@ fn emit_overflow_tests_for(
     Ok(())
 }
 
-/// Random op-sequence length for the state-machine harness, and the
-/// divisor for [`seq_param_bound`].
-const SEQ_LEN: usize = 20;
-
-/// Upper bound for an unsigned numeric `arb_op` param that feeds a ghost
-/// accumulator: `type_max / SEQ_LEN`. `None` (full domain) otherwise.
-///
-/// A ghost aggregate (`total := total + amount`) renders with plain
-/// arithmetic and has no reject path — unlike a checked state field it
-/// can't decline the transition on overflow. An unbounded `arb_op` amount
-/// (`u64::MAX`) therefore overflows it across a run: a debug-mode panic
-/// (`cargo test`, which the harness header prescribes) or a release wrap
-/// that spuriously violates a conservation property. Capping the feeding
-/// param so `SEQ_LEN` additions cannot exceed the type keeps the modeled
-/// aggregate in the domain where the spec's ℕ-arithmetic properties hold.
-///
-/// The bound applies ONLY to a param a ghost update on this handler reads —
-/// that is the unchecked accumulation. Indices, thresholds, and amounts
-/// that feed only checked state fields (which reject on overflow, never
-/// panic) keep the full domain, as do signed and non-numeric params: the
-/// dedicated per-handler overflow tests still drive full-range single
-/// steps, so overflow *rejection* stays covered — only the unchecked
-/// multi-step accumulation is tamed.
-fn seq_param_bound(
-    spec: &ParsedSpec,
-    handler: &str,
-    param: &str,
-    dsl_type: &str,
-) -> Option<String> {
-    let feeds_ghost_accumulator = spec.ghosts.iter().any(|g| {
-        g.updates
-            .iter()
-            .any(|u| u.handler == handler && rust_type_mentions(&u.value_rust, param))
-    });
-    if !feeds_ghost_accumulator {
-        return None;
-    }
-    let max: u128 = match dsl_type.trim() {
-        "U8" => u8::MAX as u128,
-        "U16" => u16::MAX as u128,
-        "U32" => u32::MAX as u128,
-        "U64" => u64::MAX as u128,
-        "U128" => u128::MAX,
-        _ => return None,
-    };
-    Some((max / SEQ_LEN as u128).to_string())
-}
-
 /// Emit state machine sequence test — random op sequences checking invariants.
 fn emit_sequence_test_for(
     out: &mut String,
@@ -1837,13 +1808,8 @@ fn emit_sequence_test_for(
             let strategies: Vec<String> = params
                 .iter()
                 // Type-dispatched strategy — see the effect-conformance
-                // site above (#295). A param feeding a ghost accumulator is
-                // bounded so multi-step accumulation can't overflow (see
-                // `seq_param_bound`).
-                .map(|(pname, t)| {
-                    let bound = seq_param_bound(spec, &op.name, pname, t);
-                    strategy_for_field(t, spec, StrategyMode::Full, bound.as_deref())
-                })
+                // site above (#295).
+                .map(|(_, t)| strategy_for_field(t, spec, StrategyMode::Full, None))
                 .collect::<Result<Vec<_>>>()?
                 .into_iter()
                 .map(|strategy| strategy.render())
@@ -1979,10 +1945,7 @@ fn emit_sequence_test_for(
         .filter(|p| p.expression.is_some() && p.class != crate::check::PropertyClass::Binary)
         .collect();
 
-    // `SEQ_LEN` is also `seq_param_bound`'s divisor — an unsigned
-    // accumulator fed one bounded param per step stays within its type
-    // across the whole run.
-    let seq_len = SEQ_LEN;
+    let seq_len = 20;
     out.push_str("proptest! {\n");
     out.push_str("    #![proptest_config(ProptestConfig::with_cases(256))]\n");
     out.push_str("    #[test]\n");
@@ -2081,6 +2044,17 @@ struct ProptestComponent {
 
 fn model_params(op: &ParsedHandler) -> impl Iterator<Item = &(String, String)> {
     op.takes_params.iter().chain(op.abstract_binders.iter())
+}
+
+/// Union-find root with path halving, over a flat `parent` slice. Used to
+/// group state fields into connected components for per-component bound
+/// propagation (`emit_account_section`).
+fn uf_find(parent: &mut [usize], mut x: usize) -> usize {
+    while parent[x] != x {
+        parent[x] = parent[parent[x]];
+        x = parent[x];
+    }
+    x
 }
 
 fn rust_type_mentions(rust_ty: &str, name: &str) -> bool {
@@ -2432,7 +2406,13 @@ fn emit_product_module(
                                     .with_binder(rust_codegen_util::tree_render::Binder::SelfAcct(
                                         "pre",
                                     ))
-                                    .with_product_fields(Some(&update_fields)),
+                                    .with_product_fields(Some(&update_fields))
+                                    // Ghost aggregate: saturate rather than
+                                    // overflow-panic under the debug sequence
+                                    // harness (see the single-account emit).
+                                    .with_arith(
+                                        rust_codegen_util::tree_render::ArithMode::SaturatingEffect,
+                                    ),
                             )
                         })
                         .unwrap_or_else(|| u.value_rust.clone());
@@ -2664,11 +2644,7 @@ fn emit_product_sequence_test(
         if params.is_empty() {
             out.push_str(&format!("            Just(Op::{}),\n", variant));
         } else if params.len() == 1 {
-            // A param feeding a ghost accumulator is bounded so multi-step
-            // accumulation can't overflow (see `seq_param_bound`).
-            let bound = seq_param_bound(spec, &op.name, &params[0].0, &params[0].1);
-            let strategy =
-                strategy_for_field(&params[0].1, spec, StrategyMode::Full, bound.as_deref())?;
+            let strategy = strategy_for_field(&params[0].1, spec, StrategyMode::Full, None)?;
             // Parens are load-bearing: `0u64..=u64::MAX.prop_map(…)`
             // parses as a range whose end is the method call.
             out.push_str(&format!(
@@ -2678,10 +2654,8 @@ fn emit_product_sequence_test(
         } else {
             let strategies: Vec<String> = params
                 .iter()
-                .map(|(pname, t)| {
-                    let bound = seq_param_bound(spec, &op.name, pname, t);
-                    strategy_for_field(t, spec, StrategyMode::Full, bound.as_deref())
-                        .map(|s| s.to_string())
+                .map(|(_, t)| {
+                    strategy_for_field(t, spec, StrategyMode::Full, None).map(|s| s.to_string())
                 })
                 .collect::<Result<_>>()?;
             let binders: Vec<String> = (0..params.len()).map(|i| format!("p{}", i)).collect();
@@ -3745,12 +3719,14 @@ property version_bounded :
         );
     }
 
-    /// A ghost accumulator (`total := total + amount`, plain arithmetic, no
-    /// reject path) overflows under a full-domain `arb_op` amount across a
-    /// sequence run. The feeding param is bounded so `SEQ_LEN` additions
-    /// stay in-domain; a param that feeds no ghost keeps the full range.
+    /// A ghost accumulator has no reject path, so a full-domain `arb_op`
+    /// amount would overflow-panic it in the debug sequence harness. The
+    /// update renders SATURATING arithmetic — clamping at the type bound,
+    /// never panicking — including a multiplicative term (`amount * 21`)
+    /// that a `type_max/SEQ_LEN` input bound could not have tamed. No input
+    /// bounding, so every param keeps its full domain.
     #[test]
-    fn ghost_feeding_arb_op_param_is_bounded_others_full_range() {
+    fn ghost_accumulator_saturates_and_params_stay_full_range() {
         let (_spec, body) = emit_full_harness(
             r#"
 spec Vol
@@ -3762,7 +3738,7 @@ type Error
 
 ghost volume : U64 {
   init { 0 }
-  on deposit { volume := state.volume + amount }
+  on deposit { volume := state.volume + amount * 21 }
 }
 
 handler deposit (amount : U64) {
@@ -3770,9 +3746,8 @@ handler deposit (amount : U64) {
   effect { balance := state.balance + amount }
 }
 
-handler withdraw (amount : U64) {
-  requires amount > 0 else InvalidAmount
-  effect { balance := state.balance - amount }
+handler noop {
+  effect { balance := state.balance }
 }
 
 property vol_ge_balance :
@@ -3781,16 +3756,55 @@ property vol_ge_balance :
 "#,
         );
 
-        let bound = (u64::MAX / SEQ_LEN as u64).to_string();
-        // deposit's amount feeds the `volume` ghost → bounded.
+        // Nested saturating: `amount * 21` and the accumulation both clamp.
         assert!(
-            body.contains(&format!("(0u64..={bound}u64).prop_map(|v| Op::Deposit(v))")),
-            "ghost-feeding param must be bounded to type_max/SEQ_LEN:\n{body}"
+            body.contains("s.volume = (s.volume).saturating_add((amount).saturating_mul(21));"),
+            "ghost accumulator must render nested saturating arithmetic:\n{body}"
         );
-        // withdraw's amount feeds no ghost → full domain preserved.
+        // No input bounding — the param keeps its full domain (a pure
+        // assignment `last := amount` would otherwise lose 95% of it).
         assert!(
-            body.contains("(0u64..=u64::MAX).prop_map(|v| Op::Withdraw(v))"),
-            "non-ghost param must keep the full domain:\n{body}"
+            body.contains("(0u64..=u64::MAX).prop_map(|v| Op::Deposit(v))"),
+            "arb_op param must keep the full domain (no accumulator bounding):\n{body}"
+        );
+    }
+
+    /// Bound propagation is per connected-component, not one global
+    /// minimum: `a <= 10; a >= b` and `c <= 1000; c >= d` are unrelated
+    /// property groups, so `d` borrows `c`'s 1000 — not `a`'s tighter 10.
+    #[test]
+    fn bound_propagation_is_per_component_not_global_minimum() {
+        let (_spec, body) = emit_full_harness(
+            r#"
+spec Groups
+
+state { a : U64, b : U64, c : U64, d : U64 }
+
+type Error
+  | Bad
+
+handler touch (x : U64) {
+  requires x > 0 else Bad
+  effect { a := x }
+}
+
+property a_cap : state.a <= 10 preserved_by all
+property a_ge_b : state.a >= state.b preserved_by all
+property c_cap : state.c <= 1000 preserved_by all
+property c_ge_d : state.c >= state.d preserved_by all
+"#,
+        );
+
+        // Grab the `arb_state` body so we assert on the full-domain strategy.
+        let start = body.find("fn arb_state").expect("arb_state present");
+        let arb = &body[start..start + body[start..].find("-> State").unwrap_or(400)];
+        assert!(
+            arb.contains("a in 0u64..=10u64") && arb.contains("b in 0u64..=10u64"),
+            "component {{a,b}} must use its own bound 10:\n{arb}"
+        );
+        assert!(
+            arb.contains("c in 0u64..=1000u64") && arb.contains("d in 0u64..=1000u64"),
+            "component {{c,d}} must borrow c's 1000, not the global min 10:\n{arb}"
         );
     }
 }

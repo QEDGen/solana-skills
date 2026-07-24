@@ -204,7 +204,7 @@ mod product {
     fn deposit(s: &mut ProductState, amount: u64) -> bool {
         let pre = s.clone();
         if pool::deposit(&mut s.pool, amount) {
-            s.lifetime_total = pre.lifetime_total + amount;
+            s.lifetime_total = (pre.lifetime_total).saturating_add(amount);
             true
         } else {
             false
@@ -234,7 +234,7 @@ mod product {
     fn arb_op() -> impl Strategy<Value = Op> {
         prop_oneof![
             Just(Op::InitPool),
-            (0u64..=922337203685477580u64).prop_map(Op::Deposit),
+            (0u64..=u64::MAX).prop_map(Op::Deposit),
             (0u64..=u64::MAX).prop_map(Op::OpenLoan),
         ]
     }

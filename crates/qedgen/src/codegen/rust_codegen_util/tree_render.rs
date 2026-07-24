@@ -64,6 +64,17 @@ pub enum ArithMode {
     /// keeps the plain `Widened` form. Byte-compatible with
     /// `wrap_arithmetic(translate_guard_to_rust(rust_expr_math))`.
     Wrapping,
+    /// Effect-RHS saturating: bare arithmetic lowers to `saturating_*` (no
+    /// `?`, unlike `Checked`). For an abstract aggregate with no reject
+    /// path — a ghost accumulator — whose model saturates rather than
+    /// rejects: the sequence harness feeds full-domain params and runs in
+    /// debug, where a plain `+` panics on overflow. Saturation clamps at
+    /// the type max/min, so it never panics AND keeps the aggregate above
+    /// (add) / below (sub) any co-tracked value — preserving the monotone
+    /// `>=` / `<=` conservation properties a wrapping form would break.
+    /// Recurses so nested arithmetic saturates too. Distinct from
+    /// `Wrapping`, which only rewrites a predicate's comparison spine.
+    SaturatingEffect,
 }
 
 /// How handler-account reads lower in scaffold guard positions (#151
@@ -1072,6 +1083,22 @@ fn render_arith(
         };
         let (l, r) = render_pair_with_coercion(lhs, rhs, cx, inside_old, Prec::Or);
         return (format!("({}).{}({})?", l, method, r), Prec::Atom);
+    }
+    // Effect-RHS saturating mode: bare arithmetic lowers to `saturating_*`
+    // (no `?` — the value can't fail, it clamps). Ghost aggregate updates
+    // use this so a full-domain accumulator never overflow-panics under
+    // the debug-mode sequence harness. `div`/`rem` have no saturating
+    // form and can't overflow, but a zero divisor would panic — clamp to 0.
+    if cx.arith == ArithMode::SaturatingEffect {
+        let (l, r) = render_pair_with_coercion(lhs, rhs, cx, inside_old, Prec::Or);
+        let expr = match op {
+            TreeArithOp::Add => format!("({}).saturating_add({})", l, r),
+            TreeArithOp::Sub => format!("({}).saturating_sub({})", l, r),
+            TreeArithOp::Mul => format!("({}).saturating_mul({})", l, r),
+            TreeArithOp::Div => format!("({}).checked_div({}).unwrap_or(0)", l, r),
+            TreeArithOp::Mod => format!("({}).checked_rem({}).unwrap_or(0)", l, r),
+        };
+        return (expr, Prec::Atom);
     }
     // `Wrapping` only rewrites the comparison-side spine (see
     // `render_pred_wrapped_term`); an `Arith` outside any comparison
