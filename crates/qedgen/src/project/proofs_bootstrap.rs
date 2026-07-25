@@ -416,7 +416,7 @@ def cover_can_execute_stmt : Prop := ∃ s, True
         );
     }
 
-    /// The blessed form — `theorem X : X_stmt` (bare or namespace-qualified)
+    /// The accepted form — `theorem X : X_stmt` (bare or namespace-qualified)
     /// — produces no nudge.
     #[test]
     fn stmt_typed_theorems_do_not_nudge() {

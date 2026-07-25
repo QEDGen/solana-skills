@@ -449,7 +449,7 @@ mod tests {
 
     #[test]
     fn effect_coverage_skips_unrecognized_handlers() {
-        // Unrecognized handler shape must skip silently, not blow up.
+        // Unrecognized handler shape must skip silently, not panic.
         let tmp = tempfile::tempdir().unwrap();
         let root = write_lib_rs(
             &tmp,

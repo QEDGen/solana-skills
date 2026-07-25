@@ -32,7 +32,7 @@ There is intentionally no `programs/` (qedgen-codegen output) or
 generates them as part of Step 3 so the reader sees what comes out
 fresh.
 
-## The pitch
+## The idea
 
 > *"I see this is an existing Solana program. Before we write a spec,
 > let me hand off to `/qedgen-auditor` to find what's already broken.

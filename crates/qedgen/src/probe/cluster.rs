@@ -51,7 +51,7 @@ pub struct Cluster {
     pub question_md: String,
     /// Routing for the four interview outcomes: logical destination keys
     /// the prompts reader dispatches on. The current user-facing behavior is
-    /// documented under `qedgen ratify` in `references/cli.md`.
+    /// documented under `qedgen ratify` in `references/cli/probe.md`.
     pub writes_on_accept: String,
     pub writes_on_narrow: String,
     pub writes_on_reject: String,

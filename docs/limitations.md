@@ -160,7 +160,8 @@ issue at <https://github.com/qedgen/solana-skills/issues> with the
 fragment that doesn't lower.
 
 **Agents authoring `.qedspec`s: fail fast.** SKILL.md's "When the
-spec hits a wall" section is the binding contract — if you hit a lint
+spec cannot go forward" section plus `references/filing-issues.md` are
+the binding contract — if you hit a lint
 / codegen error (or a generated-output compile / kani / lake failure)
 not covered by the documented workarounds above, sanitize a generic
 reproducer, ask the user before filing, then file the issue and

@@ -155,7 +155,7 @@ pub struct RustCx<'a> {
     /// the local mirror off the guard fn's `ctx` — multi-variant via the
     /// mirror's inner-enum accessor (`(*ctx.<acct>.inner.<field>())`),
     /// flat via the wrapper's auto-deref (`ctx.<acct>.<field>`). Guards
-    /// positions only (the `ctx` receiver is baked in, like
+    /// positions only (the `ctx` receiver is fixed, like
     /// [`AcctKeyStyle`]); `None` elsewhere.
     pub acct_mirror: Option<&'a std::collections::HashMap<String, bool>>,
     /// Product-state component routing (#324/#331): state-field name →

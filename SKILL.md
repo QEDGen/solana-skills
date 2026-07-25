@@ -23,7 +23,7 @@ Do not present generated Rust as complete business logic. Anchor, Quasar, and Pi
 
 ## First Contact (Brownfield)
 
-If the user invokes you on an **existing** Solana program with no real `.qedspec` (or only a skeleton), do **not** route them straight into spec-writing. Spec-writing from a cold start is unmotivated work. Instead, route them through `/qedgen-auditor` first; the auditor surfaces real findings in their code, and *then* the spec captures those findings as permanent regression guards. The pitch:
+If the user invokes you on an **existing** Solana program with no real `.qedspec` (or only a skeleton), do **not** route them straight into spec-writing. Spec-writing from a cold start is unmotivated work. Instead, route them through `/qedgen-auditor` first; the auditor surfaces real findings in their code, and *then* the spec captures those findings as permanent regression guards. Use this text:
 
 > "I see this is an existing Solana program. Before we write a spec, let me hand off to `/qedgen-auditor` to find what's already broken. We'll lock those findings in as a spec so they don't come back."
 
@@ -112,7 +112,7 @@ cargo check --manifest-path programs/Cargo.toml
 cargo test --manifest-path programs/Cargo.toml
 ```
 
-**No `--fill` flag.** The agent reads the generated files, greps for `todo!()`, looks up the matching handler / accounts / effect in the `.qedspec`, and edits each body in place. The old `qedgen codegen --fill` / `--fill-tests` flags emitted structured prompts to stdout for the agent to consume — useful before agents had file tools, ceremony now. They're soft-deprecated in v2.18 (print a warning, still run) and will be removed in v3.0. Same direct-edit pattern applies to integration tests and Crucible action bodies.
+**No `--fill` flag.** The agent reads the generated files, greps for `todo!()`, looks up the matching handler / accounts / effect in the `.qedspec`, and edits each body in place. The old `qedgen codegen --fill` / `--fill-tests` flags emitted structured prompts to stdout for the agent to consume — useful before agents had file tools, unnecessary now. They're soft-deprecated in v2.18 (print a warning, still run) and will be removed in v3.0. Same direct-edit pattern applies to integration tests and Crucible action bodies.
 
 **Spec-level renames.** `lib.rs` and `instructions/*.rs` are user-owned, so after renaming an account, state field, or handler in the spec, a plain `codegen` regenerates their siblings (guards.rs, state.rs, harnesses) but skips them with a stale-revision WARNING. Recover with `codegen --merge-accounts` (Anchor: regenerates only the `#[derive(Accounts)]` structs, handler fills survive) or `codegen --force` (regenerates the user-owned set wholesale — re-apply fills from git history). Both refuse to run unless the affected files are committed and unmodified in git, so commit before renaming.
 
@@ -144,7 +144,7 @@ with mutated typed-action sequences and crashes from real execution. Run
 `$QEDGEN probe --spec program.qedspec --fuzz 300` to get the JSON
 findings list directly, or `--crucible 300` on verify to fold them into
 the BackendReport. First-time setup needs `crucible` on PATH (see
-`references/cli.md`) plus a built harness from `codegen --crucible`.
+`references/cli/codegen.md`) plus a built harness from `codegen --crucible`.
 
 After `codegen --crucible`, the generated `fuzz/<prog>/src/main.rs`
 contains one `todo!("agent-fill: accounts::X { ... } from spec accounts
@@ -345,88 +345,27 @@ Cross-program *spec* composition (importing another program's qedspec or interfa
 
 When you need the **data shape** of another program's account (not its CPI surface), v2.29's `import Foreign from "dep_key"` against a foreign qedspec that declares `type` blocks materializes those types as a local Rust mirror at `src/imported/<ns>.rs`, lets the handler bind accounts via `acct : type Foreign.State`, and resolves field reads (`foreign_acct.admin`) through the mirror. See [`references/qedspec-dsl.md#importing-another-programs-spec`](./references/qedspec-dsl.md#importing-another-programs-spec) for the full walkthrough (Anchor target only in v2.29; Lean ∀-quantification of imported fields deferred to v2.29.1).
 
-## When the spec hits a wall: fail fast, file an issue
+## When the spec cannot go forward: fail fast, file an issue
 
-**Hard rule for spec-authoring agents:** if **any of these** emits an error you don't have a documented path past, **stop and file an issue at <https://github.com/qedgen/solana-skills/issues>**:
+**Hard rule for spec-authoring agents.** If **any of these** emits an error you don't have a documented path past, **stop**:
 
 - `qedgen check` lint or hard error (spec doesn't validate)
 - `qedgen codegen` hard error
 - **`cargo check` / `cargo build` on the generated Rust crate** (Anchor / Quasar / Pinocchio scaffold doesn't compile)
 - **`cargo kani` / `cargo test --release` on the generated Kani harness** (proof fails to elaborate, not just fails to verify)
-- **`cargo test` on the generated proptest harness** (proptest doesn't compile or panics outside the property body)
-- **`lake build` on the generated Lean `Spec.lean` / `Proofs.lean`** (proof file doesn't elaborate — missing import, unknown identifier, type mismatch in the generated theorem statement)
+- **`cargo test` on the generated proptest harness** (doesn't compile, or panics outside the property body)
+- **`lake build` on the generated `Spec.lean` / `Proofs.lean`** (doesn't elaborate — missing import, unknown identifier, type mismatch in the generated theorem)
 
-In every case, the failure is a **codegen bug**, not a spec bug — the user wrote a valid spec and the generator emitted broken output. Hand-editing the generated file (guards.rs, state.rs, lib.rs's Accounts structs, Spec.lean, kani.rs, proptest.rs, the imported/ mirror) is the worst possible response: the next `qedgen codegen` regenerates over your edit and the fix evaporates.
+In every case the failure is a **codegen bug**, not a spec bug. Do *not* invent any of these workarounds:
 
-Do *not* invent any of these workarounds:
-
-- Phantom state fields to satisfy `auth` or to make `requires` reference resolve
+- Phantom state fields to satisfy `auth` or to make a `requires` reference resolve
 - Manual `transfers` blocks to silence `missing_cpi_for_token_context`
-- Hand-edited generated files (anything under `programs/src/` other than `instructions/<name>.rs` handler bodies, or anything in `formal_verification/` that qedgen wrote)
-- Parser-tricking renames (`admin_` instead of `admin` to dodge a keyword collision, etc.)
+- Hand-edited generated files (anything under `programs/src/` other than `instructions/<name>.rs` handler bodies, or anything in `formal_verification/` that qedgen wrote) — the next `codegen` overwrites them
+- Parser-tricking renames (`admin_` instead of `admin` to avoid a keyword collision, etc.)
 - Spec-side type changes that "happen to make codegen work" but no longer describe the program
 - Removing the failing handler / property / requires from the spec to make the build green
 
-The fail-fast script:
-
-1. **Surface the error verbatim** *to the user, in your reply* — not yet to GitHub. The exact lint name (`unsupported_quantifier_shape`, `no_access_control`, `missing_cpi_for_token_context`, etc.) or the exact compiler / Kani / Lake error message, plus the spec fragment and (for codegen-output failures) the generated line that tripped it.
-2. **Check `docs/limitations.md`** — many shapes already have documented status (deferred, workaround, won't-fix). If your shape is listed and the documented workaround doesn't lie about the spec, follow it.
-3. **Construct a sanitized minimal reproducer.** Before drafting any issue body, REWRITE the failing fragment as a *generic* repro. The bug is in qedgen's handling of a shape, not in the user's specific business logic — the issue only needs the shape. **Get explicit user approval before sending any reproducer to GitHub** (next step).
-
-   **MUST scrub:**
-   - Real pubkeys / addresses (use `"11111111111111111111111111111111"` placeholder or omit `program_id` from the reproducer entirely)
-   - Token mint addresses, oracle keys, treasury / multisig pubkeys
-   - Named accounts, fields, handlers, and error variants that hint at protocol identity (anything that ties the spec to a specific product name, brand, or recognizable on-chain protocol) — rename to generic shapes (`admin`, `vault`, `pool`, `Foo`, `Bar`, `Action`)
-   - Constants encoding deal-specific numbers (fee bps, tier thresholds, hardcoded ratios) — replace with `0` / `1` / a generic literal
-   - Account schema fields that aren't load-bearing for the bug — drop them entirely; keep only the fields the failing construct touches
-   - Comments that reveal product names, customer names, internal team handles, deadlines, audit findings, or competitive context
-   - File paths under `programs/` / `formal_verification/` — strip directory prefixes; refer to files by their generated role (`guards.rs`, `state.rs`, the handler scaffold for `<handler_name>`)
-   - The repo path in any stack trace (sed out `/Users/<name>/code/<project>/`)
-
-   **MAY include:**
-   - The exact lint name / compiler error name / lake elaboration message (these are qedgen-side identifiers, not user data)
-   - The generic spec shape (`type State | A of {…} | B of {…}` with anonymized field names) that triggers the failing path
-   - The generated-file role (`guards.rs`'s emitted check for the handler) — without the real handler name
-
-4. **Ask the user before filing.** Once you have a sanitized reproducer, show it to the user and ask: "Is this safe to file at github.com/qedgen/solana-skills/issues? It will be public." Default answer is no — many specs describe pre-launch or closed-source programs whose architecture leaking is real harm. If the user declines OR doesn't respond, do NOT file. Hand them the sanitized reproducer to file themselves when they're ready.
-
-5. **If the user authorizes**, file the issue:
-   ```bash
-   gh issue create \
-     --title "qedgen: <generic one-line summary, no product names>" \
-     --body "$(cat <<EOF
-   ## Sanitized spec fragment
-
-   \`\`\`fsharp
-   <minimal generic reproducer — 10-20 lines, no real pubkeys / business logic / product names>
-   \`\`\`
-
-   ## Shape this is meant to cover
-
-   <one paragraph: the GENERIC pattern that's tripping qedgen, not what the user is building>
-
-   ## What qedgen / cargo / kani / lake says
-
-   \`\`\`
-   <verbatim error output — strip user-paths / personal info, keep qedgen-side identifiers>
-   \`\`\`
-
-   ## Generated file role (if a codegen-output failure)
-
-   <which generated file (guards.rs / state.rs / Spec.lean / kani.rs / etc.) the codegen-emitted line lives in, plus the offending lines AFTER scrubbing>
-
-   ## Workarounds considered and rejected
-
-   <list anti-patterns considered + why each lies about the spec shape>
-   EOF
-   )"
-   ```
-
-6. **Then pause and tell the user.** Don't auto-apply a workaround "for now." Auto-workarounds — in the spec OR in the generated output — are how `phantom_admin: Pubkey` ends up in production state forever (the friction-report's #6 was exactly this shape) and how generated Anchor crates accumulate hand-edited drift that regen overwrites.
-
-The exception: if the user explicitly tells you to ship a workaround (with phrasing like "just inline it for now" / "phantom field is fine" / "we'll fix it later" / "hand-edit the guard for this PR"), apply the workaround AND leave a `// FIXME(qedgen-issue: <url>):` comment pointing at the issue. The marker makes the regression auditable later. For hand-edits to generated files, ALSO note in the issue body that the edit will be overwritten on the next `qedgen codegen` — the user needs to know.
-
-The exception does NOT cover filing issues: even when the user authorizes a workaround, the issue body must still be sanitized per step 3. The workaround marker is private (lives in their repo); the issue is public.
+Then load **`references/filing-issues.md`** and follow it. In short: surface the error verbatim to the user, check `docs/limitations.md` for documented status, build a *sanitized* generic reproducer, get explicit user approval, and only then file at <https://github.com/qedgen/solana-skills/issues>. Never send an unsanitized spec fragment to a public issue.
 
 ## References
 
@@ -434,7 +373,7 @@ Load references on demand. Do not bulk-load all files.
 
 | Reference | Use When |
 |---|---|
-| `references/cli.md` | Full command and flag details |
+| `references/cli.md` | Command index; routes to `references/cli/<group>.md` for flags |
 | `references/qedspec-dsl.md` | DSL syntax and modeling patterns |
 | `references/qedspec-imports.md` | `import`, `qed.toml`, `qed.lock`, `--frozen`, upstream checks |
 | `references/qedspec-anchor.md` | Anchor adapter and brownfield coverage checks |
@@ -445,4 +384,5 @@ Load references on demand. Do not bulk-load all files.
 | `references/kani-examples.md` | Longer Kani harness examples moved out of the skill |
 | `references/brownfield-testing.md` | Existing-test strategy for brownfield projects |
 | `references/skill-operations.md` | Git hygiene, learning capture, environment, and error handling |
+| `references/filing-issues.md` | The fail-fast rule fired: sanitizing a reproducer and filing an issue |
 | `references/release-history.md` | Version-feature history moved out of the skill |

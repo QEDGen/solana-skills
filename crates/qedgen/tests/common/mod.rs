@@ -5,7 +5,7 @@
 //! renderer, and the [`SnapshotHarness`] assert-or-update loop shared by
 //! the four snapshot suites (`mir`, `kani`, `codegen`, `proptest`).
 //!
-//! `ensure_qedgen_built` fixes the historical stale-binary footgun: it
+//! `ensure_qedgen_built` fixes the historical stale-binary trap: it
 //! unconditionally runs `cargo build --bin qedgen` (once per test binary,
 //! via `Once`; cargo's own freshness check makes the no-op case cheap),
 //! so a stale `target/<profile>/qedgen` can never silently serve old

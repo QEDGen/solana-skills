@@ -256,7 +256,7 @@ pub(super) fn handler_clause<'a>() -> impl Parser<'a, &'a str, HandlerClause, Er
     // `let <ident> = call Foo.handler(...)` binds the call's return value;
     // `let <ident> = <expr>` is the handler-level let. They diverge after
     // `=` — the call form is tried first so the parser doesn't commit to
-    // an expression and then choke on `call`.
+    // an expression and then fail on `call`.
     enum LetRhs {
         Expr(Node<Expr>),
         Call(QualifiedPath, Vec<CallArg>),

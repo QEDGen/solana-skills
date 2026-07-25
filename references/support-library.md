@@ -6,7 +6,7 @@
 > `CpiInstruction` / `AccountMeta` / `Lifecycle` types, and Mathlib-backed
 > arithmetic helpers. It does **not** ship Solana-runtime axioms (rent
 > formula, ABI layout, borrow-state protocol, PDA ownership rules) —
-> those track a moving target and would rot faster than they pay off.
+> those change often and would go stale faster than they are worth.
 > See SKILL.md **Step 4** drift caution.
 
 After `import QEDGen.Solana` or individual modules.

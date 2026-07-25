@@ -725,7 +725,7 @@ handler check (auth : Pubkey) {
 /// `pragma kani_option_none = <field>` builds that `Option<_>` field as `None`
 /// — no `Some` payload construction — so a dead symbolic sub-state the property
 /// never reads costs nothing. Companion to `kani_vec_empty` for pruning
-/// nested-container construction that would otherwise blow up CBMC.
+/// nested-container construction that would otherwise overwhelm CBMC.
 #[test]
 fn brownfield_kani_option_none_prunes_payload() {
     let src = r#"spec OptNone

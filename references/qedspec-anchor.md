@@ -56,7 +56,7 @@ Mismatch in any leg → `compile_error!` with an "Expected: … Actual: …" dif
 
 `qedgen stamp` (formerly `adapt --spec`; the new verb additionally gates on recorded implementation-verified evidence) precomputes every leg via the same algorithms (`spec_hash::body_hash_for_fn`, `spec_hash::body_hash_for_impl_fn`, `spec_hash::spec_hash_for_handler`, `spec_hash::accounts_struct_hash`) so the user just pastes the output. The accounts triplet is auto-included whenever the adapter can find the `Context<X>` struct in source.
 
-### What edits trip drift
+### What edits cause drift
 
 - Edit the function body (a statement, an arithmetic op, a `let` binding, even a parameter type) → body hash changes → `compile_error!`.
 - Edit the spec's `handler { ... }` block (any byte inside the braces, including whitespace) → spec hash changes → `compile_error!`.
@@ -137,7 +137,7 @@ lint: for each spec handler with an `effect { ... }` block, it
 verifies the resolved Rust handler body contains at least one
 assignment-like mutation whose LHS leaf matches each declared
 effect's field name. Catches the "I added an effect to the spec but
-forgot to wire it in code" footgun. Heuristic — not a proof of
+forgot to wire it in code" trap. Heuristic — not a proof of
 semantic equivalence — but cheap and bounded.
 
 ```
@@ -162,7 +162,7 @@ through a normalizer before hashing. Cosmetic edits don't fire drift:
     spaces inside the literal are semantically meaningful.
 
 Semantic edits — operator changes, identifier changes, added/removed
-clauses — still trip drift, since the canonical bytes change.
+clauses — still cause drift, since the canonical bytes change.
 
 ## Limitations + roadmap
 

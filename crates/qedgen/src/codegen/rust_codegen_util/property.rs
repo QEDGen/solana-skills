@@ -254,7 +254,7 @@ pub fn infer_const_type(value: &str) -> &'static str {
 ///   bit-blasts at narrow widths.
 /// * **bin = "z3"** — wide-type multiplication/division (u64, u128, i128).
 ///   CBMC hands the problem to z3 as an SMT2 solver; z3's bit-vector theory
-///   handles nested `*`/`/` chains on 64+ bit types that SAT backends blow up
+///   handles nested `*`/`/` chains on 64+ bit types that SAT backends cannot solve
 ///   on (the `amount * 125 / 10000 * N / 10000` pattern is the canonical
 ///   wedge case). Requires `z3` on `PATH` when running `cargo kani --tests`.
 ///

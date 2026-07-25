@@ -326,7 +326,7 @@ engineering, supply chain, telemetry. They don't map to a code
 pattern in SKILL.md because the bug isn't in the program; the
 bug is in the operational envelope around it. Auditors should
 recognize the shapes because programs are often shipped with
-threat-models that handwave these — "the admin key is secure,"
+threat-models that dismiss these — "the admin key is secure,"
 "the dependency is pinned," "the telemetry redacts secrets" —
 and a real audit interrogates those claims rather than accepting
 them.
