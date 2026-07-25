@@ -12,7 +12,7 @@
 > compiler-emitted intrinsics — e.g. proposed `sol_multi3`-style
 > libcalls for u128 mul — emit `CALL_IMM` to handlers the Lean
 > interpreter doesn't know, which `asm2lean` will transpile opaquely
-> and `wp_exec` will get stuck on. If you need to verify such a
+> and `wp_exec` cannot handle. If you need to verify such a
 > program today, verify at the **Rust source level** via Kani rather
 > than at the bytecode level — Rust semantics (`a * b : u128`) are
 > unchanged by the intrinsic, and Kani is immune to the drift.

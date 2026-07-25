@@ -56,7 +56,7 @@ harnesses, command logs) for **friction between intent and the toolchain**:
 4. **Dedup.** Read `docs/toolchain-backlog.md` first. Extend or cross-link an
    existing entry rather than duplicating it.
 5. **Rank by leverage.** How many future tasks does this unblock? A brownfield-Anchor
-   codegen mode > a one-off unwind papercut. Order entries most-leverage first.
+   codegen mode > a one-off unwind annoyance. Order entries by impact, highest first.
 
 ## Bugs: propose, never patch
 
@@ -99,8 +99,9 @@ gh issue create --label toolchain \
   --body "<generic repro + root cause (file:line) + proposed fix>"
 ```
 
-**SANITIZE like the SKILL's fail-fast section (SKILL.md §"When the spec hits a
-wall").** A toolchain issue is about a qedgen SHAPE, not about the program you were
+**SANITIZE like the SKILL's fail-fast rule (SKILL.md §"When the spec cannot go
+forward", full procedure in `references/filing-issues.md`).** A toolchain issue
+is about a qedgen SHAPE, not about the program you were
 verifying. The issue body MUST NOT name or hint at the audit/verification target,
 and MUST scrub: real pubkeys, product/protocol names, deal-specific constants, and
 absolute repo paths (`/Users/<name>/code/<project>/`). Refer to the target as "an
@@ -117,7 +118,7 @@ Kani/lake messages) ARE fair to include — they're tool internals, not user dat
   as the record — don't fail the run.
 
 Then return a short summary to the caller: counts by category, the issues opened,
-and the single highest-leverage item. Do not restate the whole backlog.
+and the single most important item. Do not restate the whole backlog.
 
 ## What NOT to do
 

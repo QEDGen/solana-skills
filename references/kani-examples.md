@@ -45,7 +45,7 @@ Default `.qedspec` `+=` and `-=` effects lower to checked arithmetic in
 the Kani model. Use explicit wrapping or saturating forms only when the
 program intentionally uses those semantics.
 
-For wide arithmetic that causes solver blowups, QEDGen can route selected
+For wide arithmetic that makes the solver too slow, QEDGen can route selected
 harnesses to z3 with `#[kani::solver(bin = "z3")]`. If z3 is missing, install
 it before running the affected harnesses.
 

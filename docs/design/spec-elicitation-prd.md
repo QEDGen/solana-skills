@@ -126,7 +126,7 @@ verification artifact.
 
 Success: a brownfield user who ran `qedgen probe` out of curiosity leaves with a
 partial-but-real, checking `.qedspec` they didn't author from scratch, a clear
-reason each clause earns its keep, and no ambiguity about whether a green result
+reason each clause is justified, and no ambiguity about whether a green result
 exercised the spec model or the real program.
 
 ### 3.1 The assurance contract
@@ -350,7 +350,7 @@ the two are the same activity seen from opposite ends: a **violated** invariant
 is a finding; a **held** invariant, once the user confirms it is intended, is a
 spec clause. The agent already hypothesizes invariants to hunt bugs; surfacing
 the ones it could *not* violate, as confirm/deny questions, turns audit output
-into a spec for free.
+into a spec at no cost.
 
 **Earn-then-ask.** Do not front-load an interview the user must commit to. The
 agent leads with bug-finding (Phase 1 autonomous discovery); once it has

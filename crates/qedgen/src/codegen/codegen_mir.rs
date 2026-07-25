@@ -313,7 +313,7 @@ fn render_cargo_toml(
 
     // The generated proptest harness (tests/proptest.rs) imports
     // `proptest::prelude::*` — ship the dev-dep so the crate compiles
-    // out of the box instead of failing on the first `cargo test`.
+    // by default instead of failing on the first `cargo test`.
     out.push_str("\n[dev-dependencies]\n");
     out.push_str("proptest = \"1\"\n");
 

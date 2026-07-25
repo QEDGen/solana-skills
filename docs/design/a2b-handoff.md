@@ -76,7 +76,7 @@ no-insn path uses `initState` with `entry = 0`. `Bridge.lean` now `import`s
 > now shows the corrected signature (`h_prog : cr.SatisfiedBy progAt`, `h_asm`,
 > `h_pre`, …). Both the no-insn (`initState`) and insn+status+param (`initState2`)
 > paths were checked.
-> Gotcha: `lean_solana` is **Mathlib-free** — no `set`/Mathlib tactics. The
+> Pitfall: `lean_solana` is **Mathlib-free** — no `set`/Mathlib tactics. The
 > bridge's `Pubkey` resolves to `QEDGen.Solana.Pubkey` (= `SVM.Pubkey.Pubkey`);
 > `State` inside the `<Spec>.Bridge` namespace resolves to the abstract
 > `<Spec>.State`, so the adapter's `State` is written fully-qualified

@@ -1,12 +1,12 @@
 ---
-description: Lean proof gotchas — auto-loaded when editing Lean files or the Lean codegens
+description: Lean proof pitfalls — auto-loaded when editing Lean files or the Lean codegens
 paths:
   - "**/*.lean"
   - "crates/qedgen/src/codegen/lean_gen_mir.rs"
   - "crates/qedgen/src/codegen/asm2lean.rs"
 ---
 
-# Lean proof gotchas
+# Lean proof pitfalls
 
 Full patterns: [references/proof-patterns.md](../../references/proof-patterns.md). For sBPF: [references/sbpf.md](../../references/sbpf.md). These are the non-obvious traps that cause silent failures or runaway build times:
 

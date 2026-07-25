@@ -198,7 +198,7 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
     let mut consts_map: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
     // Integer-max builtins so `requires state.x + n <= U64_MAX` resolves
-    // out of the box. User-defined `const` shadows the builtin (builtins
+    // by default. User-defined `const` shadows the builtin (builtins
     // inserted first, user consts after).
     consts_map.insert("U64_MAX".to_string(), u64::MAX.to_string());
     consts_map.insert("U32_MAX".to_string(), u32::MAX.to_string());

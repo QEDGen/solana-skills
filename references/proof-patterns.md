@@ -115,7 +115,7 @@ theorem initialize_arithmetic_safety (amount taker : Nat) (post : ProgramState)
 
 | Do | Don't |
 |---|---|
-| `unfold f at h` before `split_ifs` | `simp [f] at h` before `split_ifs` (kills if-structure) |
+| `unfold f at h` before `split_ifs` | `simp [f] at h` before `split_ifs` (removes the if-structure) |
 | `unfold pred at h_inv ⊢` for named predicates | `unfold pred` only in goal (omega can't see hypotheses) |
 | `cases h` after `split_ifs` on `some = some` | `injection h` (unnecessary, cases handles it) |
 | `omega` for linear arithmetic | `norm_num` for linear goals (omega is more reliable) |

@@ -12,122 +12,6 @@ specific AST node shape that influences codegen (match, constructors, record
 updates, `mul_div_*`), the node name is called out so you can follow the
 transform into the Lean/Rust backends.
 
-## What changed in v2.25
-
-- **`ref_impl name (...) : T = <expr>` top-level declarations.** Reference
-  implementations that `ensures` clauses can call by name. Lower to Lean
-  `def`s (proofs `unfold` them) and to Rust `fn`s embedded in the Kani
-  harness so ensures-preservation assertions can invoke them. Handler
-  codegen skips ref_impls — they're verification-only, not part of the
-  impl contract. See [`ref_impl`](#ref_impl-v225).
-- **`modifies [X, Y]` agent-fill sites.** When `modifies` declares a
-  field the `effect` block doesn't write, codegen emits a structured
-  `todo!()` site in the Rust handler with the relevant `ensures`
-  clauses quoted as comments. The agent (or you) fills the math
-  against the quoted contract.
-- **`unconstrained_modifies` P0 lint.** Fires when a field appears in
-  `modifies [...]` but neither the effect block writes it nor any
-  `ensures` references it. That shape is completely unverified — add
-  an `ensures` constraint or drop the field from `modifies`.
-- **Ensures-preservation Kani harnesses.** For every handler with
-  `ensures <expr>` clauses, codegen emits a Kani BMC harness that
-  snapshots `pre = s.clone()`, runs the spec-translated transition,
-  and asserts each ensures clause against `(pre, post)`. Counterexamples
-  surface contract gaps the spec model couldn't satisfy on its own.
-
-## What changed in v2.7
-
-- **`+=` / `-=` default to checked semantics in Anchor handler bodies too**
-  (v2.6 already did this for the Kani model). `pool += net` lowers to
-  `self.pool = self.pool.checked_add(net).ok_or(ErrorCode::MathOverflow)?`
-  — the pattern deployed programs use. Pre-v2.7 this lowered to
-  `wrapping_add` which didn't match production.
-- **Explicit per-effect arithmetic modifiers.** `+=! ` (saturating) and `+=?`
-  (wrapping) opt out of the checked default when the handler *deliberately*
-  wants those semantics. Same three tiers for `-=!` / `-=?`. See
-  [Effect arithmetic](#effect-arithmetic) below.
-- **`permissionless` handler marker.** New body clause that opts the handler
-  out of the `no_access_control` P1 lint — for deliberately-unauthenticated
-  handlers like `deposit_collateral`, `init_user`, donations. Declaring both
-  `auth X` and `permissionless` on one handler fires a `contradictory_auth`
-  P1. See [Handler clauses](#handler-clauses).
-- **proptest `Arbitrary` strategies for records + unit-variant sums.** Each
-  record type emits a `prop_compose! { fn arb_<Name>(…) -> <Name> { … } }`
-  block; each unit-variant sum emits a `prop_oneof!` strategy. `arb_state`
-  now correctly composes these instead of bailing to `0u64..=u64::MAX` for
-  user-typed fields.
-- **`Map[N] T` strategies use strict-length Vec + `TryInto`.** Works for any
-  N; proptest's `prop::array::uniform*` combinators cap at 32 which wasn't
-  enough for `Map[1024] Account`.
-- **`--spec <dir>` accepts directories** across every CLI subcommand
-  (`check`, `codegen`, `verify`, `spec`, `reconcile`). Multi-file specs
-  already worked at the parser level; v2.7 locks it in as CLI-level
-  contract with clearer errors on missing paths.
-
-## What changed in v2.6
-
-- **`+=` / `-=` default to checked arithmetic** in the generated Kani model.
-  On overflow the transition returns `false` — mirroring the
-  `checked_add(..).ok_or(MathOverflow)?` pattern deployed Anchor programs
-  use. Proptest mode keeps wrapping arithmetic for bounded exploration.
-  Before v2.6 the Kani model emitted bare `+=`, which flagged overflow on
-  every unbounded pre-state (a spec-model artifact that didn't match real
-  programs).
-- **`state { fields }` sugar parses** as documented. Accepts
-  comma- or newline-separated fields; desugars to `type State = { ... }`.
-- **Single-line `accounts { a : signer, b : writable, ... }` parses.**
-  Attribute commas and descriptor commas disambiguate via lookahead for
-  `<ident> :`, so multi-line and compact forms both work.
-- **`implies` lowers to valid Rust** (`(!a) || (b)`) in generated Kani and
-  proptest property bodies. `forall` / `exists` in property bodies emit a
-  `/* QEDGEN_UNSUPPORTED_QUANTIFIER */` marker — the property fn returns
-  `true` (non-blocking) and the body should be lifted to harness-level
-  `kani::any()` scaffolding instead.
-- **Multi-variant ADTs with shared field names deduplicate** when flattened
-  into the state model. First-variant wins on collisions. Proper
-  enum+match codegen remains on the roadmap.
-- **Default output layout changed.** `qedgen codegen --kani` / `--proptest`
-  write to `./programs/tests/kani.rs` / `./programs/tests/proptest.rs` so
-  `cargo kani --tests` and `cargo test --test proptest` resolve the
-  program's `Cargo.toml` directly. `qedgen verify` matches. Pass
-  `--kani-output` / `--proptest-output` to override.
-- **`qedgen init` refuses to nest `formal_verification/formal_verification/`.**
-  If run from inside an existing `formal_verification/` it bails with a
-  fix hint (`--output-dir .`).
-- **Generated `Cargo.toml` points at real deps.** `anchor-lang` +
-  `anchor-spl` are the target framework; `qedgen-macros` is a git-dep
-  at the release tag. Dependency lines start commented with a clear TODO
-  so `cargo build` surfaces the contract instead of pretending the
-  scaffold is complete.
-- **Vacuous `verify_*_rejects_invalid` Kani harnesses are gone.** The
-  `kani::assume(!(true))` footgun is fixed — harnesses now negate the
-  full `guard + requires` conjunction, or skip entirely when the handler
-  has no preconditions.
-- **`verify_*_effects` is split per-field.** One `verify_X_effect_{field}`
-  harness per effect, with `kani::solver(minisat)` when the RHS contains
-  `*` or `/`. No more 20-minute cadical wedges on chained fee arithmetic.
-
-## What changed in v2.5
-
-- **`pragma <name> { ... }`** — platform-specific namespace. sBPF-specific
-  constructs (`instruction`, `pubkey`, top-level `errors [...]`) now live
-  only inside `pragma sbpf { ... }`. See *Pragmas* below.
-- **`target` keyword removed.** Target is inferred from pragma presence —
-  `pragma sbpf` → assembly target, absent → framework-flavored Rust.
-  Framework selection happens at codegen time via `qedgen init
-  --target {anchor,quasar,pinocchio}` — all three emit a full program
-  scaffold.
-- **`assembly "..."` keyword removed.** Assembly source path is tooling
-  config, not spec intent — pass `qedgen asm2lean --input <path>` or use
-  the convention of `src/program.s` next to the spec.
-- **`interface Name { ... }` + `call Target.handler(...)`** — declarative
-  CPI contracts. See *Interface declarations*.
-- **Multi-file specs.** `parse_spec_file` accepts a directory of `.qedspec`
-  fragments (all declaring the same `spec Name`); fragments are merged
-  deterministically in sorted-path order.
-- **`let x = v in body` in expressions** — ML-style binding inside
-  `ensures` / `requires` / effect RHS.
-
 ## File structure
 
 ```fsharp
@@ -1426,7 +1310,7 @@ generated proof (right after `#[kani::proof]`), so a harness that needs a
 specific solver is reproducible without a `cargo kani --solver` flag. Use an SMT
 solver (`z3`, `cvc5`) when the harness divides/mods by a *symbolic* value — they
 reason about bit-vector division natively, where the default SAT backend
-(CaDiCaL) bit-blasts it and can blow up. Values: `z3`, `cvc5`, `bitwuzla`,
+(CaDiCaL) bit-blasts it and can become very slow. Values: `z3`, `cvc5`, `bitwuzla`,
 `cadical`, `kissat`, `minisat`.
 
 **`pragma kani_vec_empty = <field>`** (repeatable) — build that State `Vec` field
@@ -1884,7 +1768,7 @@ Args:
   block text (set by codegen and by `qedgen reconcile --update-hashes`)
 
 See SKILL.md **Step 4d — drift reconciliation** for the full agent workflow
-and `references/cli.md` for `qedgen reconcile` / `qedgen check --drift`.
+and `references/cli/validation.md` for `qedgen reconcile` / `qedgen check --drift`.
 
 ## `qedgen check` coverage
 
@@ -1930,7 +1814,7 @@ From a `.qedspec`, codegen produces:
   waterfall
 
 `qedgen codegen --spec program.qedspec --all` generates everything. See
-`references/cli.md` for the scaffold-once policy, drift attributes, and the
+`references/cli/codegen.md` for the scaffold-once policy, drift attributes, and the
 require-git guard.
 
 ## qedguards Lean macro

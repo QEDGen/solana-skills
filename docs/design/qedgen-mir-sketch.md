@@ -277,7 +277,7 @@ Realistic per the `cross-cutting-transforms.md` analysis. The original proposal'
 | 1 | Port Lean codegen for the pilot scope (TokenTransfer + RequireOrAbort + Assign + CheckedAdd/Sub + lifecycle gating via `HandlerMir.transition`). Keep `lean_gen.rs` as a fallback behind a flag. Acceptance: every TokenTransfer-using fixture produces byte-identical or cosmetic-diff-only Lean output. | ~2 wks |
 | 2 | Port Anchor codegen (`codegen.rs::Target::Anchor` + `Target::Quasar`) for pilot scope. Second target validates the abstraction. Acceptance: every fixture's Anchor output is byte-identical or cosmetic-diff-only. | ~2 wks |
 | 3 | Move MIR→MIR passes: `cpi_substitute`, `lifecycle_lower`, `variant_promote_check`, `effect_op_validate`, `account_consistency`. Reuse between Lean and Anchor validates the pass infrastructure. | ~1 wk |
-| 4 | Port Kani (classic + impl) and proptest. proptest gains the `cpi_substitute` output for free, closing divergence A4 by construction. | ~2 wks |
+| 4 | Port Kani (classic + impl) and proptest. proptest gains the `cpi_substitute` output at no cost, closing divergence A4 by construction. | ~2 wks |
 | 5 | Add `Stmt::Branch` + `Stmt::VariantPromote` + `Stmt::WrapAdd` etc. to all codegens. The ones not exercised by the pilot land here. Bug-bundle replay tests (#39/#40/#41/#43 + the ParsedEffectBranches gap) become acceptance gates. | ~1–2 wks |
 | 6 | Remove `ParsedSpec`-era fallback paths from all codegens. Delete dead code as cleanup. | ~3 days |
 

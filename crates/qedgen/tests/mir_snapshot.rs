@@ -15,7 +15,7 @@
 //!
 //! Path coverage across fixtures (post-v2.33, when `pragma state_repr =
 //! adt` became the explicit opt-in for the inductive multi-variant
-//! State, replacing the incidental `WrongState`-error footgun):
+//! State, replacing the incidental `WrongState`-error trap):
 //!   * Flat path (escrow, escrow-split, bundled-stdlib-demo, lending):
 //!     the default `structure State` + `status` discriminant. These
 //!     were legacy ADT byte-identity fixtures before the representation

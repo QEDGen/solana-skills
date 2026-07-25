@@ -218,7 +218,7 @@ pub fn init(
         "project name must be alphanumeric (underscores allowed)"
     );
 
-    // Nested-layout footgun: output_dir leaf is `formal_verification` AND its
+    // Nested-layout trap: output_dir leaf is `formal_verification` AND its
     // canonicalized parent already ends in `formal_verification/` → a double
     // layer that confuses every downstream tool. Refuse.
     let leaf_is_fv = output_dir.file_name().and_then(|n| n.to_str()) == Some("formal_verification");
@@ -546,7 +546,7 @@ mod tests {
         let root = tmp.path().canonicalize().unwrap();
         let existing_fv = root.join("formal_verification");
         std::fs::create_dir_all(&existing_fv).unwrap();
-        // Simulate the footgun: running `qedgen init --output-dir ./formal_verification`
+        // Simulate the trap: running `qedgen init --output-dir ./formal_verification`
         // from inside `formal_verification/` → `output_dir` resolves to
         // `formal_verification/formal_verification/`.
         let nested = existing_fv.join("formal_verification");

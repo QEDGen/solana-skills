@@ -72,7 +72,7 @@ That page opens with a **Quickstart for agents** (install, then audit your exist
 
 CPI calls are axiomatic — we verify the program passes correct parameters. SPL Token internals and the Solana runtime are trusted.
 
-**Proofs prove correctness. Ratchet proves deployability.** The P-rule preflight (`qedgen readiness`) catches future-upgrade landmines in a single IDL before the first deploy; the R-rule diff (`qedgen check-upgrade`) catches every breaking change between an old and new IDL once the program is live.
+**Proofs prove correctness. Ratchet proves deployability.** The P-rule preflight (`qedgen readiness`) catches future-upgrade risks in a single IDL before the first deploy; the R-rule diff (`qedgen check-upgrade`) catches every breaking change between an old and new IDL once the program is live.
 
 ## Quick start
 
@@ -86,8 +86,8 @@ Two paths from here — pick the one that matches what you have:
 ### A. Existing program (brownfield) — audit first, spec second
 
 The audit-first flow works on Anchor, Quasar, Pinocchio, and native Rust.
-sBPF assembly uses the proof-first path instead. Pitch: _"Find the bugs that are already there, then turn each
-finding into a spec property that locks it in."_
+sBPF assembly uses the proof-first path instead. The idea: find the bugs that are already there, then turn each
+finding into a spec property that keeps them fixed.
 
 ```bash
 # In Claude Code / Codex / Cursor, invoke the auditor subagent on the
@@ -177,7 +177,7 @@ End-to-end walkthrough on a real bug class: `examples/rust/brownfield-onboarding
 
 ### Brownfield — spec elicitation (turn what the code already enforces into a spec)
 
-The front door for code→spec is the probe. Every spec-less run hypothesizes program-specific invariants from evidence it can cite — a single authority-bound signer, a `require!(amount <= …)` the body already enforces, an Anchor `#[account(init)]` constraint, a resolved SPL-token `Transfer { from, to, authority }`, an unwired error variant, the IDL's status enum — and prints them ranked on stderr with the payoff of confirming each. Confirmations land in `answers.json`; `ratify` lowers each confirmed hypothesis to a real, executable clause (`auth <signer>`, `requires … else …`, lifecycle transitions, `transfers { … }`) and refuses to report success unless the result parses and lints. A claim it cannot lower without placeholders is reported `confirmed, not executable` — never smuggled in as a comment.
+The front door for code→spec is the probe. Every spec-less run hypothesizes program-specific invariants from evidence it can cite — a single authority-bound signer, a `require!(amount <= …)` the body already enforces, an Anchor `#[account(init)]` constraint, a resolved SPL-token `Transfer { from, to, authority }`, an unwired error variant, the IDL's status enum — and prints them ranked on stderr with the payoff of confirming each. Confirmations land in `answers.json`; `ratify` lowers each confirmed hypothesis to a real, executable clause (`auth <signer>`, `requires … else …`, lifecycle transitions, `transfers { … }`) and refuses to report success unless the result parses and lints. A claim it cannot lower without placeholders is reported `confirmed, not executable` — never inserted as a comment.
 
 ```bash
 # Hypothesize + write the audit working set (skeleton, hypotheses.json, …)
@@ -396,7 +396,7 @@ When a `.qedspec` `import`s another program's interface (e.g. SPL Token),
 the import can pin an `upstream_binary_hash` — the SHA-256 of the on-chain
 `.so`. `qedgen verify --check-upstream` diffs each pinned hash against
 what's actually deployed via `solana program dump`, so a callee program
-upgraded out from under your proofs surfaces as a verification failure
+upgraded after you wrote your proofs surfaces as a verification failure
 instead of a silent risk.
 
 ```bash
@@ -576,7 +576,7 @@ manually for Lean/codegen changes and before a release.
 
 ### Deploy-safety lint (ratchet)
 
-`qedgen readiness` runs before the first deploy: one IDL in, a verdict out (`READY`, `UNSAFE`, or `BREAKING`) plus every specific future-upgrade landmine it finds. `qedgen check-upgrade` runs on every subsequent release: diff the deployed IDL against the candidate and fail the build on any change that would silently corrupt on-chain state, break existing clients, or orphan PDAs. Both work against Anchor IDLs (`anchor build`) and Quasar IDLs (`quasar build`) — the framework is autodetected from `Anchor.toml` / `Quasar.toml` in the working directory, or you can force it with `--quasar`.
+`qedgen readiness` runs before the first deploy: one IDL in, a verdict out (`READY`, `UNSAFE`, or `BREAKING`) plus every specific future-upgrade risk it finds. `qedgen check-upgrade` runs on every subsequent release: diff the deployed IDL against the candidate and fail the build on any change that would silently corrupt on-chain state, break existing clients, or orphan PDAs. Both work against Anchor IDLs (`anchor build`) and Quasar IDLs (`quasar build`) — the framework is autodetected from `Anchor.toml` / `Quasar.toml` in the working directory, or you can force it with `--quasar`.
 
 ```bash
 # Pre-deploy — lint one IDL for mainnet-readiness
@@ -592,7 +592,7 @@ qedgen check-upgrade --old ratchet.lock --new target/idl/my_program.json \
   --unsafe allow-field-append --migrated-account EscrowState
 ```
 
-Exit codes mirror ratchet's CLI conventions: `0 = additive/safe`, `1 = breaking`, `2 = unsafe`. Under the hood qedgen embeds [ratchet](https://github.com/saicharanpogul/ratchet) as a library, so the rule catalog stays in sync with upstream — run `qedgen readiness --list-rules` (P-rules) or `qedgen check-upgrade --list-rules` (R-rules) to see the full set. Pair with `--json` for a machine-readable dump. A worked Quasar IDL pair (v1 → v2) lives at [`crates/qedgen/tests/fixtures/quasar-readiness/`](crates/qedgen/tests/fixtures/quasar-readiness/).
+Exit codes mirror ratchet's CLI conventions: `0 = additive/safe`, `1 = breaking`, `2 = unsafe`. Internally qedgen embeds [ratchet](https://github.com/saicharanpogul/ratchet) as a library, so the rule catalog stays in sync with upstream — run `qedgen readiness --list-rules` (P-rules) or `qedgen check-upgrade --list-rules` (R-rules) to see the full set. Pair with `--json` for a machine-readable dump. A worked Quasar IDL pair (v1 → v2) lives at [`crates/qedgen/tests/fixtures/quasar-readiness/`](crates/qedgen/tests/fixtures/quasar-readiness/).
 
 **Why both.** qedgen's `#[qed(verified)]` hash-stamps the *function body*, so a rename of an `#[account]` struct compiles with a stale-but-valid proof even though the on-chain discriminator is now different and every existing account of that type is orphaned. `qedgen check-upgrade`'s `R006 account-discriminator-change` catches that class of failure; the proof layer alone doesn't look at it.
 

@@ -67,5 +67,5 @@ changed.
 
 Stop adding generated tests once the spec has coverage for the user-visible
 security contract and the existing test suite plus generated backends cover
-the high-risk paths. Do not chase exhaustive runtime simulation if the spec
+the high-risk paths. Do not attempt exhaustive runtime simulation if the spec
 property is already proven by a smaller model.

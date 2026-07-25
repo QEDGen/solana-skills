@@ -664,7 +664,7 @@ addresses division — a symbolic multiply is a separate wall (see G15c UPDATE 2
 A harness that divides/mods by a symbolic value blows up the default SAT backend;
 z3/cvc5 reason about bit-vector division natively. `pragma kani_solver = <solver>`
 emits `#[kani::solver(<solver>)]` after `#[kani::proof]` on every generated proof,
-so the solver requirement is baked in + reproducible without a `cargo kani --solver`
+so the solver requirement is fixed + reproducible without a `cargo kani --solver`
 flag (`1219c00`). Test: `brownfield_kani_solver_pragma_bakes_solver_attr`.
 
 ### 📐 M4 — E-A / E-B (round-2 policy findings): per-finding tractability, code-grounded  [NEEDS-TRIAGE]
@@ -959,7 +959,7 @@ project_root/name derived from the audit-dir grandparent (`.qed`).
 
 `probe --bootstrap --root <p> --json` → `error: unexpected argument '--json' found`.
 `probe` has no `--json` flag yet writes JSON to stdout, and `--json` IS accepted on
-`verify --probe-repros`, so authors reach for it.
+`verify --probe-repros`, so authors use it.
 - **Evidence:** the command above.
 - **Proposed:** accept-and-ignore `--json` on `probe` (or document that bootstrap
   emits raw JSON).
@@ -1377,7 +1377,7 @@ spot-check mode did not — and the reason the `.qed/` prerequisite fires at all
 for a `--proptest`-only run is that the greenfield Rust scaffold runs
 unconditionally: artifact flags are additive on top of it, so there is no
 "generate only the harness I asked for" mode. RELEASING.md §8a carries only
-the grep command, so every release re-derives the recipe. Papercut en route:
+the grep command, so every release re-derives the recipe. Annoyance en route:
 guessing `--output` gets a clap tip pointing at `--ci-output`, not
 `--output-dir`.
 - **Evidence:** this release's §8a run — (1) `codegen --proptest --spec
@@ -1397,7 +1397,7 @@ guessing `--output` gets a clap tip pointing at `--ci-output`, not
   §8a so it runs copy-paste clean in an empty dir; (b) tool: when explicit
   artifact flags are passed without `--all`, emit only those artifacts —
   `scaffold_will_run &&= (rust || all || no flags)` — which makes
-  harness-only spot-checks projectless for free (the `.qed/` gate stays for
+  harness-only spot-checks projectless at no cost (the `.qed/` gate stays for
   scaffold-emitting invocations). Gate: a CLI test asserting
   `codegen --proptest --spec <staged spec>` succeeds in a git dir with no
   `.qed/` and writes only the proptest harness.

@@ -193,7 +193,7 @@ fn lower_fixture(rel_path: &str) -> Mir {
 
 /// The inductive multi-variant State representation is opted into via
 /// `pragma state_repr = adt`, decoupled from the incidental
-/// `WrongState` error variant that once keyed it (footgun:
+/// `WrongState` error variant that once keyed it (trap:
 /// adding/removing a lifecycle error silently flipped flat↔ADT).
 /// Same State shape + same `WrongState` error ⇒ flat by default,
 /// `inductive State` only when the pragma is present.

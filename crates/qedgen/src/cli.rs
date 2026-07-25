@@ -917,7 +917,7 @@ pub(crate) enum Commands {
     /// Lint one Anchor IDL for mainnet-readiness before first deploy.
     ///
     /// Runs the ratchet P-rule preflight on the IDL and reports every
-    /// future-upgrade landmine it finds — missing `version: u8` prefix,
+    /// future-upgrade risk it finds — missing `version: u8` prefix,
     /// no `_reserved` trailing padding, unpinned discriminators, name
     /// collisions, writable accounts with no signer. Complements
     /// `qedgen check` / `qedgen verify` (which prove semantics) by

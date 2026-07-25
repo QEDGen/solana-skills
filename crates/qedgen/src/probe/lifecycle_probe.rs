@@ -102,7 +102,7 @@ fn scan_authority_grants(rel_file: &Path, source: &str) -> Vec<AuthorityGrant> {
             continue;
         }
         let op = caps.name("op").unwrap().as_str();
-        // Footgun: SetAuthority's `authority` field is the *current*
+        // Trap: SetAuthority's `authority` field is the *current*
         // authority, not the new one — only `new_authority` is the grant.
         let body = caps.name("body").unwrap().as_str();
         let target_field = if op == "SetAuthority" {

@@ -64,7 +64,7 @@ gated on an explicit y/N (or `--yes` in non-interactive shells).
 Surface the command proactively when any of these fire:
 
 - **Same lint or codegen error appears twice in the session without progress.**
-  Two attempts at the same wall, no movement — they're stuck on something that
+  Two attempts at the same problem with no progress — they are blocked on something that
   may not be their bug. Suggest `qedgen feedback --note "<one-line summary>"`.
 - **An internal qedgen error or panic.** Stack traces, "unreachable", parser
   errors that aren't user-fix-able, file-not-found on paths qedgen owns. The
