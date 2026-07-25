@@ -32,6 +32,18 @@ carries per-handler `applicable_categories` + `intent_tag`
 narrowed by handler-body heuristic (S2.2 — authority-gated /
 trader-gated / permissionless).
 
+v2.48.1 (#361) adds source-level handler discovery for **Pinocchio**, which
+has no `#[program]` mod to parse. Both dispatch-body conventions resolve:
+`pub fn process_<name>` takes its name from the function, and a bare
+`pub fn process(` takes its name from its `instructions/<name>.rs` module.
+Handlers found this way carry `dispatcher_kind: "pinocchio_source"` and
+`discovered_via: "pinocchio_source"`. Before this, Pinocchio handlers came
+only from the IDL overlay below, so a repo with no discoverable IDL emitted
+an empty `handlers[]`. The same release makes an empty bootstrap work list
+report `outcome: no_findings_low_coverage` rather than
+`passed_with_coverage`: a work list with no handlers means discovery found
+nothing to investigate, not that the program is clean.
+
 v2.44 (#235) adds the **IDL-enrichment overlay** to every spec-less
 envelope. Source discovery stays ground truth; when an on-disk IDL exists
 (canonical paths: `idl.json`, `program/idl.json`, `target/idl/*.json`,
