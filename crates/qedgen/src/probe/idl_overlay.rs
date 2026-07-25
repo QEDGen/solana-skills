@@ -136,8 +136,16 @@ fn discover_workspace_ancestor_idl(
         return Ok(None);
     };
     for ancestor in program_root.ancestors().skip(1) {
+        // `Anchor.toml` and a `programs/` parent are Anchor-shaped markers.
+        // A Pinocchio repo often has neither: a single crate at `program/`
+        // (singular) with the IDL committed at the repo root. Cargo's own
+        // `[workspace]` table is the runtime-agnostic marker for the same
+        // "this is the repo root" question, so accept it too.
         let is_workspace_root = ancestor.join("Anchor.toml").is_file()
-            || program_root.starts_with(ancestor.join("programs"));
+            || program_root.starts_with(ancestor.join("programs"))
+            || std::fs::read_to_string(ancestor.join("Cargo.toml"))
+                .map(|t| t.lines().any(|l| l.trim_start().starts_with("[workspace]")))
+                .unwrap_or(false);
         if is_workspace_root {
             return discover_workspace_program_idl(ancestor, &program_root, &fallback_name);
         }
@@ -551,6 +559,46 @@ fn apply_discovered_idl(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A non-Anchor repo: single crate at `program/` (singular), IDL
+    /// committed at the repo root, no `Anchor.toml` and no `programs/`
+    /// dir. The ancestor walk previously recognised neither marker, so the
+    /// IDL one level up was never found and Pinocchio got zero handlers.
+    #[test]
+    fn workspace_table_marks_the_repo_root_for_the_idl_walk() {
+        use std::fs;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"program\"]\nresolver = \"2\"\n",
+        )
+        .expect("write");
+        fs::create_dir_all(root.join("program").join("src")).expect("mkdir");
+        fs::write(
+            root.join("program").join("Cargo.toml"),
+            "[package]\nname = \"program\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("write");
+        fs::create_dir_all(root.join("idl")).expect("mkdir");
+        fs::write(
+            root.join("idl").join("program.json"),
+            r#"{"instructions":[{"name":"deposit"}]}"#,
+        )
+        .expect("write");
+
+        let found = discover_idl(&root.join("program")).expect("discover");
+        assert!(
+            found.is_some(),
+            "a root [workspace] table must mark the repo root so the root idl/ is reachable"
+        );
+        let (path, _) = found.expect("some");
+        assert!(
+            path.ends_with("idl/program.json"),
+            "expected the root idl/, got {}",
+            path.display()
+        );
+    }
 
     fn mk_handler(name: &str) -> BootstrapHandler {
         BootstrapHandler {

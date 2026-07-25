@@ -794,9 +794,11 @@ impl ProbeOutput {
             candidates: Vec::new(),
             engine_runs: Vec::new(),
             coverage: None,
-            // Overwritten by every real construction site; the neutral
-            // default suits a bare/empty envelope (bootstrap work list).
-            outcome: ProbeOutcome::PassedWithCoverage,
+            // Every real construction site sets this explicitly. The
+            // default is the weakest claim on purpose: a site that forgets
+            // to set it under-reports coverage rather than asserting a
+            // clean bill of health it never established.
+            outcome: ProbeOutcome::NoFindingsLowCoverage,
             clusters: None,
             idl_path: None,
             derivable_idl: None,
@@ -1177,6 +1179,14 @@ pub fn run_bootstrap(project_root: &Path) -> Result<ProbeOutput> {
             }
             _ => (Vec::new(), None),
         },
+        // Pinocchio has no `#[program]` mod, so it needs its own source
+        // walk. Without one it fell to the `_` arm below and depended
+        // entirely on the IDL overlay for handlers.
+        Runtime::Pinocchio => {
+            let h = discover_pinocchio_handlers(project_root);
+            let kind = (!h.is_empty()).then(|| "pinocchio_source".to_string());
+            (h, kind)
+        }
         _ => (Vec::new(), None),
     };
     let applicable = applicable_categories(&runtime);
@@ -1195,6 +1205,16 @@ pub fn run_bootstrap(project_root: &Path) -> Result<ProbeOutput> {
     let mut candidates = overlay.drift_candidates;
     candidates.extend(dead_guard_probe::scan_program(project_root).unwrap_or_default());
 
+    // A work list with no handlers means discovery found nothing to hand
+    // the auditor — not that the program is clean. Reporting
+    // `PassedWithCoverage` there is a false green: it reads as "probed,
+    // nothing found" when the truth is "nothing was probed".
+    let outcome = if handlers.is_empty() {
+        ProbeOutcome::NoFindingsLowCoverage
+    } else {
+        ProbeOutcome::PassedWithCoverage
+    };
+
     Ok(ProbeOutput {
         project_root: Some(project_root.display().to_string()),
         runtime: Some(runtime),
@@ -1204,6 +1224,7 @@ pub fn run_bootstrap(project_root: &Path) -> Result<ProbeOutput> {
         idl_path: overlay.idl_path,
         derivable_idl: overlay.derivable_idl,
         dispatcher_kind,
+        outcome,
         ..ProbeOutput::envelope(Mode::SpecLess)
     })
 }
@@ -1307,6 +1328,112 @@ fn has_qedgen_markers(root: &Path) -> bool {
         }
     }
     false
+}
+
+/// Source-level handler discovery for Pinocchio, which has no `#[program]`
+/// mod to parse. Two dispatch-body conventions appear in the wild and a
+/// program uses one or the other, never both:
+///
+/// 1. `pub fn process_<name>(..)` — the handler name is the fn name.
+/// 2. `pub fn process(..)`, one per `instructions/<name>.rs` module — the
+///    handler name is the file stem, because every fn is called `process`.
+///
+/// Before this existed, `run_bootstrap` fell through to the `_` arm and
+/// Pinocchio handlers could only ever come from the IDL overlay, so a
+/// repo with no discoverable IDL reported zero handlers.
+fn discover_pinocchio_handlers(root: &Path) -> Vec<BootstrapHandler> {
+    let rel = |p: &Path| -> String {
+        p.strip_prefix(root)
+            .map(|r| r.display().to_string())
+            .unwrap_or_else(|_| p.display().to_string())
+    };
+
+    // `entrypoint!(process_instruction)` names the dispatcher, which matches
+    // the `process_*` convention but is not a handler. Read the name out of
+    // the macro rather than hardcoding one: programs are free to call it
+    // anything.
+    let files = crate::fs_walk::collect_rs_files(root, crate::fs_walk::DEFAULT_SKIP_DIRS);
+    let dispatchers: std::collections::BTreeSet<String> = {
+        let re = regex::Regex::new(r"entrypoint!\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)")
+            .expect("static regex compiles");
+        files
+            .iter()
+            .filter_map(|f| std::fs::read_to_string(f).ok())
+            .flat_map(|t| {
+                re.captures_iter(&t)
+                    .map(|c| c[1].to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    };
+
+    // Convention 1: `process_*` fn names carry the handler name.
+    if let Ok(names) = crate::adapt::pinocchio_to_spec::enumerate_handlers(root) {
+        let names: Vec<String> = names
+            .into_iter()
+            .filter(|n| !dispatchers.contains(n))
+            .collect();
+        if !names.is_empty() {
+            return names
+                .into_iter()
+                .map(|name| {
+                    let needle = format!("pub fn {name}(");
+                    let source_file = files
+                        .iter()
+                        .find(|f| {
+                            std::fs::read_to_string(f)
+                                .map(|t| t.contains(&needle))
+                                .unwrap_or(false)
+                        })
+                        .map(|f| rel(f))
+                        .unwrap_or_default();
+                    BootstrapHandler {
+                        name,
+                        source_file,
+                        enum_variant: None,
+                        entry_fn: None,
+                        line: None,
+                        applicable_categories: None,
+                        intent_tag: None,
+                        idl_accounts: None,
+                        idl_args: None,
+                        discovered_via: Some("pinocchio_source".to_string()),
+                    }
+                })
+                .collect();
+        }
+    }
+
+    // Convention 2: bare `pub fn process(` — the module file names the
+    // handler. A file carrying `entrypoint!` is the dispatcher, not a
+    // handler module.
+    let mut out: Vec<BootstrapHandler> = files
+        .into_iter()
+        .filter(|f| {
+            f.file_stem().and_then(|s| s.to_str()) != Some("mod")
+                && std::fs::read_to_string(f)
+                    .map(|t| t.contains("pub fn process(") && !t.contains("entrypoint!"))
+                    .unwrap_or(false)
+        })
+        .filter_map(|f| {
+            let name = f.file_stem()?.to_str()?.to_string();
+            Some(BootstrapHandler {
+                name,
+                source_file: rel(&f),
+                enum_variant: None,
+                entry_fn: None,
+                line: None,
+                applicable_categories: None,
+                intent_tag: None,
+                idl_accounts: None,
+                idl_args: None,
+                discovered_via: Some("pinocchio_source".to_string()),
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out.dedup_by(|a, b| a.name == b.name);
+    out
 }
 
 /// Map `parse_anchor_project` instructions into `BootstrapHandler`
@@ -1481,6 +1608,120 @@ fn classify_shank_handler(
         return (tag_str, None);
     }
     (tag_str, Some(narrowed))
+}
+
+#[cfg(test)]
+mod pinocchio_bootstrap_tests {
+    use super::*;
+    use std::fs;
+
+    /// Minimal Pinocchio crate. `naming` picks the dispatch-body
+    /// convention: `"prefixed"` = `pub fn process_<name>`, `"bare"` =
+    /// `pub fn process(` one per instruction module.
+    fn pinocchio_crate(root: &std::path::Path, naming: &str) {
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\npinocchio = \"0.7\"\n",
+        )
+        .expect("write");
+        let src = root.join("src");
+        fs::create_dir_all(src.join("instructions")).expect("mkdir");
+        // The dispatcher lives outside lib.rs on purpose: that layout is
+        // what originally resolved zero handlers.
+        fs::write(
+            src.join("entrypoint.rs"),
+            "entrypoint!(process_instruction);\npub fn process_instruction(a: &[u8]) -> u8 { 0 }\n",
+        )
+        .expect("write");
+        fs::write(
+            src.join("lib.rs"),
+            "pub mod entrypoint;\npub mod instructions;\n",
+        )
+        .expect("write");
+        for name in ["deposit", "withdraw"] {
+            let body = if naming == "prefixed" {
+                format!("pub fn process_{name}(a: &[u8]) -> u8 {{ 0 }}\n")
+            } else {
+                "pub fn process(a: &[u8]) -> u8 { 0 }\n".to_string()
+            };
+            fs::write(src.join("instructions").join(format!("{name}.rs")), body).expect("write");
+        }
+    }
+
+    #[test]
+    fn pinocchio_prefixed_handlers_discovered_from_source() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        pinocchio_crate(dir.path(), "prefixed");
+        let out = run_bootstrap(dir.path()).expect("bootstrap");
+        let mut names: Vec<String> = out
+            .handlers
+            .unwrap_or_default()
+            .into_iter()
+            .map(|h| h.name)
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["process_deposit", "process_withdraw"],
+            "process_* handlers must be discovered without an IDL"
+        );
+    }
+
+    #[test]
+    fn pinocchio_bare_process_handlers_named_by_module() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        pinocchio_crate(dir.path(), "bare");
+        let out = run_bootstrap(dir.path()).expect("bootstrap");
+        let mut names: Vec<String> = out
+            .handlers
+            .unwrap_or_default()
+            .into_iter()
+            .map(|h| h.name)
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["deposit", "withdraw"],
+            "bare `pub fn process` handlers take their module's name"
+        );
+    }
+
+    #[test]
+    fn entrypoint_dispatcher_is_not_a_handler() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        pinocchio_crate(dir.path(), "prefixed");
+        let out = run_bootstrap(dir.path()).expect("bootstrap");
+        assert!(
+            !out.handlers
+                .unwrap_or_default()
+                .iter()
+                .any(|h| h.name == "process_instruction"),
+            "the fn named by entrypoint!() is the dispatcher, not a handler"
+        );
+    }
+
+    #[test]
+    fn empty_handler_list_reports_low_coverage_not_a_pass() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("write");
+        fs::create_dir_all(root.join("src")).expect("mkdir");
+        fs::write(root.join("src").join("lib.rs"), "// no handlers\n").expect("write");
+        let out = run_bootstrap(root).expect("bootstrap");
+        assert!(
+            out.handlers.unwrap_or_default().is_empty(),
+            "no handlers expected"
+        );
+        assert_eq!(
+            out.outcome,
+            ProbeOutcome::NoFindingsLowCoverage,
+            "a work list with no handlers must not claim passed_with_coverage"
+        );
+    }
 }
 
 #[cfg(test)]
