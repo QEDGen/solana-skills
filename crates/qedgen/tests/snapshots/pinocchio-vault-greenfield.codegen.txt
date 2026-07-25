@@ -18,7 +18,7 @@ pinocchio = "0.8"
 pinocchio-pubkey = "0.3"
 zeropod = "0.1"
 pinocchio-token = "0.3"
-qedgen-macros = { git = "https://github.com/qedgen/solana-skills", tag = "v2.48.0" }
+qedgen-macros = { git = "https://github.com/qedgen/solana-skills", tag = "v2.48.1" }
 
 [dev-dependencies]
 proptest = "1"
