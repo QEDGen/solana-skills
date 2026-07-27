@@ -1,0 +1,68 @@
+// Deliberately vulnerable fixture for the Parallax repro gate.
+//
+// TWO-SIDED BY CONSTRUCTION. The gate is only meaningful if it can tell a
+// real bug from a guard, so this spec carries one of each:
+//
+//   `set_fee`  — VULNERABLE. A singleton `config` PDA with a constant seed
+//                and NO signer account. Any caller can drive it against the
+//                one global config, so the generated reproducer MUST fire.
+//
+//   `open`     — GUARDED control. `auth owner`, a `signer` account, and a
+//                PDA seeded on the actor. The same generator aimed here MUST
+//                NOT fire.
+//
+// Why the shape matters: an earlier version of this fixture gave the
+// vulnerable handler a `signer` account and a caller-seeded PDA. The
+// `missing_signer` predicate still fired (no `auth` clause), but the program
+// was not actually exploitable — the `signer` marker enforces a signature
+// independently of `auth`, and the PDA seed binds the account to its caller.
+// The reproducer correctly refused to fire and the candidate would have been
+// dropped. Keep the vulnerable handler genuinely unbound, or the gate proves
+// nothing about the firing direction.
+
+spec Vulnerable
+
+type State
+  | Uninitialized
+  | Active of {
+      owner : Pubkey,
+      total : U64,
+    }
+
+// `MathOverflow` is deliberately NOT declared: the checked add in `set_fee`
+// names it, and codegen synthesizes it the way R26/R28 synthesize
+// `InvalidLifecycle` / `InvalidPda`. Leaving it undeclared keeps this fixture
+// covering that synthesis.
+type Error
+  | InvalidAmount
+
+pda vault ["vault", owner]
+pda config ["config"]
+
+/// Guarded control: requires a signer and pins a lifecycle transition.
+handler open : State.Uninitialized -> State.Active {
+  auth owner
+
+  accounts {
+    owner          : signer, writable
+    vault          : writable, pda ["vault", owner]
+    system_program : program
+  }
+
+  effect {
+    owner := owner.pubkey
+    total := 0
+  }
+}
+
+/// VULNERABLE: no `auth`, no signer account, no lifecycle pre-condition,
+/// and a constant-seed singleton PDA. Anyone can drive it, repeatedly.
+handler set_fee (amount : U64) {
+  accounts {
+    config : writable, pda ["config"]
+  }
+
+  effect {
+    total += amount
+  }
+}
