@@ -1,3 +1,4 @@
+#[allow(dead_code)]
 fn mint_account(address: Pubkey, authority: Pubkey) -> Account {
     let mint = SplMint {
         mint_authority: COption::Some(authority),
@@ -11,6 +12,7 @@ fn mint_account(address: Pubkey, authority: Pubkey) -> Account {
     Account::new(address, SPL_TOKEN_PROGRAM_ID, 2_000_000, data)
 }
 
+#[allow(dead_code)]
 fn token_account(address: Pubkey, mint: Pubkey, owner: Pubkey, amount: u64) -> Account {
     let token = SplTokenAccount {
         mint,

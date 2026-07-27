@@ -30,7 +30,7 @@ sBPF assembly is selected by `pragma sbpf` in the spec, not by a `Target`.
 | Kani spec-model (`kani_mir`) | ✅ ¹ ⁴ | ✅ ¹ ⁴ | ✅ ¹ ⁴ | n/a | skip by design |
 | impl-Kani (`kani_impl`) | ✅ greenfield + state-struct (#162) + Context (#169) | ⚠️ greenfield shape only | ⚠️ own `#[repr(C)]` shape; some ix-data field types TODO | ❌ | ❌ |
 | proptest (`proptest_gen_mir`) | ✅ ⁵ | ✅ ⁵ | ✅ ⁵ | n/a | skip by design |
-| Parallax/LiteSVM integration tests (`integration_test`) | ❌ adapter pending | ✅ compiled `.so` + account/outcome/CU fixtures | ❌ adapter pending | ❌ | ❌ |
+| Parallax/LiteSVM integration tests (`integration_test`) | ❌ adapter pending | ✅ compiled `.so` + account/outcome fixtures ⁶ | ❌ adapter pending | ❌ | ❌ |
 | Lean (`lean_gen_mir`) | ✅ ² ³ | ✅ ² ³ | ✅ ² ³ | n/a | ✅ dedicated sBPF path |
 | Probe: runtime-agnostic scanners (`run_helpers`) | ✅ (#196) | ✅ (#196) | ✅ | ✅ (#196) | ❌ bootstrap only |
 | Probe: IDL-enrichment overlay (`probe/idl_overlay`) | ✅ enrich + narrow (#235); unbuilt → `derivable_idl` (#238) | ✅ enrich + narrow (#235); unbuilt → `derivable_idl` (#238) | ✅ enrich + handler fill | ⚠️ enrich only (declarative flags) | ❌ |
@@ -83,6 +83,24 @@ read or written by a per-account transition (guard, let, effect, or
 branch scrutinee) is not liftable — that spec keeps per-account ghost
 copies and its ghost obligations stay
 `unsupported(proptest_multi_account_ghost)` in the manifest.
+
+⁶ Parallax integration scaffold. World setup, execution, outcomes, and
+checks are Parallax; the instruction builders still come from the generated
+Quasar `program::client` module, which is why the lane is Quasar-only.
+Assertions are the spec's: `Outcome::success()` on happy paths and
+`Outcome::error(<Prog>Error::<Code>)` on forged-signer tests when the spec
+declares `Unauthorized` or `InvalidLifecycle` (otherwise the scaffold
+degrades to a marked weak assertion rather than naming a variant
+`codegen_mir` may not have synthesized). No compute-unit assertion is
+emitted: a committed transaction always spends CU, so a `cu > 0` check
+cannot fail, and the scaffold points at a measured budget instead.
+
+`parallax-svm` is pinned to a git revision (it is not published to
+crates.io), and `crates/qedgen/tests/parallax_integration_gate.rs` compiles
+the generated scaffold against that pin in CI. The gate covers the Parallax
+surface only — `codegen --target quasar` emits `quasar-lang = "0.0.0"`, a
+placeholder that resolves from no registry, so the Quasar client boundary
+cannot be compiled in CI and stays ungated.
 
 ## Codegen ownership contract: CPIs, PDA creation, and events
 

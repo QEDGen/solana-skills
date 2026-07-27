@@ -288,12 +288,19 @@ qedgen check --regen-drift
 ```
 
 The integration scaffold executes the compiled program in
-[Parallax](https://github.com/blueshift-gg/parallax), with account fixtures,
-outcome checks, and compute-unit assertions backed by LiteSVM. Its current
-instruction-builder boundary is Quasar-only; Anchor and Pinocchio adapters are
-not emitted yet. QEDGen pins Parallax's compatible Solana crate set in the
-generated program's `[dev-dependencies]` because a dependency's `Cargo.lock`
-is not inherited by consumers.
+[Parallax](https://github.com/blueshift-gg/parallax), with account fixtures
+and outcome checks backed by LiteSVM. Happy paths assert
+`Outcome::success()`; forged-signer tests assert the spec's own
+authorization error. No compute-unit assertion is emitted, because a
+committed transaction always spends compute units and a `cu > 0` check
+cannot fail; the scaffold marks where to pin a measured budget instead.
+
+Its current instruction-builder boundary is Quasar-only; Anchor and Pinocchio
+adapters are not emitted yet. QEDGen pins Parallax's compatible Solana crate
+set in the generated program's `[dev-dependencies]` because a dependency's
+`Cargo.lock` is not inherited by consumers, and CI compiles the generated
+scaffold against the pinned Parallax revision
+(`crates/qedgen/tests/parallax_integration_gate.rs`).
 
 ### sBPF verification
 

@@ -19,4 +19,16 @@ qedgen-macros = { git = "https://github.com/qedgen/solana-skills", tag = "v2.48.
 [dev-dependencies]
 proptest = "1"
 
+parallax-svm = { git = "https://github.com/blueshift-gg/parallax", rev = "804c5662832c65330e7299901cc5195a78d87256" }
+solana-sdk-ids = "3.1"
+solana-address = "=2.6.1"
+solana-hash = "=4.5.0"
+solana-nonce = "=3.2.0"
+solana-short-vec = "=3.2.2"
+solana-last-restart-slot = "=3.1.0"
+solana-slot-history = "=3.1.0"
+solana-epoch-rewards = "=3.1.0"
+solana-slot-hashes = "=3.1.0"
+spl-token = { version = "=9.0.0", default-features = false, features = ["no-entrypoint"] }
+wincode = { version = "0.5", features = ["derive"] }
 [workspace]
