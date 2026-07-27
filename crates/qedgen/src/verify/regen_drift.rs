@@ -324,7 +324,7 @@ fn resolve_project_target(root: &Path) -> Result<Option<Target>> {
     Ok(None)
 }
 
-fn detect_program_target(out_root: &Path) -> Result<Option<Target>> {
+pub(crate) fn detect_program_target(out_root: &Path) -> Result<Option<Target>> {
     let cargo = out_root.join("Cargo.toml");
     let cargo_target = if cargo.is_file() {
         target_from_text(&std::fs::read_to_string(&cargo)?)

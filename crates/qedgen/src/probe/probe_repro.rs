@@ -205,23 +205,62 @@ struct DeployedProgram {
 
 /// Find `declare_id!("…")` and a built `.so` under `project_root`.
 ///
-/// `None` when either is absent — most often "the program was never built".
-/// That is a legitimate outcome, not an error: the caller drops the
-/// candidate with a reason, which is exactly the reproducer-only contract.
-fn discover_deployed_program(project_root: &Path) -> Option<DeployedProgram> {
+/// `Err` when the target is unsupported or the program was never built.
+/// Both are legitimate outcomes rather than bugs: the caller drops the
+/// candidate carrying the reason, which is exactly the reproducer-only
+/// contract — no evidence, no finding.
+fn discover_deployed_program(project_root: &Path) -> Result<DeployedProgram, ConstructFailure> {
+    // Anchor only. The generated reproducer encodes Anchor's 8-byte
+    // `sha256("global:<name>")` instruction discriminator and its
+    // `sha256("account:<Name>")` account discriminator; a Pinocchio program
+    // tags instructions differently, so the same bytes would address a
+    // different handler — or none — and the reproducer would report "no bug"
+    // for a reason that has nothing to do with the finding.
+    let crate_roots = [
+        project_root.join("programs"),
+        project_root.join("program"),
+        project_root.to_path_buf(),
+    ];
+    let detected = crate_roots.iter().find_map(|root| {
+        crate::verify::regen_drift::detect_program_target(root)
+            .ok()
+            .flatten()
+    });
+    // FAIL CLOSED: require positive Anchor detection rather than refusing
+    // only the frameworks we happen to recognise. `target_from_text` knows
+    // Anchor and Quasar, so a Pinocchio project reads as `None` — treating
+    // "unknown" as "probably fine" would emit an Anchor-shaped harness
+    // against it and report "no bug" from a transaction that never reached
+    // the handler.
+    if detected != Some(crate::Target::Anchor) {
+        return Err(ConstructFailure::BuildError(format!(
+            "Parallax reproducers are Anchor-only today (detected: {detected:?}). The \
+             harness encodes Anchor instruction and account discriminators, which would \
+             address a different handler — or none — on another framework."
+        )));
+    }
+
     let lib_candidates = [
         project_root.join("programs/src/lib.rs"),
         project_root.join("program/src/lib.rs"),
         project_root.join("src/lib.rs"),
     ];
-    let address = lib_candidates.iter().find_map(|path| {
-        let source = std::fs::read_to_string(path).ok()?;
-        source.lines().find_map(|line| {
-            let rest = line.trim().strip_prefix("declare_id!(\"")?;
-            let end = rest.find('"')?;
-            Some(rest[..end].to_string())
+    let address = lib_candidates
+        .iter()
+        .find_map(|path| {
+            let source = std::fs::read_to_string(path).ok()?;
+            source.lines().find_map(|line| {
+                let rest = line.trim().strip_prefix("declare_id!(\"")?;
+                let end = rest.find('"')?;
+                Some(rest[..end].to_string())
+            })
         })
-    })?;
+        .ok_or_else(|| {
+            ConstructFailure::BuildError(
+                "no `declare_id!` found — cannot tell which address to send the attack to"
+                    .to_string(),
+            )
+        })?;
 
     let deploy_candidates = [
         project_root.join("programs/target/deploy"),
@@ -232,16 +271,25 @@ fn discover_deployed_program(project_root: &Path) -> Option<DeployedProgram> {
     // relative whenever the user runs `qedgen probe --spec foo.qedspec` from
     // the project directory. The repro crate lives several levels below
     // `target/`, so a relative artifact path there resolves to nothing.
-    let artifact = deploy_candidates.iter().find_map(|dir| {
-        let entries = std::fs::read_dir(dir).ok()?;
-        entries
-            .filter_map(|entry| entry.ok())
-            .map(|entry| entry.path())
-            .find(|path| path.extension().is_some_and(|ext| ext == "so"))
-            .and_then(|path| path.canonicalize().ok())
-    })?;
+    let artifact = deploy_candidates
+        .iter()
+        .find_map(|dir| {
+            let entries = std::fs::read_dir(dir).ok()?;
+            entries
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.path())
+                .find(|path| path.extension().is_some_and(|ext| ext == "so"))
+                .and_then(|path| path.canonicalize().ok())
+        })
+        .ok_or_else(|| {
+            ConstructFailure::BuildError(
+                "no compiled program found — build it (`cargo build-sbf`) so the reproducer \
+             can drive a real transaction at it"
+                    .to_string(),
+            )
+        })?;
 
-    Some(DeployedProgram { address, artifact })
+    Ok(DeployedProgram { address, artifact })
 }
 
 /// A generated Parallax reproducer crate: where it lives and how to run it.
@@ -354,13 +402,7 @@ pub fn write_parallax_repro(
         .find(|h| h.name == finding.handler)
         .ok_or(ConstructFailure::NotImplemented)?;
 
-    let Some(program) = discover_deployed_program(&ctx.project_root) else {
-        return Err(ConstructFailure::BuildError(
-            "no compiled program found — build it (`cargo build-sbf`) so the \
-             reproducer can drive a real transaction at it"
-                .to_string(),
-        ));
-    };
+    let program = discover_deployed_program(&ctx.project_root)?;
 
     let crate_dir = ctx
         .project_root
