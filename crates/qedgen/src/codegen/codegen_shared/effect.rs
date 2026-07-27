@@ -279,6 +279,58 @@ pub(crate) fn checked_arith_error_variants<'a>(
     (overflow_variant, underflow_variant)
 }
 
+/// Every error variant a checked-arithmetic lowering will NAME in emitted
+/// code, across all of `spec`'s handlers.
+///
+/// `errors.rs` generation consumes this so the enum always declares what the
+/// `ok_or(...)` sites reference. Both go through
+/// [`checked_arith_error_variants`], so the declaration cannot drift from the
+/// use: there is one resolver, not two lists kept in sync by hand.
+///
+/// Why this is needed at all: tier 3 of that resolver falls back to the
+/// built-in `MathOverflow` / `MathUnderflow` *names* without checking they
+/// are declared. A spec with `total += amount` and no `MathOverflow` in its
+/// `type Error` block therefore generated
+/// `ok_or(VulnerableError::MathOverflow)?` against an enum that never had the
+/// variant — the program failed to compile and `qedgen check` reported zero
+/// errors. Anchor and Quasar were both affected; Pinocchio escaped only
+/// because `emit_pinocchio_effect_body` guards with its own `has(..)` check
+/// and degrades to `ProgramError::ArithmeticOverflow`.
+///
+/// Only the CHECKED ops appear here. `_sat` / `_wrap` cannot fail, so they
+/// name no variant — the arms below mirror `mechanize_effect`'s exactly.
+pub(crate) fn checked_arith_error_variants_in_use(spec: &ParsedSpec) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let mut note = |effect: &crate::check::ParsedEffect| {
+        let (overflow, underflow) = checked_arith_error_variants(spec, effect.on_error.as_deref());
+        let named = match effect.op.as_str() {
+            "add" => overflow,
+            "sub" => underflow,
+            _ => return,
+        };
+        if !names.iter().any(|existing| existing == named) {
+            names.push(named.to_string());
+        }
+    };
+
+    for handler in &spec.handlers {
+        for effect in &handler.effects {
+            note(effect);
+        }
+        // Conditional `effect { match … }` bodies keep their sites on the
+        // arm, not on `handler.effects`. Missing these would reintroduce the
+        // exact bug for every branching handler.
+        if let Some(branches) = &handler.effect_branches {
+            for arm in &branches.arms {
+                for effect in &arm.effects {
+                    note(effect);
+                }
+            }
+        }
+    }
+    names
+}
+
 /// Try to translate a single effect tuple to a real Rust statement. Returns
 /// None when the RHS is too complex for mechanical expansion (match/arith/
 /// pre-rendered Lean form); the caller falls through to a `todo!()` so an

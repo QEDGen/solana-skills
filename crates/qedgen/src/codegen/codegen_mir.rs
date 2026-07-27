@@ -1470,6 +1470,19 @@ fn emit_errors(
     if needs_invalid_pda && !codes.iter().any(|c| c == "InvalidPda") {
         codes.push("InvalidPda".to_string());
     }
+    // Checked arithmetic (`+=` / `-=`) lowers to
+    // `ok_or(<Prog>Error::<Variant>)?`, where the variant comes from
+    // `checked_arith_error_variants`. Its built-in tier names
+    // `MathOverflow` / `MathUnderflow` whether or not the spec declared
+    // them, so without this the generated program referenced a variant that
+    // was never emitted and failed to compile — with `qedgen check`
+    // reporting zero errors. Declaration and use share one resolver, so
+    // they cannot drift.
+    for variant in crate::codegen_shared::checked_arith_error_variants_in_use(parsed) {
+        if !codes.iter().any(|c| c == &variant) {
+            codes.push(variant);
+        }
+    }
 
     if matches!(target, Target::Pinocchio) {
         // Pinocchio: plain `#[repr(u32)]` enum + `From<…> for ProgramError`
@@ -1728,6 +1741,103 @@ mod tests {
     use super::*;
     use crate::check;
     use std::path::Path;
+
+    /// A spec using checked arithmetic without declaring `MathOverflow`
+    /// generated `ok_or(<Prog>Error::MathOverflow)?` against an enum that
+    /// never had the variant: the program failed to compile and
+    /// `qedgen check` reported zero errors. The variant must be synthesized,
+    /// exactly as R26/R28 synthesize `InvalidLifecycle` / `InvalidPda`.
+    #[test]
+    fn checked_add_synthesizes_its_overflow_variant() {
+        const SPEC: &str = r#"
+spec Repro
+type State
+  | Uninitialized
+  | Active of { owner : Pubkey, total : U64 }
+type Error
+  | InvalidAmount
+pda config ["config"]
+handler bump (amount : U64) {
+  accounts { config : writable, pda ["config"] }
+  effect { total += amount }
+}
+"#;
+        let spec = crate::spec::chumsky_adapter::parse_str(SPEC).expect("spec parses");
+        assert!(
+            !spec.error_codes.iter().any(|c| c == "MathOverflow"),
+            "fixture must NOT declare MathOverflow — that is the bug's precondition"
+        );
+        assert_eq!(
+            crate::codegen_shared::checked_arith_error_variants_in_use(&spec),
+            vec!["MathOverflow".to_string()],
+            "`+=` must report the variant its lowering will name"
+        );
+    }
+
+    /// `-=` names the underflow variant, and saturating / wrapping forms
+    /// cannot fail so they must name nothing — a spurious variant would be
+    /// dead code in every generated program.
+    #[test]
+    fn only_checked_ops_contribute_variants() {
+        const SPEC: &str = r#"
+spec Repro
+type State
+  | Uninitialized
+  | Active of { owner : Pubkey, total : U64, slack : U64 }
+type Error
+  | InvalidAmount
+pda config ["config"]
+handler drain (amount : U64) {
+  accounts { config : writable, pda ["config"] }
+  effect {
+    total -= amount
+    slack +=! amount
+  }
+}
+"#;
+        let spec = crate::spec::chumsky_adapter::parse_str(SPEC).expect("spec parses");
+        let variants = crate::codegen_shared::checked_arith_error_variants_in_use(&spec);
+        assert!(
+            variants.iter().any(|v| v == "MathUnderflow"),
+            "`-=` must name the underflow variant, got {variants:?}"
+        );
+        assert_eq!(
+            variants.len(),
+            1,
+            "saturating `+=!` cannot fail and must name no variant, got {variants:?}"
+        );
+    }
+
+    /// A spec that already declares the variant must not get a duplicate.
+    #[test]
+    fn declared_variants_are_not_duplicated() {
+        const SPEC: &str = r#"
+spec Repro
+type State
+  | Uninitialized
+  | Active of { owner : Pubkey, total : U64 }
+type Error
+  | MathOverflow
+pda config ["config"]
+handler bump (amount : U64) {
+  accounts { config : writable, pda ["config"] }
+  effect { total += amount }
+}
+"#;
+        let spec = crate::spec::chumsky_adapter::parse_str(SPEC).expect("spec parses");
+        let mir = crate::mir::lower(&spec);
+        let mut codes: Vec<String> = mir.errors.variants.clone();
+        for variant in crate::codegen_shared::checked_arith_error_variants_in_use(&spec) {
+            if !codes.iter().any(|c| c == &variant) {
+                codes.push(variant);
+            }
+        }
+        assert_eq!(
+            codes.iter().filter(|c| *c == "MathOverflow").count(),
+            1,
+            "an already-declared variant must not be re-added: {codes:?}"
+        );
+    }
 
     #[test]
     fn embedded_stamps_stale_detects_spec_revision_drift() {
