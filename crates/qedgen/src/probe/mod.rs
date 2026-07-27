@@ -1064,6 +1064,69 @@ pub fn run_probe(spec_path: &Path, execute_repros: bool) -> Result<ProbeOutput> 
             continue;
         }
 
+        // Parallax lane: `missing_signer` / `lifecycle_one_shot_violation`.
+        // Same generate-then-confirm shape as the boundary harness above,
+        // and for the same reason — a generated test is not evidence that
+        // the test passes. These predicates key off an ABSENT spec clause,
+        // but a program can still be guarded by other means (an `accounts`
+        // block marking an account `signer` enforces a signature with no
+        // `auth` clause anywhere), so promoting without running would
+        // surface precisely the false positives this lane exists to drop.
+        if let Some(attack) = crate::probe_repro::parallax_attack_for(&finding.category) {
+            match crate::probe_repro::write_parallax_repro(&finding, &ctx, attack) {
+                Ok(harness) => {
+                    repro_stats.generated += 1;
+                    if !execute_repros {
+                        candidates.push(
+                            Candidate::from_dropped_finding(
+                                finding,
+                                "Parallax reproducer generated; run it (or pass \
+                                 --execute-repros) to confirm",
+                            )
+                            .with_repro_harness(harness.as_repro_harness()),
+                        );
+                        continue;
+                    }
+                    repro_stats.executed += 1;
+                    match crate::probe_repro::execute_parallax_harness(&harness) {
+                        crate::probe_repro::ExecOutcome::Reproduced => {
+                            repro_stats.reproduced += 1;
+                            finding.reproducer = Some(harness.as_reproducer());
+                            kept.push(finding);
+                        }
+                        crate::probe_repro::ExecOutcome::NotReproduced => {
+                            candidates.push(
+                                Candidate::from_dropped_finding(
+                                    finding,
+                                    "Parallax reproducer ran but the program refused the \
+                                     attack — the guard the predicate reports as absent is \
+                                     enforced by other means",
+                                )
+                                .with_repro_harness(harness.as_repro_harness()),
+                            );
+                        }
+                        crate::probe_repro::ExecOutcome::BuildError(e) => {
+                            repro_stats.build_errors += 1;
+                            candidates.push(
+                                Candidate::from_dropped_finding(
+                                    finding,
+                                    format!("Parallax reproducer could not be built/run: {e}"),
+                                )
+                                .with_repro_harness(harness.as_repro_harness()),
+                            );
+                        }
+                    }
+                }
+                Err(reason) => {
+                    candidates.push(Candidate::from_dropped_finding(
+                        finding,
+                        crate::probe_repro::describe_failure(&reason),
+                    ));
+                }
+            }
+            continue;
+        }
+
         match crate::probe_repro::construct_reproducer(&finding, &ctx) {
             Ok(repro) => {
                 finding.reproducer = Some(repro);

@@ -66,3 +66,22 @@ handler set_fee (amount : U64) {
     total += amount
   }
 }
+
+/// GUARDED BUT FLAGGED. The `missing_signer` predicate fires (no `auth`
+/// clause) yet the program is not exploitable: `owner : signer` enforces a
+/// signature independently of `auth`, and the PDA seed binds the vault to
+/// its caller. Its authority reproducer must be DROPPED.
+///
+/// Its `lifecycle_one_shot_violation` reproducer must still CONFIRM — the
+/// handler really can be replayed. One handler, two claims, opposite
+/// verdicts: that is what per-claim evidence buys.
+handler bump_total (amount : U64) {
+  accounts {
+    owner : signer, writable
+    vault : writable, pda ["vault", owner]
+  }
+
+  effect {
+    total += amount
+  }
+}

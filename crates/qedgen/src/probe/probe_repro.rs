@@ -244,17 +244,109 @@ fn discover_deployed_program(project_root: &Path) -> Option<DeployedProgram> {
     Some(DeployedProgram { address, artifact })
 }
 
-/// Write the Parallax reproducer crate for `finding` and return the
-/// `Reproducer` pointing at it.
+/// A generated Parallax reproducer crate: where it lives and how to run it.
+///
+/// Deliberately NOT a [`Reproducer`]. Generating a test is not evidence that
+/// the test passes, and `construct_reproducer` returning `Ok` is what
+/// promotes a candidate to a finding. A predicate can fire on a handler that
+/// is in fact guarded — `missing_signer` keys off a missing `auth` clause,
+/// but an `accounts` block marking an account `signer` enforces a signature
+/// independently — so confirming without running would surface exactly the
+/// false positives this lane exists to eliminate.
+pub struct ParallaxHarness {
+    /// Test path relative to the project root.
+    rel_test_path: String,
+    /// Absolute path to the generated crate's manifest.
+    manifest: PathBuf,
+    /// `cargo test --test <stem>` target name.
+    test_stem: String,
+    test_fn: String,
+    invocation: String,
+    attack: String,
+}
+
+impl ParallaxHarness {
+    /// The candidate-facing pointer: harness generated, NOT yet run.
+    pub fn as_repro_harness(&self) -> ReproHarness {
+        ReproHarness {
+            path: self.rel_test_path.clone(),
+            invocation: self.invocation.clone(),
+            kind: "parallax_transaction".to_string(),
+            failing_input: self.attack.clone(),
+        }
+    }
+
+    /// The confirmed-finding reproducer — only after the test actually ran
+    /// and the attack committed.
+    pub fn as_reproducer(&self) -> Reproducer {
+        Reproducer::Parallax {
+            test_path: self.rel_test_path.clone(),
+            test_fn: self.test_fn.clone(),
+            invocation: self.invocation.clone(),
+            attack: self.attack.clone(),
+        }
+    }
+}
+
+/// Which attack, if any, this category's reproducer drives. `None` means the
+/// category is not handled by this lane.
+pub fn parallax_attack_for(
+    category: &Category,
+) -> Option<crate::codegen::parallax_repro::ParallaxAttack> {
+    use crate::codegen::parallax_repro::ParallaxAttack;
+    match category {
+        Category::MissingSigner => Some(ParallaxAttack::UnsignedInvocation),
+        Category::LifecycleOneShotViolation => Some(ParallaxAttack::Replay),
+        _ => None,
+    }
+}
+
+/// Build and run the reproducer crate. Exit 0 means the attack committed and
+/// the finding is confirmed; a failing assertion means the program refused
+/// it, so the candidate is dropped.
+pub fn execute_parallax_harness(harness: &ParallaxHarness) -> ExecOutcome {
+    let output = std::process::Command::new("cargo")
+        .arg("test")
+        .arg("--manifest-path")
+        .arg(&harness.manifest)
+        .arg("--test")
+        .arg(&harness.test_stem)
+        .output();
+    match output {
+        Ok(out) if out.status.success() => ExecOutcome::Reproduced,
+        Ok(out) => {
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            // A compile failure is a harness problem, not evidence either
+            // way; a failed assertion IS evidence the guard held.
+            if text.contains("could not compile") || text.contains("error[E") {
+                ExecOutcome::BuildError(
+                    text.lines()
+                        .find(|line| line.starts_with("error"))
+                        .unwrap_or("cargo test failed to build the reproducer")
+                        .to_string(),
+                )
+            } else {
+                ExecOutcome::NotReproduced
+            }
+        }
+        Err(e) => ExecOutcome::BuildError(format!("could not run cargo test: {e}")),
+    }
+}
+
+/// Write the Parallax reproducer crate for `finding`.
 ///
 /// One crate per finding under `target/qedgen-repros/parallax/<id>/`:
 /// ephemeral, never committed, and isolated from the Mollusk repro crate
 /// whose `solana-account 3` cannot coexist with Parallax's `4.x`.
-fn write_parallax_repro(
+pub fn write_parallax_repro(
     finding: &Finding,
     ctx: &ReproducerContext,
     attack: crate::codegen::parallax_repro::ParallaxAttack,
-) -> Result<Reproducer, ConstructFailure> {
+) -> Result<ParallaxHarness, ConstructFailure> {
     let handler = ctx
         .spec
         .handlers
@@ -310,15 +402,18 @@ fn write_parallax_repro(
             .display()
             .to_string()
     };
-    Ok(Reproducer::Parallax {
-        test_path: rel(&test_file),
+    let manifest_path = crate_dir.join("Cargo.toml");
+    Ok(ParallaxHarness {
+        rel_test_path: rel(&test_file),
         test_fn: format!("probe_{}_{}", handler.name, attack_suffix(attack)),
         invocation: format!(
             "cargo test --manifest-path {} --test {}",
-            rel(&crate_dir.join("Cargo.toml")),
+            rel(&manifest_path),
             test_stem
         ),
         attack: generated.attack,
+        manifest: manifest_path,
+        test_stem,
     })
 }
 
@@ -351,39 +446,28 @@ fn construct_unbounded_amount_param(
 /// Proptest seed: invoke in an unintended lifecycle state, assert effects
 /// fired anyway.
 ///
-/// Parallax: invoke the handler twice against the same state. BOTH
-/// committing is the evidence — nothing pins it to a single lifecycle
-/// state. A program that guards correctly rejects the second call, the
-/// assertion fails, and the candidate is dropped.
+/// Handled upstream in `run_probe` via [`write_parallax_repro`] +
+/// [`execute_parallax_harness`], because confirmation requires RUNNING the
+/// reproducer and this dispatcher's `Ok` means "confirmed". Reaching here is
+/// out-of-band.
 fn construct_lifecycle_one_shot_violation(
-    finding: &Finding,
-    ctx: &ReproducerContext,
+    _finding: &Finding,
+    _ctx: &ReproducerContext,
 ) -> Result<Reproducer, ConstructFailure> {
-    write_parallax_repro(
-        finding,
-        ctx,
-        crate::codegen::parallax_repro::ParallaxAttack::Replay,
-    )
+    Err(ConstructFailure::NotImplemented)
 }
 
 /// Sandbox tx: invoke from an unauthorized signer (litesvm); observe the
 /// state change occurs without auth.
 ///
-/// Parallax: invoke with every account meta unsigned. The program
-/// COMMITTING is the evidence that no authority gate stands between a
-/// caller and the handler's effects. Note that an `accounts` block marking
-/// an account `signer` enforces a signature independently of `auth`, so a
-/// handler the predicate flags may still be guarded — that case fails the
-/// assertion and is correctly dropped.
+/// Handled upstream in `run_probe` — see
+/// [`construct_lifecycle_one_shot_violation`] for why confirmation cannot
+/// happen in this dispatcher.
 fn construct_missing_signer(
-    finding: &Finding,
-    ctx: &ReproducerContext,
+    _finding: &Finding,
+    _ctx: &ReproducerContext,
 ) -> Result<Reproducer, ConstructFailure> {
-    write_parallax_repro(
-        finding,
-        ctx,
-        crate::codegen::parallax_repro::ParallaxAttack::UnsignedInvocation,
-    )
+    Err(ConstructFailure::NotImplemented)
 }
 
 /// May need spec-less mode: the spec doesn't carry the impl's CPI list,

@@ -204,6 +204,15 @@ jobs:
           cargo build -p qedgen-solana-skills --bin qedgen
           cargo test -p qedgen-sandbox --test runtime_journey -- --ignored --nocapture
 
+      # Lives here rather than in the gate job because it needs the Solana
+      # platform tools: it builds an SBF program and RUNS the generated
+      # reproducers against it. That execution is the only thing that
+      # separates a real bug from a guarded handler the predicate still
+      # flags — the repro compiles either way, so no cheaper check can.
+      # Serial: both tests stage the same fixture.
+      - name: Parallax reproducer gate
+        run: cargo test -p qedgen-solana-skills --test parallax_repro_gate -- --ignored --test-threads=1
+
   # Supply-chain gate. Runs independently of `test` so an advisory
   # publish doesn't block a feature PR's other checks from reporting,
   # and so the cargo-audit / cargo-deny tool installs don't bloat the
