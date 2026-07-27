@@ -142,7 +142,8 @@ the spec; `verify` validates the code the spec produced. With no backend
 flags, runs every backend whose artifact is present on disk
 (`./programs/tests/proptest.rs`, `./programs/tests/kani.rs`,
 `./formal_verification/`). Use `--proptest` / `--kani` / `--lean` to
-target one backend.
+target one backend. Supplying flagless `--program <crate>` also runs the
+`scaffold` backend (`cargo check --tests`) in that program crate.
 
 v2.44 — every run also records its evidence to
 `<spec_dir>/.qed/verify-evidence.json` (spec hash, optional program-source
@@ -163,6 +164,9 @@ $QEDGEN verify --spec my_program.qedspec --proptest
 $QEDGEN verify --spec my_program.qedspec --kani
 $QEDGEN verify --spec my_program.qedspec --lean
 
+# Compile the generated program crate as a verify backend.
+$QEDGEN verify --spec my_program.qedspec --program ./programs/my_program --scaffold
+
 # CI gating
 $QEDGEN verify --spec my_program.qedspec --fail-fast --json
 
@@ -181,7 +185,8 @@ $QEDGEN verify --spec my_program.qedspec --check-upstream --upstream-stale-ok
 | Flag | Type | Default | Description |
 |---|---|---|---|
 | `--spec` | Path | required | Spec file (`.qedspec`) |
-| `--program` | Path | none | Program crate to hash into implementation-bound evidence; required before `stamp` can consume that evidence |
+| `--program` | Path | none | Program crate selected by source-bound backends and hashed into their evidence; required before `stamp` can consume eligible implementation-bound evidence |
+| `--scaffold` | bool | auto with flagless `--program` | Run `cargo check --tests` in the `--program` crate. Requires `--program`; explicit backend selection remains exact. Compilation proves buildability, not semantic conformance, and cannot authorize `stamp`. |
 | `--proptest` | bool | false | Run proptest harnesses (`cargo test --release`) |
 | `--proptest-path` | Path | `./programs/tests/proptest.rs` | Proptest harness file |
 | `--kani` | bool | false | Run Kani BMC harnesses (`cargo kani --tests`) |
@@ -202,5 +207,4 @@ $QEDGEN verify --spec my_program.qedspec --check-upstream --upstream-stale-ok
 | `--crucible-stateful` | bool | false | Stateful action-chain mode for `--crucible`. |
 | `--recursive` | bool | false | v2.27 Track D3 — DFS-walk the transitive proof-package closure (deduped by path) and run `lake build` per layer. Per-layer PASS/FAIL is reported; failed layers print the first ~10 lines of stderr/stdout. Exits non-zero on any layer failure; emits "every imported proof package built clean" when all pass. No-op success when the spec imports nothing with `verified = true` in `qed.lock`. |
 | `--require-verified` | bool | false | v2.27 Track D2 — exits non-zero before any backend dispatches if any imported Tier-1+ interface (binary_hash + `ensures`) did NOT ship a `.qed/proofs/<Iface>.lean + lakefile.lean` package alongside. Tier-0 (no ensures) and sentinel-pinned natives (all-zero binary_hash) are exempt. Default-off in v2.27 because the bundled stdlib still ships Stance 1 for `import System from "system"` (no bundled proof package for Pubkey-param handlers). |
-| `--strict` | bool | false | #332 — recompute the reconciled backend-obligation manifest (kani / lean / proptest, in memory) and exit 1 on any `unsupported` or `failed` entry. A passing strict verify means no requested obligation was silently dropped by a backend. Remaining `unsupported` shapes (v2.48.0): property preservation that spans account modules (kani/lean), Lean abort predicates with multi-projection account reads, CPI ensures composition at call sites without `state_binders`, and guard-rejection tests whose guard does not survive the simplified proptest model. Specs with these shapes fail strict verify by design. |
-
+| `--strict` | bool | false | Fail when an enabled scaffold backend is skipped. Also recompute the reconciled backend-obligation manifest (kani / lean / proptest, in memory) and exit 1 on any `unsupported` or `failed` entry. A passing strict verify means no requested obligation was silently dropped by a backend. Remaining `unsupported` shapes (v2.48.0): property preservation that spans account modules (kani/lean), Lean abort predicates with multi-projection account reads, CPI ensures composition at call sites without `state_binders`, and guard-rejection tests whose guard does not survive the simplified proptest model. Specs with these shapes fail strict verify by design. |

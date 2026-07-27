@@ -129,9 +129,15 @@ qedgen init --name my_program --spec my_program.qedspec --target anchor
 qedgen check
 qedgen codegen --all
 
-# 3. Fill generated Rust handler TODOs, then run backend verification
-qedgen verify
+# 3. Fill generated Rust handler TODOs, then verify the program crate
+qedgen verify --program ./programs/my_program
 ```
+
+When `--program <crate>` is supplied without explicit backend flags, verify
+also runs the `scaffold` backend (`cargo check --tests`) so generated Rust
+compile failures surface inside QEDGen. Use `--scaffold` to combine that check
+with an explicitly selected backend. A scaffold pass proves buildability, not
+spec conformance, and cannot authorize `qedgen stamp`.
 
 ### Stuck? File feedback
 

@@ -750,9 +750,11 @@ pub(crate) enum Commands {
 
     /// Run the generated harnesses against the generated implementation.
     ///
-    /// `check` validates the spec; `verify` validates the code the spec
-    /// produced. Default (no flags) runs every backend whose artifact is
-    /// present on disk. Use --proptest/--kani/--lean to target one backend.
+    /// `check` validates the spec; `verify` runs proof backends and can
+    /// compile a selected program crate. Default (no flags) runs every
+    /// backend whose artifact is present on disk. With `--program`, it also
+    /// runs `cargo check --tests` to establish buildability, not semantic
+    /// conformance. Use --proptest/--kani/--lean to target one backend.
     Verify {
         /// Path to the spec file (.qedspec). Optional — falls back to the
         /// `spec` field in the nearest `.qed/config.json` discovered by
@@ -760,16 +762,17 @@ pub(crate) enum Commands {
         #[arg(long)]
         spec: Option<PathBuf>,
 
-        /// Program crate whose implementation is exercised by an
-        /// implementation-bound backend. Required for verification evidence
-        /// that can authorize `qedgen stamp`: the source-tree hash recorded
-        /// here must still match the crate passed to `stamp`.
+        /// Program crate selected by source-bound backends. Its source-tree
+        /// hash is retained in verification evidence. Authorizing
+        /// `qedgen stamp` additionally requires a passing implementation-bound
+        /// backend, and the hash must still match the crate passed to `stamp`.
         #[arg(long)]
         program: Option<PathBuf>,
 
         /// Compile the selected program crate with `cargo check --tests`.
         /// Requires `--program`. With no explicit backend flags, supplying
-        /// `--program` enables this backend automatically.
+        /// `--program` enables this backend automatically. This establishes
+        /// buildability, not semantic conformance.
         #[arg(long, requires = "program")]
         scaffold: bool,
 
@@ -907,7 +910,9 @@ pub(crate) enum Commands {
         #[arg(long)]
         recursive: bool,
 
-        /// #332 — fail unless every backend obligation is `emitted`.
+        /// Fail if an enabled scaffold backend is skipped.
+        ///
+        /// #332 — also fail unless every backend obligation is `emitted`.
         /// Recomputes the reconciled backend-obligation manifest in
         /// memory (kani / lean / proptest) and exits 1 on any
         /// `unsupported` or `failed` entry: a passing strict verify
