@@ -291,6 +291,26 @@ pub enum Reproducer {
         /// `qedgen probe --fill-repros` fills the TODOs.
         needs_fill: bool,
     },
+    /// Parallax-driven Rust integration test under
+    /// `<project_root>/target/qedgen-repros/parallax/`. Drives an attack
+    /// transaction at the DEPLOYED `.so` through LiteSVM and asserts it
+    /// COMMITS — the evidence that the guard the finding names is absent.
+    ///
+    /// A separate variant from [`Reproducer::Sandbox`] rather than a flag on
+    /// it: the two cannot share a crate (Mollusk pulls `solana-account 3`,
+    /// Parallax `4.x`), they assert opposite polarities, and a closed enum
+    /// makes every consumer handle the difference explicitly.
+    Parallax {
+        /// Path to the generated test file, relative to the project root.
+        test_path: String,
+        /// Test function name (`probe_<handler>_<attack>`).
+        test_fn: String,
+        /// Exact invocation that runs just this test; exits 0 iff the
+        /// attack reproduces.
+        invocation: String,
+        /// The attack the harness drives, for human inspection.
+        attack: String,
+    },
     /// Pinocchio probe: structured prompt the audit subagent expands into
     /// a Mollusk-driven Rust test. The CLI emits the prompt + substitution
     /// map; the agent writes the `repro.rs` body. Template-driven (one

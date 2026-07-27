@@ -78,7 +78,7 @@ fn parallax_dependency_line() -> String {
 /// Solana crates held at the versions Parallax 0.1 resolves against. A
 /// dependency's `Cargo.lock` is not inherited by consumers, so without these
 /// a fresh resolve picks the wincode-0.6 line and fails to compile.
-fn parallax_dev_dependencies() -> String {
+pub(crate) fn parallax_dev_dependencies() -> String {
     format!(
         "{}\n\
          solana-sdk-ids = \"3.1\"\n\

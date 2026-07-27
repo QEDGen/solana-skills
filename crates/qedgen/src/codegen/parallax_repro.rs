@@ -67,12 +67,6 @@
 //! `signer` account and a caller-seeded PDA was not exploitable at all, and
 //! the reproducer correctly refused to confirm it.
 
-// Generation is complete and verified two-sided (see the module docs), but
-// `probe_repro`'s per-category constructors do not call it yet: they still
-// need the deployed program's address and `.so` path, which the reproducer
-// context does not carry today.
-#![allow(dead_code)]
-
 use crate::check::{ParsedHandler, ParsedSpec};
 
 /// A generated Parallax reproducer: source plus the human-readable
@@ -120,8 +114,13 @@ impl ParallaxAttack {
 
 /// Generate the reproducer for `handler` under `attack`.
 ///
-/// `program_id` is the deployed address the repro sends to, and
-/// `so_relative_path` locates the built artifact from the repro crate.
+/// `program_id` is the deployed address the repro sends to.
+/// `program_path_expr` is a complete Rust expression evaluating to the
+/// artifact path — a quoted absolute path from the probe layer, or a
+/// `concat!(env!("CARGO_MANIFEST_DIR"), …)` from a fixture. Taking an
+/// expression rather than a relative fragment keeps path arithmetic out of
+/// this module; getting that arithmetic wrong produced a repro that failed
+/// to load the program at all.
 /// Anchor-shaped instruction data (8-byte `sha256("global:<name>")`
 /// discriminator) — the caller gates on target, since a Pinocchio program
 /// tags its instructions differently.
@@ -130,7 +129,7 @@ pub fn generate(
     handler: &ParsedHandler,
     attack: ParallaxAttack,
     program_id: &str,
-    so_relative_path: &str,
+    program_path_expr: &str,
 ) -> GeneratedParallaxRepro {
     let mut out = String::new();
     let test_fn = format!("probe_{}_{}", handler.name, attack.test_fn_suffix());
@@ -155,23 +154,23 @@ pub fn generate(
     out.push_str("    PROGRAM_ID.parse().expect(\"program id\")\n");
     out.push_str("}\n\n");
 
-    // Anchor instruction discriminator. Computed in the repro rather than
-    // baked in, so the harness stays readable and reviewable.
-    out.push_str("/// `sha256(\"global:<name>\")[..8]` — the Anchor discriminator.\n");
-    out.push_str("fn discriminator(handler: &str) -> Vec<u8> {\n");
-    out.push_str("    let hex = qedgen_hash_core::sha256_hex16(&format!(\"global:{handler}\"));\n");
-    out.push_str("    (0..8)\n");
-    out.push_str(
-        "        .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).expect(\"hex byte\"))\n",
-    );
-    out.push_str("        .collect()\n");
-    out.push_str("}\n\n");
+    // Discriminators are constants, so they are computed HERE and emitted as
+    // byte literals. A runtime `sha256` helper would drag a hashing crate
+    // into every generated repro for a value that can never change — and the
+    // repro crate is standalone, so every dependency it names has to be
+    // declared in a manifest this module also writes.
+    out.push_str(&format!(
+        "/// Anchor instruction discriminator: `sha256(\"global:{}\")[..8]`.\n",
+        handler.name
+    ));
+    out.push_str(&format!(
+        "const IX_DISCRIMINATOR: [u8; 8] = {};\n\n",
+        discriminator_literal(&format!("global:{}", handler.name))
+    ));
 
     out.push_str("fn ctx() -> Ctx {\n");
     out.push_str("    Ctx::builder(program_id())\n");
-    out.push_str(&format!(
-        "        .program_path(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"{so_relative_path}\"))\n"
-    ));
+    out.push_str(&format!("        .program_path({program_path_expr})\n"));
     out.push_str("        .build()\n");
     out.push_str("        .expect(\"load the program under test\")\n");
     out.push_str("}\n\n");
@@ -213,15 +212,13 @@ fn emit_state_bytes_helper(out: &mut String, spec: &ParsedSpec, handler: &Parsed
         crate::codegen_shared::to_pascal_case(&spec.program_name)
     );
 
-    out.push_str("/// `sha256(\"account:<Name>\")[..8]` — Anchor's account discriminator.\n");
-    out.push_str("fn account_discriminator(name: &str) -> Vec<u8> {\n");
-    out.push_str("    let hex = qedgen_hash_core::sha256_hex16(&format!(\"account:{name}\"));\n");
-    out.push_str("    (0..8)\n");
-    out.push_str(
-        "        .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).expect(\"hex byte\"))\n",
-    );
-    out.push_str("        .collect()\n");
-    out.push_str("}\n\n");
+    out.push_str(&format!(
+        "/// Anchor account discriminator: `sha256(\"account:{state_name}\")[..8]`.\n"
+    ));
+    out.push_str(&format!(
+        "const ACCOUNT_DISCRIMINATOR: [u8; 8] = {};\n\n",
+        discriminator_literal(&format!("account:{state_name}"))
+    ));
 
     out.push_str(
         "/// Pre-state the handler decodes. Without it the program aborts with\n\
@@ -229,9 +226,7 @@ fn emit_state_bytes_helper(out: &mut String, spec: &ParsedSpec, handler: &Parsed
          /// reproducer would report \"no bug\" for entirely the wrong reason.\n",
     );
     out.push_str("fn state_bytes(bump: u8) -> Vec<u8> {\n");
-    out.push_str(&format!(
-        "    let mut data = account_discriminator(\"{state_name}\");\n"
-    ));
+    out.push_str("    let mut data = ACCOUNT_DISCRIMINATOR.to_vec();\n");
     for (name, ty) in &spec.state_fields {
         out.push_str(&format!("    {} // {name}: {ty}\n", zero_field_expr(ty)));
     }
@@ -347,15 +342,9 @@ fn emit_test(
     }
     out.push_str("        ],\n");
     if handler.takes_params.is_empty() {
-        out.push_str(&format!(
-            "        data: discriminator(\"{}\"),\n",
-            handler.name
-        ));
+        out.push_str("        data: IX_DISCRIMINATOR.to_vec(),\n");
     } else {
-        out.push_str(&format!(
-            "        data: {{\n            let mut data = discriminator(\"{}\");\n",
-            handler.name
-        ));
+        out.push_str("        data: {\n            let mut data = IX_DISCRIMINATOR.to_vec();\n");
         for (name, ty) in &handler.takes_params {
             out.push_str(&format!(
                 "            data.extend_from_slice(&{}); // {name}: {ty}\n",
@@ -427,6 +416,15 @@ fn account_meta_expr(account: &crate::check::ParsedHandlerAccount, is_signer: bo
     }
 }
 
+/// Render `sha256(<preimage>)[..8]` as a Rust byte-array literal.
+fn discriminator_literal(preimage: &str) -> String {
+    let hex = qedgen_hash_core::sha256_hex16(preimage);
+    let bytes: Vec<String> = (0..8)
+        .map(|index| format!("0x{}", &hex[index * 2..index * 2 + 2]))
+        .collect();
+    format!("[{}]", bytes.join(", "))
+}
+
 /// A concrete witness value for an instruction parameter. Any in-domain
 /// value demonstrates an absent guard, so `1` is used for integers rather
 /// than a boundary value — this lane proves the guard is missing, not that
@@ -494,7 +492,7 @@ handler bump_total (amount : U64) {
             &handler(&spec, "bump_total"),
             ParallaxAttack::UnsignedInvocation,
             "Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS",
-            "/../program/target/deploy/vulnerable.so",
+            "concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../program/target/deploy/vulnerable.so\")",
         );
 
         assert!(
@@ -516,7 +514,7 @@ handler bump_total (amount : U64) {
                 &handler(&spec, "bump_total"),
                 attack,
                 "Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS",
-                "/../program/target/deploy/vulnerable.so",
+                "concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../program/target/deploy/vulnerable.so\")",
             );
             assert!(
                 generated.source.contains("check(Outcome::success())"),
@@ -539,7 +537,7 @@ handler bump_total (amount : U64) {
             &handler(&spec, "bump_total"),
             ParallaxAttack::Replay,
             "Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS",
-            "/../program/target/deploy/vulnerable.so",
+            "concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../program/target/deploy/vulnerable.so\")",
         );
         assert_eq!(
             generated.source.matches("test.execute(").count(),
@@ -561,7 +559,7 @@ handler bump_total (amount : U64) {
             &handler(&spec, "bump_total"),
             ParallaxAttack::UnsignedInvocation,
             "Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS",
-            "/../program/target/deploy/vulnerable.so",
+            "concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../program/target/deploy/vulnerable.so\")",
         );
 
         assert!(
@@ -574,8 +572,22 @@ handler bump_total (amount : U64) {
         assert!(
             generated
                 .source
-                .contains("account_discriminator(\"VulnerableAccount\")"),
+                .contains("const ACCOUNT_DISCRIMINATOR: [u8; 8] = [0x"),
             "state bytes must lead with Anchor's account discriminator:\n{}",
+            generated.source
+        );
+        assert!(
+            generated
+                .source
+                .contains("let mut data = ACCOUNT_DISCRIMINATOR.to_vec();"),
+            "state bytes must start from that discriminator:\n{}",
+            generated.source
+        );
+        // A standalone repro crate can only name deps its own manifest
+        // declares, so discriminators must be literals, not a runtime hash.
+        assert!(
+            !generated.source.contains("qedgen_hash_core"),
+            "the repro must not depend on a hashing crate:\n{}",
             generated.source
         );
         assert!(
@@ -605,7 +617,7 @@ handler bump_total (amount : U64) {
             &handler(&spec, "open"),
             ParallaxAttack::UnsignedInvocation,
             "Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS",
-            "/../program/target/deploy/vulnerable.so",
+            "concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../program/target/deploy/vulnerable.so\")",
         );
 
         assert!(
@@ -633,7 +645,7 @@ handler bump_total (amount : U64) {
             &handler(&spec, "bump_total"),
             ParallaxAttack::UnsignedInvocation,
             "Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS",
-            "/../program/target/deploy/vulnerable.so",
+            "concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../program/target/deploy/vulnerable.so\")",
         );
         assert!(generated
             .source
@@ -653,7 +665,7 @@ handler bump_total (amount : U64) {
             &handler(&spec, "bump_total"),
             ParallaxAttack::UnsignedInvocation,
             "Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS",
-            "/../program/target/deploy/vulnerable.so",
+            "concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../program/target/deploy/vulnerable.so\")",
         );
         assert!(generated.source.contains("1u64.to_le_bytes()"));
     }

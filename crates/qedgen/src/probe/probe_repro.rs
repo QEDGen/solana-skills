@@ -12,12 +12,26 @@
 //! ephemeral, never committed.
 //!
 //! The reproducer vertical slice (#228) lands real reproducers category by
-//! category. The first is `ArithmeticOverflowWrapping`, handled by
+//! category. `ArithmeticOverflowWrapping` is handled by
 //! [`build_arith_overflow_harness`] (a generated boundary program, run only
-//! under `--execute-repros`) rather than [`construct_reproducer`], whose
-//! per-category constructors are still stubs (`NotImplemented`) — those
-//! categories surface as candidates until their reproducer lands. The auditor
-//! SKILL writes Mollusk repros directly in the meantime.
+//! under `--execute-repros`) rather than [`construct_reproducer`].
+//!
+//! `MissingSigner` and `LifecycleOneShotViolation` are Parallax-driven: the
+//! constructor discovers the deployed program under the project root
+//! (`declare_id!` plus a built `.so`), generates a transaction that performs
+//! the attack, and writes a standalone repro crate under
+//! `target/qedgen-repros/parallax/<id>/`. These assert the attack COMMITS —
+//! an absent guard is proven by the program accepting what it should refuse
+//! — which is the opposite polarity from the integration scaffold. Verified
+//! both ways against `tests/fixtures/parallax-repro-gate`: the vulnerable
+//! handler's repros fire, the guarded handler produces no finding at all.
+//! An unbuilt program yields `BuildError`, so the candidate is dropped with
+//! a reason rather than silently confirmed.
+//!
+//! The remaining per-category constructors are still stubs
+//! (`NotImplemented`) — those categories surface as candidates until their
+//! reproducer lands. The auditor SKILL writes Mollusk repros in the
+//! meantime.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -176,6 +190,146 @@ pub fn construct_reproducer(
 // witness tests against the operator alone.
 // ---------------------------------------------------------------------------
 
+/// The deployed program a Parallax reproducer drives: its on-chain address
+/// and the built `.so`.
+///
+/// Discovered from the project root rather than configured: `qed.toml`
+/// carries no program id, and requiring one would make the whole lane
+/// opt-in. The address is the scaffold's own `declare_id!`, so it is always
+/// in sync with the program the user actually built.
+struct DeployedProgram {
+    address: String,
+    /// Absolute path to the artifact.
+    artifact: PathBuf,
+}
+
+/// Find `declare_id!("…")` and a built `.so` under `project_root`.
+///
+/// `None` when either is absent — most often "the program was never built".
+/// That is a legitimate outcome, not an error: the caller drops the
+/// candidate with a reason, which is exactly the reproducer-only contract.
+fn discover_deployed_program(project_root: &Path) -> Option<DeployedProgram> {
+    let lib_candidates = [
+        project_root.join("programs/src/lib.rs"),
+        project_root.join("program/src/lib.rs"),
+        project_root.join("src/lib.rs"),
+    ];
+    let address = lib_candidates.iter().find_map(|path| {
+        let source = std::fs::read_to_string(path).ok()?;
+        source.lines().find_map(|line| {
+            let rest = line.trim().strip_prefix("declare_id!(\"")?;
+            let end = rest.find('"')?;
+            Some(rest[..end].to_string())
+        })
+    })?;
+
+    let deploy_candidates = [
+        project_root.join("programs/target/deploy"),
+        project_root.join("program/target/deploy"),
+        project_root.join("target/deploy"),
+    ];
+    // Canonicalized: `project_root` comes from the spec path, which is
+    // relative whenever the user runs `qedgen probe --spec foo.qedspec` from
+    // the project directory. The repro crate lives several levels below
+    // `target/`, so a relative artifact path there resolves to nothing.
+    let artifact = deploy_candidates.iter().find_map(|dir| {
+        let entries = std::fs::read_dir(dir).ok()?;
+        entries
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "so"))
+            .and_then(|path| path.canonicalize().ok())
+    })?;
+
+    Some(DeployedProgram { address, artifact })
+}
+
+/// Write the Parallax reproducer crate for `finding` and return the
+/// `Reproducer` pointing at it.
+///
+/// One crate per finding under `target/qedgen-repros/parallax/<id>/`:
+/// ephemeral, never committed, and isolated from the Mollusk repro crate
+/// whose `solana-account 3` cannot coexist with Parallax's `4.x`.
+fn write_parallax_repro(
+    finding: &Finding,
+    ctx: &ReproducerContext,
+    attack: crate::codegen::parallax_repro::ParallaxAttack,
+) -> Result<Reproducer, ConstructFailure> {
+    let handler = ctx
+        .spec
+        .handlers
+        .iter()
+        .find(|h| h.name == finding.handler)
+        .ok_or(ConstructFailure::NotImplemented)?;
+
+    let Some(program) = discover_deployed_program(&ctx.project_root) else {
+        return Err(ConstructFailure::BuildError(
+            "no compiled program found — build it (`cargo build-sbf`) so the \
+             reproducer can drive a real transaction at it"
+                .to_string(),
+        ));
+    };
+
+    let crate_dir = ctx
+        .project_root
+        .join("target/qedgen-repros/parallax")
+        .join(&finding.id);
+    let tests_dir = crate_dir.join("tests");
+    std::fs::create_dir_all(&tests_dir)
+        .map_err(|e| ConstructFailure::Io(format!("create repro crate dir: {e}")))?;
+
+    // The repro crate is ephemeral and machine-local, so it embeds the
+    // artifact's ABSOLUTE path. `{:?}` quotes and escapes it into a Rust
+    // string literal, which also survives spaces in the project path.
+    let generated = crate::codegen::parallax_repro::generate(
+        ctx.spec,
+        handler,
+        attack,
+        &program.address,
+        &format!("{:?}", program.artifact.display().to_string()),
+    );
+
+    let test_stem = format!("probe_{}", finding.id);
+    let test_file = tests_dir.join(format!("{test_stem}.rs"));
+    std::fs::write(&test_file, &generated.source)
+        .map_err(|e| ConstructFailure::Io(format!("write repro test: {e}")))?;
+
+    let manifest = format!(
+        "[package]\nname = \"qedgen-repro-{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+         # Standalone workspace: the repro must not be absorbed by the user's.\n\
+         [workspace]\n\n[dependencies]\n\n[dev-dependencies]\n{}",
+        finding.id,
+        crate::codegen::integration_test::parallax_dev_dependencies()
+    );
+    std::fs::write(crate_dir.join("Cargo.toml"), manifest)
+        .map_err(|e| ConstructFailure::Io(format!("write repro manifest: {e}")))?;
+
+    let rel = |path: &Path| {
+        path.strip_prefix(&ctx.project_root)
+            .unwrap_or(path)
+            .display()
+            .to_string()
+    };
+    Ok(Reproducer::Parallax {
+        test_path: rel(&test_file),
+        test_fn: format!("probe_{}_{}", handler.name, attack_suffix(attack)),
+        invocation: format!(
+            "cargo test --manifest-path {} --test {}",
+            rel(&crate_dir.join("Cargo.toml")),
+            test_stem
+        ),
+        attack: generated.attack,
+    })
+}
+
+fn attack_suffix(attack: crate::codegen::parallax_repro::ParallaxAttack) -> &'static str {
+    use crate::codegen::parallax_repro::ParallaxAttack;
+    match attack {
+        ParallaxAttack::UnsignedInvocation => "unsigned_invocation_is_accepted",
+        ParallaxAttack::Replay => "replay_is_accepted",
+    }
+}
+
 /// Mollusk sandbox tx: drive overflow-triggering params (e.g. `u64::MAX`
 /// into a `+=?` field), observe the wrap propagated to post-state.
 fn construct_arithmetic_overflow_wrapping(
@@ -196,20 +350,40 @@ fn construct_unbounded_amount_param(
 
 /// Proptest seed: invoke in an unintended lifecycle state, assert effects
 /// fired anyway.
+///
+/// Parallax: invoke the handler twice against the same state. BOTH
+/// committing is the evidence — nothing pins it to a single lifecycle
+/// state. A program that guards correctly rejects the second call, the
+/// assertion fails, and the candidate is dropped.
 fn construct_lifecycle_one_shot_violation(
-    _finding: &Finding,
-    _ctx: &ReproducerContext,
+    finding: &Finding,
+    ctx: &ReproducerContext,
 ) -> Result<Reproducer, ConstructFailure> {
-    Err(ConstructFailure::NotImplemented)
+    write_parallax_repro(
+        finding,
+        ctx,
+        crate::codegen::parallax_repro::ParallaxAttack::Replay,
+    )
 }
 
 /// Sandbox tx: invoke from an unauthorized signer (litesvm); observe the
 /// state change occurs without auth.
+///
+/// Parallax: invoke with every account meta unsigned. The program
+/// COMMITTING is the evidence that no authority gate stands between a
+/// caller and the handler's effects. Note that an `accounts` block marking
+/// an account `signer` enforces a signature independently of `auth`, so a
+/// handler the predicate flags may still be guarded — that case fails the
+/// assertion and is correctly dropped.
 fn construct_missing_signer(
-    _finding: &Finding,
-    _ctx: &ReproducerContext,
+    finding: &Finding,
+    ctx: &ReproducerContext,
 ) -> Result<Reproducer, ConstructFailure> {
-    Err(ConstructFailure::NotImplemented)
+    write_parallax_repro(
+        finding,
+        ctx,
+        crate::codegen::parallax_repro::ParallaxAttack::UnsignedInvocation,
+    )
 }
 
 /// May need spec-less mode: the spec doesn't carry the impl's CPI list,
