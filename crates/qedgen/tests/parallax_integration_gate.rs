@@ -23,12 +23,20 @@
 //! symbol the emitters name (`system_program`, `DEFAULT_WALLET_LAMPORTS`,
 //! `SPL_TOKEN_PROGRAM_ID`, `Instruction`, `Pubkey`, `Cu`).
 //!
-//! NOT COVERED — the Quasar client boundary. `codegen --target quasar`
-//! emits `quasar-lang = { version = "0.0.0" }`, a placeholder that resolves
-//! from no registry, so a real Quasar crate cannot be built in CI. The stub
-//! mirrors the shapes Quasar codegen produces; if Quasar's own output moves,
-//! this gate will not catch it. That is a known, separately-tracked gap —
-//! see `docs/framework-support.md`.
+//! NOT COVERED — the Quasar client boundary, because the generated Quasar
+//! program does not compile at all today.
+//!
+//! `quasar-lang` 0.0.0 IS published and resolves (an earlier version of this
+//! comment claimed otherwise; that was wrong and unverified). The real
+//! blocker is a type mismatch: quasar-lang is `#![no_std]` and addresses are
+//! `solana_address::Address`, while `map_type_quasar` shares Anchor's
+//! mapping and emits `Pubkey`, which quasar-lang does not define. A
+//! `codegen --target quasar` of the bundled multisig example fails with 13
+//! errors, starting with "cannot find type `Pubkey` in this scope".
+//!
+//! So the stub below mirrors the shapes Quasar codegen produces, and if
+//! Quasar's own output moves this gate will not catch it. Closing that needs
+//! the codegen fixed first, not more gate. Separately tracked.
 //!
 //! `#[ignore]`: pulls LiteSVM + the Agave runtime on first run (network,
 //! multi-minute cold compile). CI runs it with `-- --ignored`, like

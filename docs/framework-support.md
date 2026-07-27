@@ -30,7 +30,7 @@ sBPF assembly is selected by `pragma sbpf` in the spec, not by a `Target`.
 | Kani spec-model (`kani_mir`) | ✅ ¹ ⁴ | ✅ ¹ ⁴ | ✅ ¹ ⁴ | n/a | skip by design |
 | impl-Kani (`kani_impl`) | ✅ greenfield + state-struct (#162) + Context (#169) | ⚠️ greenfield shape only | ⚠️ own `#[repr(C)]` shape; some ix-data field types TODO | ❌ | ❌ |
 | proptest (`proptest_gen_mir`) | ✅ ⁵ | ✅ ⁵ | ✅ ⁵ | n/a | skip by design |
-| Parallax/LiteSVM integration tests (`integration_test`) | ❌ adapter pending | ✅ compiled `.so` + account/outcome fixtures ⁶ | ❌ adapter pending | ❌ | ❌ |
+| Parallax/LiteSVM integration tests (`integration_test`) | ❌ adapter pending | ⚠️ scaffold emitted, but no Quasar program compiles ⁶ | ❌ adapter pending | ❌ | ❌ |
 | Lean (`lean_gen_mir`) | ✅ ² ³ | ✅ ² ³ | ✅ ² ³ | n/a | ✅ dedicated sBPF path |
 | Probe: runtime-agnostic scanners (`run_helpers`) | ✅ (#196) | ✅ (#196) | ✅ | ✅ (#196) | ❌ bootstrap only |
 | Probe: IDL-enrichment overlay (`probe/idl_overlay`) | ✅ enrich + narrow (#235); unbuilt → `derivable_idl` (#238) | ✅ enrich + narrow (#235); unbuilt → `derivable_idl` (#238) | ✅ enrich + handler fill | ⚠️ enrich only (declarative flags) | ❌ |
@@ -98,9 +98,22 @@ cannot fail, and the scaffold points at a measured budget instead.
 `parallax-svm` is pinned to a git revision (it is not published to
 crates.io), and `crates/qedgen/tests/parallax_integration_gate.rs` compiles
 the generated scaffold against that pin in CI. The gate covers the Parallax
-surface only — `codegen --target quasar` emits `quasar-lang = "0.0.0"`, a
-placeholder that resolves from no registry, so the Quasar client boundary
-cannot be compiled in CI and stays ungated.
+surface only; the Quasar client boundary stays ungated.
+
+The reason is worse than a missing gate. **A generated Quasar program does
+not compile today.** `quasar-lang` 0.0.0 is published and resolves fine, but
+it is `#![no_std]` and its addresses are `solana_address::Address`, while
+`map_type_quasar` shares Anchor's mapping and emits `Pubkey` — a type
+quasar-lang does not define. `codegen --target quasar` on the bundled
+multisig spec fails with 13 errors, the first being "cannot find type
+`Pubkey` in this scope". No Quasar artifact in this repo has ever been
+compiled, which is how the gap survived: the snapshot suites compare text and
+the #294 artifact gate is Anchor-only.
+
+(An earlier revision of this note claimed `quasar-lang` "resolves from no
+registry". That was asserted from the `0.0.0` version string without checking
+crates.io, and it is wrong. The dependency resolves; the emitted code does
+not typecheck against it.)
 
 ## Codegen ownership contract: CPIs, PDA creation, and events
 
