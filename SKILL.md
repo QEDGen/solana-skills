@@ -238,7 +238,7 @@ Generated and always safe to regenerate:
 | `tests/kani.rs` | QEDGen | Kani harnesses |
 | `tests/proptest.rs` | QEDGen | Property-test harnesses |
 | `tests/unit.rs` | QEDGen | Unit tests when requested |
-| `programs/tests/integration_tests.rs` | QEDGen | Integration-test scaffold when requested |
+| `programs/tests/integration_tests.rs` | QEDGen | Parallax/LiteSVM scaffold when requested; Quasar client builders today |
 | `formal_verification/Spec.lean` | QEDGen | Lean model generated from `.qedspec` |
 
 User-owned after first scaffold:

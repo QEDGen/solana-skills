@@ -1,13 +1,9 @@
-fn signer(address: Pubkey) -> Account {
-    quasar_svm::token::create_keyed_system_account(&address, 10_000_000_000)
+#[allow(dead_code)]
+fn signer_account(address: Pubkey) -> Account {
+    Account::new(address, system_program::ID, DEFAULT_WALLET_LAMPORTS, vec![])
 }
 
-fn empty(address: Pubkey) -> Account {
-    Account {
-        address,
-        lamports: 0,
-        data: vec![],
-        owner: quasar_svm::system_program::ID,
-        executable: false,
-    }
+#[allow(dead_code)]
+fn empty_account(address: Pubkey) -> Account {
+    Account::new(address, system_program::ID, 0, vec![])
 }

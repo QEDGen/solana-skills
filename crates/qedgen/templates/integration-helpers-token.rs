@@ -1,25 +1,28 @@
 fn mint_account(address: Pubkey, authority: Pubkey) -> Account {
-    quasar_svm::token::create_keyed_mint_account(
-        &address,
-        &Mint {
-            mint_authority: Some(authority).into(),
-            supply: 1_000_000_000,
-            decimals: 9,
-            is_initialized: true,
-            freeze_authority: None.into(),
-        },
-    )
+    let mint = SplMint {
+        mint_authority: COption::Some(authority),
+        supply: 1_000_000_000,
+        decimals: 9,
+        is_initialized: true,
+        freeze_authority: COption::None,
+    };
+    let mut data = vec![0; SplMint::LEN];
+    SplMint::pack(mint, &mut data).expect("encode SPL mint fixture");
+    Account::new(address, SPL_TOKEN_PROGRAM_ID, 2_000_000, data)
 }
 
 fn token_account(address: Pubkey, mint: Pubkey, owner: Pubkey, amount: u64) -> Account {
-    quasar_svm::token::create_keyed_token_account(
-        &address,
-        &TokenAccount {
-            mint,
-            owner,
-            amount,
-            state: AccountState::Initialized,
-            ..TokenAccount::default()
-        },
-    )
+    let token = SplTokenAccount {
+        mint,
+        owner,
+        amount,
+        delegate: COption::None,
+        state: AccountState::Initialized,
+        is_native: COption::None,
+        delegated_amount: 0,
+        close_authority: COption::None,
+    };
+    let mut data = vec![0; SplTokenAccount::LEN];
+    SplTokenAccount::pack(token, &mut data).expect("encode SPL token fixture");
+    Account::new(address, SPL_TOKEN_PROGRAM_ID, 2_000_000, data)
 }

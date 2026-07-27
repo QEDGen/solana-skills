@@ -276,7 +276,7 @@ qedgen codegen --spec my_program.qedspec --kani         # + Kani harnesses (spec
 qedgen codegen --spec my_program.qedspec --kani-impl    # + impl-targeted Kani (calls user's Anchor handler)
 qedgen codegen --spec my_program.qedspec --test         # + unit tests
 qedgen codegen --spec my_program.qedspec --proptest     # + proptest harnesses
-qedgen codegen --spec my_program.qedspec --integration  # + in-process SVM integration tests
+qedgen codegen --spec my_program.qedspec --target quasar --integration  # + Parallax/LiteSVM tests
 
 # Check with drift detection and verification report
 qedgen check --spec my_program.qedspec --coverage       # operation × property matrix
@@ -286,6 +286,14 @@ qedgen check --spec my_program.qedspec --code ./programs --kani ./programs/tests
 # Repo maintenance gate: bundled examples match current codegen
 qedgen check --regen-drift
 ```
+
+The integration scaffold executes the compiled program in
+[Parallax](https://github.com/blueshift-gg/parallax), with account fixtures,
+outcome checks, and compute-unit assertions backed by LiteSVM. Its current
+instruction-builder boundary is Quasar-only; Anchor and Pinocchio adapters are
+not emitted yet. QEDGen pins Parallax's compatible Solana crate set in the
+generated program's `[dev-dependencies]` because a dependency's `Cargo.lock`
+is not inherited by consumers.
 
 ### sBPF verification
 

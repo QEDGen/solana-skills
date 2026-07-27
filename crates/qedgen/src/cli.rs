@@ -1131,7 +1131,8 @@ pub(crate) enum Commands {
         #[arg(long, default_value = "./fuzz")]
         crucible_output: PathBuf,
 
-        /// Generate in-process SVM integration test scaffolds
+        /// Generate Parallax/LiteSVM integration-test scaffolds.
+        /// Currently requires `--target quasar` for its host-side client builders.
         #[arg(long)]
         integration: bool,
 
