@@ -1143,6 +1143,7 @@ pub(crate) mod miri_verify;
 pub(crate) mod ratchet;
 pub(crate) mod regen_drift;
 pub(crate) mod sbpf_verify;
+pub(crate) mod scaffold;
 pub(crate) mod upstream_check;
 pub(crate) mod verify_counterexample;
 pub(crate) mod verify_kani_parse;
