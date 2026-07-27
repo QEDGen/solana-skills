@@ -35,6 +35,10 @@ cd lean_solana && lake build                                    # Lean support l
 
 Snapshot suites (`tests/{mir,kani,codegen,proptest}_snapshot.rs`) gate every fixture against checked-in references; the shared harness lives in `tests/common/mod.rs` and rebuilds `qedgen` before driving it (no stale-binary trap). Regenerate with `UPDATE_SNAPSHOTS=1 cargo test --test <suite>`. Snapshots prove output stability, not correctness: the executable artifact gate (`tests/generated_artifact_gate.rs`, `-- --ignored`, own CI job) regenerates every bundled Anchor example, compiles all generated Rust artifacts, runs the generated unit tests and proptests, and type-checks the Kani harness via `crates/kani-compile-stub` (#294). Full command + flag reference: [`references/cli.md`](references/cli.md).
 
+## Commits
+
+One line. Conventional-commit prefix, imperative, no body unless the change genuinely needs one (`fix(qedgen): harden Parallax integration scaffolds`). **No trailers** — no `Co-Authored-By`, no `Claude-Session`. Never commit or push without being asked.
+
 ## Dogfooding → toolchain backlog (dev-mode loop)
 
 When you use QEDGen on a real target from this repo (verifying an audit program, a codegen bring-up, a spec at scale), close the loop as the **last step**: run the **`toolchain-scout`** agent (`.claude/agents/toolchain-scout.md`) on the session. It mines the run for friction — codegen bugs, missing modes/DSL constructs, DX annoyances, reusable techniques — and files evidence-backed, deduplicated entries to [`docs/toolchain-backlog.md`](docs/toolchain-backlog.md) plus one sanitized GitHub issue each. The scout **proposes**; the main loop fixes codegen bugs in source (never works around them) with a regression test. This lives here **only** — it is dev/maintainer tooling and must NOT go in `SKILL.md`, which ships to end users verifying their own programs.

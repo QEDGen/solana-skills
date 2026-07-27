@@ -8,7 +8,7 @@
 //   1. Build your program: cargo build-sbf (or cargo build --target bpfel-unknown-none)
 //   2. Run tests: cargo test --features client
 //
-// Dev-dependencies (add to Cargo.toml):
+// Dev-dependencies (upserted into Cargo.toml by qedgen):
 //   [dev-dependencies]
 //   parallax-svm = { git = "https://github.com/blueshift-gg/parallax", rev = "804c5662832c65330e7299901cc5195a78d87256" }
 //   solana-sdk-ids = "3.1"

@@ -51,19 +51,50 @@ pub fn generate(spec_path: &Path, output_path: &Path, target: Target) -> Result<
     Ok(())
 }
 
-const PARALLAX_DEV_DEPENDENCIES: &str = "\
-parallax-svm = { git = \"https://github.com/blueshift-gg/parallax\", rev = \"804c5662832c65330e7299901cc5195a78d87256\" }\n\
-solana-sdk-ids = \"3.1\"\n\
-solana-address = \"=2.6.1\"\n\
-solana-hash = \"=4.5.0\"\n\
-solana-nonce = \"=3.2.0\"\n\
-solana-short-vec = \"=3.2.2\"\n\
-solana-last-restart-slot = \"=3.1.0\"\n\
-solana-slot-history = \"=3.1.0\"\n\
-solana-epoch-rewards = \"=3.1.0\"\n\
-solana-slot-hashes = \"=3.1.0\"\n\
-spl-token = { version = \"=9.0.0\", default-features = false, features = [\"no-entrypoint\"] }\n\
-wincode = { version = \"0.5\", features = [\"derive\"] }\n";
+/// Upstream Parallax repository. Not published to crates.io, so consumers
+/// pin a git revision.
+pub(crate) const PARALLAX_GIT_URL: &str = "https://github.com/blueshift-gg/parallax";
+
+/// The pinned Parallax revision — the SINGLE source for it in this repo.
+///
+/// It previously appeared as three independent literals (this dependency
+/// set, the header comment the scaffold emits, and the compile-gate
+/// fixture's manifest). Two of those drifting apart is a silent failure in
+/// both directions: a scaffold whose comment advertises a revision its own
+/// `[dev-dependencies]` does not use, and — worse — a gate that compiles the
+/// OLD revision, stays green, and stops gating what actually ships.
+/// `parallax_gate_fixture_pins_the_same_revision` holds the fixture to this.
+///
+/// Bumping: change this, run
+/// `cargo test -p qedgen-solana-skills --test parallax_integration_gate -- --ignored`,
+/// and regenerate the bundled examples.
+pub(crate) const PARALLAX_GIT_REV: &str = "804c5662832c65330e7299901cc5195a78d87256";
+
+/// The `parallax-svm` dependency line, built from the pin above.
+fn parallax_dependency_line() -> String {
+    format!("parallax-svm = {{ git = \"{PARALLAX_GIT_URL}\", rev = \"{PARALLAX_GIT_REV}\" }}")
+}
+
+/// Solana crates held at the versions Parallax 0.1 resolves against. A
+/// dependency's `Cargo.lock` is not inherited by consumers, so without these
+/// a fresh resolve picks the wincode-0.6 line and fails to compile.
+fn parallax_dev_dependencies() -> String {
+    format!(
+        "{}\n\
+         solana-sdk-ids = \"3.1\"\n\
+         solana-address = \"=2.6.1\"\n\
+         solana-hash = \"=4.5.0\"\n\
+         solana-nonce = \"=3.2.0\"\n\
+         solana-short-vec = \"=3.2.2\"\n\
+         solana-last-restart-slot = \"=3.1.0\"\n\
+         solana-slot-history = \"=3.1.0\"\n\
+         solana-epoch-rewards = \"=3.1.0\"\n\
+         solana-slot-hashes = \"=3.1.0\"\n\
+         spl-token = {{ version = \"=9.0.0\", default-features = false, features = [\"no-entrypoint\"] }}\n\
+         wincode = {{ version = \"0.5\", features = [\"derive\"] }}\n",
+        parallax_dependency_line()
+    )
+}
 
 const PARALLAX_DEV_DEP_NAMES: &[&str] = &[
     "parallax-svm",
@@ -169,7 +200,8 @@ fn upsert_dev_dependencies(existing: &str) -> String {
         .copied()
         .filter(|name| !subtabled.contains(name))
         .collect();
-    let additions: String = PARALLAX_DEV_DEPENDENCIES
+    let dev_dependencies = parallax_dev_dependencies();
+    let additions: String = dev_dependencies
         .lines()
         .filter(|line| {
             let key = line.split('=').next().unwrap_or("").trim();
@@ -238,23 +270,23 @@ pub fn render(spec: &ParsedSpec, hash: &str) -> Result<String> {
     out.push_str("//   1. Build your program: cargo build-sbf (or cargo build --target bpfel-unknown-none)\n");
     out.push_str("//   2. Run tests: cargo test --features client\n");
     out.push_str("//\n");
-    out.push_str("// Dev-dependencies (add to Cargo.toml):\n");
+    // Rendered from `parallax_dev_dependencies()` rather than repeated as
+    // literals: a comment advertising a different revision than the one
+    // `codegen` actually writes into Cargo.toml is a lie the user would act
+    // on. `qedgen codegen --integration` upserts these automatically; the
+    // block is here so the file is self-describing when read on its own.
+    out.push_str("// Dev-dependencies (upserted into Cargo.toml by qedgen):\n");
     out.push_str("//   [dev-dependencies]\n");
-    out.push_str("//   parallax-svm = { git = \"https://github.com/blueshift-gg/parallax\", rev = \"804c5662832c65330e7299901cc5195a78d87256\" }\n");
-    out.push_str("//   solana-sdk-ids = \"3.1\"\n");
-    out.push_str(
-        "//   # Parallax 0.1 compatibility pins; dependency Cargo.lock files are not inherited.\n",
-    );
-    out.push_str("//   solana-address = \"=2.6.1\"\n");
-    out.push_str("//   solana-hash = \"=4.5.0\"\n");
-    out.push_str("//   solana-nonce = \"=3.2.0\"\n");
-    out.push_str("//   solana-short-vec = \"=3.2.2\"\n");
-    out.push_str("//   solana-last-restart-slot = \"=3.1.0\"\n");
-    out.push_str("//   solana-slot-history = \"=3.1.0\"\n");
-    out.push_str("//   solana-epoch-rewards = \"=3.1.0\"\n");
-    out.push_str("//   solana-slot-hashes = \"=3.1.0\"\n");
-    out.push_str("//   spl-token = { version = \"=9.0.0\", default-features = false, features = [\"no-entrypoint\"] }\n");
-    out.push_str("//   wincode = { version = \"0.5\", features = [\"derive\"] }\n\n");
+    for (index, line) in parallax_dev_dependencies().lines().enumerate() {
+        // The compatibility pins start after parallax-svm + solana-sdk-ids.
+        if index == 2 {
+            out.push_str(
+                "//   # Parallax 0.1 compatibility pins; dependency Cargo.lock files are not inherited.\n",
+            );
+        }
+        out.push_str(&format!("//   {line}\n"));
+    }
+    out.push('\n');
 
     // Imports
     out.push_str("extern crate std;\n");
@@ -1139,6 +1171,49 @@ mod tests {
         assert!(merged.contains("[dev-dependencies.parallax-svm]"));
         // Everything not subtabled still lands.
         assert_eq!(merged.matches("solana-sdk-ids =").count(), 1);
+    }
+
+    /// The compile gate is only meaningful if it builds the revision the
+    /// scaffold actually ships. If codegen bumps `PARALLAX_GIT_REV` and the
+    /// fixture manifest keeps the old one, the gate compiles the OLD
+    /// Parallax, passes green, and silently stops gating — the exact failure
+    /// a gate exists to prevent.
+    #[test]
+    fn parallax_gate_fixture_pins_the_same_revision() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/parallax-api-gate/stub/Cargo.toml");
+        let manifest = std::fs::read_to_string(&fixture)
+            .unwrap_or_else(|e| panic!("read {}: {e}", fixture.display()));
+
+        assert!(
+            manifest.contains(PARALLAX_GIT_REV),
+            "gate fixture pins a different Parallax revision than codegen emits.\n\
+             codegen: {PARALLAX_GIT_REV}\n\
+             fixture: {}\n\
+             Update {} so the gate compiles what ships.",
+            manifest
+                .lines()
+                .find(|line| line.contains("parallax-svm"))
+                .unwrap_or("<no parallax-svm line>")
+                .trim(),
+            fixture.display()
+        );
+        assert!(manifest.contains(PARALLAX_GIT_URL));
+    }
+
+    /// The emitted header must advertise the revision codegen actually
+    /// writes into `[dev-dependencies]`, not a stale copy of it.
+    #[test]
+    fn scaffold_header_and_manifest_agree_on_the_pin() {
+        let spec = chumsky_adapter::parse_str(ESCROW_SPEC).unwrap();
+        let out = render(&spec, "test").expect("render");
+
+        assert_eq!(
+            out.matches(PARALLAX_GIT_REV).count(),
+            1,
+            "the scaffold should name the pin exactly once (in the header block):\n{out}"
+        );
+        assert!(parallax_dev_dependencies().contains(PARALLAX_GIT_REV));
     }
 
     /// A `#` inside a quoted value is not a comment.
