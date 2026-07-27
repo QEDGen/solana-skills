@@ -47,9 +47,19 @@ pub(super) fn check_error_declared_as_record(spec: &ParsedSpec) -> Vec<Completen
     warnings
 }
 
-/// `unknown_error_variant`: a per-site `or X` override or checked_overflow/
-/// underflow pragma references a variant not declared in `type Error | …` —
-/// the generated Rust references `<ProgramName>Error::X` and won't compile.
+/// `unknown_error_variant`: a USER-WRITTEN error name that is absent from
+/// `type Error | …`. Covers three sites, all of which lower to
+/// `<ProgramName>Error::X` in generated Rust: a `requires … else X` clause,
+/// a per-site effect `or X` override, and the
+/// `checked_{over,under}flow_error` pragmas.
+///
+/// Only user-written names are reported. Codegen's OWN defaults
+/// (`MathOverflow` / `MathUnderflow` when the spec names nothing,
+/// `InvalidLifecycle`, `InvalidPda`) are synthesized into the enum by
+/// `codegen_mir`, so they always exist and are never a typo. The split
+/// matters: synthesizing user-written names too would let a misspelled
+/// `else Unathorized` compile as a brand-new variant that no guard ever
+/// raises.
 pub(super) fn check_unknown_error_variant(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let has_decl = |name: &str| spec.error_codes.iter().any(|c| c == name);
     let mut warnings = Vec::new();
@@ -58,8 +68,8 @@ pub(super) fn check_unknown_error_variant(spec: &ParsedSpec) -> Vec<Completeness
     for (key, value) in &spec.pragma_assignments {
         if (key == "checked_overflow_error" || key == "checked_underflow_error") && !has_decl(value)
         {
-            warnings.push(warn("unknown_error_variant", Severity::Warning, 2, format!(
-                    "`pragma {} = {}` references a variant absent from `type Error | …`. Generated Rust references `{}Error::{}` and won't compile.",
+            warnings.push(warn("unknown_error_variant", Severity::Error, 1, format!(
+                    "`pragma {} = {}` references a variant absent from `type Error | …`. Generated Rust references `{}Error::{}`, which does not compile.",
                     key,
                     value,
                     crate::codegen_shared::to_pascal_case(&spec.program_name),
@@ -71,12 +81,43 @@ pub(super) fn check_unknown_error_variant(spec: &ParsedSpec) -> Vec<Completeness
         }
     }
 
-    // Per-site `or X` references.
+    // `requires <expr> else X`. `guards.rs` emits `<Prog>Error::X` for these
+    // and nothing declared it, which is how a spec could pass `check` with
+    // zero errors and still generate a program that does not compile.
     for h in &spec.handlers {
-        for on_error in h.effects.iter().filter_map(|e| e.on_error.as_ref()) {
+        for name in h.requires.iter().filter_map(|r| r.error_name.as_ref()) {
+            if !has_decl(name) {
+                warnings.push(warn("unknown_error_variant", Severity::Error, 1, format!(
+                        "handler '{}' has `requires … else {}` referencing a variant absent from `type Error | …`. Generated Rust references `{}Error::{}`, which does not compile.",
+                        h.name,
+                        name,
+                        crate::codegen_shared::to_pascal_case(&spec.program_name),
+                        name,
+                    )).subject(h.name.clone()).fix(format!(
+                        "Add `{}` to your `type Error | …` block, or use a declared variant name.",
+                        name,
+                    )));
+            }
+        }
+    }
+
+    // Per-site `or X` references, including conditional `effect { match … }`
+    // arms — those keep their sites on the arm, not on `h.effects`.
+    for h in &spec.handlers {
+        let arm_effects = h
+            .effect_branches
+            .iter()
+            .flat_map(|b| b.arms.iter())
+            .flat_map(|a| a.effects.iter());
+        for on_error in h
+            .effects
+            .iter()
+            .chain(arm_effects)
+            .filter_map(|e| e.on_error.as_ref())
+        {
             if !has_decl(on_error) {
-                warnings.push(warn("unknown_error_variant", Severity::Warning, 2, format!(
-                        "handler '{}' has an effect with `else {}` referencing a variant absent from `type Error | …`. Generated Rust references `{}Error::{}` and won't compile.",
+                warnings.push(warn("unknown_error_variant", Severity::Error, 1, format!(
+                        "handler '{}' has an effect with `else {}` referencing a variant absent from `type Error | …`. Generated Rust references `{}Error::{}`, which does not compile.",
                         h.name,
                         on_error,
                         crate::codegen_shared::to_pascal_case(&spec.program_name),

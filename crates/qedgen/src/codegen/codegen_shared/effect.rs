@@ -300,9 +300,20 @@ pub(crate) fn checked_arith_error_variants<'a>(
 /// Only the CHECKED ops appear here. `_sat` / `_wrap` cannot fail, so they
 /// name no variant — the arms below mirror `mechanize_effect`'s exactly.
 pub(crate) fn checked_arith_error_variants_in_use(spec: &ParsedSpec) -> Vec<String> {
+    // ONLY codegen's own defaults. A per-site `or X` or a
+    // `pragma checked_{over,under}flow_error =` is a name the USER wrote: if
+    // it is undeclared that is a typo, and `unknown_error_variant` must
+    // report it rather than this silently inventing the variant and letting
+    // a misspelled error ship as a real one. Synthesis is for names the user
+    // never chose.
+    let user_named_default = spec.pragma_value("checked_overflow_error").is_some()
+        || spec.pragma_value("checked_underflow_error").is_some();
     let mut names: Vec<String> = Vec::new();
     let mut note = |effect: &crate::check::ParsedEffect| {
-        let (overflow, underflow) = checked_arith_error_variants(spec, effect.on_error.as_deref());
+        if effect.on_error.is_some() || user_named_default {
+            return;
+        }
+        let (overflow, underflow) = checked_arith_error_variants(spec, None);
         let named = match effect.op.as_str() {
             "add" => overflow,
             "sub" => underflow,
@@ -338,7 +349,8 @@ pub(crate) fn checked_arith_error_variants_in_use(spec: &ParsedSpec) -> Vec<Stri
 ///
 /// `effect.tree` is the typed RHS (always adapter-populated post-#151).
 ///
-/// `effect.on_error` is the per-site override (`pool += amount or X`) for
+/// `effect.on_error` is the per-site override (`pool += amount else X` —
+/// `or` would collide with the boolean infix) for
 /// the `checked_add` / `checked_sub` error variant; when `None`, fall back
 /// to the `pragma checked_{over,under}flow_error =` default, then built-in
 /// `MathOverflow` / `MathUnderflow`. Always `None` for non-checked ops.
