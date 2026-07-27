@@ -113,8 +113,22 @@ impl VerifyReport {
     }
 }
 
+pub fn strict_scaffold_skip(
+    report: &VerifyReport,
+    scaffold_enabled: bool,
+) -> Option<&BackendReport> {
+    if !scaffold_enabled {
+        return None;
+    }
+    report.backends.iter().find(|backend| {
+        backend.name == "scaffold" && matches!(backend.status, BackendStatus::Skipped)
+    })
+}
+
 pub struct VerifyOpts {
     pub spec: PathBuf,
+    pub scaffold: bool,
+    pub program_dir: Option<PathBuf>,
     pub proptest: bool,
     pub proptest_path: PathBuf,
     pub kani: bool,
@@ -214,8 +228,13 @@ pub fn recursive_lake_walk(parsed: &crate::check::ParsedSpec) {
 
 pub fn run(opts: &VerifyOpts) -> Result<VerifyReport> {
     let mut backends = Vec::new();
-    let runners: [&dyn VerifyBackend; 4] =
-        [&ProptestBackend, &KaniBackend, &LeanBackend, &MiriBackend];
+    let runners: [&dyn VerifyBackend; 5] = [
+        &ScaffoldBackend,
+        &ProptestBackend,
+        &KaniBackend,
+        &LeanBackend,
+        &MiriBackend,
+    ];
 
     for runner in runners {
         if !runner.enabled(opts) {
@@ -248,6 +267,17 @@ struct ProptestBackend;
 struct KaniBackend;
 struct LeanBackend;
 struct MiriBackend;
+struct ScaffoldBackend;
+
+impl VerifyBackend for ScaffoldBackend {
+    fn enabled(&self, opts: &VerifyOpts) -> bool {
+        opts.scaffold
+    }
+
+    fn run(&self, opts: &VerifyOpts) -> BackendReport {
+        scaffold::run(opts.program_dir.as_deref())
+    }
+}
 
 impl VerifyBackend for ProptestBackend {
     fn enabled(&self, opts: &VerifyOpts) -> bool {

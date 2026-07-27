@@ -1462,6 +1462,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
         Commands::Verify {
             spec,
             program,
+            scaffold,
             proptest,
             proptest_path,
             kani,
@@ -1545,7 +1546,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 // When --check-upstream is the only verb, exit cleanly
                 // without firing the backend runners. Combine with
                 // --proptest etc. to do both in one invocation.
-                let any_backend_flag = proptest || kani || lean || miri || probe_repros;
+                let any_backend_flag = scaffold || proptest || kani || lean || miri || probe_repros;
                 if check_upstream && !any_backend_flag {
                     return Ok(());
                 }
@@ -1555,7 +1556,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 eprintln!(
                     "note: --upstream-stale-ok suppressed --check-upstream (offline-dev mode)"
                 );
-                let any_backend_flag = proptest || kani || lean || miri || probe_repros;
+                let any_backend_flag = scaffold || proptest || kani || lean || miri || probe_repros;
                 if !any_backend_flag {
                     return Ok(());
                 }
@@ -1592,7 +1593,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                     );
                     std::process::exit(1);
                 }
-                let any_backend_flag = proptest || kani || lean || miri;
+                let any_backend_flag = scaffold || proptest || kani || lean || miri;
                 if !any_backend_flag {
                     record_verify_evidence(
                         &spec,
@@ -1611,7 +1612,12 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
 
             // No explicit backend flags -> run every backend whose artifact
             // is present on disk.
-            let any_flag = proptest || kani || lean || miri;
+            let any_flag = scaffold || proptest || kani || lean || miri;
+            let scaffold_enabled = if any_flag {
+                scaffold
+            } else {
+                program.is_some()
+            };
             // Project root used by Miri repro discovery — spec parent dir.
             let project_root = spec
                 .parent()
@@ -1632,14 +1638,16 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 .and_then(|s| s.to_str())
                 .map(|s| s.starts_with("kani_impl"))
                 .unwrap_or(false);
-            // A source hash is meaningful only when the implementation-bound
-            // backend is mechanically rooted in the crate being recorded.
+            // A source hash is meaningful only when a source-bound backend is
+            // mechanically rooted in the crate being recorded.
             // This prevents `--program unrelated-crate` from attaching an
             // otherwise valid backend result to source it never exercised.
-            let evidence_program = program.as_deref().filter(|program| {
+            let source_bound_program = program.as_deref().filter(|program| {
                 let Ok(program_root) = program.canonicalize() else {
                     return false;
                 };
+                let scaffold_matches =
+                    scaffold_enabled && program_root.join("Cargo.toml").is_file();
                 let kani_matches = kani_impl_bound
                     && kani_path
                         .canonicalize()
@@ -1648,11 +1656,13 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                     && project_root
                         .canonicalize()
                         .is_ok_and(|path| path == program_root);
-                kani_matches || miri_matches
+                scaffold_matches || kani_matches || miri_matches
             });
             let opts = if any_flag {
                 verify::VerifyOpts {
                     spec: spec.clone(),
+                    scaffold: scaffold_enabled,
+                    program_dir: program.clone(),
                     proptest,
                     proptest_path,
                     kani,
@@ -1666,6 +1676,8 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             } else {
                 verify::VerifyOpts {
                     spec: spec.clone(),
+                    scaffold: scaffold_enabled,
+                    program_dir: program.clone(),
                     proptest: proptest_path.exists(),
                     proptest_path,
                     kani: kani_path.exists(),
@@ -1704,10 +1716,10 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
 
             // Persist the evidence record `stamp` gates on — written on
             // pass AND fail (a failed run is still evidence of what ran).
-            if program.is_some() && evidence_program.is_none() {
+            if program.is_some() && source_bound_program.is_none() {
                 eprintln!(
-                    "warning: --program is not rooted at the implementation-bound backend \
-                     input; verification evidence will not authorize `stamp`"
+                    "warning: --program is not rooted at a source-bound backend input; \
+                     verification evidence will not retain its source hash"
                 );
             }
             // #332 — reconciled backend-obligation entries: digested into
@@ -1729,7 +1741,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
 
             record_verify_evidence(
                 &spec,
-                evidence_program,
+                source_bound_program,
                 &report,
                 kani_impl_bound,
                 probe_repros_passed,
@@ -1737,6 +1749,13 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             );
 
             if strict {
+                if let Some(skipped) = verify::strict_scaffold_skip(&report, opts.scaffold) {
+                    eprintln!(
+                        "verify --strict: enabled scaffold backend was skipped — {}",
+                        skipped.detail.as_deref().unwrap_or("no reason reported")
+                    );
+                    std::process::exit(1);
+                }
                 crate::obligations::print_backend_summaries(&obligation_entries);
                 let problems = crate::obligations::problem_entries(&obligation_entries);
                 for problem in &problems {

@@ -767,6 +767,12 @@ pub(crate) enum Commands {
         #[arg(long)]
         program: Option<PathBuf>,
 
+        /// Compile the selected program crate with `cargo check --tests`.
+        /// Requires `--program`. With no explicit backend flags, supplying
+        /// `--program` enables this backend automatically.
+        #[arg(long, requires = "program")]
+        scaffold: bool,
+
         /// Run proptest harnesses (cargo test --release)
         #[arg(long)]
         proptest: bool,

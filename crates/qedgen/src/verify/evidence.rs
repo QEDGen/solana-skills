@@ -370,6 +370,19 @@ mod tests {
     }
 
     #[test]
+    fn scaffold_evidence_is_source_bound_but_not_stamp_authorizing() {
+        let spec = tmp_spec("scaffold");
+        let program = tmp_program(&spec);
+        let r = report(vec![("scaffold", BackendStatus::Passed)]);
+        let e = build(&spec, Some(&program), &r, false, None, None).unwrap();
+        assert_eq!(e.backends[0].name, "scaffold");
+        assert!(!e.backends[0].implementation_bound);
+        assert!(!e.implementation_verified);
+        assert!(e.program_hash.is_some());
+        let _ = std::fs::remove_dir_all(spec.parent().unwrap());
+    }
+
+    #[test]
     fn miri_pass_and_kani_impl_pass_count() {
         let spec = tmp_spec("impl");
         let program = tmp_program(&spec);
