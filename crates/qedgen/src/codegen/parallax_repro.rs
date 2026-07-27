@@ -34,40 +34,43 @@
 //! a crate — Mollusk pulls `solana-account 3`, Parallax `4.x` — so this emits
 //! a standalone crate beside the existing repro crate rather than into it.
 //!
-//! ## Not yet handled: pre-state for a PDA the handler READS
+//! ## Pre-state for a PDA the handler READS
 //!
-//! Verified empirically against a deliberately vulnerable fixture
-//! (`tests/fixtures/parallax-repro-gate/vulnerable.qedspec`, built to SBF and
-//! executed): the generated repro compiles and runs, but a handler that reads
-//! an existing PDA aborts with Anchor's `AccountNotInitialized` (3012) before
-//! reaching the guard the finding is about. This module derives PDA
-//! ADDRESSES but never populates the accounts.
+//! An `init` handler creates its PDA, so that account must enter the world
+//! EMPTY. Every other handler DECODES an existing account, and an empty one
+//! aborts with Anchor's `AccountNotInitialized` (3012) before the guard under
+//! test ever runs — reporting "no bug" for entirely the wrong reason. So a
+//! non-init handler gets its state account installed: the 8-byte
+//! `sha256("account:<Name>")` discriminator, the state fields in declaration
+//! order, then `bump` and `status`, mirroring `codegen_mir`'s `#[account]`
+//! struct. Field CONTENTS are irrelevant to an absent-guard claim, but the
+//! byte WIDTHS are not — a short buffer fails deserialization just as an
+//! empty account does.
 //!
-//! Closing it means emitting the account bytes the program expects — the
-//! 8-byte `sha256("account:<Name>")` discriminator followed by the Borsh
-//! state — which the spec fully determines, so it is mechanical. Until then
-//! the per-category constructors in `probe_repro` deliberately stay
-//! unwired: pointing them here would drop every candidate for a reason
-//! unrelated to its finding.
+//! ## Verified two-sided
 //!
-//! Two things this fixture already proves, and that any change here must
-//! keep true:
+//! Against `tests/fixtures/parallax-repro-gate/vulnerable.qedspec`, built to
+//! SBF and executed:
 //!
-//! - the GUARDED control (`open`: `auth`, a `signer` account, an
-//!   actor-seeded PDA) does not fire — no false positive;
-//! - a `signer` marker in the accounts block enforces a signature
-//!   INDEPENDENTLY of `auth`, so "no `auth` clause" does not imply "no
-//!   signature required". An earlier fixture whose vulnerable handler had a
-//!   `signer` account and a caller-seeded PDA was not exploitable at all,
-//!   and the reproducer correctly refused to confirm it.
+//! - `set_fee` (no `auth`, no signer account, constant-seed singleton PDA):
+//!   both the unsigned-invocation and replay reproducers FIRE;
+//! - `open` (`auth owner`, a `signer` account, an actor-seeded PDA): the same
+//!   generator does NOT fire, rejected with `AccountNotSigner` (3010) — the
+//!   guard under test, not an incidental failure.
+//!
+//! Keep both directions. A lane that only ever fires is a false-positive
+//! generator; one that never fires is dead weight.
+//!
+//! A `signer` marker in the accounts block enforces a signature
+//! INDEPENDENTLY of `auth`, so "no `auth` clause" does not imply "no
+//! signature required". An earlier fixture whose vulnerable handler had a
+//! `signer` account and a caller-seeded PDA was not exploitable at all, and
+//! the reproducer correctly refused to confirm it.
 
-// Not yet reachable from `probe_repro`'s per-category constructors: the
-// generator cannot construct pre-state for a PDA the handler READS, so
-// aiming it at `missing_signer` / `lifecycle_one_shot_violation` today
-// produces a repro that aborts with `AccountNotInitialized` before it ever
-// reaches the guard under test. Wiring the constructors before that lands
-// would turn every candidate into a dropped finding for the wrong reason.
-// See the module docs' "Not yet handled" section.
+// Generation is complete and verified two-sided (see the module docs), but
+// `probe_repro`'s per-category constructors do not call it yet: they still
+// need the deployed program's address and `.so` path, which the reproducer
+// context does not carry today.
 #![allow(dead_code)]
 
 use crate::check::{ParsedHandler, ParsedSpec};
@@ -173,12 +176,108 @@ pub fn generate(
     out.push_str("        .expect(\"load the program under test\")\n");
     out.push_str("}\n\n");
 
+    if reads_existing_state(handler) {
+        emit_state_bytes_helper(&mut out, spec, handler);
+    }
     emit_test(&mut out, spec, handler, attack, &test_fn);
 
     GeneratedParallaxRepro {
         source: out,
         attack: attack.describes(&handler.name),
     }
+}
+
+/// Does this handler READ an account the program expects to already exist,
+/// rather than create it?
+///
+/// An `init` handler (lifecycle pre-state `Uninitialized` / `Empty`) creates
+/// its PDA, so the account must enter the world EMPTY — installing one would
+/// make the init fail with "already in use". Every other handler decodes an
+/// existing account, and an empty one aborts with Anchor's
+/// `AccountNotInitialized` (3012) before the guard under test ever runs.
+fn reads_existing_state(handler: &ParsedHandler) -> bool {
+    !matches!(
+        handler.pre_status.as_deref(),
+        Some("Uninitialized") | Some("Empty")
+    )
+}
+
+/// Emit a helper producing the exact bytes the program will decode:
+/// Anchor's 8-byte `sha256("account:<Name>")` discriminator, then the state
+/// fields in declaration order, then `bump` and `status`. This mirrors
+/// `codegen_mir`'s emitted `#[account]` struct; the layout is fully
+/// determined by the spec, so it is mechanical.
+fn emit_state_bytes_helper(out: &mut String, spec: &ParsedSpec, handler: &ParsedHandler) {
+    let state_name = format!(
+        "{}Account",
+        crate::codegen_shared::to_pascal_case(&spec.program_name)
+    );
+
+    out.push_str("/// `sha256(\"account:<Name>\")[..8]` — Anchor's account discriminator.\n");
+    out.push_str("fn account_discriminator(name: &str) -> Vec<u8> {\n");
+    out.push_str("    let hex = qedgen_hash_core::sha256_hex16(&format!(\"account:{name}\"));\n");
+    out.push_str("    (0..8)\n");
+    out.push_str(
+        "        .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).expect(\"hex byte\"))\n",
+    );
+    out.push_str("        .collect()\n");
+    out.push_str("}\n\n");
+
+    out.push_str(
+        "/// Pre-state the handler decodes. Without it the program aborts with\n\
+         /// `AccountNotInitialized` before reaching the guard under test, and the\n\
+         /// reproducer would report \"no bug\" for entirely the wrong reason.\n",
+    );
+    out.push_str("fn state_bytes(bump: u8) -> Vec<u8> {\n");
+    out.push_str(&format!(
+        "    let mut data = account_discriminator(\"{state_name}\");\n"
+    ));
+    for (name, ty) in &spec.state_fields {
+        out.push_str(&format!("    {} // {name}: {ty}\n", zero_field_expr(ty)));
+    }
+    out.push_str("    data.push(bump);\n");
+    out.push_str(&format!(
+        "    data.push({}); // status: {}\n",
+        status_value(spec, handler),
+        status_label(spec, handler)
+    ));
+    out.push_str("    data\n");
+    out.push_str("}\n\n");
+}
+
+/// A zero value of the right WIDTH for a state field. The reproducer proves
+/// an absent guard, so field contents are irrelevant — but the byte length
+/// is not: a short buffer fails Anchor's deserialization before the guard.
+fn zero_field_expr(dsl_ty: &str) -> String {
+    match crate::codegen::repro_gen::rust_int_type(dsl_ty) {
+        Some("u8") => "data.push(0);".to_string(),
+        Some(rust_ty) => format!("data.extend_from_slice(&0{rust_ty}.to_le_bytes());"),
+        // Pubkey and anything else addressable is 32 bytes.
+        None if dsl_ty.trim() == "Bool" => "data.push(0);".to_string(),
+        None => "data.extend_from_slice(&[0u8; 32]);".to_string(),
+    }
+}
+
+/// The lifecycle discriminant the handler expects to find. Uses the declared
+/// `pre_status` when there is one; otherwise the first initialized state,
+/// since a handler with no lifecycle clause is reachable from any of them
+/// (which is exactly what `lifecycle_one_shot_violation` reports).
+fn status_value(spec: &ParsedSpec, handler: &ParsedHandler) -> usize {
+    let index_of = |name: &str| spec.lifecycle_states.iter().position(|s| s == name);
+    handler
+        .pre_status
+        .as_deref()
+        .and_then(index_of)
+        .unwrap_or(1)
+}
+
+fn status_label(spec: &ParsedSpec, handler: &ParsedHandler) -> String {
+    handler.pre_status.clone().unwrap_or_else(|| {
+        spec.lifecycle_states
+            .get(1)
+            .cloned()
+            .unwrap_or_else(|| "first initialized state".to_string())
+    })
 }
 
 fn emit_test(
@@ -210,11 +309,24 @@ fn emit_test(
             account.name
         ));
     }
+    let populate = reads_existing_state(handler);
     for name in &derived {
         let seeds = pda_seed_exprs(name, spec);
+        // The bump binding is only used when the account gets populated;
+        // discard it otherwise so the repro compiles warning-clean.
+        let bump_binding = if populate {
+            format!("{name}_bump")
+        } else {
+            "_".to_string()
+        };
         out.push_str(&format!(
-            "    let ({name}, _) = Pubkey::find_program_address(&[{seeds}], &program_id());\n"
+            "    let ({name}, {bump_binding}) = Pubkey::find_program_address(&[{seeds}], &program_id());\n"
         ));
+        if populate {
+            out.push_str(&format!(
+                "    test.add(Account::new({name}, program_id(), 2_000_000, state_bytes({name}_bump)));\n"
+            ));
+        }
     }
     out.push('\n');
 
@@ -433,6 +545,79 @@ handler bump_total (amount : U64) {
             generated.source.matches("test.execute(").count(),
             2,
             "replay must invoke twice:\n{}",
+            generated.source
+        );
+    }
+
+    /// A non-init handler DECODES its state account, so the repro must
+    /// install one. Without it the program aborts with
+    /// `AccountNotInitialized` (3012) before the guard under test runs, and
+    /// the reproducer reports "no bug" for the wrong reason.
+    #[test]
+    fn read_handlers_get_their_state_account_installed() {
+        let spec = spec();
+        let generated = generate(
+            &spec,
+            &handler(&spec, "bump_total"),
+            ParallaxAttack::UnsignedInvocation,
+            "Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS",
+            "/../program/target/deploy/vulnerable.so",
+        );
+
+        assert!(
+            generated
+                .source
+                .contains("fn state_bytes(bump: u8) -> Vec<u8>"),
+            "a read handler must emit the state-bytes helper:\n{}",
+            generated.source
+        );
+        assert!(
+            generated
+                .source
+                .contains("account_discriminator(\"VulnerableAccount\")"),
+            "state bytes must lead with Anchor's account discriminator:\n{}",
+            generated.source
+        );
+        assert!(
+            generated.source.contains(
+                "test.add(Account::new(vault, program_id(), 2_000_000, state_bytes(vault_bump)))"
+            ),
+            "the derived PDA must be installed with those bytes:\n{}",
+            generated.source
+        );
+        // Widths must match the emitted `#[account]` struct exactly: a short
+        // buffer fails deserialization just like an empty account.
+        assert!(generated
+            .source
+            .contains("data.extend_from_slice(&[0u8; 32]); // owner: Pubkey"));
+        assert!(generated
+            .source
+            .contains("data.extend_from_slice(&0u64.to_le_bytes()); // total: U64"));
+    }
+
+    /// An `init` handler CREATES its PDA, so installing an account makes the
+    /// init fail with "already in use" — the opposite mistake.
+    #[test]
+    fn init_handlers_leave_their_pda_empty() {
+        let spec = spec();
+        let generated = generate(
+            &spec,
+            &handler(&spec, "open"),
+            ParallaxAttack::UnsignedInvocation,
+            "Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS",
+            "/../program/target/deploy/vulnerable.so",
+        );
+
+        assert!(
+            !generated.source.contains("state_bytes"),
+            "an init target must not be pre-populated:\n{}",
+            generated.source
+        );
+        assert!(
+            generated
+                .source
+                .contains("let (vault, _) = Pubkey::find_program_address"),
+            "an unused bump must be discarded so the repro compiles clean:\n{}",
             generated.source
         );
     }
