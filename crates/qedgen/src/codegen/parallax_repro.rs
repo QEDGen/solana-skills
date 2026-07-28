@@ -355,6 +355,9 @@ fn emit_test(
     }
     out.push_str("    };\n\n");
 
+    out.push_str(
+        "    let attack_verdict = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {\n",
+    );
     match attack {
         ParallaxAttack::UnsignedInvocation => {
             out.push_str("    // The program accepting an entirely unsigned invocation is the\n");
@@ -372,6 +375,14 @@ fn emit_test(
             out.push_str("    test.execute(instruction).check(Outcome::success());\n");
         }
     }
+    out.push_str("    }));\n");
+    out.push_str("    match attack_verdict {\n");
+    out.push_str("        Ok(()) => println!(\"QEDGEN_PARALLAX_ATTACK_COMMITTED\"),\n");
+    out.push_str("        Err(_) => {\n");
+    out.push_str("            println!(\"QEDGEN_PARALLAX_ATTACK_REJECTED\");\n");
+    out.push_str("            panic!(\"the program rejected the generated attack\");\n");
+    out.push_str("        }\n");
+    out.push_str("    }\n");
 
     out.push_str("}\n");
 }
@@ -527,6 +538,23 @@ handler bump_total (amount : U64) {
                 generated.source
             );
         }
+    }
+
+    #[test]
+    fn generated_attack_reports_an_explicit_machine_readable_verdict() {
+        let spec = spec();
+        let generated = generate(
+            &spec,
+            &handler(&spec, "bump_total"),
+            ParallaxAttack::UnsignedInvocation,
+            "Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS",
+            "\"/tmp/vulnerable.so\"",
+        );
+
+        assert!(generated
+            .source
+            .contains("QEDGEN_PARALLAX_ATTACK_COMMITTED"));
+        assert!(generated.source.contains("QEDGEN_PARALLAX_ATTACK_REJECTED"));
     }
 
     #[test]
