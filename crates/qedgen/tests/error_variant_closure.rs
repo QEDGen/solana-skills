@@ -231,6 +231,50 @@ fn the_scan_detects_an_undeclared_reference() {
     );
 }
 
+#[test]
+fn synthesized_only_errors_emit_the_module_and_enum() {
+    ensure_qedgen_built();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let spec_path = temp.path().join("checked.qedspec");
+    std::fs::write(
+        &spec_path,
+        "spec Checked\n\
+         type State\n  | Active of { total : U64 }\n\
+         handler add (amount : U64) {\n  \
+         effect { total += amount }\n}\n",
+    )
+    .expect("write spec");
+    std::fs::create_dir_all(temp.path().join(".qed")).expect("mkdir .qed");
+    common::git_init(temp.path());
+
+    let output_dir = temp.path().join("programs");
+    let out = Command::new(qedgen_bin())
+        .args(["codegen", "--spec"])
+        .arg(&spec_path)
+        .args(["--target", "anchor", "--no-check-compiles", "--output-dir"])
+        .arg(&output_dir)
+        .current_dir(temp.path())
+        .output()
+        .expect("spawn qedgen codegen");
+    assert!(
+        out.status.success(),
+        "codegen failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let lib = std::fs::read_to_string(output_dir.join("src/lib.rs")).expect("lib.rs");
+    let errors =
+        std::fs::read_to_string(output_dir.join("src/errors.rs")).expect("errors.rs emitted");
+    assert!(
+        lib.contains("pub mod errors;"),
+        "lib.rs must expose a synthesized-only error enum"
+    );
+    assert!(
+        errors.contains("MathOverflow"),
+        "checked addition must declare its synthesized error"
+    );
+}
+
 macro_rules! closure_tests {
     ($($name:ident => ($example:literal, $spec:literal, $target:literal);)*) => {
         $(

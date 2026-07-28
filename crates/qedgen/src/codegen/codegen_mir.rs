@@ -515,7 +515,7 @@ fn emit_lib(
     if !mir.events.is_empty() {
         out.push_str("pub mod events;\n");
     }
-    if !mir.errors.variants.is_empty() {
+    if !crate::codegen_shared::emitted_error_variants(parsed, target).is_empty() {
         out.push_str("pub mod errors;\n");
     }
     out.push_str("pub mod state;\n");
@@ -1417,7 +1417,8 @@ fn emit_errors(
     output_dir: &Path,
     target: Target,
 ) -> Result<()> {
-    if mir.errors.variants.is_empty() {
+    let codes = crate::codegen_shared::emitted_error_variants(parsed, target);
+    if codes.is_empty() {
         return Ok(());
     }
     let src_dir = output_dir.join("src");
@@ -1448,8 +1449,6 @@ fn emit_errors(
     // were derived independently, one site named a variant the enum lacked
     // (non-compiling program, `check` silent) and another refused to name one
     // the enum had (needlessly weakened assertion).
-    let codes: Vec<String> = crate::codegen_shared::emitted_error_variants(parsed, target);
-
     if matches!(target, Target::Pinocchio) {
         // Pinocchio: plain `#[repr(u32)]` enum + `From<…> for ProgramError`
         // (guards/handlers convert via `ProgramError::from(<Enum>::<V>)`).
