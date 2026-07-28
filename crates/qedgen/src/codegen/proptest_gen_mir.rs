@@ -1101,16 +1101,16 @@ struct FieldConstraint {
 /// return its name.
 fn tree_state_field(tree: &crate::mir::ExprTree) -> Option<String> {
     use crate::mir::expr_tree::{BindingKind, TreeSeg};
-    if let crate::mir::ExprTree::Path(p) = tree {
-        if matches!(p.binding, BindingKind::StateField | BindingKind::Ghost)
-            && p.segments.len() == 1
-        {
-            if let TreeSeg::Field(f) = &p.segments[0] {
-                return Some(f.clone());
-            }
-        }
+    let crate::mir::ExprTree::Path(p) = tree else {
+        return None;
+    };
+    if !matches!(p.binding, BindingKind::StateField | BindingKind::Ghost) {
+        return None;
     }
-    None
+    match p.segments.as_slice() {
+        [TreeSeg::Field(f)] => Some(f.clone()),
+        _ => None,
+    }
 }
 
 /// Render `tree` as a saturating-`+` chain over bare field names / int
@@ -1170,12 +1170,12 @@ fn tree_field_constraint(
     let ExprTree::Cmp { op, lhs, rhs } = tree else {
         return None;
     };
-    let (field, sum_side, op) = if let Some(f) = tree_state_field(lhs) {
-        (f, rhs.as_ref(), *op)
-    } else if let Some(f) = tree_state_field(rhs) {
-        (f, lhs.as_ref(), flip_cmp(*op))
-    } else {
-        return None;
+    // Put the single field on the left, the sum on the right — trying both
+    // operand orders (`b + c <= a` is `a >= b + c`).
+    let (field, sum_side, op) = match (tree_state_field(lhs), tree_state_field(rhs)) {
+        (Some(f), _) => (f, rhs.as_ref(), *op),
+        (None, Some(f)) => (f, lhs.as_ref(), flip_cmp(*op)),
+        (None, None) => return None,
     };
     let mut deps = std::collections::BTreeSet::new();
     let rhs_str = tree_linear_sum(sum_side, known, &mut deps)?;
