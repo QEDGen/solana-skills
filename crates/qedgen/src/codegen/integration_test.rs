@@ -764,20 +764,30 @@ fn emit_unauthorized_test(
 }
 
 /// The error a forged signer is expected to produce: `Unauthorized` when the
-/// spec declares it, else `InvalidLifecycle`, matching the preference order
-/// `codegen_shared::guards` uses for the program's own authorization checks.
+/// generated enum carries it, else `InvalidLifecycle`, matching the
+/// preference order `codegen_shared::guards` uses for the program's own
+/// authorization checks.
 ///
-/// Only SPEC-DECLARED codes are named. `guards` can fall back to
-/// `InvalidLifecycle` unconditionally because it emits that check only where
-/// the variant exists; this scaffold emits one negative test per `who`
-/// handler, and `codegen_mir` synthesizes `InvalidLifecycle` / `InvalidPda`
-/// into the enum only when `needs_lifecycle` / `needs_invalid_pda` hold. So
-/// `None` here means "degrade to the marked weak form" rather than name a
-/// variant the generated enum may not carry.
+/// #363 — this used to read `spec.error_codes` directly, which is the
+/// DECLARED set, not the EMITTED one. `codegen_mir` also synthesizes
+/// `InvalidLifecycle` when any handler has a non-init pre-status, and this
+/// function had no way to ask, so it deliberately under-approximated and
+/// returned `None`. The bundled multisig spec is exactly that shape: its
+/// enum does carry `InvalidLifecycle`, yet every forged-signer test degraded
+/// to the marked weak form for no reason.
+///
+/// Now both sides read `emitted_error_variants`, so this names a variant
+/// exactly when the enum will have one. `None` still means "degrade to the
+/// marked weak form" — it just no longer happens spuriously.
+///
+/// The lane is Quasar-only (`generate` rejects other targets), so the target
+/// is known here.
 fn authorization_error(spec: &ParsedSpec) -> Option<&'static str> {
     ["Unauthorized", "InvalidLifecycle"]
         .into_iter()
-        .find(|candidate| spec.error_codes.iter().any(|code| code == candidate))
+        .find(|candidate| {
+            crate::codegen_shared::declares_error_variant(spec, Target::Quasar, candidate)
+        })
 }
 
 fn emit_lifecycle_sequence_test(out: &mut String, spec: &ParsedSpec) {
@@ -1135,22 +1145,57 @@ mod tests {
         );
     }
 
-    /// Only a spec-declared error may be named. `InvalidLifecycle` and
-    /// `InvalidPda` are synthesized into the generated enum conditionally
-    /// (`codegen_mir`'s `needs_lifecycle` / `needs_invalid_pda`), so naming
-    /// one on a spec that does not declare it can reference a variant that
-    /// was never emitted.
+    /// #363 — the name must track the EMITTED enum, not the declared block.
+    ///
+    /// This asserted `None` for multisig, on the reasoning that its
+    /// `type Error` block declares neither candidate. But `codegen_mir` also
+    /// synthesizes `InvalidLifecycle` whenever a handler has a non-init
+    /// pre-status, which multisig has, so the enum did carry it and every
+    /// forged-signer test was weakened for nothing. Both sides now read
+    /// `emitted_error_variants`.
     #[test]
-    fn authorization_error_names_only_spec_declared_codes() {
+    fn authorization_error_tracks_the_emitted_enum() {
         let spec = chumsky_adapter::parse_str(ESCROW_SPEC).unwrap();
         assert_eq!(authorization_error(&spec), Some("Unauthorized"));
 
-        // Multisig's `type Error` block declares neither candidate, so the
-        // scaffold degrades to the marked weak form instead of guessing.
         let multisig = chumsky_adapter::parse_str(MULTISIG_SPEC).unwrap();
-        assert_eq!(authorization_error(&multisig), None);
+        assert_eq!(
+            authorization_error(&multisig),
+            Some("InvalidLifecycle"),
+            "multisig declares neither candidate but its enum carries \
+             InvalidLifecycle (non-init pre-status)"
+        );
+        // Tie the claim to the emitter rather than restating it: if
+        // `emitted_error_variants` stops synthesizing the variant, naming it
+        // here becomes a dangling reference and this fails first.
+        assert!(
+            crate::codegen_shared::declares_error_variant(
+                &multisig,
+                Target::Quasar,
+                "InvalidLifecycle"
+            ),
+            "the emitted enum must actually carry what the scaffold names"
+        );
+    }
 
-        let out = render(&multisig, "test").expect("render");
+    /// A spec whose enum carries neither candidate still degrades to the
+    /// marked weak form rather than guessing a variant that was never
+    /// emitted. `None` is still reachable — it just no longer fires
+    /// spuriously.
+    #[test]
+    fn authorization_error_degrades_when_the_enum_carries_neither() {
+        // No `type Error`, and every handler is init-shaped, so neither
+        // `Unauthorized` nor `InvalidLifecycle` reaches the enum.
+        let spec = chumsky_adapter::parse_str(
+            "spec Weak\n\
+             type State\n  | Uninitialized\n  | Active of { total : U64, }\n\
+             handler init : State.Uninitialized -> State.Active {\n  \
+             auth owner\n  accounts { owner : signer }\n  effect { total := 0 }\n}\n",
+        )
+        .expect("parse");
+        assert_eq!(authorization_error(&spec), None);
+
+        let out = render(&spec, "test").expect("render");
         if out.contains("_unauthorized()") {
             assert!(
                 out.contains("the spec declares no authorization error"),
