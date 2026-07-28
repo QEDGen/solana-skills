@@ -41,6 +41,7 @@ mod pool {
             interest_rate in 0u64..=u64::MAX,
             status in prop_oneof![Just(Status::Uninitialized), Just(Status::Active), Just(Status::Paused)],
         ) -> State {
+            let total_deposits = total_deposits.max(total_borrows);
             State {
                 authority,
                 total_deposits,

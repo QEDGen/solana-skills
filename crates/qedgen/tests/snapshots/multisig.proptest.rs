@@ -46,6 +46,7 @@ prop_compose! {
         rejection_count in 0u8..=255u8,
         status in prop_oneof![Just(Status::Uninitialized), Just(Status::Active), Just(Status::HasProposal)],
     ) -> State {
+        let member_count = member_count.max((approval_count).saturating_add(rejection_count));
         State {
             creator,
             threshold,

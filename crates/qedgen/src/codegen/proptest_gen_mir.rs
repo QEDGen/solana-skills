@@ -919,11 +919,25 @@ fn emit_account_section(
             }
         }
     }
+    // Conservation-invariant repairs for `arb_state` (see `state_repairs`).
+    // Source the assumed predicates the preservation tests filter random
+    // states against: unary (non-binary) properties and the spec's
+    // invariants. Repairing to satisfy them keeps the reject rate low
+    // enough that the preservation tests actually run.
+    let constraint_trees: Vec<&crate::mir::ExprTree> = properties
+        .iter()
+        .filter(|p| p.class != crate::check::PropertyClass::Binary)
+        .filter_map(|p| p.tree.as_ref())
+        .chain(spec.invariants.iter().filter_map(|i| i.tree.as_ref()))
+        .collect();
+    let repairs = state_repairs(&constraint_trees, mutable_fields);
+
     emit_state_strategy(
         out,
         mutable_fields,
         all_fields,
         &field_bounds,
+        &repairs,
         lifecycle_states,
         spec,
         vis,
@@ -1062,17 +1076,259 @@ fn emit_account_section(
     Ok(())
 }
 
+/// Direction of a single-field constraint recovered for `arb_state` repair.
+#[derive(Clone, Copy, PartialEq)]
+enum RepairDir {
+    /// `field >= rhs` — raise `field` to at least `rhs`.
+    Lower,
+    /// `field <= rhs` — lower `field` to at most `rhs`.
+    Upper,
+    /// `field == rhs` — set `field` to `rhs`.
+    Exact,
+}
+
+/// A single-field constraint of the conservation shape
+/// `field (>=|<=|==) <sum of other fields (+ constants)>`.
+struct FieldConstraint {
+    field: String,
+    dir: RepairDir,
+    /// Rust for the right-hand side, a saturating-`+` chain over field names.
+    rhs: String,
+    deps: std::collections::BTreeSet<String>,
+}
+
+/// If `tree` is a bare state/ghost field read (`state.f`, no subscript),
+/// return its name.
+fn tree_state_field(tree: &crate::mir::ExprTree) -> Option<String> {
+    use crate::mir::expr_tree::{BindingKind, TreeSeg};
+    let crate::mir::ExprTree::Path(p) = tree else {
+        return None;
+    };
+    if !matches!(p.binding, BindingKind::StateField | BindingKind::Ghost) {
+        return None;
+    }
+    match p.segments.as_slice() {
+        [TreeSeg::Field(f)] => Some(f.clone()),
+        _ => None,
+    }
+}
+
+/// Render `tree` as a saturating-`+` chain over bare field names / int
+/// literals — the RHS of a conservation constraint. `None` for any shape
+/// outside `field` / `int` / `a + b` (so `-`, `*`, subscripts fall through
+/// to the reject-sampling path). Collects the referenced field names into
+/// `deps`; a field not in `known` (e.g. a subscripted one) makes it `None`.
+fn tree_linear_sum(
+    tree: &crate::mir::ExprTree,
+    known: &std::collections::BTreeSet<String>,
+    deps: &mut std::collections::BTreeSet<String>,
+) -> Option<String> {
+    use crate::mir::expr_tree::TreeArithOp;
+    use crate::mir::ExprTree;
+    match tree {
+        ExprTree::Int(v) => Some(v.to_string()),
+        ExprTree::Arith {
+            op: TreeArithOp::Add,
+            lhs,
+            rhs,
+        } => {
+            let l = tree_linear_sum(lhs, known, deps)?;
+            let r = tree_linear_sum(rhs, known, deps)?;
+            Some(format!("({l}).saturating_add({r})"))
+        }
+        _ => {
+            let f = tree_state_field(tree)?;
+            if !known.contains(&f) {
+                return None;
+            }
+            deps.insert(f.clone());
+            Some(f)
+        }
+    }
+}
+
+fn flip_cmp(op: crate::mir::expr_tree::TreeCmpOp) -> crate::mir::expr_tree::TreeCmpOp {
+    use crate::mir::expr_tree::TreeCmpOp::*;
+    match op {
+        Ge => Le,
+        Le => Ge,
+        Gt => Lt,
+        Lt => Gt,
+        Eq => Eq,
+        Ne => Ne,
+    }
+}
+
+/// Recover a `field (>=|<=|==) sum` constraint from a comparison, trying
+/// both operand orders (`b + c <= a` is `a >= b + c`).
+fn tree_field_constraint(
+    tree: &crate::mir::ExprTree,
+    known: &std::collections::BTreeSet<String>,
+) -> Option<FieldConstraint> {
+    use crate::mir::expr_tree::TreeCmpOp;
+    use crate::mir::ExprTree;
+    let ExprTree::Cmp { op, lhs, rhs } = tree else {
+        return None;
+    };
+    // Put the single field on the left, the sum on the right — trying both
+    // operand orders (`b + c <= a` is `a >= b + c`).
+    let (field, sum_side, op) = match (tree_state_field(lhs), tree_state_field(rhs)) {
+        (Some(f), _) => (f, rhs.as_ref(), *op),
+        (None, Some(f)) => (f, lhs.as_ref(), flip_cmp(*op)),
+        (None, None) => return None,
+    };
+    let mut deps = std::collections::BTreeSet::new();
+    let rhs_str = tree_linear_sum(sum_side, known, &mut deps)?;
+    if deps.contains(&field) {
+        return None; // self-referential (`a >= a + b`)
+    }
+    let (dir, rhs) = match op {
+        TreeCmpOp::Ge => (RepairDir::Lower, rhs_str),
+        TreeCmpOp::Gt => (RepairDir::Lower, format!("({rhs_str}).saturating_add(1)")),
+        TreeCmpOp::Le => (RepairDir::Upper, rhs_str),
+        TreeCmpOp::Lt => (RepairDir::Upper, format!("({rhs_str}).saturating_sub(1)")),
+        TreeCmpOp::Eq => (RepairDir::Exact, rhs_str),
+        TreeCmpOp::Ne => return None,
+    };
+    Some(FieldConstraint {
+        field,
+        dir,
+        rhs,
+        deps,
+    })
+}
+
+/// Split a boolean tree into its top-level `and` conjuncts.
+fn tree_conjuncts<'a>(tree: &'a crate::mir::ExprTree, out: &mut Vec<&'a crate::mir::ExprTree>) {
+    use crate::mir::expr_tree::TreeBoolOp;
+    use crate::mir::ExprTree;
+    if let ExprTree::BoolOp {
+        op: TreeBoolOp::And,
+        lhs,
+        rhs,
+    } = tree
+    {
+        tree_conjuncts(lhs, out);
+        tree_conjuncts(rhs, out);
+    } else {
+        out.push(tree);
+    }
+}
+
+/// Best-effort repair statements for `arb_state`: raise / lower / set
+/// fields so the common conservation invariants (`field (>=|<=|==) sum`)
+/// hold by construction, instead of `prop_assume` rejecting nearly every
+/// random state (tight relational invariants exhaust `max_global_rejects`,
+/// so the preservation test aborts having validated nothing).
+///
+/// Correctness rests on the preservation tests KEEPING their `prop_assume`
+/// as the safety net: this only reduces the reject rate, so any shape it
+/// can't repair (subscripts, `-`/`*`, mixed `>=`/`<=` on one field, cyclic
+/// dependencies) simply reject-samples as before. Returns `(field, rhs)` in
+/// dependency order — a field whose RHS reads another repaired field is
+/// emitted after it.
+fn state_repairs(
+    trees: &[&crate::mir::ExprTree],
+    mutable_fields: &[&(String, String)],
+) -> Vec<(String, String)> {
+    use std::collections::{BTreeMap, BTreeSet};
+    // Only numeric fields carry `.max()` / `.saturating_add()` repairs.
+    let known: BTreeSet<String> = mutable_fields
+        .iter()
+        .filter(|(_, t)| prim_rust_suffix(&crate::mir::parse_ty(t)).is_some())
+        .map(|(n, _)| n.clone())
+        .collect();
+
+    let mut per_field: BTreeMap<String, Vec<FieldConstraint>> = BTreeMap::new();
+    for tree in trees {
+        let mut conjuncts = Vec::new();
+        tree_conjuncts(tree, &mut conjuncts);
+        for c in conjuncts {
+            if let Some(fc) = tree_field_constraint(c, &known) {
+                per_field.entry(fc.field.clone()).or_default().push(fc);
+            }
+        }
+    }
+
+    struct Repair {
+        expr: String,
+        deps: BTreeSet<String>,
+    }
+    let mut repairs: BTreeMap<String, Repair> = BTreeMap::new();
+    for (field, cs) in &per_field {
+        if let Some(exact) = cs.iter().find(|c| c.dir == RepairDir::Exact) {
+            repairs.insert(
+                field.clone(),
+                Repair {
+                    expr: exact.rhs.clone(),
+                    deps: exact.deps.clone(),
+                },
+            );
+            continue;
+        }
+        let has_lower = cs.iter().any(|c| c.dir == RepairDir::Lower);
+        let has_upper = cs.iter().any(|c| c.dir == RepairDir::Upper);
+        // A range (both directions) can be infeasible after clamping — leave
+        // it to `prop_assume` rather than risk producing a violating state.
+        if has_lower && has_upper {
+            continue;
+        }
+        let (method, dir) = if has_lower {
+            ("max", RepairDir::Lower)
+        } else {
+            ("min", RepairDir::Upper)
+        };
+        let mut expr = field.clone();
+        let mut deps = BTreeSet::new();
+        for c in cs.iter().filter(|c| c.dir == dir) {
+            expr = format!("{expr}.{method}({})", c.rhs);
+            deps.extend(c.deps.iter().cloned());
+        }
+        repairs.insert(field.clone(), Repair { expr, deps });
+    }
+
+    // Dependency order (Kahn): emit a field once its repaired deps are done;
+    // fields left in a cycle are dropped (they reject-sample).
+    let repaired: BTreeSet<String> = repairs.keys().cloned().collect();
+    let mut ordered: Vec<(String, String)> = Vec::new();
+    let mut done: BTreeSet<String> = BTreeSet::new();
+    loop {
+        let mut progressed = false;
+        for (field, r) in &repairs {
+            if done.contains(field) {
+                continue;
+            }
+            if r.deps
+                .iter()
+                .all(|d| !repaired.contains(d) || done.contains(d))
+            {
+                ordered.push((field.clone(), r.expr.clone()));
+                done.insert(field.clone());
+                progressed = true;
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+    ordered
+}
+
 /// Emit proptest `Arbitrary`-like strategy for State.
+#[allow(clippy::too_many_arguments)]
 fn emit_state_strategy(
     out: &mut String,
     mutable_fields: &[&(String, String)],
     all_fields: &[(String, String)],
     field_bounds: &std::collections::HashMap<String, String>,
+    repairs: &[(String, String)],
     lifecycle_states: &[String],
     spec: &ParsedSpec,
     vis: &str,
 ) -> Result<()> {
-    // Full-range strategy (capped by property bounds when available)
+    // Full-range strategy (capped by property bounds when available, and
+    // repaired to satisfy conservation invariants so preservation tests
+    // don't reject-exhaust).
     emit_state_strategy_inner(
         out,
         "arb_state",
@@ -1080,11 +1336,14 @@ fn emit_state_strategy(
         all_fields,
         StrategyMode::Full,
         field_bounds,
+        repairs,
         lifecycle_states,
         spec,
         vis,
     )?;
-    // Boundary-biased strategy for guard rejection tests
+    // Boundary-biased strategy for guard rejection tests — deliberately
+    // NOT repaired: guard tests want boundary / invalid states and assume
+    // no invariant.
     emit_state_strategy_inner(
         out,
         "arb_boundary_state",
@@ -1092,6 +1351,7 @@ fn emit_state_strategy(
         all_fields,
         StrategyMode::Boundary,
         field_bounds,
+        &[],
         lifecycle_states,
         spec,
         vis,
@@ -1113,6 +1373,7 @@ fn emit_state_strategy_inner(
     all_fields: &[(String, String)],
     mode: StrategyMode,
     field_bounds: &std::collections::HashMap<String, String>,
+    repairs: &[(String, String)],
     lifecycle_states: &[String],
     spec: &ParsedSpec,
     vis: &str,
@@ -1150,6 +1411,13 @@ fn emit_state_strategy_inner(
         out.push_str(&format!("        status in prop_oneof![{}],\n", variants));
     }
     out.push_str("    ) -> State {\n");
+    // Repair the generated fields so conservation invariants hold by
+    // construction (raise/lower/set in dependency order). Shadows the
+    // generated binding; `State { field }` shorthand then uses the repaired
+    // value. Only `arb_state` (Full) is repaired.
+    for (field, rhs) in repairs {
+        out.push_str(&format!("        let {field} = {rhs};\n"));
+    }
     out.push_str("        State {\n");
     for (fname, _) in mutable_fields {
         out.push_str(&format!("            {},\n", fname));
@@ -3889,6 +4157,83 @@ property c_ge_d : state.c >= state.d preserved_by all
         assert!(
             arb.contains("c in 0u64..=1000u64") && arb.contains("d in 0u64..=1000u64"),
             "component {{c,d}} must borrow c's 1000, not the global min 10:\n{arb}"
+        );
+    }
+
+    /// `arb_state` repairs conservation invariants (`field >= sum`,
+    /// `field == sum`) so preservation tests satisfy their `prop_assume`
+    /// by construction instead of reject-exhausting. Stacked invariants
+    /// repair in dependency order (a field feeding another's RHS first).
+    #[test]
+    fn arb_state_repairs_conservation_invariants_in_dependency_order() {
+        let (_spec, body) = emit_full_harness(
+            r#"
+spec Cons
+
+state { total : U64, reserved : U64, pending : U64, queued : U64 }
+
+type Error | Bad
+
+handler touch (x : U64) {
+  requires x > 0 else Bad
+  effect { total := state.total + x }
+}
+
+property p_total : state.total >= state.reserved + state.pending preserved_by [touch]
+property p_pending : state.pending >= state.queued preserved_by [touch]
+"#,
+        );
+
+        let start = body.find("fn arb_state").expect("arb_state present");
+        let end = body[start..]
+            .find("arb_boundary_state")
+            .map(|i| start + i)
+            .unwrap_or(body.len());
+        let arb = &body[start..end];
+        let ip = arb.find("let pending = pending.max(queued)");
+        let it = arb.find("let total = total.max((reserved).saturating_add(pending))");
+        assert!(
+            ip.is_some() && it.is_some(),
+            "both conservation repairs must be emitted:\n{arb}"
+        );
+        // `pending` feeds `total`'s RHS, so it must be repaired first.
+        assert!(
+            ip < it,
+            "repairs must be in dependency order (pending before total):\n{arb}"
+        );
+    }
+
+    /// The repair only fires for the recognized conservation shape; a
+    /// subtraction on the RHS falls back to the `prop_assume` path (no
+    /// `let` shadow), so nothing regresses for unsupported shapes.
+    #[test]
+    fn arb_state_repair_falls_back_on_unsupported_shape() {
+        let (_spec, body) = emit_full_harness(
+            r#"
+spec Sub
+
+state { a : U64, b : U64, c : U64 }
+
+type Error | Bad
+
+handler touch (x : U64) {
+  requires x > 0 else Bad
+  effect { a := state.a + x }
+}
+
+property rel : state.a >= state.b - state.c preserved_by [touch]
+"#,
+        );
+
+        let start = body.find("fn arb_state").expect("arb_state present");
+        let end = body[start..]
+            .find("arb_boundary_state")
+            .map(|i| start + i)
+            .unwrap_or(body.len());
+        let arb = &body[start..end];
+        assert!(
+            !arb.contains("let a ="),
+            "a `-` RHS is unsupported and must not emit a repair:\n{arb}"
         );
     }
 
