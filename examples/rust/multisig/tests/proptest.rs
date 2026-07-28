@@ -631,6 +631,7 @@ proptest! {
             if next_lifecycle.is_none() {
                 continue; // skip ops not valid in current lifecycle state
             }
+            let pre = s;
             if apply_op(&mut s, op) {
                 if let Some(next) = next_lifecycle {
                     lifecycle = next;
@@ -639,11 +640,15 @@ proptest! {
                     initialized = true;
                     continue; // skip property checks on init transition
                 }
-                // Check all properties after each successful transition
-                prop_assert!(threshold_bounded(&s),
-                    "threshold_bounded violated after op {:?} (step {})", op, i);
-                prop_assert!(votes_bounded(&s),
-                    "votes_bounded violated after op {:?} (step {})", op, i);
+                // Check each preserved_by obligation as `pre -> post`
+                if threshold_bounded(&pre) {
+                    prop_assert!(threshold_bounded(&s),
+                        "threshold_bounded violated after op {:?} (step {})", op, i);
+                }
+                if matches!(op, Op::CreateVault(..) | Op::Propose | Op::Execute(..) | Op::CancelProposal | Op::RemoveMember) && votes_bounded(&pre) {
+                    prop_assert!(votes_bounded(&s),
+                        "votes_bounded violated after op {:?} (step {})", op, i);
+                }
             }
         }
     }
