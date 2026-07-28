@@ -2,7 +2,9 @@ use anyhow::Result;
 use std::path::Path;
 
 use crate::check::{self, ParsedHandler, ParsedHandlerAccount, ParsedSpec};
-use crate::codegen_shared::{map_type, map_type_quasar, to_pascal_case, write_generated_file};
+use crate::codegen_shared::{
+    map_type, map_type_parallax_host, to_pascal_case, write_generated_file,
+};
 use crate::Target;
 
 /// Generate Parallax integration test scaffolds: tests run the compiled
@@ -382,13 +384,19 @@ fn emit_account_helpers(
         out.push_str("#[allow(dead_code)]\n");
         out.push_str("fn state_account(\n");
         out.push_str("    address: Pubkey,\n");
-        // Quasar's type mapping, not the standalone one. This helper builds
-        // the program's own state struct, and `src/state.rs` is emitted with
-        // `map_type_quasar` — a `Pubkey` field there against a `[u8; 32]`
-        // parameter here is a type error the moment an agent wires the
-        // helper up.
+        // The Parallax-host mapping, not the standalone one. This helper
+        // builds the program's own state struct, so a `[u8; 32]` parameter
+        // against the struct's real field type is a type error the moment an
+        // agent wires the helper up.
+        //
+        // Not `map_type_quasar` either (#372): that emits `Address`, which
+        // this file cannot name — Parallax's prelude exports `Pubkey`, and
+        // the program's `use quasar_lang::prelude::*` is private, so
+        // `use program::state::*` does not bring `Address` along. The two
+        // denote one type (`solana-pubkey` re-exports
+        // `solana_address::Address as Pubkey`), so the struct still matches.
         for (name, ty) in fields {
-            let rust_ty = map_type_quasar(ty, spec)?;
+            let rust_ty = map_type_parallax_host(ty, spec)?;
             out.push_str(&format!("    {}: {},\n", name, rust_ty));
         }
         out.push_str("    bump: u8,\n");

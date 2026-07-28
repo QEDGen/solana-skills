@@ -23,20 +23,22 @@
 //! symbol the emitters name (`system_program`, `DEFAULT_WALLET_LAMPORTS`,
 //! `SPL_TOKEN_PROGRAM_ID`, `Instruction`, `Pubkey`, `Cu`).
 //!
-//! NOT COVERED — the Quasar client boundary, because the generated Quasar
-//! program does not compile at all today.
+//! NOT COVERED — the Quasar client boundary. The stub below mirrors the
+//! shapes Quasar codegen produces, so if Quasar's own output moves this gate
+//! will not catch it.
 //!
-//! `quasar-lang` 0.0.0 IS published and resolves (an earlier version of this
-//! comment claimed otherwise; that was wrong and unverified). The real
-//! blocker is a type mismatch: quasar-lang is `#![no_std]` and addresses are
-//! `solana_address::Address`, while `map_type_quasar` shares Anchor's
-//! mapping and emits `Pubkey`, which quasar-lang does not define. A
-//! `codegen --target quasar` of the bundled multisig example fails with 13
-//! errors, starting with "cannot find type `Pubkey` in this scope".
+//! The blocker that forced the stub is gone: #372 gave Quasar its own
+//! `Address` mapping, and `generated_artifact_gate` now compiles all three
+//! bundled examples as Quasar. Replacing this stub with a real generated
+//! Quasar program is the remaining step, and it is blocked on the dependency
+//! problem below rather than on codegen.
 //!
-//! So the stub below mirrors the shapes Quasar codegen produces, and if
-//! Quasar's own output moves this gate will not catch it. Closing that needs
-//! the codegen fixed first, not more gate. Separately tracked.
+//! KNOWN RED — the pinned `parallax-svm` revision's transitive dependencies
+//! do not currently resolve to a compatible set: `solana-transaction` 4.1.5
+//! and `solana-sysvar` 4.1.0 fail to compile against `wincode` 0.5.5. That
+//! is upstream, not generated code. The pin-liveness script (#371) checks
+//! that the revision EXISTS, not that it builds, so it stays green through
+//! this.
 //!
 //! `#[ignore]`: pulls LiteSVM + the Agave runtime on first run (network,
 //! multi-minute cold compile). CI runs it with `-- --ignored`, like
