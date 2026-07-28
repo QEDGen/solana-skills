@@ -161,6 +161,10 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     // referencing undeclared Error variants would also fail cargo build.
     warnings.extend(check_unknown_error_variant(spec));
 
+    // #368 — no `program_id` means `declare_id!` gets the System Program's
+    // address. Valid base58, so nothing downstream rejects it on shape.
+    warnings.extend(check_missing_program_id(spec));
+
     // Opt-in non-default arithmetic (`+=?`/`-=?` wrapping, `+=!`/`-=!`
     // saturating) needs surfacing but isn't reproducible from the spec
     // alone — lives in check, not probe (reproducer-only probe contract).
@@ -258,6 +262,32 @@ mod tests {
                 window[1].priority
             );
         }
+    }
+
+    /// #368 — both roads to a System-Program `declare_id!` are reported,
+    /// and a real address is clean.
+    #[test]
+    fn missing_program_id_covers_absent_and_placeholder() {
+        let body = "\ntype State\n  | Active of { total : U64, }\n\
+                    handler settle (amount : U64) : State.Active -> State.Active {\n  \
+                    effect { total := amount }\n}\n";
+        let fires = |header: &str| {
+            let spec = crate::chumsky_adapter::parse_str(&format!("{header}{body}"))
+                .expect("spec should parse");
+            check_completeness(&spec)
+                .iter()
+                .any(|w| w.rule == "missing_program_id")
+        };
+
+        assert!(fires("spec Absent\n"), "no program_id must be reported");
+        assert!(
+            fires("spec Placeholder\nprogram_id \"11111111111111111111111111111111\"\n"),
+            "the `qedgen init` placeholder must be reported even though it IS declared"
+        );
+        assert!(
+            !fires("spec Real\nprogram_id \"Escrow111111111111111111111111111111111111z\"\n"),
+            "a declared non-placeholder address must be clean"
+        );
     }
 
     #[test]

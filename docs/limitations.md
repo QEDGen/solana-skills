@@ -145,6 +145,43 @@ to handler parameter" is the only working in-spec answer.
 
 ---
 
+## `declare_id!` without a `program_id` (#368)
+
+Codegen must emit a `declare_id!`, so a spec that declares no
+`program_id` falls back to `11111111111111111111111111111111` — the
+System Program's address. `qedgen init` templates that same value into
+new specs, so the default authoring path produces it too.
+
+The trap is that it is a **valid base58 pubkey**. Nothing downstream
+rejects it on shape, so it reads back as a real address:
+
+```
+declare_id!("11111111111111111111111111111111");   // the System Program
+```
+
+Three things now make it visible rather than silent:
+
+- `qedgen check` reports the P3 `missing_program_id` info, for both the
+  absent case and a verbatim placeholder;
+- the generated `lib.rs` carries a `// PLACEHOLDER:` comment above the
+  line, which is the only in-band signal a reader or a grep can use;
+- the probe reproducer lane refuses to build against it, rather than
+  aiming an attack transaction at the System Program and reporting "no
+  bug" for an unrelated reason.
+
+Info rather than Warning on purpose: `qedgen check` exits non-zero on
+any Warning, and a spec legitimately has no deployed address for most
+of its life. Gating ordinary in-progress work on "you have not deployed
+yet" would get the rule muted rather than obeyed.
+
+Fix: add `program_id "<your id>"` to the spec, from `anchor keys list`
+or `solana-keygen pubkey target/deploy/<name>-keypair.json`.
+
+Note the bundled examples under `examples/rust/` still carry the
+placeholder. They are never deployed, so it is accurate there.
+
+---
+
 ## Past limitations (lifted)
 
 - **`forall` over wider-than-U8 binder types verified vacuously** —

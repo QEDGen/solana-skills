@@ -56,23 +56,19 @@ fn parallax_reproducers_confirm_bugs_and_drop_guarded_handlers() {
             .current_dir(tmp.path()),
     );
 
-    // The scaffold stamps the System Program id as a `declare_id!`
-    // placeholder, which cannot be the program's own address at runtime.
+    // #368 — this used to rewrite `declare_id!` after generation, because a
+    // spec without `program_id` gets the System Program's address stamped as
+    // its own. The fixture spec now declares the id, so codegen emits it and
+    // the reproducer lane (which refuses the placeholder outright) has a real
+    // target. Asserted rather than assumed: if the spec loses its
+    // `program_id`, this fails here instead of the lane silently reporting
+    // "no bug" from a transaction aimed at the System Program.
     let lib = tmp.path().join("program/src/lib.rs");
     let source = std::fs::read_to_string(&lib).expect("read lib.rs");
-    let stamped: String = source
-        .lines()
-        .map(|line| {
-            if line.starts_with("declare_id!") {
-                format!("declare_id!(\"{PROGRAM_ID}\");")
-            } else {
-                line.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert_ne!(source, stamped, "expected a declare_id! line to stamp");
-    std::fs::write(&lib, stamped).expect("write lib.rs");
+    assert!(
+        source.contains(&format!("declare_id!(\"{PROGRAM_ID}\")")),
+        "the fixture spec must declare `program_id \"{PROGRAM_ID}\"`; got:\n{source}"
+    );
 
     // The generated manifest pins `qedgen-macros` to an unreleased tag.
     let manifest_path = tmp.path().join("program/Cargo.toml");
