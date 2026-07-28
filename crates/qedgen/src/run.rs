@@ -1484,6 +1484,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             require_verified,
             recursive,
             strict,
+            scaffold,
         } => {
             require_git_repo()?;
 
@@ -1612,7 +1613,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
 
             // No explicit backend flags -> run every backend whose artifact
             // is present on disk.
-            let any_flag = proptest || kani || lean || miri;
+            let any_flag = proptest || kani || lean || miri || scaffold;
             // Project root used by Miri repro discovery — spec parent dir.
             let project_root = spec
                 .parent()
@@ -1651,6 +1652,18 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                         .is_ok_and(|path| path == program_root);
                 kani_matches || miri_matches
             });
+            // #364 — the crate the `scaffold` backend compiles. `--program`
+            // already names the program crate; default to the codegen output
+            // directory so `--scaffold` alone works in the standard layout.
+            let scaffold_path = program
+                .clone()
+                .unwrap_or_else(|| project_root.join("programs"));
+            // Flag-less auto-on requires BOTH the crate and a resolved
+            // dependency tree — see `scaffold::deps_resolved`. Without the
+            // second condition a bare `qedgen verify` in a fresh project
+            // would stall on a cold `anchor-lang` build.
+            let scaffold_default = scaffold_path.join("Cargo.toml").exists()
+                && verify::scaffold::deps_resolved(&scaffold_path);
             let opts = if any_flag {
                 verify::VerifyOpts {
                     spec: spec.clone(),
@@ -1663,6 +1676,8 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                     miri,
                     fail_fast,
                     project_root: project_root.clone(),
+                    scaffold,
+                    scaffold_path,
                 }
             } else {
                 verify::VerifyOpts {
@@ -1677,6 +1692,8 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                     miri: miri_default,
                     fail_fast,
                     project_root: project_root.clone(),
+                    scaffold: scaffold_default,
+                    scaffold_path,
                 }
             };
 
@@ -1705,7 +1722,13 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
 
             // Persist the evidence record `stamp` gates on — written on
             // pass AND fail (a failed run is still evidence of what ran).
-            if program.is_some() && evidence_program.is_none() {
+            // Only meaningful when an implementation-bound backend was
+            // actually requested. #364 gave `--program` a second job (naming
+            // the crate `--scaffold` compiles), and warning that it "will not
+            // authorize stamp" on a plain `--scaffold` run reads as a fault
+            // when nothing is wrong: a scaffold pass is not stamp evidence by
+            // design, so there is nothing for the user to fix.
+            if program.is_some() && evidence_program.is_none() && (kani_impl_bound || miri) {
                 eprintln!(
                     "warning: --program is not rooted at the implementation-bound backend \
                      input; verification evidence will not authorize `stamp`"
@@ -1880,6 +1903,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             fill,
             handler,
             fill_tests,
+            no_check_compiles,
         } => {
             // `is_pinocchio` gates the post-regen stamped-drift scan below
             // (the Pinocchio scaffold carries no `#[qed(verified)]` stamps).
@@ -2280,6 +2304,21 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                         eprintln!("warning: stamped-drift scan failed: {}", e);
                     }
                 }
+            }
+
+            // #364 — compile what we just wrote. Nothing else in the loop
+            // does, so a codegen defect otherwise reaches the user as a red
+            // `cargo build` with no qedgen diagnostic, often after `check`
+            // printed `0 error(s)`.
+            //
+            // Never gates: codegen's contract is to write files and it did,
+            // and a brownfield crate that fails to build for unrelated
+            // reasons must not make codegen unusable. `verify --scaffold`
+            // is the gating surface. (`scaffold_will_run` above is the Rust
+            // SCAFFOLD-GENERATION flag; this is the compile check over its
+            // output.)
+            if scaffold_will_run && !no_check_compiles && output_dir.exists() {
+                report_scaffold_compile_check(&output_dir);
             }
 
             if fill {

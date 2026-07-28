@@ -26,7 +26,8 @@ sBPF assembly is selected by `pragma sbpf` in the spec, not by a `Target`.
 | IDL → Tier-0 interface (`interface_gen`) | ✅ | ❌ | ✅ Codama IR (#197) | ❌ | ❌ |
 | IDL → brownfield fuzz (`probe/crucible_brownfield`) | ✅ 0.30 | ✅ | ⚠️ needs on-disk Codama/0.30 IDL | ❌ deferred | ❌ parked |
 | Brownfield adapt → spec skeleton (`adapt/`) — *deprecated* | ✅ args + accounts + errors | ❌ no adapter | ⚠️ handlers-only skeleton | ⚠️ loose (no conventions) | ❌ |
-| Greenfield Rust scaffold (`codegen_mir`) | ✅ | ⚠️ generic CPI → `todo!()` | ⚠️ generic CPI → `todo!()`; imported mirrors error | n/a | n/a |
+| Greenfield Rust scaffold (`codegen_mir`) | ✅ | ⚠️ generic CPI → `todo!()`; **does not compile** (see the Quasar note below) | ⚠️ generic CPI → `todo!()`; imported mirrors error | n/a | n/a |
+| Scaffold compiles (`verify --scaffold`, #364) | ✅ gated (`generated_artifact_gate`) | ❌ fails today (`Pubkey` vs `solana_address::Address`, #372) | ⚠️ compiles, ungated ⁷ | n/a | n/a |
 | Kani spec-model (`kani_mir`) | ✅ ¹ ⁴ | ✅ ¹ ⁴ | ✅ ¹ ⁴ | n/a | skip by design |
 | impl-Kani (`kani_impl`) | ✅ greenfield + state-struct (#162) + Context (#169) | ⚠️ greenfield shape only | ⚠️ own `#[repr(C)]` shape; some ix-data field types TODO | ❌ | ❌ |
 | proptest (`proptest_gen_mir`) | ✅ ⁵ | ✅ ⁵ | ✅ ⁵ | n/a | skip by design |
@@ -83,6 +84,11 @@ read or written by a per-account transition (guard, let, effect, or
 branch scrutinee) is not liftable — that spec keeps per-account ghost
 copies and its ghost obligations stay
 `unsupported(proptest_multi_account_ghost)` in the manifest.
+
+⁷ A generated Pinocchio scaffold typechecks against `pinocchio` 0.8 /
+`pinocchio-pubkey` 0.3 / `zeropod` 0.1 — checked by hand with `verify
+--scaffold`, not asserted from the code. No gate compiles one, so nothing
+keeps it that way. `generated_artifact_gate` covers Anchor only.
 
 ⁶ Parallax integration scaffold. World setup, execution, outcomes, and
 checks are Parallax; the instruction builders still come from the generated

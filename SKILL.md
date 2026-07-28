@@ -119,6 +119,7 @@ cargo test --manifest-path programs/Cargo.toml
 Step 5. Verify generated backends.
 
 ```bash
+$QEDGEN verify --spec program.qedspec --scaffold   # v2.49 — the generated program crate compiles
 $QEDGEN verify --spec program.qedspec --proptest
 $QEDGEN verify --spec program.qedspec --kani
 $QEDGEN verify --spec program.qedspec --kani-impl   # v2.26 — calls user's real Anchor handler (opt-in)
@@ -128,6 +129,16 @@ $QEDGEN verify --spec program.qedspec --check-upstream # v2.26 — pin-mismatch 
 $QEDGEN verify --spec program.qedspec --recursive       # v2.27 — DFS-walk transitive proof packages; lake build per layer
 $QEDGEN verify --spec program.qedspec --require-verified # v2.27 — exits non-zero on any Tier-1+ import without a bundled proof package (default-off)
 ```
+
+`--scaffold` is the cheapest of these and answers a different question:
+does the generated program crate compile at all? Every other backend
+builds a harness, so before v2.49 a codegen defect surfaced only as a red
+`cargo build` in your project, often right after `check` reported
+`0 error(s)`. Dependency and toolchain problems report `skipped` with the
+reason rather than failing, since neither is a statement about the
+generated code. A pass does not authorize `stamp` — compiling is not
+verifying. `codegen` runs the same check automatically once your
+dependencies resolve.
 
 v2.26 split the Kani layer into two harness shapes: `--kani` runs the
 v2.25 ensures-preservation harness against the spec-translated transition

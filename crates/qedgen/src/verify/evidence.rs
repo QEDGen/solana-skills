@@ -168,6 +168,14 @@ pub fn build(
             implementation_bound: match b.name {
                 "miri" => true,
                 "kani" => kani_impl_bound,
+                // #364 — `scaffold` compiles the real program crate, so it
+                // looks implementation-bound and is not. It proves the code
+                // typechecks, never that it conforms to the spec. Letting it
+                // count here would let a green `cargo check` authorize
+                // `qedgen stamp` to write `#[qed(verified)]`. Explicit arm,
+                // not the catch-all, so the decision is recorded where the
+                // next backend author will read it.
+                "scaffold" => false,
                 _ => false,
             },
         })

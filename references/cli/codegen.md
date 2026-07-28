@@ -80,6 +80,22 @@ $QEDGEN codegen --force            # regen user-owned set wholesale; re-apply fi
 | `--fill` | bool | false | **DEPRECATED (v3.0 removal).** Emits stdout prompt blocks per handler with `todo!()`. The agent can fill these directly via Read / Edit — grep for `todo!()` in `programs/`, look up the handler in the spec, edit in place. Flag still runs in v2.x but prints a deprecation warning. |
 | `--handler` | String | - | Restrict `--fill` to one handler by name (deprecated with `--fill`). |
 | `--fill-tests` | bool | false | **DEPRECATED (v3.0 removal).** Same shape as `--fill` for `tests/integration_tests.rs`. Agent fills directly. |
+| `--no-check-compiles` | bool | false | Skip the post-codegen compile check (#364). |
+
+#### Post-codegen compile check (#364)
+
+After writing the program crate, `codegen` runs `cargo check --tests` over
+it and reports any error, so a codegen defect is caught in the command that
+produced it rather than in a later `cargo build`.
+
+It runs only when the dependency tree already resolves (a `Cargo.lock` in
+the crate or its parent). A first generation therefore stays fast and
+offline, and prints one line saying the check was deferred; by the second
+run the answer arrives in seconds. It never changes the exit code —
+`codegen`'s contract is to write files, and a brownfield crate that fails
+to build for unrelated reasons must not make `codegen` unusable.
+[`verify --scaffold`](validation.md#verify) is the gating surface and always
+runs. Opt out with `--no-check-compiles`.
 
 #### MIR-default dispatch
 

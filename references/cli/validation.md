@@ -141,8 +141,29 @@ Run the generated harnesses against the implementation. `check` validates
 the spec; `verify` validates the code the spec produced. With no backend
 flags, runs every backend whose artifact is present on disk
 (`./programs/tests/proptest.rs`, `./programs/tests/kani.rs`,
-`./formal_verification/`). Use `--proptest` / `--kani` / `--lean` to
-target one backend.
+`./formal_verification/`, and the program crate itself when its
+dependencies already resolve). Use `--proptest` / `--kani` / `--lean` /
+`--scaffold` to target one backend.
+
+**`--scaffold` (#364)** compiles the generated program crate with
+`cargo check --tests`. It is the only backend that builds what codegen
+wrote: `check` is spec-level lint, and the Kani/proptest harnesses build in
+isolated crates on purpose, so before this backend a codegen defect reached
+the user as a red `cargo build` with no qedgen diagnostic, often right after
+`check` printed `0 error(s)`. It compiles the crate named by `--program`,
+defaulting to `./programs`.
+
+Only rustc rejecting code in that crate fails the run. Dependency
+resolution, a missing toolchain, and a dependency that itself fails to build
+all report `skipped` with the reason, because none of them is a statement
+about the generated code. A pass does **not** authorize [`stamp`](#stamp):
+compiling is not verifying.
+
+`codegen` runs the same check over what it just wrote, but only once the
+dependency tree resolves, so a first generation never stalls on a cold
+`anchor-lang` build. It reports and never changes the exit code; `verify
+--scaffold` is the gating surface. Opt out with `codegen
+--no-check-compiles`.
 
 v2.44 — every run also records its evidence to
 `<spec_dir>/.qed/verify-evidence.json` (spec hash, optional program-source
@@ -181,7 +202,8 @@ $QEDGEN verify --spec my_program.qedspec --check-upstream --upstream-stale-ok
 | Flag | Type | Default | Description |
 |---|---|---|---|
 | `--spec` | Path | required | Spec file (`.qedspec`) |
-| `--program` | Path | none | Program crate to hash into implementation-bound evidence; required before `stamp` can consume that evidence |
+| `--program` | Path | none | Program crate. Hashed into implementation-bound evidence (required before `stamp` can consume it), and the crate `--scaffold` compiles. |
+| `--scaffold` | bool | false | Compile the generated program crate (`cargo check --tests`) and fail if it does not typecheck. Dependency/toolchain failures report `skipped` with the reason, not `failed`. A pass does not authorize `stamp`. |
 | `--proptest` | bool | false | Run proptest harnesses (`cargo test --release`) |
 | `--proptest-path` | Path | `./programs/tests/proptest.rs` | Proptest harness file |
 | `--kani` | bool | false | Run Kani BMC harnesses (`cargo kani --tests`) |
