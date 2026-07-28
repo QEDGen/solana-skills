@@ -28,6 +28,7 @@ sBPF assembly is selected by `pragma sbpf` in the spec, not by a `Target`.
 | Brownfield adapt → spec skeleton (`adapt/`) — *deprecated* | ✅ args + accounts + errors | ❌ no adapter | ⚠️ handlers-only skeleton | ⚠️ loose (no conventions) | ❌ |
 | Greenfield Rust scaffold (`codegen_mir`) | ✅ | ⚠️ generic CPI → `todo!()` | ⚠️ generic CPI → `todo!()`; imported mirrors error | n/a | n/a |
 | Scaffold compiles (`verify --scaffold`, #364) | ✅ gated (`generated_artifact_gate`) | ✅ gated (`generated_artifact_gate`, #372) | ⚠️ compiles, ungated ⁷ | n/a | n/a |
+| Regen-drift over the program crate (`check --regen-drift`) | ✅ | ✅ | ✅ (#367) | n/a | n/a |
 | Kani spec-model (`kani_mir`) | ✅ ¹ ⁴ | ✅ ¹ ⁴ | ✅ ¹ ⁴ | n/a | skip by design |
 | impl-Kani (`kani_impl`) | ✅ greenfield + state-struct (#162) + Context (#169) | ⚠️ greenfield shape only | ⚠️ own `#[repr(C)]` shape; some ix-data field types TODO | ❌ | ❌ |
 | proptest (`proptest_gen_mir`) | ✅ ⁵ | ✅ ⁵ | ✅ ⁵ | n/a | skip by design |
