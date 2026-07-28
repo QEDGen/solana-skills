@@ -21,6 +21,10 @@
 //   solana-slot-history = "=3.1.0"
 //   solana-epoch-rewards = "=3.1.0"
 //   solana-slot-hashes = "=3.1.0"
+//   solana-rent = "=4.3.0"
+//   solana-signature = "=3.4.1"
+//   solana-epoch-schedule = "=3.2.0"
+//   solana-fee-calculator = "=3.2.2"
 //   spl-token = { version = "=9.0.0", default-features = false, features = ["no-entrypoint"] }
 //   wincode = { version = "0.5", features = ["derive"] }
 

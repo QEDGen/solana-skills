@@ -106,15 +106,40 @@ crates.io), and `crates/qedgen/tests/parallax_integration_gate.rs` compiles
 the generated scaffold against that pin in CI. The gate covers the Parallax
 surface only; the Quasar client boundary stays ungated.
 
-The reason is worse than a missing gate. **A generated Quasar program does
-not compile today.** `quasar-lang` 0.0.0 is published and resolves fine, but
-it is `#![no_std]` and its addresses are `solana_address::Address`, while
-`map_type_quasar` shares Anchor's mapping and emits `Pubkey` — a type
-quasar-lang does not define. `codegen --target quasar` on the bundled
-multisig spec fails with 13 errors, the first being "cannot find type
-`Pubkey` in this scope". No Quasar artifact in this repo has ever been
-compiled, which is how the gap survived: the snapshot suites compare text and
-the #294 artifact gate is Anchor-only.
+That gate went red without any qedgen change, and the mechanism is worth
+knowing because it will recur. `litesvm` 0.15 requires `wincode ^0.5.5`, so
+the whole graph must stay on wincode 0.5. Several small solana crates crossed
+to `wincode` 0.6 in a MINOR bump (`solana-rent` 4.3.0 → 4.4.0,
+`solana-signature` 3.4.1 → 3.5.0, `solana-epoch-schedule` 3.2.0 → 3.3.0,
+`solana-fee-calculator` 3.2.2 → 3.3.0), and every parent asks for them with a
+caret, so a fresh resolve took the crossing version and put two incompatible
+`wincode` majors in one graph.
+
+It does not surface as a version error. Both wincodes build; the derive on
+`solana-transaction` then targets 0.5's `SchemaRead` while `solana-signature`
+implements 0.6's, and rustc reports an unsatisfied trait bound deep inside a
+dependency. `verify --scaffold` classifies that as `Unresolved`, not a codegen
+defect (#364), which is the intended reading.
+
+Fixed by pinning those four in `parallax_dev_dependencies`, alongside the
+pins that were already there for the same reason. That list is not a stable
+set — it is "every crate that has ever crossed the boundary". When the gate
+fails this way again, find the new one with
+`cargo tree -i wincode@0.6.0 --depth 1` and pin its last 0.5 version. Moving
+past the boundary wholesale needs Parallax on `wincode` 0.6 first.
+
+Note the pin-liveness script (#371) checks that the pinned revision EXISTS,
+not that it builds, so it stayed green through all of this.
+
+The reason this gate still uses a stub is worse than a missing gate. **A
+generated Quasar program does not compile today.** `quasar-lang` 0.0.0 is
+published and resolves fine, but it is `#![no_std]` and its addresses are
+`solana_address::Address`, while `map_type_quasar` shares Anchor's mapping
+and emits `Pubkey` — a type quasar-lang does not define. `codegen --target
+quasar` on the bundled multisig spec fails with 13 errors, the first being
+"cannot find type `Pubkey` in this scope". No Quasar artifact in this repo
+has ever been compiled, which is how the gap survived: the snapshot suites
+compare text and the #294 artifact gate is Anchor-only.
 
 (An earlier revision of this note claimed `quasar-lang` "resolves from no
 registry". That was asserted from the `0.0.0` version string without checking
