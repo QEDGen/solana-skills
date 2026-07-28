@@ -79,7 +79,31 @@ fn parallax_dependency_line() -> String {
 
 /// Solana crates held at the versions Parallax 0.1 resolves against. A
 /// dependency's `Cargo.lock` is not inherited by consumers, so without these
-/// a fresh resolve picks the wincode-0.6 line and fails to compile.
+/// a fresh resolve straddles the wincode 0.5/0.6 boundary and fails to
+/// compile.
+///
+/// ## Why this list, and why it grows
+///
+/// `litesvm` 0.15 requires `wincode ^0.5.5`, so 0.5 is the line everything
+/// here must stay on. The solana crates each declare `wincode ^0.5` or
+/// `^0.6`, and a crate that crosses does so in a MINOR bump — `solana-rent`
+/// 4.3.0 → 4.4.0, `solana-signature` 3.4.1 → 3.5.0, `solana-epoch-schedule`
+/// 3.2.0 → 3.3.0, `solana-fee-calculator` 3.2.2 → 3.3.0. Every parent asks
+/// for them with a caret, so a fresh resolve silently takes the crossing
+/// version and lands two incompatible `wincode` majors in one graph.
+///
+/// The failure is not a version error. Both wincodes build; the derive on
+/// `solana-transaction` then targets 0.5's `SchemaRead` while
+/// `solana-signature` implements 0.6's, and rustc reports an unsatisfied
+/// trait bound deep inside a dependency, with "there are multiple different
+/// versions of crate `wincode`" as the only clue. `verify --scaffold`
+/// classifies that as `Unresolved` rather than a codegen defect (#364).
+///
+/// So this list is not a stable set: it is "every crate that has ever
+/// crossed the boundary". When the gate fails this way again, find the new
+/// one with `cargo tree -i wincode@0.6.0 --depth 1` and pin its last 0.5
+/// version here. Bumping past the boundary wholesale is the real fix and
+/// needs Parallax to move to `wincode` 0.6 first.
 pub(crate) fn parallax_dev_dependencies() -> String {
     format!(
         "{}\n\
@@ -92,26 +116,34 @@ pub(crate) fn parallax_dev_dependencies() -> String {
          solana-slot-history = \"=3.1.0\"\n\
          solana-epoch-rewards = \"=3.1.0\"\n\
          solana-slot-hashes = \"=3.1.0\"\n\
+         solana-rent = \"=4.3.0\"\n\
+         solana-signature = \"=3.4.1\"\n\
+         solana-epoch-schedule = \"=3.2.0\"\n\
+         solana-fee-calculator = \"=3.2.2\"\n\
          spl-token = {{ version = \"=9.0.0\", default-features = false, features = [\"no-entrypoint\"] }}\n\
          wincode = {{ version = \"0.5\", features = [\"derive\"] }}\n",
         parallax_dependency_line()
     )
 }
 
-const PARALLAX_DEV_DEP_NAMES: &[&str] = &[
-    "parallax-svm",
-    "solana-sdk-ids",
-    "solana-address",
-    "solana-hash",
-    "solana-nonce",
-    "solana-short-vec",
-    "solana-last-restart-slot",
-    "solana-slot-history",
-    "solana-epoch-rewards",
-    "solana-slot-hashes",
-    "spl-token",
-    "wincode",
-];
+/// The dependency names [`parallax_dev_dependencies`] emits, read off that
+/// function rather than restated beside it.
+///
+/// These were two hand-kept lists, which is the #363 bug class in miniature:
+/// a name present in the emitted block but missing here is not detected as
+/// subtabled, so upserting a manifest that declares it as
+/// `[dev-dependencies.<name>]` writes a duplicate key and the user's
+/// manifest stops parsing. The pin list grows every time a solana crate
+/// crosses the wincode boundary, so the drift window is not hypothetical.
+fn parallax_dev_dep_names() -> Vec<String> {
+    parallax_dev_dependencies()
+        .lines()
+        .filter_map(|line| {
+            let key = line.split('=').next()?.trim();
+            (!key.is_empty()).then(|| key.to_string())
+        })
+        .collect()
+}
 
 /// Upsert the dependencies owned by the Parallax integration artifact into
 /// the generated program manifest. Integration tests conventionally live at
@@ -188,18 +220,19 @@ fn upsert_dev_dependencies(existing: &str) -> String {
     // (`[dev-dependencies.parallax-svm]`). Emitting the inline key as well
     // would leave the manifest with a duplicate key, so leave those alone
     // and let the existing declaration stand.
-    let subtabled: Vec<&str> = PARALLAX_DEV_DEP_NAMES
+    let names = parallax_dev_dep_names();
+    let subtabled: Vec<&str> = names
         .iter()
-        .copied()
+        .map(String::as_str)
         .filter(|name| {
             existing
                 .lines()
                 .any(|line| strip_toml_comment(line).trim() == format!("[dev-dependencies.{name}]"))
         })
         .collect();
-    let owned_names: Vec<&str> = PARALLAX_DEV_DEP_NAMES
+    let owned_names: Vec<&str> = names
         .iter()
-        .copied()
+        .map(String::as_str)
         .filter(|name| !subtabled.contains(name))
         .collect();
     let dev_dependencies = parallax_dev_dependencies();
@@ -1181,6 +1214,48 @@ mod tests {
         assert_eq!(merged.matches("solana-sdk-ids =").count(), 1);
     }
 
+    /// The name list is derived from the emitted block, so this guards the
+    /// derivation rather than a second copy: every key the block emits must
+    /// come back, and nothing else. A stray non-`key = value` line (a
+    /// comment, a blank, a `[subtable]` header) would otherwise enter the
+    /// list and be treated as a dependency name.
+    #[test]
+    fn dev_dep_names_match_the_emitted_block_exactly() {
+        let block = parallax_dev_dependencies();
+        let names = parallax_dev_dep_names();
+
+        for name in &names {
+            assert!(
+                block.contains(&format!("{name} =")),
+                "{name} is not a key in the emitted block"
+            );
+            assert!(
+                !name.starts_with('[') && !name.starts_with('#') && !name.contains(' '),
+                "{name:?} is not a dependency name"
+            );
+        }
+        assert_eq!(
+            names.len(),
+            block.lines().filter(|l| l.contains('=')).count(),
+            "every emitted line must yield exactly one name"
+        );
+        // The pins that keep the graph on one side of the wincode 0.5/0.6
+        // boundary. Losing any of them puts two incompatible wincode majors
+        // in the graph, which surfaces as an unsatisfied trait bound inside
+        // solana-transaction rather than as a version error.
+        for pinned in [
+            "solana-rent",
+            "solana-signature",
+            "solana-epoch-schedule",
+            "solana-fee-calculator",
+        ] {
+            assert!(
+                names.iter().any(|n| n == pinned),
+                "{pinned} pin was dropped — see the doc on parallax_dev_dependencies"
+            );
+        }
+    }
+
     /// The compile gate is only meaningful if it builds the revision the
     /// scaffold actually ships. If codegen bumps `PARALLAX_GIT_REV` and the
     /// fixture manifest keeps the old one, the gate compiles the OLD
@@ -1251,7 +1326,7 @@ mod tests {
         ensure_parallax_dev_dependencies(&output).unwrap();
 
         let manifest = std::fs::read_to_string(program.join("Cargo.toml")).unwrap();
-        for dependency in PARALLAX_DEV_DEP_NAMES {
+        for dependency in parallax_dev_dep_names() {
             assert_eq!(
                 manifest.matches(&format!("{dependency} =")).count(),
                 1,

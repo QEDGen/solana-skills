@@ -31,7 +31,7 @@ sBPF assembly is selected by `pragma sbpf` in the spec, not by a `Target`.
 | Kani spec-model (`kani_mir`) | ✅ ¹ ⁴ | ✅ ¹ ⁴ | ✅ ¹ ⁴ | n/a | skip by design |
 | impl-Kani (`kani_impl`) | ✅ greenfield + state-struct (#162) + Context (#169) | ⚠️ greenfield shape only | ⚠️ own `#[repr(C)]` shape; some ix-data field types TODO | ❌ | ❌ |
 | proptest (`proptest_gen_mir`) | ✅ ⁵ | ✅ ⁵ | ✅ ⁵ | n/a | skip by design |
-| Parallax/LiteSVM integration tests (`integration_test`) | ❌ adapter pending | ⚠️ scaffold emitted; pinned `parallax-svm` deps do not build ⁶ | ❌ adapter pending | ❌ | ❌ |
+| Parallax/LiteSVM integration tests (`integration_test`) | ❌ adapter pending | ⚠️ scaffold emitted + compile-gated ⁶ | ❌ adapter pending | ❌ | ❌ |
 | Lean (`lean_gen_mir`) | ✅ ² ³ | ✅ ² ³ | ✅ ² ³ | n/a | ✅ dedicated sBPF path |
 | Probe: runtime-agnostic scanners (`run_helpers`) | ✅ (#196) | ✅ (#196) | ✅ | ✅ (#196) | ❌ bootstrap only |
 | Probe: IDL-enrichment overlay (`probe/idl_overlay`) | ✅ enrich + narrow (#235); unbuilt → `derivable_idl` (#238) | ✅ enrich + narrow (#235); unbuilt → `derivable_idl` (#238) | ✅ enrich + handler fill | ⚠️ enrich only (declarative flags) | ❌ |
@@ -100,15 +100,30 @@ cannot fail, and the scaffold points at a measured budget instead.
 crates.io), and `crates/qedgen/tests/parallax_integration_gate.rs` compiles
 the generated scaffold against that pin in CI.
 
-**That gate is red today**, and not because of anything qedgen emits: the
-pinned revision's transitive dependencies no longer resolve to a compatible
-set. `solana-transaction` 4.1.5 and `solana-sysvar` 4.1.0 fail to compile
-against `wincode` 0.5.5 (`the trait bound `Signature: SchemaRead<..>` is not
-satisfied`, and 18 more). Any generated crate that carries the integration
-scaffold inherits this, which is why `codegen --all --target quasar` does not
-build even though the program crate does. Tracked separately from #372; the
-pin-liveness script (#371) checks that the revision EXISTS, not that it
-builds, so it stays green through this.
+That gate went red without any qedgen change, and the mechanism is worth
+knowing because it will recur. `litesvm` 0.15 requires `wincode ^0.5.5`, so
+the whole graph must stay on wincode 0.5. Several small solana crates crossed
+to `wincode` 0.6 in a MINOR bump (`solana-rent` 4.3.0 → 4.4.0,
+`solana-signature` 3.4.1 → 3.5.0, `solana-epoch-schedule` 3.2.0 → 3.3.0,
+`solana-fee-calculator` 3.2.2 → 3.3.0), and every parent asks for them with a
+caret, so a fresh resolve took the crossing version and put two incompatible
+`wincode` majors in one graph.
+
+It does not surface as a version error. Both wincodes build; the derive on
+`solana-transaction` then targets 0.5's `SchemaRead` while `solana-signature`
+implements 0.6's, and rustc reports an unsatisfied trait bound deep inside a
+dependency. `verify --scaffold` classifies that as `Unresolved`, not a codegen
+defect (#364), which is the intended reading.
+
+Fixed by pinning those four in `parallax_dev_dependencies`, alongside the
+pins that were already there for the same reason. That list is not a stable
+set — it is "every crate that has ever crossed the boundary". When the gate
+fails this way again, find the new one with
+`cargo tree -i wincode@0.6.0 --depth 1` and pin its last 0.5 version. Moving
+past the boundary wholesale needs Parallax on `wincode` 0.6 first.
+
+Note the pin-liveness script (#371) checks that the pinned revision EXISTS,
+not that it builds, so it stayed green through all of this.
 
 Until #372, a generated Quasar program did not compile at all. `quasar-lang`
 is `#![no_std]` and its addresses are `solana_address::Address`, while
