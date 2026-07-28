@@ -264,13 +264,16 @@ mod product {
             };
             let mut initialized = false;
             for (i, op) in ops.iter().enumerate() {
+                let pre = s;
                 if apply_op(&mut s, op) {
                     if !initialized {
                         initialized = true;
                         continue;
                     }
-                    prop_assert!(ghost_tracks_total(&s),
-                        "ghost_tracks_total violated after op {:?} (step {})", op, i);
+                    if matches!(op, Op::Deposit(..)) && ghost_tracks_total(&pre) {
+                        prop_assert!(ghost_tracks_total(&s),
+                            "ghost_tracks_total violated after op {:?} (step {})", op, i);
+                    }
                 }
             }
         }

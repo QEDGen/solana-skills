@@ -1991,6 +1991,34 @@ fn emit_sequence_test_for(
         out.push_str("            }\n");
     }
 
+    // Properties this section checks in the sequence: those with at least
+    // one obligated handler here. A pre-state snapshot lets each check
+    // assert the `preserved_by` obligation faithfully — `pre → post`, not
+    // just `post` (see the emission comment below).
+    let seq_props: Vec<(&&ParsedProperty, Vec<String>)> = all_props
+        .iter()
+        .filter_map(|prop| {
+            let pats: Vec<String> = handlers
+                .iter()
+                .filter(|h| prop.preserved_by.iter().any(|n| n == &h.name))
+                .map(|h| {
+                    let pascal = crate::codegen_shared::to_pascal_case(&h.name);
+                    if model_params(h).next().is_some() {
+                        format!("Op::{}(..)", pascal)
+                    } else {
+                        format!("Op::{}", pascal)
+                    }
+                })
+                .collect();
+            (!pats.is_empty()).then_some((prop, pats))
+        })
+        .collect();
+
+    // Snapshot the pre-state (State is `Copy`) before the transition so the
+    // check below can read the property at `pre`.
+    if !seq_props.is_empty() {
+        out.push_str("            let pre = s;\n");
+    }
     out.push_str("            if apply_op(&mut s, op) {\n");
 
     if has_lifecycle {
@@ -2008,18 +2036,37 @@ fn emit_sequence_test_for(
         }
     }
 
-    out.push_str("                // Check all properties after each successful transition\n");
-    if !all_props.is_empty() {
-        for prop in &all_props {
-            out.push_str(&format!(
-                "                prop_assert!({}(&s),\n",
-                prop.name
-            ));
-            out.push_str(&format!(
-                "                    \"{} violated after op {{:?}} (step {{}})\", op, i);\n",
-                prop.name
-            ));
-        }
+    // Check each property only against the handlers obligated to preserve
+    // it, and only as the `preserved_by` conditional `pre → post`:
+    //   - A property `preserved_by [deposit]` is an obligation on `deposit`
+    //     alone; another handler may legitimately leave it false (e.g.
+    //     `lock` growing a locked balance past the total), so it is not
+    //     asserted after those ops. `preserved_by all` expands to the full
+    //     handler list, so its match guard covers every op.
+    //   - Even for an obligated handler, preservation only requires that a
+    //     property TRUE before the op stays true after; a handler need not
+    //     RESTORE a property a prior op already broke. Guarding on the
+    //     pre-state value avoids a false counterexample there.
+    if !seq_props.is_empty() {
+        out.push_str("                // Check each preserved_by obligation as `pre -> post`\n");
+    }
+    for (prop, pats) in &seq_props {
+        let guarded = pats.len() != handlers.len();
+        let cond = if guarded {
+            format!("matches!(op, {}) && {}(&pre)", pats.join(" | "), prop.name)
+        } else {
+            format!("{}(&pre)", prop.name)
+        };
+        out.push_str(&format!("                if {cond} {{\n"));
+        out.push_str(&format!(
+            "                    prop_assert!({}(&s),\n",
+            prop.name
+        ));
+        out.push_str(&format!(
+            "                        \"{} violated after op {{:?}} (step {{}})\", op, i);\n",
+            prop.name
+        ));
+        out.push_str("                }\n");
     }
 
     out.push_str("            }\n");
@@ -2732,21 +2779,58 @@ fn emit_product_sequence_test(
     }
     out.push_str("            };\n");
     out.push_str("            let mut initialized = false;\n");
+    // Ghost properties this sequence checks, with the Op patterns of the
+    // handlers obligated to preserve each. Same `preserved_by` + `pre ->
+    // post` discipline as the single-account sequence (see there): assert a
+    // property only after an obligated handler, and only when it held
+    // before the op. `preserved_by all` covers every handler, so its guard
+    // is just the pre-state check.
+    let seq_ghost_props: Vec<(&&ParsedProperty, Vec<String>)> = ghost_props
+        .iter()
+        .filter_map(|prop| {
+            let pats: Vec<String> = spec
+                .handlers
+                .iter()
+                .filter(|h| prop.preserved_by.iter().any(|n| n == &h.name))
+                .map(|h| {
+                    let pascal = crate::codegen_shared::to_pascal_case(&h.name);
+                    if model_params(h).next().is_some() {
+                        format!("Op::{}(..)", pascal)
+                    } else {
+                        format!("Op::{}", pascal)
+                    }
+                })
+                .collect();
+            (!pats.is_empty()).then_some((prop, pats))
+        })
+        .collect();
     out.push_str("            for (i, op) in ops.iter().enumerate() {\n");
+    // Snapshot the pre-state (ProductState is `Copy`) for the `pre -> post` check.
+    if !seq_ghost_props.is_empty() {
+        out.push_str("                let pre = s;\n");
+    }
     out.push_str("                if apply_op(&mut s, op) {\n");
     out.push_str("                    if !initialized {\n");
     out.push_str("                        initialized = true;\n");
     out.push_str("                        continue;\n");
     out.push_str("                    }\n");
-    for prop in ghost_props {
+    for (prop, pats) in &seq_ghost_props {
+        let guarded = pats.len() != spec.handlers.len();
+        let cond = if guarded {
+            format!("matches!(op, {}) && {}(&pre)", pats.join(" | "), prop.name)
+        } else {
+            format!("{}(&pre)", prop.name)
+        };
+        out.push_str(&format!("                    if {cond} {{\n"));
         out.push_str(&format!(
-            "                    prop_assert!({}(&s),\n",
+            "                        prop_assert!({}(&s),\n",
             prop.name
         ));
         out.push_str(&format!(
-            "                        \"{} violated after op {{:?}} (step {{}})\", op, i);\n",
+            "                            \"{} violated after op {{:?}} (step {{}})\", op, i);\n",
             prop.name
         ));
+        out.push_str("                    }\n");
     }
     out.push_str("                }\n");
     out.push_str("            }\n");
@@ -3805,6 +3889,62 @@ property c_ge_d : state.c >= state.d preserved_by all
         assert!(
             arb.contains("c in 0u64..=1000u64") && arb.contains("d in 0u64..=1000u64"),
             "component {{c,d}} must borrow c's 1000, not the global min 10:\n{arb}"
+        );
+    }
+
+    /// The sequence harness must respect each property's `preserved_by`
+    /// scope: a property `preserved_by [grow_a]` is only asserted after
+    /// `grow_a`, and only as the `pre -> post` obligation (it held before →
+    /// it holds after). Asserting it after `grow_b` — which is not obligated
+    /// to preserve it — or when it was already false yields false
+    /// counterexamples on a correct spec.
+    #[test]
+    fn sequence_asserts_scoped_property_only_after_its_preserving_handler() {
+        let (_spec, body) = emit_full_harness(
+            r#"
+spec Scoped
+
+type S
+  | Active of { a : U64, b : U64 }
+  | Closed
+
+type Error
+  | Bad
+
+handler init : S.Uninitialized -> S.Active {
+  effect { a := 0  b := 0 }
+}
+
+handler grow_a (x : U64) : S.Active -> S.Active {
+  requires x > 0 else Bad
+  effect { a += x }
+}
+
+handler grow_b (x : U64) : S.Active -> S.Active {
+  requires x > 0 else Bad
+  effect { b += x }
+}
+
+property a_ge_b :
+  state.a >= state.b
+  preserved_by [grow_a]
+"#,
+        );
+
+        let start = body
+            .find("fn state_machine_sequence")
+            .expect("sequence present");
+        let seq = &body[start..];
+        // Pre-state snapshot for the `pre -> post` obligation.
+        assert!(
+            seq.contains("let pre = s;"),
+            "sequence must snapshot the pre-state:\n{seq}"
+        );
+        // `grow_a` is the sole preserver, so the guard is exactly that op
+        // plus the pre-state check — `grow_b` never appears.
+        assert!(
+            seq.contains("if matches!(op, Op::GrowA(..)) && a_ge_b(&pre) {"),
+            "scoped property must be guarded by its preserver and pre-state:\n{seq}"
         );
     }
 }

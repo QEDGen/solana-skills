@@ -231,6 +231,7 @@ mod pool {
                 if next_lifecycle.is_none() {
                     continue; // skip ops not valid in current lifecycle state
                 }
+                let pre = s;
                 if apply_op(&mut s, op) {
                     if let Some(next) = next_lifecycle {
                         lifecycle = next;
@@ -239,9 +240,11 @@ mod pool {
                         initialized = true;
                         continue; // skip property checks on init transition
                     }
-                    // Check all properties after each successful transition
-                    prop_assert!(pool_solvency(&s),
-                        "pool_solvency violated after op {:?} (step {})", op, i);
+                    // Check each preserved_by obligation as `pre -> post`
+                    if pool_solvency(&pre) {
+                        prop_assert!(pool_solvency(&s),
+                            "pool_solvency violated after op {:?} (step {})", op, i);
+                    }
                 }
             }
         }
