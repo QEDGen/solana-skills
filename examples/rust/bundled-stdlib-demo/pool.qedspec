@@ -14,7 +14,7 @@
 // bundled-proof materialization, and Track A axiom-application path.
 
 spec PoolDemo
-program_id "11111111111111111111111111111111"
+program_id "A5hNUXHVGiTfLjPsnQdGBvLFApRMPaRVNtBwLwCLFxLo"
 
 import Token from "spl"
 

@@ -177,8 +177,17 @@ yet" would get the rule muted rather than obeyed.
 Fix: add `program_id "<your id>"` to the spec, from `anchor keys list`
 or `solana-keygen pubkey target/deploy/<name>-keypair.json`.
 
-Note the bundled examples under `examples/rust/` still carry the
-placeholder. They are never deployed, so it is accurate there.
+Every bundled example under `examples/rust/` now declares a real
+`program_id` (generated with `solana-keygen`, one per example, with the
+imported `cross-program-vault-admin` getting its own). They demonstrate
+the practice rather than the placeholder.
+
+Note for maintainers: `program_id` is a top-level spec item, so it feeds
+`spec_context_digest` and therefore every handler's `spec_hash`. Changing
+one re-stamps every `#[qed(verified, …)]` in that program and moves the
+expectations in `crates/qedgen-hash-core/tests/stamp_crosscheck.rs`. This
+is by design — that digest is deliberately conservative — but it makes a
+`program_id` edit a wider change than it looks.
 
 ---
 

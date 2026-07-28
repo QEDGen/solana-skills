@@ -27,7 +27,7 @@ pub struct Initialize<'info> {
 }
 
 impl<'info> Initialize<'info> {
-    #[qed(verified, spec = "../escrow.qedspec", handler = "initialize", hash = "1de528c0f3938362", spec_hash = "804b5ee68ad1d84b")]
+    #[qed(verified, spec = "../escrow.qedspec", handler = "initialize", hash = "1de528c0f3938362", spec_hash = "aa7cf712c695ed1a")]
     #[inline(always)]
     pub fn handler(&mut self, deposit_amount: u64, receive_amount: u64, bumps: &InitializeBumps) -> Result<(), ProgramError> {
         guards::initialize(self, deposit_amount, receive_amount)?;

@@ -8,6 +8,8 @@
 
 spec Multisig
 
+
+program_id "DRaRMV9qeti1v78tjANtxzv9ejugh1GUyco6kn2QBQTK"
 const MAX_MEMBERS = 32
 
 type State
