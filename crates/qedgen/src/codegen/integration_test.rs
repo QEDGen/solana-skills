@@ -155,6 +155,26 @@ fn ensure_parallax_dev_dependencies(output_path: &Path) -> Result<()> {
     };
     let manifest = crate_root.join("Cargo.toml");
     if !manifest.is_file() {
+        // Nothing to upsert into, and the scaffold gets written anyway, so
+        // the user ends up with a test that cannot resolve `parallax_svm`
+        // and no diagnostic (#390). Silence here was the whole defect: the
+        // only signal was the ABSENCE of the "updated Cargo.toml" line
+        // below, which is not something anyone reads for.
+        //
+        // Generating the program crate afterwards does not repair it. That
+        // pass renders a fresh manifest, and the dev-dependencies this one
+        // would have added were never in it. (The reverse order is safe:
+        // `merge_cargo_toml` preserves a `[dev-dependencies]` section it did
+        // not write.)
+        eprintln!(
+            "warning: no Cargo.toml at {} — the Parallax dev-dependencies were NOT added, \
+             so the generated integration test will not resolve `parallax_svm`.",
+            crate_root.display()
+        );
+        eprintln!(
+            "         Generate the program crate first (`qedgen codegen --spec <spec> \
+             --target <target>`), then re-run with `--integration`."
+        );
         return Ok(());
     }
 

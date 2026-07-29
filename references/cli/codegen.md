@@ -53,7 +53,7 @@ $QEDGEN codegen --force            # regen user-owned set wholesale; re-apply fi
 |---|---|---|---|
 | `--spec` | Path | optional | Spec file or directory. Defaults to `.qed/config.json spec` |
 | `--target` | enum | `anchor` | Framework target for the Rust program crate. Values: `anchor` (Anchor-compatible, default); `quasar` (Blueshift `quasar_lang`); `pinocchio` (Pinocchio `#![no_std]` — `entrypoint!` + byte-discriminant dispatch, zeropod zero-copy state, `&AccountInfo` account structs with `.handler()` methods, checked effects, SPL Token CPIs). All three targets emit the full program scaffold. The verification backends (`--kani` / `--proptest` / `--lean` / `--ci`) are spec-driven and target-agnostic — they run for any target (see the comment at the top of any generated `tests/kani.rs`). Exception: `--integration` is Quasar-only — the in-process SVM scaffold imports `quasar_svm` and the generated `<name>-client` crate, which don't compile for other targets; non-Quasar targets skip it with a note. |
-| `--output-dir` | Path | `./programs` | Output directory for Rust skeleton. Relative paths — this and every `--*-output` default below — resolve against the **spec's directory** (the project root), not the invoker's cwd (#279): `codegen --spec <elsewhere>/x.qedspec` from anywhere writes into `<elsewhere>/`. Absolute paths pass through untouched. |
+| `--output-dir` | Path | `./programs` | Output directory for Rust skeleton. Relative paths — this and every `--*-output` default below — resolve against the **spec's directory** (the project root), not the invoker's cwd (#279): `codegen --spec <elsewhere>/x.qedspec` from anywhere writes into `<elsewhere>/`. Absolute paths pass through untouched. qedgen warns when a relative path repeats the spec directory's own name (`proj/tests/x.rs` from a parent directory resolves to `proj/proj/tests/x.rs`), which is the usual way this bites (#370). |
 | `--force` | bool | false | **Destructive opt-in (#288):** regenerate the USER-OWNED files too (`src/lib.rs`, `src/instructions/*.rs`) — the rename workflow where regen + re-fill beats hand-merging. Every affected file must have a committed, unmodified git baseline (the recovery path); dirty or untracked files abort before anything is written. Conflicts with `--merge-accounts`. |
 | `--merge-accounts` | bool | false | **Surgical rename recovery (#288, Anchor only):** regenerate only the `#[derive(Accounts)]` structs inside the user-owned `lib.rs`, preserving handler fills and everything else (the Cargo.toml section-merge doctrine applied to Rust items). Hand-tuned constraints inside replaced structs are overwritten, so the same git-baseline guard applies. Structs with no matching spec handler (pre-rename leftovers, hand-added instructions) are left in place and reported. |
 | `--all` | bool | false | Generate the Rust scaffold and all artifacts |
@@ -96,6 +96,17 @@ run the answer arrives in seconds. It never changes the exit code —
 to build for unrelated reasons must not make `codegen` unusable.
 [`verify --scaffold`](validation.md#verify) is the gating surface and always
 runs. Opt out with `--no-check-compiles`.
+
+#### Retired output paths (#369)
+
+When a generator default moves between releases, `codegen` deletes the
+generator-owned file left at the old path and prints one note naming the
+replacement. Without that sweep the orphan is never compiled (no `mod`
+hook, wrong directory), never removed, and still drift-compared, so
+`check --regen-drift --write` keeps refreshing a file nothing builds — it
+looks maintained and is dead. A file at such a path with no QEDGEN banner
+is treated as yours: kept, with a warning. A retired path passed
+explicitly to this run is never swept.
 
 #### MIR-default dispatch
 

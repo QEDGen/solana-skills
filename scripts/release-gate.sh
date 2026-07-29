@@ -84,6 +84,19 @@ while IFS= read -r f; do
 done < <(find "$repo_root/examples" -name '*.lean' \
   -not -path '*/.lake/*' -not -path '*/lean_solana/*')
 
+# ── Parallax pin liveness (#371) ────────────────────────────────────────
+# Was a manual RELEASING.md bullet. A human is a poor owner for a check
+# whose failure lands in a user's crate, so the release path calls it
+# mechanically and a weekly job (.github/workflows/parallax-pin.yml) covers
+# the gap between cuts.
+#
+# Exit 0 covers "behind upstream" and "upstream unreachable" — being behind
+# is the point of pinning, and a rate-limited runner must not fail a
+# release. Only a vanished revision (1) or an unreadable pin (2) fails.
+if ! bash "$repo_root/scripts/check-parallax-pin.sh"; then
+  fail "parallax pin check failed — see scripts/check-parallax-pin.sh exit codes"
+fi
+
 # ── Verdict ─────────────────────────────────────────────────────────────
 if [[ "$failures" -gt 0 ]]; then
   echo "release-gate: $failures failure(s) — baseline drifted (or update the expectation table in this script, in the same PR)" >&2
