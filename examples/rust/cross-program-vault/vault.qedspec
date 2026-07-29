@@ -29,7 +29,7 @@ spec Vault
 // other example lowers to the default flat `structure State`.
 pragma state_repr = adt
 
-program_id "11111111111111111111111111111111"
+program_id "G8BADsJLeMRcPmXtGFK5xiuutdHRPZ6nd56mW4AuhjXc"
 
 import AdminConfig from "admin_config"
 import Token from "spl"

@@ -5,6 +5,8 @@
 
 spec Lending
 
+
+program_id "8LkvBaAMyniLPESYdmmDKkLJYsVXgUT1nx3KA6ycafvW"
 // State as algebraic data types: fields live inside the variant they belong to.
 // An Uninitialized pool has no fields. An Active pool has authority, balances, etc.
 

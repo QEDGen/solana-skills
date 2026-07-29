@@ -17,7 +17,7 @@ pub struct Propose<'info> {
 }
 
 impl<'info> Propose<'info> {
-    #[qed(verified, spec = "multisig.qedspec", handler = "propose", hash = "267b5df0e5e45e78", spec_hash = "7e1a675c5e1599ed")]
+    #[qed(verified, spec = "multisig.qedspec", handler = "propose", hash = "267b5df0e5e45e78", spec_hash = "55a7167856412030")]
     #[inline(always)]
     pub fn handler(&mut self, bumps: &ProposeBumps) -> Result<(), ProgramError> {
         guards::propose(self)?;
