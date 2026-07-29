@@ -51,6 +51,14 @@ pub(crate) fn merge_cargo_toml(existing: &str, fresh: &str) -> String {
         }
         push_section(&mut out, name, body);
     }
+    // Exactly one trailing newline, matching the greenfield render
+    // byte-for-byte. `check --regen-drift` regenerates into an empty temp
+    // directory, which is the greenfield path, and compares against a
+    // committed file that has been through the merge path — so a merge-only
+    // trailing blank line reads as drift on every example, forever.
+    while out.ends_with("\n\n") {
+        out.pop();
+    }
     out
 }
 
@@ -63,10 +71,20 @@ pub(crate) fn lookup_section<'a>(parsed: &'a ParsedToml, name: &str) -> &'a str 
         .unwrap_or("")
 }
 
+/// Write `[name]` and its body, followed by exactly one blank line.
+///
+/// The body is trimmed of trailing newlines first, because a parsed body
+/// already carries the blank line that separated it from the next section.
+/// Appending a separator to that made every regeneration add one blank line
+/// per section, unbounded: five `codegen` runs over one spec took the
+/// generated `Cargo.toml` from 24 lines to 36. Nothing broke, which is why
+/// it went unnoticed — the file just grew, and never matched its committed
+/// copy again.
 pub(crate) fn push_section(out: &mut String, name: &str, body: &str) {
     out.push_str(&format!("[{name}]\n"));
-    out.push_str(body);
-    if !body.ends_with('\n') {
+    let body = body.trim_end_matches('\n');
+    if !body.is_empty() {
+        out.push_str(body);
         out.push('\n');
     }
     out.push('\n');

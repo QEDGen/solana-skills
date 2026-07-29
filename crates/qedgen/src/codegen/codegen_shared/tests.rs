@@ -3287,3 +3287,41 @@ fn flat_state_fields_carry_the_synthesized_tail() {
         assert_eq!(ty, "U8", "{name} must map to a single byte");
     }
 }
+
+// ── Cargo.toml round-trip (#369 follow-on) ───────────────────────────
+
+/// Regenerating must not grow the manifest. `push_section` appended a
+/// separator to a body that already carried one, so every `codegen` run
+/// added one blank line per section — five runs over one spec took a
+/// generated manifest from 24 lines to 36. Nothing broke, which is why it
+/// went unnoticed; the file just drifted from its committed copy forever.
+#[test]
+fn merging_a_manifest_is_idempotent() {
+    let fresh = "# generated\n\n[package]\nname = \"x\"\n\n[dependencies]\nanchor-lang = \"0.31\"\n\n[workspace]\n";
+
+    let once = merge_cargo_toml(fresh, fresh);
+    let twice = merge_cargo_toml(&once, fresh);
+    let thrice = merge_cargo_toml(&twice, fresh);
+
+    assert_eq!(once, twice, "a second merge changed the manifest");
+    assert_eq!(twice, thrice, "the manifest is still growing");
+    assert!(
+        !once.contains("\n\n\n"),
+        "no run of blank lines should survive a merge:\n{once}"
+    );
+}
+
+/// The merged form must be byte-identical to the greenfield render.
+/// `check --regen-drift` regenerates into an empty temp directory — the
+/// greenfield path — and compares against a committed file that has only
+/// ever been through the merge path, so any difference reads as drift on
+/// every example, forever.
+#[test]
+fn merged_and_greenfield_manifests_agree() {
+    let fresh = "# generated\n\n[package]\nname = \"x\"\n\n[dependencies]\nanchor-lang = \"0.31\"\n\n[workspace]\n";
+    // What a user keeps on disk after one regeneration.
+    let merged = merge_cargo_toml(fresh, fresh);
+    // Merging into nothing is the greenfield shape.
+    let greenfield = merge_cargo_toml("", fresh);
+    assert_eq!(merged, greenfield);
+}
