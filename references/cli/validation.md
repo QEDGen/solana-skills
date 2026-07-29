@@ -63,7 +63,7 @@ $QEDGEN check --regen-drift --examples-root examples/rust
 | `--coverage` | bool | false | Show operation × property matrix (spec coverage) plus the per-backend obligation rollup (backend coverage, #332): for each of kani / lean / proptest, how many requested obligations are `emitted` vs `unsupported(reason)` vs `failed`, recomputed in memory from the current spec. Under `--json` the matrix fields and the `backend_coverage` key form the `coverage` section of the single check document (#355). |
 | `--explain` | bool | false | Generate Markdown verification report |
 | `--output` | Path | stdout | Output file for --explain |
-| `--drift` | Path | - | Rust source path for #[qed(verified)] drift detection |
+| `--drift` | Path | - | Rust source path for #[qed(verified)] drift detection. Checks every leg a stamp carries — `hash` (body), `spec_hash` (the handler's spec block), `accounts_hash` (the accounts struct) — and names the stale leg in the report, because a stale `spec_hash` means regenerate while a stale body hash means re-verify. Before #382 only the body leg was read, so a stale `spec_hash` reported `OK`. |
 | `--update-hashes` | bool | false | Auto-stamp hashes in source files |
 | `--deep` | bool | false | Transitive drift detection (check callees) |
 | `--code` | Path | - | Generated program source dir (code drift detection) |

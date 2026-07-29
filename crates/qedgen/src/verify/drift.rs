@@ -5,14 +5,54 @@ use syn::ItemFn;
 
 use crate::spec_hash;
 
-/// Status of a verified function's hash.
+/// One leg of a `#[qed(verified, ...)]` stamp.
+///
+/// Closed by discipline, like `Stmt`: the proc macro rejects the build when
+/// ANY leg goes stale, so a reporter that reads a subset answers "is my
+/// stamp current?" from part of the evidence. `--drift` did exactly that
+/// until #382 — it read `hash` alone and called a stale `spec_hash` `OK`.
+/// Adding a leg here is a compile error at every consumer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StampLeg {
+    /// `hash` — the stamped function body.
+    Body,
+    /// `spec_hash` — the handler's block in the `.qedspec`.
+    Spec,
+    /// `accounts_hash` — the accounts struct the handler binds.
+    Accounts,
+}
+
+impl StampLeg {
+    /// How the report names this leg. Matches the attribute key, except
+    /// `Body`, whose key is the unqualified `hash`.
+    pub fn label(self) -> &'static str {
+        match self {
+            StampLeg::Body => "body",
+            StampLeg::Spec => "spec_hash",
+            StampLeg::Accounts => "accounts_hash",
+        }
+    }
+}
+
+/// A stamp leg whose recorded hash no longer matches what is on disk.
+#[derive(Debug, PartialEq, Eq)]
+pub struct DriftedLeg {
+    pub leg: StampLeg,
+    pub expected: String,
+    pub actual: String,
+}
+
+/// Status of a verified function's stamp.
 #[derive(Debug, PartialEq)]
 pub enum DriftStatus {
-    /// Hash matches — code is unchanged since verification
+    /// Every leg the stamp carries matches what is on disk.
     Ok,
-    /// Hash mismatch — code has drifted
-    Drifted { expected: String, actual: String },
-    /// No hash provided (setup mode)
+    /// At least one leg is stale. All stale legs are listed, because the
+    /// remedy differs per leg: a stale `body` means re-verify the code, a
+    /// stale `spec_hash` means the spec moved and the handler must be
+    /// regenerated or re-verified against it.
+    Drifted { legs: Vec<DriftedLeg> },
+    /// Bare `#[qed(verified)]` with no `hash`, and no other leg stale.
     NoHash { computed: String },
 }
 
@@ -231,11 +271,18 @@ fn scan_file(path: &Path) -> Result<Vec<VerifiedEntry>> {
     let results = scanned
         .into_iter()
         .map(|entry| {
-            let actual = content_hash(&entry.func);
-            let status = match entry.attr.hash {
-                Some(expected) if expected == actual => DriftStatus::Ok,
-                Some(expected) => DriftStatus::Drifted { expected, actual },
-                None => DriftStatus::NoHash { computed: actual },
+            let legs = drifted_legs(path, &entry);
+            // Drift outranks "unhashed": a bare stamp whose spec moved has
+            // something to act on, and reporting it as merely unhashed
+            // would hide that.
+            let status = if !legs.is_empty() {
+                DriftStatus::Drifted { legs }
+            } else if entry.attr.hash.is_none() {
+                DriftStatus::NoHash {
+                    computed: content_hash(&entry.func),
+                }
+            } else {
+                DriftStatus::Ok
             };
             VerifiedEntry {
                 file: path.to_path_buf(),
@@ -497,6 +544,79 @@ fn actual_leg_hash(
     }
 }
 
+/// Every stale leg of one stamp — THE definition of "a stamp is current"
+/// (empty = current).
+///
+/// One definition serves all three readers: the `--drift` verb
+/// (`scan_file`), the post-`codegen` scan (`check_stamped_drift`), and the
+/// exit-code gate in `run.rs`. `update` refreshes exactly these legs.
+/// Before #382 the verb checked one leg, the updater refreshed three, and
+/// the correct three-leg checker sat between them, used by neither.
+///
+/// A leg the stamp does not carry is not drift. Neither is a leg whose
+/// source file will not resolve (`LegHash::Unresolved` / `Unavailable`):
+/// this function reports staleness, not missing evidence, so a partial
+/// checkout stays silent instead of reporting false drift. `update` warns
+/// on the same condition, since a leg it cannot refresh is actionable.
+fn drifted_legs(stamped_file: &Path, entry: &VerifiedFn) -> Vec<DriftedLeg> {
+    let attr = &entry.attr;
+    let mut legs = Vec::new();
+
+    // Body leg: the stamped fn against its own recomputed hash.
+    if let Some(expected) = &attr.hash {
+        let actual = content_hash(&entry.func);
+        if expected != &actual {
+            legs.push(DriftedLeg {
+                leg: StampLeg::Body,
+                expected: expected.clone(),
+                actual,
+            });
+        }
+    }
+
+    // spec_hash leg: needs `spec` + `handler` set.
+    if let (Some(spec_path), Some(handler_name), Some(expected)) =
+        (&attr.spec, &attr.handler, &attr.spec_hash)
+    {
+        if let LegHash::Hash(actual) =
+            actual_leg_hash(stamped_file, spec_path, handler_name, |src, h| {
+                spec_hash::spec_hash_for_handler(src, h)
+            })
+        {
+            if &actual != expected {
+                legs.push(DriftedLeg {
+                    leg: StampLeg::Spec,
+                    expected: expected.clone(),
+                    actual,
+                });
+            }
+        }
+    }
+
+    // accounts_hash leg: needs `accounts` + `accounts_file` set. The macro
+    // enforces all-or-nothing (#29), so partial configs are compile errors
+    // rather than silent skips here.
+    if let (Some(struct_name), Some(accounts_file), Some(expected)) =
+        (&attr.accounts, &attr.accounts_file, &attr.accounts_hash)
+    {
+        if let LegHash::Hash(actual) =
+            actual_leg_hash(stamped_file, accounts_file, struct_name, |src, s| {
+                spec_hash::accounts_struct_hash(src, s)
+            })
+        {
+            if &actual != expected {
+                legs.push(DriftedLeg {
+                    leg: StampLeg::Accounts,
+                    expected: expected.clone(),
+                    actual,
+                });
+            }
+        }
+    }
+
+    legs
+}
+
 /// Read-only complement to `update`: same staleness logic across all three
 /// hash legs, no rewrites. One entry per stale stamp; empty = all current.
 pub fn check_stamped_drift(input: &Path) -> Result<Vec<StampedDriftEntry>> {
@@ -514,48 +634,7 @@ pub fn check_stamped_drift(input: &Path) -> Result<Vec<StampedDriftEntry>> {
         };
 
         for entry in &scanned {
-            let attr = &entry.attr;
-            let mut stale = false;
-
-            // Body hash leg
-            let actual_body = content_hash(&entry.func);
-            if let Some(expected) = &attr.hash {
-                if expected != &actual_body {
-                    stale = true;
-                }
-            }
-
-            // spec_hash leg
-            if let (Some(spec_path), Some(handler_name), Some(expected_spec)) =
-                (&attr.spec, &attr.handler, &attr.spec_hash)
-            {
-                if let LegHash::Hash(actual_spec) =
-                    actual_leg_hash(file, spec_path, handler_name, |src, h| {
-                        spec_hash::spec_hash_for_handler(src, h)
-                    })
-                {
-                    if &actual_spec != expected_spec {
-                        stale = true;
-                    }
-                }
-            }
-
-            // accounts_hash leg
-            if let (Some(struct_name), Some(accounts_file), Some(expected_acct)) =
-                (&attr.accounts, &attr.accounts_file, &attr.accounts_hash)
-            {
-                if let LegHash::Hash(actual_acct) =
-                    actual_leg_hash(file, accounts_file, struct_name, |src, s| {
-                        spec_hash::accounts_struct_hash(src, s)
-                    })
-                {
-                    if &actual_acct != expected_acct {
-                        stale = true;
-                    }
-                }
-            }
-
-            if stale {
+            if !drifted_legs(file, entry).is_empty() {
                 entries.push(StampedDriftEntry {
                     file: file.clone(),
                     fn_name: entry.name.clone(),
@@ -565,6 +644,35 @@ pub fn check_stamped_drift(input: &Path) -> Result<Vec<StampedDriftEntry>> {
     }
 
     Ok(entries)
+}
+
+/// Summary tally over the closed `DriftStatus` set.
+///
+/// Counted through one exhaustive match rather than a filter chain per
+/// variant, so a new status is a compile error here instead of a case that
+/// silently drops out of the summary (#260/#270).
+struct DriftCounts {
+    ok: usize,
+    drifted: usize,
+    no_hash: usize,
+}
+
+impl DriftCounts {
+    fn of(entries: &[VerifiedEntry]) -> Self {
+        let mut counts = DriftCounts {
+            ok: 0,
+            drifted: 0,
+            no_hash: 0,
+        };
+        for entry in entries {
+            match &entry.status {
+                DriftStatus::Ok => counts.ok += 1,
+                DriftStatus::Drifted { .. } => counts.drifted += 1,
+                DriftStatus::NoHash { .. } => counts.no_hash += 1,
+            }
+        }
+        counts
+    }
 }
 
 /// Print a human-readable drift report.
@@ -580,11 +688,15 @@ pub fn print_report(entries: &[VerifiedEntry]) {
             DriftStatus::Ok => {
                 eprintln!("  {}  {}  OK", file, entry.fn_name);
             }
-            DriftStatus::Drifted { expected, actual } => {
-                eprintln!(
-                    "  {}  {}  DRIFT  expected {} got {}",
-                    file, entry.fn_name, expected, actual
-                );
+            DriftStatus::Drifted { legs } => {
+                // Name the leg: "regenerate" and "re-verify" are different
+                // fixes, and only the leg says which one this is.
+                let detail = legs
+                    .iter()
+                    .map(|l| format!("{} expected {} got {}", l.leg.label(), l.expected, l.actual))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                eprintln!("  {}  {}  DRIFT  {}", file, entry.fn_name, detail);
             }
             DriftStatus::NoHash { computed } => {
                 eprintln!(
@@ -595,21 +707,10 @@ pub fn print_report(entries: &[VerifiedEntry]) {
         }
     }
 
-    let ok = entries
-        .iter()
-        .filter(|e| e.status == DriftStatus::Ok)
-        .count();
-    let drifted = entries
-        .iter()
-        .filter(|e| matches!(e.status, DriftStatus::Drifted { .. }))
-        .count();
-    let no_hash = entries
-        .iter()
-        .filter(|e| matches!(e.status, DriftStatus::NoHash { .. }))
-        .count();
+    let counts = DriftCounts::of(entries);
     eprintln!(
         "\n{} verified, {} drifted, {} unhashed",
-        ok, drifted, no_hash
+        counts.ok, counts.drifted, counts.no_hash
     );
 }
 
@@ -1105,6 +1206,133 @@ handler foo (n : U64) : Active -> Active {
         let stale = check_stamped_drift(dir.path()).unwrap();
         assert_eq!(stale.len(), 1, "expected 1 stale stamp, got {:?}", stale);
         assert_eq!(stale[0].fn_name, "foo");
+    }
+
+    /// #382: the `--drift` verb must fail a stamp whose `spec_hash` is
+    /// stale even when the body hash is current. That is the leg the proc
+    /// macro rejects the build on, so `OK` is the one answer this verb
+    /// must never give for it.
+    #[test]
+    fn check_reports_stale_spec_hash_leg() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let spec_src = r#"program foo
+
+handler foo (n : U64) : Active -> Active {
+  effect { n := n + 1 }
+}
+"#;
+        std::fs::write(dir.path().join("foo.qedspec"), spec_src).unwrap();
+
+        // Body hash current, `spec_hash` deliberately stale.
+        let f0 = write_temp_rs(
+            r#"
+            #[qed(verified)]
+            pub fn foo(n: u64) -> u64 { n + 1 }
+            "#,
+        );
+        let body_hash = match &scan_file(f0.path()).unwrap()[0].status {
+            DriftStatus::NoHash { computed } => computed.clone(),
+            other => panic!("expected NoHash, got {:?}", other),
+        };
+
+        let stamped = format!(
+            r#"
+            #[qed(verified, spec = "foo.qedspec", handler = "foo", hash = "{}", spec_hash = "deadbeefdeadbeef")]
+            pub fn foo(n: u64) -> u64 {{ n + 1 }}
+            "#,
+            body_hash
+        );
+        std::fs::write(dir.path().join("foo.rs"), stamped).unwrap();
+
+        let entries = check(dir.path()).unwrap();
+        assert_eq!(entries.len(), 1, "expected 1 stamp, got {:?}", entries);
+        match &entries[0].status {
+            DriftStatus::Drifted { legs } => {
+                assert_eq!(legs.len(), 1, "only the spec leg is stale: {:?}", legs);
+                assert_eq!(legs[0].leg, StampLeg::Spec);
+                assert_eq!(legs[0].expected, "deadbeefdeadbeef");
+            }
+            other => panic!("stale spec_hash must report DRIFT, got {:?}", other),
+        }
+    }
+
+    /// The third leg, on the same path. `--drift` never read it either.
+    #[test]
+    fn check_reports_stale_accounts_hash_leg() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let accounts_src = r#"
+            pub struct Deposit {
+                pub owner: Signer,
+                pub vault: Account,
+            }
+        "#;
+        std::fs::write(dir.path().join("accounts.rs"), accounts_src).unwrap();
+        let real = spec_hash::accounts_struct_hash(accounts_src, "Deposit").unwrap();
+        assert_ne!(real, "deadbeefdeadbeef");
+
+        // Body leg omitted entirely: the accounts leg alone must carry the
+        // report, and must outrank the bare-stamp "unhashed" status.
+        let stamped = r#"
+            #[qed(verified, accounts = "Deposit", accounts_file = "accounts.rs", accounts_hash = "deadbeefdeadbeef")]
+            pub fn deposit(n: u64) -> u64 { n + 1 }
+        "#;
+        std::fs::write(dir.path().join("deposit.rs"), stamped).unwrap();
+
+        let entries = check(dir.path()).unwrap();
+        let deposit = entries
+            .iter()
+            .find(|e| e.fn_name == "deposit")
+            .expect("stamp not found");
+        match &deposit.status {
+            DriftStatus::Drifted { legs } => {
+                assert_eq!(legs.len(), 1, "only the accounts leg is stale: {:?}", legs);
+                assert_eq!(legs[0].leg, StampLeg::Accounts);
+                assert_eq!(legs[0].actual, real);
+            }
+            other => panic!("stale accounts_hash must report DRIFT, got {:?}", other),
+        }
+    }
+
+    /// The other half of the gate: widening the check must not turn a
+    /// current three-leg stamp into a false DRIFT.
+    #[test]
+    fn check_ok_when_every_leg_is_current() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let spec_src = r#"program foo
+
+handler foo (n : U64) : Active -> Active {
+  effect { n := n + 1 }
+}
+"#;
+        std::fs::write(dir.path().join("foo.qedspec"), spec_src).unwrap();
+        let live_spec_hash = spec_hash::spec_hash_for_handler(spec_src, "foo").unwrap();
+
+        let f0 = write_temp_rs(
+            r#"
+            #[qed(verified)]
+            pub fn foo(n: u64) -> u64 { n + 1 }
+            "#,
+        );
+        let body_hash = match &scan_file(f0.path()).unwrap()[0].status {
+            DriftStatus::NoHash { computed } => computed.clone(),
+            other => panic!("expected NoHash, got {:?}", other),
+        };
+
+        let stamped = format!(
+            r#"
+            #[qed(verified, spec = "foo.qedspec", handler = "foo", hash = "{}", spec_hash = "{}")]
+            pub fn foo(n: u64) -> u64 {{ n + 1 }}
+            "#,
+            body_hash, live_spec_hash
+        );
+        std::fs::write(dir.path().join("foo.rs"), stamped).unwrap();
+
+        let entries = check(dir.path()).unwrap();
+        assert_eq!(entries.len(), 1, "expected 1 stamp, got {:?}", entries);
+        assert_eq!(entries[0].status, DriftStatus::Ok);
     }
 
     #[test]
