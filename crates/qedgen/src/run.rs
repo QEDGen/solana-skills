@@ -1522,6 +1522,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             // bypasses the gate; `--upstream-stale-ok` suppresses it for
             // offline dev.
             let spec_dir = spec.parent().unwrap_or_else(|| Path::new("."));
+            let any_verify_backend = proptest || kani || lean || miri || scaffold;
             let run_upstream = if upstream_stale_ok {
                 // Honored even when --check-upstream is explicit — the
                 // local-dev escape hatch, not a "render warnings anyway" knob.
@@ -1547,8 +1548,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 // When --check-upstream is the only verb, exit cleanly
                 // without firing the backend runners. Combine with
                 // --proptest etc. to do both in one invocation.
-                let any_backend_flag = proptest || kani || lean || miri || probe_repros;
-                if check_upstream && !any_backend_flag {
+                if check_upstream && !any_verify_backend && !probe_repros {
                     return Ok(());
                 }
             } else if check_upstream && upstream_stale_ok {
@@ -1557,8 +1557,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 eprintln!(
                     "note: --upstream-stale-ok suppressed --check-upstream (offline-dev mode)"
                 );
-                let any_backend_flag = proptest || kani || lean || miri || probe_repros;
-                if !any_backend_flag {
+                if !any_verify_backend && !probe_repros {
                     return Ok(());
                 }
             }
@@ -1594,8 +1593,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                     );
                     std::process::exit(1);
                 }
-                let any_backend_flag = proptest || kani || lean || miri;
-                if !any_backend_flag {
+                if !any_verify_backend {
                     record_verify_evidence(
                         &spec,
                         None,
@@ -1613,7 +1611,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
 
             // No explicit backend flags -> run every backend whose artifact
             // is present on disk.
-            let any_flag = proptest || kani || lean || miri || scaffold;
+            let any_flag = any_verify_backend;
             // Project root used by Miri repro discovery — spec parent dir.
             let project_root = spec
                 .parent()

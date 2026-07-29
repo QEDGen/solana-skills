@@ -81,20 +81,46 @@ fn minimal_crate(root: &Path, lib_rs: &str) -> PathBuf {
 
 /// `verify` output plus its exit code. `common::run_ok` asserts success, and
 /// half of what this gate checks is a deliberate failure.
-fn verify_scaffold(project_root: &Path, program: &Path) -> (String, bool) {
+fn verify_scaffold_with(
+    project_root: &Path,
+    program: &Path,
+    extra_args: &[&str],
+) -> (String, bool) {
     ensure_qedgen_built();
-    let out = Command::new(qedgen_bin())
+    let mut command = Command::new(qedgen_bin());
+    command
         .args(["verify", "--spec", "v.qedspec", "--scaffold", "--program"])
         .arg(program)
-        .current_dir(project_root)
-        .output()
-        .expect("spawn qedgen verify");
+        .args(extra_args)
+        .current_dir(project_root);
+    let out = command.output().expect("spawn qedgen verify");
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
     (combined, out.status.success())
+}
+
+fn verify_scaffold(project_root: &Path, program: &Path) -> (String, bool) {
+    verify_scaffold_with(project_root, program, &[])
+}
+
+/// A dependency-free shared repro crate whose one test fires. This exercises
+/// the real `--probe-repros` stage without pulling in Mollusk or Solana.
+fn passing_probe_repro(project_root: &Path) {
+    let repros = project_root.join("target/qedgen-repros");
+    std::fs::create_dir_all(repros.join("src")).expect("mkdir repro crate");
+    std::fs::write(
+        repros.join("Cargo.toml"),
+        "[package]\nname = \"probe-repro\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+    )
+    .expect("write repro manifest");
+    std::fs::write(
+        repros.join("src/lib.rs"),
+        "#[test]\nfn finding_fires() { assert_eq!(2 + 2, 4); }\n",
+    )
+    .expect("write repro test");
 }
 
 #[test]
@@ -128,6 +154,37 @@ fn clean_crate_passes_the_scaffold_backend() {
 
     assert!(ok, "a crate that typechecks must pass:\n{out}");
     assert!(out.contains("[PASS] scaffold"), "{out}");
+}
+
+#[test]
+fn check_upstream_combination_still_runs_scaffold() {
+    let tmp = project(SPEC);
+    let krate = minimal_crate(tmp.path(), "pub fn f() -> u8 { 0 }\n");
+    std::fs::write(tmp.path().join("qed.lock"), "version = 1\n").expect("write empty lock");
+
+    let (out, ok) = verify_scaffold_with(tmp.path(), &krate, &["--check-upstream", "--offline"]);
+
+    assert!(ok, "both requested stages must pass:\n{out}");
+    assert!(
+        out.contains("[PASS] scaffold"),
+        "--check-upstream must not return before the requested scaffold backend:\n{out}"
+    );
+}
+
+#[test]
+fn probe_repros_combination_still_runs_scaffold() {
+    let tmp = project(SPEC);
+    let krate = minimal_crate(tmp.path(), "pub fn f() -> u8 { 0 }\n");
+    passing_probe_repro(tmp.path());
+
+    let (out, ok) = verify_scaffold_with(tmp.path(), &krate, &["--probe-repros"]);
+
+    assert!(ok, "both requested stages must pass:\n{out}");
+    assert!(out.contains("[FIRED] shared-crate"), "{out}");
+    assert!(
+        out.contains("[PASS] scaffold"),
+        "--probe-repros must not return before the requested scaffold backend:\n{out}"
+    );
 }
 
 /// Absence of a crate is not evidence of a defect. Skipping keeps the

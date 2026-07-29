@@ -41,6 +41,14 @@
 //! to extend it; the pin-liveness script (#371) does NOT catch this, because
 //! it checks that the revision exists, not that it builds.
 //!
+//! This gate is also the only thing that catches the wincode 0.5/0.6 split:
+//! `litesvm` requires `wincode ^0.5.5`, and solana crates cross to 0.6 in
+//! MINOR bumps that a caret requirement takes silently, landing two
+//! incompatible majors in one graph. It went red exactly that way with no
+//! qedgen change. `parallax_dev_dependencies` documents the pin list and how
+//! to extend it; the pin-liveness script (#371) does NOT catch this, because
+//! it checks that the revision exists, not that it builds.
+//!
 //! `#[ignore]`: pulls LiteSVM + the Agave runtime on first run (network,
 //! multi-minute cold compile). CI runs it with `-- --ignored`, like
 //! `generated_artifact_gate`.
