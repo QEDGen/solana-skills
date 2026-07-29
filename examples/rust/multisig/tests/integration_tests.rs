@@ -35,8 +35,13 @@ use {
 
 // ── Setup ────────────────────────────────────────────────────────
 
+/// The program under test, in the address type Parallax uses.
+fn program_id() -> Pubkey {
+    Pubkey::new_from_array(program::ID.to_bytes())
+}
+
 fn setup() -> Ctx {
-    Ctx::builder(program::ID)
+    Ctx::builder(program_id())
         .crate_name(env!("CARGO_PKG_NAME"))
         .build()
         .expect("load compiled program into Parallax")
@@ -92,7 +97,7 @@ fn state_account(
         address,
         lamports: 2_000_000,
         data,
-        owner: program::ID,
+        owner: program_id(),
         executable: false,
     }
 }
@@ -107,7 +112,7 @@ fn test_create_vault() {
     let system_program = system_program::ID;
     let creator = Pubkey::new_unique();
     let (vault, _vault_bump) =
-        Pubkey::find_program_address(&[b"vault", creator.as_ref()], &program::ID);
+        Pubkey::find_program_address(&[b"vault", creator.as_ref()], &program_id());
 
     // Instruction parameters
     let threshold: u8 = 1; // AGENT: set appropriate value
@@ -149,7 +154,7 @@ fn test_propose() {
     // Account addresses
     let creator = Pubkey::new_unique();
     let (vault, _vault_bump) =
-        Pubkey::find_program_address(&[b"vault", creator.as_ref()], &program::ID);
+        Pubkey::find_program_address(&[b"vault", creator.as_ref()], &program_id());
 
     let instruction: Instruction = ProposeInstruction { creator, vault }.into();
 
@@ -182,7 +187,7 @@ fn test_approve() {
     let creator = Pubkey::new_unique(); // AGENT: replace with the creator from pre-state
     let approver = Pubkey::new_unique();
     let (vault, _vault_bump) =
-        Pubkey::find_program_address(&[b"vault", creator.as_ref()], &program::ID);
+        Pubkey::find_program_address(&[b"vault", creator.as_ref()], &program_id());
 
     // Instruction parameters
     let member_index: u8 = 1; // AGENT: set appropriate value
@@ -223,7 +228,7 @@ fn test_reject() {
     let creator = Pubkey::new_unique(); // AGENT: replace with the creator from pre-state
     let rejecter = Pubkey::new_unique();
     let (vault, _vault_bump) =
-        Pubkey::find_program_address(&[b"vault", creator.as_ref()], &program::ID);
+        Pubkey::find_program_address(&[b"vault", creator.as_ref()], &program_id());
 
     // Instruction parameters
     let member_index: u8 = 1; // AGENT: set appropriate value
@@ -264,7 +269,7 @@ fn test_execute() {
     let creator = Pubkey::new_unique(); // AGENT: replace with the creator from pre-state
     let executor = Pubkey::new_unique();
     let (vault, _vault_bump) =
-        Pubkey::find_program_address(&[b"vault", creator.as_ref()], &program::ID);
+        Pubkey::find_program_address(&[b"vault", creator.as_ref()], &program_id());
 
     // Instruction parameters
     let member_index: u8 = 1; // AGENT: set appropriate value
@@ -305,7 +310,7 @@ fn test_cancel_proposal() {
     let creator = Pubkey::new_unique(); // AGENT: replace with the creator from pre-state
     let canceller = Pubkey::new_unique();
     let (vault, _vault_bump) =
-        Pubkey::find_program_address(&[b"vault", creator.as_ref()], &program::ID);
+        Pubkey::find_program_address(&[b"vault", creator.as_ref()], &program_id());
 
     let instruction: Instruction = CancelProposalInstruction { canceller, vault }.into();
 
@@ -337,7 +342,7 @@ fn test_add_member() {
     // Account addresses
     let creator = Pubkey::new_unique();
     let (vault, _vault_bump) =
-        Pubkey::find_program_address(&[b"vault", creator.as_ref()], &program::ID);
+        Pubkey::find_program_address(&[b"vault", creator.as_ref()], &program_id());
 
     // Instruction parameters
     let member_index: u8 = 1; // AGENT: set appropriate value
@@ -378,7 +383,7 @@ fn test_remove_member() {
     // Account addresses
     let creator = Pubkey::new_unique();
     let (vault, _vault_bump) =
-        Pubkey::find_program_address(&[b"vault", creator.as_ref()], &program::ID);
+        Pubkey::find_program_address(&[b"vault", creator.as_ref()], &program_id());
 
     let instruction: Instruction = RemoveMemberInstruction { creator, vault }.into();
 

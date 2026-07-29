@@ -468,8 +468,14 @@ fn generate_existing_artifacts(root: &Path, temp_root: &Path, spec_path: &Path) 
     // obsolete, so we skip regenerating it into temp — the comparison
     // then surfaces the leftover as drift (present in root, absent in
     // temp), flagging it for removal.
-    let project_is_quasar = resolve_project_target(root)? == Some(Target::Quasar);
-    if project_is_quasar {
+    // Regenerate with the project's OWN target, not a hardcoded Quasar
+    // (#366): Anchor projects have an integration scaffold now, and
+    // regenerating an Anchor project's tests as Quasar would report drift
+    // on every line. Pinocchio has no builder, so it has no scaffold to
+    // compare.
+    let project_target = resolve_project_target(root)?;
+    if matches!(project_target, Some(Target::Quasar) | Some(Target::Anchor)) {
+        let target = project_target.expect("matched Some above");
         // `src/` variants are the pre-v2.41 default; kept for existing projects.
         for rel in [
             "tests/integration_tests.rs",
@@ -478,7 +484,7 @@ fn generate_existing_artifacts(root: &Path, temp_root: &Path, spec_path: &Path) 
             "programs/src/integration_tests.rs",
         ] {
             if root.join(rel).is_file() {
-                crate::integration_test::generate(spec_path, &temp_root.join(rel), Target::Quasar)?;
+                crate::integration_test::generate(spec_path, &temp_root.join(rel), target)?;
             }
         }
     }

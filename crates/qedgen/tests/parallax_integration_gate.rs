@@ -63,15 +63,31 @@ use std::process::Command;
 
 /// Shared target dir so the Agave dependency tree compiles once per machine
 /// and CI's cargo cache covers it.
-fn gate_target_dir() -> std::path::PathBuf {
+fn gate_target_dir(target: &str) -> std::path::PathBuf {
     common::repo_root()
         .join("target")
-        .join("parallax-integration-gate")
+        .join(format!("parallax-integration-gate-{target}"))
 }
 
 #[test]
 #[ignore = "compile-heavy: fetches and builds LiteSVM + the Agave runtime"]
-fn parallax_integration_scaffold_compiles() {
+fn quasar_integration_scaffold_compiles() {
+    gate_target("quasar");
+}
+
+/// #366 — the Anchor half. The scaffold has no generated client module to
+/// import here, so it builds instructions from the Anchor ABI directly:
+/// discriminator, Borsh arguments, declared account metas. That path had
+/// never been compiled, and the two defects it turned out to carry (the
+/// `solana_pubkey` / `solana_address` split, and untyped argument literals)
+/// are exactly the kind a text assertion cannot see.
+#[test]
+#[ignore = "compile-heavy: fetches and builds LiteSVM + the Agave runtime"]
+fn anchor_integration_scaffold_compiles() {
+    gate_target("anchor");
+}
+
+fn gate_target(target: &str) {
     ensure_qedgen_built();
     let tmp = stage_fixture("crates/qedgen/tests/fixtures/parallax-api-gate");
     std::fs::create_dir_all(tmp.path().join(".qed")).expect("create .qed");
@@ -90,7 +106,7 @@ fn parallax_integration_scaffold_compiles() {
             .arg("--spec")
             .arg("vault.qedspec")
             .arg("--target")
-            .arg("quasar")
+            .arg(target)
             .arg("--output-dir")
             .arg(&output_dir)
             .current_dir(tmp.path()),
@@ -102,7 +118,7 @@ fn parallax_integration_scaffold_compiles() {
             .arg("--spec")
             .arg("vault.qedspec")
             .arg("--target")
-            .arg("quasar")
+            .arg(target)
             .arg("--integration")
             .arg("--output-dir")
             .arg(&output_dir)
@@ -148,7 +164,7 @@ fn parallax_integration_scaffold_compiles() {
             .arg("--tests")
             .arg("--manifest-path")
             .arg(&manifest)
-            .env("CARGO_TARGET_DIR", gate_target_dir())
+            .env("CARGO_TARGET_DIR", gate_target_dir(target))
             .env("RUSTFLAGS", "-D warnings"),
     );
 }

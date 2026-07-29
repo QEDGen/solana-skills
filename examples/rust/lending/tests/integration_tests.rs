@@ -43,8 +43,13 @@ use {
 
 // ── Setup ────────────────────────────────────────────────────────
 
+/// The program under test, in the address type Parallax uses.
+fn program_id() -> Pubkey {
+    Pubkey::new_from_array(program::ID.to_bytes())
+}
+
 fn setup() -> Ctx {
-    Ctx::builder(program::ID)
+    Ctx::builder(program_id())
         .crate_name(env!("CARGO_PKG_NAME"))
         .build()
         .expect("load compiled program into Parallax")
@@ -90,7 +95,7 @@ fn state_account(
         address,
         lamports: 2_000_000,
         data,
-        owner: program::ID,
+        owner: program_id(),
         executable: false,
     }
 }
@@ -135,7 +140,7 @@ fn test_init_pool() {
     let system_program = system_program::ID;
     let authority = Pubkey::new_unique();
     let (pool, _pool_bump) =
-        Pubkey::find_program_address(&[b"pool", authority.as_ref()], &program::ID);
+        Pubkey::find_program_address(&[b"pool", authority.as_ref()], &program_id());
 
     // Instruction parameters
     let rate: u64 = 1_000_000; // AGENT: set appropriate value
@@ -176,7 +181,7 @@ fn test_deposit() {
     let authority = Pubkey::new_unique(); // AGENT: replace with the authority from pre-state
     let depositor = Pubkey::new_unique();
     let (pool, _pool_bump) =
-        Pubkey::find_program_address(&[b"pool", authority.as_ref()], &program::ID);
+        Pubkey::find_program_address(&[b"pool", authority.as_ref()], &program_id());
     let pool_vault = Pubkey::new_unique();
     let depositor_ta = Pubkey::new_unique();
 
@@ -227,9 +232,9 @@ fn test_borrow() {
     let authority = Pubkey::new_unique(); // AGENT: replace with the authority from pre-state
     let borrower = Pubkey::new_unique();
     let (loan, _loan_bump) =
-        Pubkey::find_program_address(&[b"loan", pool.as_ref(), borrower.as_ref()], &program::ID);
+        Pubkey::find_program_address(&[b"loan", pool.as_ref(), borrower.as_ref()], &program_id());
     let (pool, _pool_bump) =
-        Pubkey::find_program_address(&[b"pool", authority.as_ref()], &program::ID);
+        Pubkey::find_program_address(&[b"pool", authority.as_ref()], &program_id());
     let pool_vault = Pubkey::new_unique();
     let borrower_ta = Pubkey::new_unique();
 
@@ -286,9 +291,9 @@ fn test_repay() {
     let authority = Pubkey::new_unique(); // AGENT: replace with the authority from pre-state
     let borrower = Pubkey::new_unique();
     let (loan, _loan_bump) =
-        Pubkey::find_program_address(&[b"loan", pool.as_ref(), borrower.as_ref()], &program::ID);
+        Pubkey::find_program_address(&[b"loan", pool.as_ref(), borrower.as_ref()], &program_id());
     let (pool, _pool_bump) =
-        Pubkey::find_program_address(&[b"pool", authority.as_ref()], &program::ID);
+        Pubkey::find_program_address(&[b"pool", authority.as_ref()], &program_id());
     let pool_vault = Pubkey::new_unique();
     let borrower_ta = Pubkey::new_unique();
 
@@ -339,9 +344,9 @@ fn test_liquidate() {
     let authority = Pubkey::new_unique(); // AGENT: replace with the authority from pre-state
     let liquidator = Pubkey::new_unique();
     let (loan, _loan_bump) =
-        Pubkey::find_program_address(&[b"loan", pool.as_ref(), borrower.as_ref()], &program::ID);
+        Pubkey::find_program_address(&[b"loan", pool.as_ref(), borrower.as_ref()], &program_id());
     let (pool, _pool_bump) =
-        Pubkey::find_program_address(&[b"pool", authority.as_ref()], &program::ID);
+        Pubkey::find_program_address(&[b"pool", authority.as_ref()], &program_id());
     let pool_vault = Pubkey::new_unique();
     let liquidator_ta = Pubkey::new_unique();
 

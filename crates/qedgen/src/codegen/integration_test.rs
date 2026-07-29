@@ -2,6 +2,7 @@ use anyhow::Result;
 use std::path::Path;
 
 use crate::check::{self, ParsedHandler, ParsedHandlerAccount, ParsedSpec};
+use crate::codegen::anchor_ix;
 use crate::codegen_shared::{
     emit_pod_bytes_append, map_type_parallax_host, to_pascal_case, write_generated_file,
 };
@@ -18,19 +19,17 @@ use crate::Target;
 /// `generate` refuses non-Quasar targets so `--target anchor` can't
 /// silently drop a broken artifact into the crate.
 pub fn generate(spec_path: &Path, output_path: &Path, target: Target) -> Result<()> {
-    if !matches!(target, Target::Quasar) {
-        anyhow::bail!(
-            "Integration-test codegen is Quasar-client-only today — the scaffold \
-             imports the generated program::client module, which \
-             doesn't exist for a {:?} program.",
-            target
-        );
-    }
+    // Before parsing: the target alone decides whether this lane can emit
+    // anything, and an unsupported target should not need a valid spec to
+    // say so.
+    ClientSurface::of(target)?;
 
     let spec = check::parse_spec_file(spec_path)?;
 
     if spec.is_assembly_target() {
-        anyhow::bail!("Integration tests are only supported for Quasar targets, not assembly/sBPF");
+        anyhow::bail!(
+            "Integration tests model a Rust program's instruction ABI; an sBPF spec has none"
+        );
     }
 
     crate::rust_codegen_util::check_effect_targets(&spec)?;
@@ -45,7 +44,7 @@ pub fn generate(spec_path: &Path, output_path: &Path, target: Target) -> Result<
     let fp = crate::fingerprint::compute_fingerprint(&spec);
     let hash = crate::codegen_shared::fingerprint_hash(&fp, "tests/unit.rs");
 
-    let out = render(&spec, &hash)?;
+    let out = render(&spec, &hash, target)?;
     write_generated_file(output_path, &out)?;
     ensure_parallax_dev_dependencies(output_path)?;
     eprintln!("  wrote {}", output_path.display());
@@ -65,7 +64,9 @@ pub(crate) const PARALLAX_GIT_URL: &str = "https://github.com/blueshift-gg/paral
 /// both directions: a scaffold whose comment advertises a revision its own
 /// `[dev-dependencies]` does not use, and — worse — a gate that compiles the
 /// OLD revision, stays green, and stops gating what actually ships.
-/// `parallax_gate_fixture_pins_the_same_revision` holds the fixture to this.
+/// The gate no longer keeps a hand-written copy to drift from: since #383
+/// it generates its program crate, so the pin reaches it through the same
+/// dev-dependency upsert a user gets.
 ///
 /// Bumping: change this, run
 /// `cargo test -p qedgen-solana-skills --test parallax_integration_gate -- --ignored`,
@@ -308,7 +309,61 @@ fn upsert_dev_dependencies(existing: &str) -> String {
 }
 
 /// Render the complete integration test file.
-pub fn render(spec: &ParsedSpec, hash: &str) -> Result<String> {
+/// The parts of the scaffold that depend on the program framework.
+///
+/// Everything else the scaffold emits — world setup, account fixtures,
+/// `execute_with`, the `Outcome` checks — is Parallax, and Parallax does
+/// not care which framework produced the `.so`. That split is why opening
+/// the lane to Anchor (#366) is an instruction builder rather than a second
+/// scaffold.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClientSurface {
+    /// Instructions come from the generated `program::client` builders.
+    Quasar,
+    /// No generated client exists, so instructions are built inline from
+    /// the Anchor ABI: an 8-byte discriminator, Borsh arguments, and the
+    /// account metas the spec declares.
+    Anchor,
+}
+
+impl ClientSurface {
+    fn of(target: Target) -> Result<Self> {
+        match target {
+            Target::Quasar => Ok(ClientSurface::Quasar),
+            Target::Anchor => Ok(ClientSurface::Anchor),
+            // Pinocchio dispatches on a leading discriminant byte rather
+            // than an 8-byte hash, and its accounts carry no framework
+            // metadata. That is a different builder, not this one with a
+            // flag, so it stays out until someone writes it.
+            Target::Pinocchio => anyhow::bail!(
+                "Integration-test codegen has no Pinocchio instruction builder yet — \
+                 its dispatch convention (leading discriminant byte) differs from \
+                 both Anchor and Quasar."
+            ),
+        }
+    }
+
+    /// How a rejection is named to `Outcome::error`, which takes anything
+    /// `Into<u32>`.
+    ///
+    /// The two frameworks differ, and getting it wrong asserts the wrong
+    /// error code rather than failing to compile. Anchor's `#[error_code]`
+    /// emits `From<E> for u32` that ADDS `ERROR_CODE_OFFSET` (6000), so the
+    /// bare variant is already the on-chain code. Quasar's emits
+    /// `From<E> for ProgramError` and `TryFrom<u32> for E` but no
+    /// `From<E> for u32`, and its conversion is `ProgramError::Custom(e as
+    /// u32)` over qedgen's explicit discriminants — so the cast is both
+    /// required to compile and exactly the code the program returns.
+    fn error_expr(self, err_enum: &str, variant: &str) -> String {
+        match self {
+            ClientSurface::Anchor => format!("program::errors::{err_enum}::{variant}"),
+            ClientSurface::Quasar => format!("program::errors::{err_enum}::{variant} as u32"),
+        }
+    }
+}
+
+pub fn render(spec: &ParsedSpec, hash: &str, target: Target) -> Result<String> {
+    let surface = ClientSurface::of(target)?;
     let mut out = String::new();
     let program_name = spec.program_name.to_lowercase();
     let state_name = format!("{}Account", to_pascal_case(&program_name));
@@ -350,8 +405,10 @@ pub fn render(spec: &ParsedSpec, hash: &str) -> Result<String> {
         "    {} as program,\n",
         program_name.replace('-', "_")
     ));
-    out.push_str("    program::client::*,\n");
-    if !spec.state_fields.is_empty() {
+    if surface == ClientSurface::Quasar {
+        out.push_str("    program::client::*,\n");
+    }
+    if !spec.state_fields.is_empty() && surface == ClientSurface::Quasar {
         out.push_str("    program::state::*,\n");
     }
     out.push_str("    parallax_svm::prelude::*,\n");
@@ -366,21 +423,26 @@ pub fn render(spec: &ParsedSpec, hash: &str) -> Result<String> {
     out.push_str("    std::vec,\n");
     out.push_str("};\n\n");
 
+    // ── Instruction discriminators (Anchor only) ────────────────────────────
+    if surface == ClientSurface::Anchor {
+        emit_anchor_discriminators(&mut out, spec);
+    }
+
     // ── Setup ────────────────────────────────────────────────────────────────
     emit_setup(&mut out);
 
     // ── Account helpers ──────────────────────────────────────────────────────
-    emit_account_helpers(&mut out, &state_name, spec, needs_token)?;
+    emit_account_helpers(&mut out, &state_name, spec, needs_token, surface)?;
 
     // ── Per-handler happy-path tests ────────────────────────────────────────
     for (i, handler) in spec.handlers.iter().enumerate() {
-        emit_happy_path_test(&mut out, handler, spec, i)?;
+        emit_happy_path_test(&mut out, handler, spec, i, surface)?;
     }
 
     // ── Unauthorized access tests ────────────────────────────────────────────
     for handler in &spec.handlers {
         if handler.who.is_some() {
-            emit_unauthorized_test(&mut out, handler, spec)?;
+            emit_unauthorized_test(&mut out, handler, spec, surface)?;
         }
     }
 
@@ -396,8 +458,174 @@ pub fn render(spec: &ParsedSpec, hash: &str) -> Result<String> {
 // Code generation helpers
 // ============================================================================
 
+/// Emit the `let instruction = …;` binding for one handler.
+///
+/// The single place the two client surfaces diverge, and the reason the
+/// Anchor lane is an adapter rather than a second scaffold (#366).
+///
+/// `account_expr` names a NON-program account (the happy path uses the
+/// declared name; the forged-signer test swaps one for `wrong_<name>`).
+/// Program accounts resolve per surface and never reach it. `arg_expr`
+/// names an argument, which is a binding on the happy path and an inline
+/// default in the negative tests.
+fn emit_instruction_with(
+    out: &mut String,
+    handler: &ParsedHandler,
+    spec: &ParsedSpec,
+    instr_struct: &str,
+    surface: ClientSurface,
+    account_expr: impl Fn(&ParsedHandlerAccount) -> String,
+    arg_expr: impl Fn(&str, &str) -> Result<String>,
+) -> Result<()> {
+    match surface {
+        ClientSurface::Quasar => {
+            out.push_str(&format!(
+                "    let instruction: Instruction = {} {{\n",
+                instr_struct
+            ));
+            for acct in &handler.accounts {
+                let value = if acct.is_program {
+                    if acct.name.contains("system") {
+                        "system_program".to_string()
+                    } else if acct.account_type.as_deref() == Some("token") {
+                        "token_program".to_string()
+                    } else {
+                        acct.name.clone()
+                    }
+                } else {
+                    account_expr(acct)
+                };
+                // Field-init shorthand when the expression is already the
+                // field's name, which is the common case and what the
+                // previous emitter always produced.
+                if value == acct.name {
+                    out.push_str(&format!("        {},\n", acct.name));
+                } else {
+                    out.push_str(&format!("        {}: {},\n", acct.name, value));
+                }
+            }
+            for (name, ty) in &handler.takes_params {
+                let value = arg_expr(name, ty)?;
+                if value == *name {
+                    out.push_str(&format!("        {},\n", name));
+                } else {
+                    out.push_str(&format!("        {}: {},\n", name, value));
+                }
+            }
+            out.push_str("    }\n    .into();\n\n");
+        }
+        ClientSurface::Anchor => {
+            // No generated client module, so the ABI is spelled out: the
+            // handler's discriminator, the account metas the spec declares
+            // in declaration order, then Borsh-encoded arguments.
+            out.push_str("    let instruction = Instruction {\n");
+            out.push_str("        program_id: program_id(),\n");
+            out.push_str("        accounts: vec![\n");
+            for acct in &handler.accounts {
+                let meta = if acct.is_program {
+                    anchor_ix::account_meta_expr(acct, false)
+                } else {
+                    // Render the meta against the caller's expression by
+                    // borrowing the account's flags under a renamed
+                    // binding, so signer/writable stay the spec's.
+                    let renamed = ParsedHandlerAccount {
+                        name: account_expr(acct),
+                        ..acct.clone()
+                    };
+                    anchor_ix::account_meta_expr(&renamed, acct.is_signer)
+                };
+                out.push_str(&format!("            {meta},\n"));
+            }
+            out.push_str("        ],\n");
+            if handler.takes_params.is_empty() {
+                out.push_str(&format!(
+                    "        data: {}.to_vec(),\n",
+                    anchor_discriminator_const(&handler.name)
+                ));
+            } else {
+                out.push_str("        data: {\n");
+                out.push_str(&format!(
+                    "            let mut data = {}.to_vec();\n",
+                    anchor_discriminator_const(&handler.name)
+                ));
+                for (name, ty) in &handler.takes_params {
+                    let value = arg_expr(name, ty)?;
+                    // A typed binding rather than the expression inline: the
+                    // negative tests pass literal defaults, and
+                    // `1_000_000.to_le_bytes()` does not compile — the
+                    // literal has no concrete type to pick a width from
+                    // (E0689). Naming it also puts the argument's spec type
+                    // in the generated file.
+                    let rust_ty = map_type_parallax_host(ty, spec)?;
+                    out.push_str(&format!(
+                        "            let {name}_arg: {rust_ty} = {value};\n"
+                    ));
+                    out.push_str(&emit_pod_bytes_append(
+                        ty,
+                        &format!("{name}_arg"),
+                        spec,
+                        "            ",
+                        0,
+                    )?);
+                }
+                out.push_str("            data\n");
+                out.push_str("        },\n");
+            }
+            out.push_str("    };\n\n");
+        }
+    }
+    Ok(())
+}
+
+/// Name of the emitted discriminator constant for a handler.
+fn anchor_discriminator_const(handler: &str) -> String {
+    format!("IX_{}", handler.to_uppercase())
+}
+
+/// One `const IX_<HANDLER>: [u8; 8]` per handler, emitted once per file.
+///
+/// Constants rather than inline literals: the same discriminator appears in
+/// a handler's happy-path test and its forged-signer test, and a reader
+/// comparing two byte arrays by eye is a worse position than a reader
+/// comparing two names.
+fn emit_anchor_discriminators(out: &mut String, spec: &ParsedSpec) {
+    out.push_str(
+        "// ── Instruction discriminators ───────────────────────────────────\n\n\
+         // Anchor derives these from the handler name: `sha256(\"global:<name>\")[..8]`.\n",
+    );
+    for handler in &spec.handlers {
+        out.push_str(&format!(
+            "const {}: [u8; 8] = {};\n",
+            anchor_discriminator_const(&handler.name),
+            anchor_ix::discriminator_literal(&anchor_ix::instruction_preimage(&handler.name))
+        ));
+    }
+    if !spec.state_fields.is_empty() {
+        let state_name = format!(
+            "{}Account",
+            to_pascal_case(&spec.program_name.to_lowercase())
+        );
+        out.push_str(&format!(
+            "\n// Account discriminator: `sha256(\"account:{}\")[..8]`.\nconst ACCOUNT_DISCRIMINATOR: [u8; 8] = {};\n",
+            state_name,
+            anchor_ix::discriminator_literal(&anchor_ix::account_preimage(&state_name))
+        ));
+    }
+    out.push('\n');
+}
+
 fn emit_setup(out: &mut String) {
     out.push_str("// ── Setup ────────────────────────────────────────────────────────\n\n");
+    // Not `program::ID` directly: Anchor's `declare_id!` produces a
+    // `solana_pubkey::Pubkey`, and Parallax speaks `solana_address::Address`
+    // (re-exported as `Pubkey`). The same 32 bytes, two crates, and no
+    // `From` between them. Quasar happens to declare the Address type
+    // already, so this is a no-op there and a conversion on Anchor — one
+    // helper rather than a target-conditional at every use site.
+    out.push_str("/// The program under test, in the address type Parallax uses.\n");
+    out.push_str("fn program_id() -> Pubkey {\n");
+    out.push_str("    Pubkey::new_from_array(program::ID.to_bytes())\n");
+    out.push_str("}\n\n");
     // `crate_name` rather than a hardcoded relative path: Parallax resolves
     // the artifact by honouring `PARALLAX_PROGRAM_PATH` first, then walking
     // ancestors for `target/deploy/<crate>.so`. A literal
@@ -405,7 +633,7 @@ fn emit_setup(out: &mut String) {
     // package sits exactly two levels under the workspace root. This is the
     // same resolution `#[parallax_test]` itself uses.
     out.push_str("fn setup() -> Ctx {\n");
-    out.push_str("    Ctx::builder(program::ID)\n");
+    out.push_str("    Ctx::builder(program_id())\n");
     out.push_str("        .crate_name(env!(\"CARGO_PKG_NAME\"))\n");
     out.push_str("        .build()\n");
     out.push_str("        .expect(\"load compiled program into Parallax\")\n");
@@ -417,6 +645,7 @@ fn emit_account_helpers(
     state_name: &str,
     spec: &ParsedSpec,
     needs_token: bool,
+    surface: ClientSurface,
 ) -> Result<()> {
     const BASE_HELPERS: &str = include_str!("../../templates/integration-helpers-base.rs");
     const TOKEN_HELPERS: &str = include_str!("../../templates/integration-helpers-token.rs");
@@ -467,13 +696,20 @@ fn emit_account_helpers(
             out.push_str(&format!("    {}: {},\n", name, rust_ty));
         }
         out.push_str(") -> Account {\n");
-        // The discriminator comes from the program's own `Discriminator`
-        // impl rather than a literal repeated here, so the fixture tracks
-        // whatever `#[account(discriminator = N)]` codegen emitted.
-        out.push_str(&format!(
-            "    let mut data = <{} as quasar_lang::prelude::Discriminator>::DISCRIMINATOR.to_vec();\n",
-            state_name
-        ));
+        // Quasar takes the discriminator from the program's own
+        // `Discriminator` impl rather than a literal repeated here, so the
+        // fixture tracks whatever `#[account(discriminator = N)]` codegen
+        // emitted. Anchor derives its 8 bytes from the struct name, and the
+        // constant is emitted once at the top of the file.
+        match surface {
+            ClientSurface::Quasar => out.push_str(&format!(
+                "    let mut data = <{} as quasar_lang::prelude::Discriminator>::DISCRIMINATOR.to_vec();\n",
+                state_name
+            )),
+            ClientSurface::Anchor => {
+                out.push_str("    let mut data = ACCOUNT_DISCRIMINATOR.to_vec();\n")
+            }
+        }
         for (name, ty) in &fields {
             out.push_str(&emit_pod_bytes_append(ty, name, spec, "    ", 0)?);
         }
@@ -481,7 +717,7 @@ fn emit_account_helpers(
         out.push_str("        address,\n");
         out.push_str("        lamports: 2_000_000,\n");
         out.push_str("        data,\n");
-        out.push_str("        owner: program::ID,\n");
+        out.push_str("        owner: program_id(),\n");
         out.push_str("        executable: false,\n");
         out.push_str("    }\n");
         out.push_str("}\n\n");
@@ -498,6 +734,7 @@ fn emit_happy_path_test(
     handler: &ParsedHandler,
     spec: &ParsedSpec,
     _discriminator: usize,
+    surface: ClientSurface,
 ) -> Result<()> {
     let test_name = format!("test_{}", handler.name);
     let pascal = to_pascal_case(&handler.name);
@@ -520,13 +757,18 @@ fn emit_happy_path_test(
         .any(|a| a.is_program && a.name.contains("system"));
 
     out.push_str("    // Account addresses\n");
-    if has_system {
+    // Only the Quasar builder takes program accounts as struct fields. The
+    // Anchor metas name `system_program::ID` / `SPL_TOKEN_PROGRAM_ID`
+    // directly, so binding them here would be an unused local — and the
+    // compile gate denies warnings on a generated DO-NOT-EDIT file.
+    let binds_program_accounts = surface == ClientSurface::Quasar;
+    if has_system && binds_program_accounts {
         out.push_str("    let system_program = system_program::ID;\n");
     }
     let has_token_program = accounts
         .iter()
         .any(|a| a.is_program && a.name.contains("token"));
-    if has_token_program {
+    if has_token_program && binds_program_accounts {
         out.push_str("    let token_program = SPL_TOKEN_PROGRAM_ID;\n");
     }
     if accounts.iter().any(|a| a.name == "rent") {
@@ -566,7 +808,7 @@ fn emit_happy_path_test(
                     })
                     .collect();
                 out.push_str(&format!(
-                    "    let ({}, _{}_bump) = Pubkey::find_program_address(\n        &[{}],\n        &program::ID,\n    );\n",
+                    "    let ({}, _{}_bump) = Pubkey::find_program_address(\n        &[{}],\n        &program_id(),\n    );\n",
                     acct.name,
                     acct.name,
                     seed_exprs.join(", ")
@@ -598,27 +840,15 @@ fn emit_happy_path_test(
         out.push('\n');
     }
 
-    out.push_str(&format!(
-        "    let instruction: Instruction = {} {{\n",
-        instr_struct
-    ));
-    for acct in accounts {
-        if acct.is_program {
-            if acct.name.contains("system") {
-                out.push_str("        system_program,\n");
-            } else if acct.account_type.as_deref() == Some("token") {
-                out.push_str("        token_program,\n");
-            } else {
-                out.push_str(&format!("        {},\n", acct.name));
-            }
-        } else {
-            out.push_str(&format!("        {},\n", acct.name));
-        }
-    }
-    for (name, _) in &handler.takes_params {
-        out.push_str(&format!("        {},\n", name));
-    }
-    out.push_str("    }\n    .into();\n\n");
+    emit_instruction_with(
+        out,
+        handler,
+        spec,
+        &instr_struct,
+        surface,
+        |acct| acct.name.clone(),
+        |name, _ty| Ok(name.to_string()),
+    )?;
 
     out.push_str("    let outcome = ctx.execute_with(\n");
     out.push_str("        instruction,\n");
@@ -676,6 +906,7 @@ fn emit_unauthorized_test(
     out: &mut String,
     handler: &ParsedHandler,
     spec: &ParsedSpec,
+    surface: ClientSurface,
 ) -> Result<()> {
     let who = match &handler.who {
         Some(w) => w,
@@ -699,10 +930,13 @@ fn emit_unauthorized_test(
     let has_token_program = accounts
         .iter()
         .any(|a| a.is_program && a.name.contains("token"));
-    if has_system {
+    // Quasar-only, same reason as the happy path: the Anchor metas name
+    // these ids inline, so a local binding would be dead.
+    let binds_program_accounts = surface == ClientSurface::Quasar;
+    if has_system && binds_program_accounts {
         out.push_str("    let system_program = system_program::ID;\n");
     }
-    if has_token_program {
+    if has_token_program && binds_program_accounts {
         out.push_str("    let token_program = SPL_TOKEN_PROGRAM_ID;\n");
     }
     if accounts.iter().any(|a| a.name == "rent") {
@@ -724,33 +958,28 @@ fn emit_unauthorized_test(
     }
     out.push('\n');
 
-    out.push_str(&format!(
-        "    let instruction: Instruction = {} {{\n",
-        instr_struct
-    ));
-    for acct in accounts {
-        if acct.is_program {
-            if acct.name.contains("system") {
-                out.push_str("        system_program,\n");
-            } else if acct.account_type.as_deref() == Some("token") {
-                out.push_str("        token_program,\n");
+    // The forged signer is the only account that differs from the happy
+    // path, and the arguments are inline defaults rather than bindings.
+    emit_instruction_with(
+        out,
+        handler,
+        spec,
+        &instr_struct,
+        surface,
+        |acct| {
+            if acct.name == *who {
+                format!("wrong_{who}")
             } else {
-                out.push_str(&format!("        {},\n", acct.name));
+                acct.name.clone()
             }
-        } else if acct.name == *who {
-            out.push_str(&format!("        {}: wrong_{},\n", who, who));
-        } else {
-            out.push_str(&format!("        {},\n", acct.name));
-        }
-    }
-    for (name, ty) in &handler.takes_params {
-        // Host mapping here too — same builder, same reason as the
-        // happy-path emitter.
-        let rt = map_type_parallax_host(ty, spec)?;
-        let default = default_value(&rt);
-        out.push_str(&format!("        {}: {},\n", name, default));
-    }
-    out.push_str("    }\n    .into();\n\n");
+        },
+        |_name, ty| {
+            // Host mapping here too — same builder, same reason as the
+            // happy-path emitter.
+            let rt = map_type_parallax_host(ty, spec)?;
+            Ok(default_value(&rt).to_string())
+        },
+    )?;
 
     out.push_str("    let outcome = ctx.execute_with(\n");
     out.push_str("        instruction,\n");
@@ -797,8 +1026,8 @@ fn emit_unauthorized_test(
             // revisit this: Anchor offsets custom codes by 6000, so `as u32`
             // would name the wrong error there.
             out.push_str(&format!(
-                "    outcome.check(Outcome::error(program::errors::{}::{} as u32));\n",
-                err_enum, error
+                "    outcome.check(Outcome::error({}));\n",
+                surface.error_expr(&err_enum, error)
             ));
         }
         None => {
@@ -1098,7 +1327,7 @@ mod tests {
     #[test]
     fn integration_test_multisig_generates() {
         let spec = chumsky_adapter::parse_str(MULTISIG_SPEC).unwrap();
-        let out = render(&spec, "test").expect("render");
+        let out = render(&spec, "test", Target::Quasar).expect("render");
         // Has setup
         assert!(out.contains("fn setup() -> Ctx"));
         assert!(out.contains("parallax_svm::prelude::*"));
@@ -1126,7 +1355,7 @@ mod tests {
     #[test]
     fn integration_test_escrow_has_token_helpers() {
         let spec = chumsky_adapter::parse_str(ESCROW_SPEC).unwrap();
-        let out = render(&spec, "test").expect("render");
+        let out = render(&spec, "test", Target::Quasar).expect("render");
         // Escrow uses SPL tokens — should have token helpers
         assert!(out.contains("fn mint_account("));
         assert!(out.contains("fn token_account("));
@@ -1146,7 +1375,7 @@ mod tests {
     #[test]
     fn inferred_token_arguments_are_named_in_the_agent_marker() {
         let spec = chumsky_adapter::parse_str(ESCROW_SPEC).unwrap();
-        let out = render(&spec, "test").expect("render");
+        let out = render(&spec, "test", Target::Quasar).expect("render");
 
         assert!(
             out.contains("/* AGENT: set mint, owner; tune amount */"),
@@ -1174,7 +1403,7 @@ mod tests {
     #[test]
     fn no_tautological_compute_unit_assertion_is_emitted() {
         let spec = chumsky_adapter::parse_str(ESCROW_SPEC).unwrap();
-        let out = render(&spec, "test").expect("render");
+        let out = render(&spec, "test", Target::Quasar).expect("render");
 
         assert!(
             !out.contains("Cu::spent(|cu| cu > 0)"),
@@ -1192,7 +1421,7 @@ mod tests {
     #[test]
     fn unauthorized_tests_assert_the_spec_declared_error() {
         let spec = chumsky_adapter::parse_str(ESCROW_SPEC).unwrap();
-        let out = render(&spec, "test").expect("render");
+        let out = render(&spec, "test", Target::Quasar).expect("render");
 
         // `as u32` is load-bearing, not cosmetic (#383): Parallax's
         // `Outcome::error` takes `impl Into<u32>`, and Quasar's
@@ -1211,6 +1440,78 @@ mod tests {
         );
     }
 
+    /// #366 — the Anchor lane builds its instruction inline, because an
+    /// Anchor crate has no generated `program::client` module to import.
+    #[test]
+    fn anchor_builds_instructions_from_the_abi() {
+        let spec = chumsky_adapter::parse_str(ESCROW_SPEC).unwrap();
+        let out = render(&spec, "test", Target::Anchor).expect("render");
+
+        assert!(
+            !out.contains("program::client::*"),
+            "an Anchor crate has no generated client module:\n{out}"
+        );
+        assert!(
+            out.contains("let instruction = Instruction {")
+                && out.contains("program_id: program_id(),"),
+            "Anchor must build the instruction inline:\n{out}"
+        );
+        // Discriminators are named constants, emitted once, not repeated
+        // byte literals at each use site.
+        assert!(
+            out.contains("const IX_INITIALIZE: [u8; 8] = [0x"),
+            "each handler needs its `sha256(\"global:<name>\")[..8]` constant:\n{out}"
+        );
+        // Metas carry the flags the spec declares.
+        assert!(
+            out.contains("AccountMeta::new(") && out.contains("AccountMeta::new_readonly("),
+            "account metas must reflect writability:\n{out}"
+        );
+    }
+
+    /// The address type is the one trap in mixing Anchor with Parallax:
+    /// `declare_id!` yields a `solana_pubkey::Pubkey` while Parallax speaks
+    /// `solana_address::Address`. Same 32 bytes, no `From` between them, so
+    /// passing `program::ID` straight through does not compile.
+    #[test]
+    fn program_id_is_converted_into_the_parallax_address_type() {
+        for target in [Target::Anchor, Target::Quasar] {
+            let spec = chumsky_adapter::parse_str(ESCROW_SPEC).unwrap();
+            let out = render(&spec, "test", target).expect("render");
+            assert!(
+                out.contains("fn program_id() -> Pubkey {")
+                    && out.contains("Pubkey::new_from_array(program::ID.to_bytes())"),
+                "{target:?} must convert the program id:\n{out}"
+            );
+            assert!(
+                out.contains("Ctx::builder(program_id())"),
+                "{target:?} must build the world with the converted id:\n{out}"
+            );
+        }
+    }
+
+    /// Anchor and Quasar name a rejection differently, and getting it wrong
+    /// asserts the wrong error code rather than failing to compile. Anchor's
+    /// `#[error_code]` emits `From<E> for u32` that adds the 6000 offset;
+    /// Quasar's emits no such impl, so the cast is both required and exactly
+    /// the code the program returns.
+    #[test]
+    fn error_expectations_match_each_frameworks_conversion() {
+        let spec = chumsky_adapter::parse_str(ESCROW_SPEC).unwrap();
+
+        let anchor = render(&spec, "test", Target::Anchor).expect("render");
+        assert!(
+            anchor.contains("Outcome::error(program::errors::EscrowError::Unauthorized)"),
+            "Anchor already offsets the code in its own From impl:\n{anchor}"
+        );
+
+        let quasar = render(&spec, "test", Target::Quasar).expect("render");
+        assert!(
+            quasar.contains("Outcome::error(program::errors::EscrowError::Unauthorized as u32)"),
+            "Quasar has no From<E> for u32, so the cast is load-bearing:\n{quasar}"
+        );
+    }
+
     /// #383 — the account fixture builds BYTES. Quasar's `#[account]`
     /// leaves a `repr(transparent)` view over `AccountView` behind and moves
     /// the declared fields into a hidden companion, so the struct literal
@@ -1219,7 +1520,7 @@ mod tests {
     #[test]
     fn state_account_builds_bytes_not_a_struct_literal() {
         let spec = chumsky_adapter::parse_str(MULTISIG_SPEC).unwrap();
-        let out = render(&spec, "test").expect("render");
+        let out = render(&spec, "test", Target::Quasar).expect("render");
 
         assert!(
             !out.contains("let state = MultisigAccount {"),
@@ -1249,7 +1550,7 @@ mod tests {
     #[test]
     fn state_account_covers_the_whole_struct() {
         let spec = chumsky_adapter::parse_str(MULTISIG_SPEC).unwrap();
-        let out = render(&spec, "test").expect("render");
+        let out = render(&spec, "test", Target::Quasar).expect("render");
 
         let helper = out
             .split_once("fn state_account(")
@@ -1319,7 +1620,7 @@ mod tests {
         .expect("parse");
         assert_eq!(authorization_error(&spec), None);
 
-        let out = render(&spec, "test").expect("render");
+        let out = render(&spec, "test", Target::Quasar).expect("render");
         if out.contains("_unauthorized()") {
             assert!(
                 out.contains("the spec declares no authorization error"),
@@ -1333,7 +1634,7 @@ mod tests {
     #[test]
     fn setup_resolves_the_artifact_through_parallax() {
         let spec = chumsky_adapter::parse_str(ESCROW_SPEC).unwrap();
-        let out = render(&spec, "test").expect("render");
+        let out = render(&spec, "test", Target::Quasar).expect("render");
 
         assert!(out.contains(".crate_name(env!(\"CARGO_PKG_NAME\"))"));
         assert!(
@@ -1442,7 +1743,7 @@ mod tests {
     #[test]
     fn scaffold_header_and_manifest_agree_on_the_pin() {
         let spec = chumsky_adapter::parse_str(ESCROW_SPEC).unwrap();
-        let out = render(&spec, "test").expect("render");
+        let out = render(&spec, "test", Target::Quasar).expect("render");
 
         assert_eq!(
             out.matches(PARALLAX_GIT_REV).count(),
@@ -1525,7 +1826,7 @@ mod tests {
         );
         let err_msg = result.unwrap_err().to_string();
         assert!(
-            err_msg.contains("only supported for Quasar"),
+            err_msg.contains("instruction ABI"),
             "unexpected error: {}",
             err_msg
         );
@@ -1533,31 +1834,31 @@ mod tests {
     }
 
     #[test]
-    fn integration_test_rejects_non_quasar_targets() {
-        // The scaffold uses Parallax for execution but still imports the
-        // Quasar <name>-client — refusing Anchor/Pinocchio up front is what
-        // keeps `codegen --all --target anchor` from dropping a
-        // non-compiling test file into an Anchor crate.
+    fn integration_test_rejects_targets_without_a_builder() {
+        // Anchor joined the lane in #366. Pinocchio has no instruction
+        // builder: it dispatches on a leading discriminant byte rather than
+        // an 8-byte hash. Refusing up front is what keeps `codegen --all
+        // --target pinocchio` from dropping a non-compiling test file into
+        // the crate.
         let dir = std::env::temp_dir().join("qedgen_integration_test_target_gate");
         std::fs::create_dir_all(&dir).unwrap();
         let spec_path = dir.join("test.qedspec");
         let out_path = dir.join("out.rs");
         std::fs::write(&spec_path, "spec Test\n").unwrap();
-        for target in [Target::Anchor, Target::Pinocchio] {
-            let result = generate(&spec_path, &out_path, target);
-            let err_msg = result
-                .expect_err("non-Quasar target must be refused")
-                .to_string();
+        let err_msg = generate(&spec_path, &out_path, Target::Pinocchio)
+            .expect_err("a target with no instruction builder must be refused")
+            .to_string();
+        assert!(
+            err_msg.contains("Pinocchio instruction builder"),
+            "unexpected error: {err_msg}"
+        );
+        assert!(!out_path.exists(), "no artifact may be written");
+
+        // Both supported targets get through the same gate.
+        for target in [Target::Anchor, Target::Quasar] {
             assert!(
-                err_msg.contains("Quasar-client-only"),
-                "unexpected error for {:?}: {}",
-                target,
-                err_msg
-            );
-            assert!(
-                !out_path.exists(),
-                "no artifact may be written for {:?}",
-                target
+                ClientSurface::of(target).is_ok(),
+                "{target:?} must have a client surface"
             );
         }
         let _ = std::fs::remove_dir_all(&dir);

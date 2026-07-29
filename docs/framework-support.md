@@ -32,7 +32,7 @@ sBPF assembly is selected by `pragma sbpf` in the spec, not by a `Target`.
 | Kani spec-model (`kani_mir`) | ✅ ¹ ⁴ | ✅ ¹ ⁴ | ✅ ¹ ⁴ | n/a | skip by design |
 | impl-Kani (`kani_impl`) | ✅ greenfield + state-struct (#162) + Context (#169) | ⚠️ greenfield shape only | ⚠️ own `#[repr(C)]` shape; some ix-data field types TODO | ❌ | ❌ |
 | proptest (`proptest_gen_mir`) | ✅ ⁵ | ✅ ⁵ | ✅ ⁵ | n/a | skip by design |
-| Parallax/LiteSVM integration tests (`integration_test`) | ❌ adapter pending | ⚠️ scaffold emitted + compile-gated ⁶ | ❌ adapter pending | ❌ | ❌ |
+| Parallax/LiteSVM integration tests (`integration_test`) | ⚠️ scaffold emitted + compile-gated ⁶ (#366) | ⚠️ scaffold emitted + compile-gated ⁶ | ❌ no instruction builder ⁶ | ❌ | ❌ |
 | Lean (`lean_gen_mir`) | ✅ ² ³ | ✅ ² ³ | ✅ ² ³ | n/a | ✅ dedicated sBPF path |
 | Probe: runtime-agnostic scanners (`run_helpers`) | ✅ (#196) | ✅ (#196) | ✅ | ✅ (#196) | ❌ bootstrap only |
 | Probe: IDL-enrichment overlay (`probe/idl_overlay`) | ✅ enrich + narrow (#235); unbuilt → `derivable_idl` (#238) | ✅ enrich + narrow (#235); unbuilt → `derivable_idl` (#238) | ✅ enrich + handler fill | ⚠️ enrich only (declarative flags) | ❌ |
@@ -86,9 +86,35 @@ branch scrutinee) is not liftable — that spec keeps per-account ghost
 copies and its ghost obligations stay
 `unsupported(proptest_multi_account_ghost)` in the manifest.
 
-⁶ Parallax integration scaffold. World setup, execution, outcomes, and
-checks are Parallax; the instruction builders still come from the generated
-Quasar `program::client` module, which is why the lane is Quasar-only.
+⁶ Parallax integration scaffold. World setup, execution, outcomes, account
+fixtures, and checks are Parallax, which does not care which framework
+produced the `.so`. Only the instruction builder is framework-bound, so
+opening the lane to Anchor (#366) was an adapter rather than a second
+scaffold:
+
+- **Quasar** builds instructions from the generated `program::client`
+  module.
+- **Anchor** has no generated client, so the scaffold spells out the ABI:
+  `sha256("global:<handler>")[..8]`, the declared account metas in order,
+  then Borsh-encoded arguments. `codegen/anchor_ix.rs` holds that encoding,
+  shared with the reproducer lane so the discriminator rule has one
+  definition.
+- **Pinocchio** has neither: it dispatches on a leading discriminant byte,
+  which is a different builder rather than this one with a flag. `codegen
+  --integration --target pinocchio` skips with a note.
+
+Two things differ between the two supported targets beyond the builder, and
+both are silent-wrong-answer shaped rather than compile errors:
+
+- **The error code.** Anchor's `#[error_code]` emits `From<E> for u32` that
+  adds `ERROR_CODE_OFFSET` (6000), so `Outcome::error(Err::X)` is already
+  the on-chain code. Quasar's emits no such impl, and its conversion is
+  `ProgramError::Custom(e as u32)` over qedgen's explicit discriminants, so
+  the scaffold emits `Err::X as u32` there.
+- **The address type.** Anchor's `declare_id!` yields a
+  `solana_pubkey::Pubkey`; Parallax speaks `solana_address::Address`. Same
+  32 bytes, no `From` between them, so both scaffolds route through a
+  generated `program_id()` helper instead of naming `program::ID`.
 Assertions are the spec's: `Outcome::success()` on happy paths and
 `Outcome::error(<Prog>Error::<Code> as u32)` on forged-signer tests when the
 spec declares `Unauthorized` or `InvalidLifecycle` (otherwise the scaffold

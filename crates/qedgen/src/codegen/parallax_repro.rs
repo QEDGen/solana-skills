@@ -70,6 +70,9 @@
 use anyhow::Result;
 
 use crate::check::{ParsedHandler, ParsedSpec};
+use crate::codegen::anchor_ix::{
+    account_meta_expr, account_preimage, discriminator_literal, instruction_preimage,
+};
 
 /// A generated Parallax reproducer: source plus the human-readable
 /// description of the attack it drives.
@@ -167,7 +170,7 @@ pub fn generate(
     ));
     out.push_str(&format!(
         "const IX_DISCRIMINATOR: [u8; 8] = {};\n\n",
-        discriminator_literal(&format!("global:{}", handler.name))
+        discriminator_literal(&instruction_preimage(&handler.name))
     ));
 
     out.push_str("fn ctx() -> Ctx {\n");
@@ -223,7 +226,7 @@ fn emit_state_bytes_helper(
     ));
     out.push_str(&format!(
         "const ACCOUNT_DISCRIMINATOR: [u8; 8] = {};\n\n",
-        discriminator_literal(&format!("account:{state_name}"))
+        discriminator_literal(&account_preimage(&state_name))
     ));
 
     out.push_str(
@@ -421,36 +424,6 @@ fn pda_seed_exprs(name: &str, spec: &ParsedSpec) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-fn account_meta_expr(account: &crate::check::ParsedHandlerAccount, is_signer: bool) -> String {
-    // Programs resolve to their runtime ids rather than a fixture.
-    let address = if account.is_program {
-        if account.name.contains("system") {
-            "system_program::ID".to_string()
-        } else if account.name.contains("token") {
-            "SPL_TOKEN_PROGRAM_ID".to_string()
-        } else {
-            format!("{}, /* AGENT: program id */", account.name)
-        }
-    } else {
-        account.name.clone()
-    };
-
-    if account.is_writable {
-        format!("AccountMeta::new({address}, {is_signer})")
-    } else {
-        format!("AccountMeta::new_readonly({address}, {is_signer})")
-    }
-}
-
-/// Render `sha256(<preimage>)[..8]` as a Rust byte-array literal.
-fn discriminator_literal(preimage: &str) -> String {
-    let hex = qedgen_hash_core::sha256_hex16(preimage);
-    let bytes: Vec<String> = (0..8)
-        .map(|index| format!("0x{}", &hex[index * 2..index * 2 + 2]))
-        .collect();
-    format!("[{}]", bytes.join(", "))
 }
 
 /// A concrete witness value for an instruction parameter. Any in-domain
