@@ -54,6 +54,13 @@ fn empty_account(address: Pubkey) -> Account {
     Account::new(address, system_program::ID, 0, vec![])
 }
 /// Create a pre-populated MultisigAccount account (program-owned).
+///
+/// Builds the account DATA, not a struct value. Quasar's
+/// `#[account]` replaces the annotated struct with a view over
+/// `AccountView` and moves the fields into a hidden zero-copy
+/// companion, so there is nothing to construct or serialize:
+/// the bytes are the discriminator followed by each field in
+/// declaration order, little-endian, no padding.
 #[allow(dead_code)]
 fn state_account(
     address: Pubkey,
@@ -65,21 +72,26 @@ fn state_account(
     approval_count: u8,
     rejection_count: u8,
     bump: u8,
+    status: u8,
 ) -> Account {
-    let state = MultisigAccount {
-        creator,
-        threshold,
-        member_count,
-        members,
-        voted,
-        approval_count,
-        rejection_count,
-        bump,
-    };
+    let mut data = <MultisigAccount as quasar_lang::prelude::Discriminator>::DISCRIMINATOR.to_vec();
+    data.extend_from_slice(creator.as_ref());
+    data.push(threshold);
+    data.push(member_count);
+    for __e0 in members.iter().copied() {
+        data.extend_from_slice(__e0.as_ref());
+    }
+    for __e0 in voted.iter().copied() {
+        data.push(__e0);
+    }
+    data.push(approval_count);
+    data.push(rejection_count);
+    data.push(bump);
+    data.push(status);
     Account {
         address,
         lamports: 2_000_000,
-        data: wincode::serialize(&state).unwrap(),
+        data,
         owner: program::ID,
         executable: false,
     }
@@ -329,7 +341,7 @@ fn test_add_member() {
 
     // Instruction parameters
     let member_index: u8 = 1; // AGENT: set appropriate value
-    let member_pubkey: [u8; 32] = todo!(); // AGENT: set appropriate value
+    let member_pubkey: Pubkey = Pubkey::new_unique(); // AGENT: set appropriate value
 
     let instruction: Instruction = AddMemberInstruction {
         creator,
@@ -413,7 +425,7 @@ fn test_create_vault_unauthorized() {
 
     // create_vault must reject a forged creator with the spec's authorization error.
     outcome.check(Outcome::error(
-        program::errors::MultisigError::InvalidLifecycle,
+        program::errors::MultisigError::InvalidLifecycle as u32,
     ));
 }
 
@@ -441,7 +453,7 @@ fn test_propose_unauthorized() {
 
     // propose must reject a forged creator with the spec's authorization error.
     outcome.check(Outcome::error(
-        program::errors::MultisigError::InvalidLifecycle,
+        program::errors::MultisigError::InvalidLifecycle as u32,
     ));
 }
 
@@ -470,7 +482,7 @@ fn test_approve_unauthorized() {
 
     // approve must reject a forged approver with the spec's authorization error.
     outcome.check(Outcome::error(
-        program::errors::MultisigError::InvalidLifecycle,
+        program::errors::MultisigError::InvalidLifecycle as u32,
     ));
 }
 
@@ -499,7 +511,7 @@ fn test_reject_unauthorized() {
 
     // reject must reject a forged rejecter with the spec's authorization error.
     outcome.check(Outcome::error(
-        program::errors::MultisigError::InvalidLifecycle,
+        program::errors::MultisigError::InvalidLifecycle as u32,
     ));
 }
 
@@ -528,7 +540,7 @@ fn test_execute_unauthorized() {
 
     // execute must reject a forged executor with the spec's authorization error.
     outcome.check(Outcome::error(
-        program::errors::MultisigError::InvalidLifecycle,
+        program::errors::MultisigError::InvalidLifecycle as u32,
     ));
 }
 
@@ -544,7 +556,7 @@ fn test_add_member_unauthorized() {
         creator: wrong_creator,
         vault,
         member_index: 1,
-        member_pubkey: todo!(),
+        member_pubkey: Pubkey::new_unique(),
     }
     .into();
 
@@ -558,7 +570,7 @@ fn test_add_member_unauthorized() {
 
     // add_member must reject a forged creator with the spec's authorization error.
     outcome.check(Outcome::error(
-        program::errors::MultisigError::InvalidLifecycle,
+        program::errors::MultisigError::InvalidLifecycle as u32,
     ));
 }
 
@@ -586,7 +598,7 @@ fn test_remove_member_unauthorized() {
 
     // remove_member must reject a forged creator with the spec's authorization error.
     outcome.check(Outcome::error(
-        program::errors::MultisigError::InvalidLifecycle,
+        program::errors::MultisigError::InvalidLifecycle as u32,
     ));
 }
 

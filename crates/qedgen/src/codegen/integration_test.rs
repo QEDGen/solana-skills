@@ -3,7 +3,7 @@ use std::path::Path;
 
 use crate::check::{self, ParsedHandler, ParsedHandlerAccount, ParsedSpec};
 use crate::codegen_shared::{
-    map_type, map_type_parallax_host, to_pascal_case, write_generated_file,
+    emit_pod_bytes_append, map_type_parallax_host, to_pascal_case, write_generated_file,
 };
 use crate::Target;
 
@@ -404,46 +404,63 @@ fn emit_account_helpers(
     out.push_str("// ── Account helpers ──────────────────────────────────────────────\n\n");
     out.push_str(BASE_HELPERS);
 
-    // state_account() — pre-populated program-owned account
-    let fields = &spec.state_fields;
+    // state_account() — pre-populated program-owned account.
+    //
+    // The whole struct, not just the spec-declared fields: `generate_state`
+    // appends a synthesized `bump` / `status` tail, and the fixture has to
+    // carry it or the account is short and the program's `AccountCheck`
+    // rejects it as `AccountDataTooSmall`.
+    let fields = crate::codegen_shared::flat_state_fields(spec);
     if !fields.is_empty() {
         out.push_str(&format!(
             "/// Create a pre-populated {} account (program-owned).\n",
             state_name
         ));
+        out.push_str(
+            "///\n\
+             /// Builds the account DATA, not a struct value. Quasar's\n\
+             /// `#[account]` replaces the annotated struct with a view over\n\
+             /// `AccountView` and moves the fields into a hidden zero-copy\n\
+             /// companion, so there is nothing to construct or serialize:\n\
+             /// the bytes are the discriminator followed by each field in\n\
+             /// declaration order, little-endian, no padding.\n",
+        );
         // Every call site is an AGENT hole (`empty_account(x) /* AGENT: use
         // state_account() */`), so this is dead until the agent wires it up.
         // Without the allow, a DO-NOT-EDIT file warns on generation.
         out.push_str("#[allow(dead_code)]\n");
         out.push_str("fn state_account(\n");
         out.push_str("    address: Pubkey,\n");
-        // The Parallax-host mapping, not the standalone one. This helper
-        // builds the program's own state struct, so a `[u8; 32]` parameter
-        // against the struct's real field type is a type error the moment an
-        // agent wires the helper up.
+        // The Parallax-host mapping, not the standalone one. These
+        // parameters feed the program's own state layout, so a `[u8; 32]`
+        // where the program declares an address is a type error the moment
+        // an agent wires the helper up.
         //
         // Not `map_type_quasar` either (#372): that emits `Address`, which
         // this file cannot name — Parallax's prelude exports `Pubkey`, and
         // the program's `use quasar_lang::prelude::*` is private, so
         // `use program::state::*` does not bring `Address` along. The two
         // denote one type (`solana-pubkey` re-exports
-        // `solana_address::Address as Pubkey`), so the struct still matches.
-        for (name, ty) in fields {
+        // `solana_address::Address as Pubkey`), so the bytes still match.
+        for (name, ty) in &fields {
             let rust_ty = map_type_parallax_host(ty, spec)?;
             out.push_str(&format!("    {}: {},\n", name, rust_ty));
         }
-        out.push_str("    bump: u8,\n");
         out.push_str(") -> Account {\n");
-        out.push_str(&format!("    let state = {} {{\n", state_name));
-        for (name, _) in fields {
-            out.push_str(&format!("        {},\n", name));
+        // The discriminator comes from the program's own `Discriminator`
+        // impl rather than a literal repeated here, so the fixture tracks
+        // whatever `#[account(discriminator = N)]` codegen emitted.
+        out.push_str(&format!(
+            "    let mut data = <{} as quasar_lang::prelude::Discriminator>::DISCRIMINATOR.to_vec();\n",
+            state_name
+        ));
+        for (name, ty) in &fields {
+            out.push_str(&emit_pod_bytes_append(ty, name, spec, "    ", 0)?);
         }
-        out.push_str("        bump,\n");
-        out.push_str("    };\n");
         out.push_str("    Account {\n");
         out.push_str("        address,\n");
         out.push_str("        lamports: 2_000_000,\n");
-        out.push_str("        data: wincode::serialize(&state).unwrap(),\n");
+        out.push_str("        data,\n");
         out.push_str("        owner: program::ID,\n");
         out.push_str("        executable: false,\n");
         out.push_str("    }\n");
@@ -546,7 +563,12 @@ fn emit_happy_path_test(
     if !handler.takes_params.is_empty() {
         out.push_str("    // Instruction parameters\n");
         for (name, ty) in &handler.takes_params {
-            let rust_ty = map_type(ty, spec)?;
+            // The host mapping, not the standalone one: these bindings are
+            // handed to the generated `program::client` instruction builder,
+            // whose address-typed fields are `Address`. `map_type` lowers
+            // `Pubkey` to `[u8; 32]` for the proptest/Kani harnesses, and
+            // that reached the builder as E0308 (#383).
+            let rust_ty = map_type_parallax_host(ty, spec)?;
             let default = default_value(&rust_ty);
             out.push_str(&format!(
                 "    let {}: {} = {}; // AGENT: set appropriate value\n",
@@ -702,7 +724,9 @@ fn emit_unauthorized_test(
         }
     }
     for (name, ty) in &handler.takes_params {
-        let rt = map_type(ty, spec)?;
+        // Host mapping here too — same builder, same reason as the
+        // happy-path emitter.
+        let rt = map_type_parallax_host(ty, spec)?;
         let default = default_value(&rt);
         out.push_str(&format!("        {}: {},\n", name, default));
     }
@@ -740,8 +764,20 @@ fn emit_unauthorized_test(
                 "    // {} must reject a forged {} with the spec's authorization error.\n",
                 handler.name, who
             ));
+            // `as u32`, not the bare variant. Parallax accepts anything
+            // `Into<u32>`, and Anchor's `#[error_code]` provides it — but
+            // Quasar's emits `From<E> for ProgramError` and `TryFrom<u32>
+            // for E`, never `From<E> for u32`, so naming the variant
+            // directly does not compile (#383). Quasar's conversion is
+            // `ProgramError::Custom(e as u32)` over qedgen's explicit
+            // discriminants, so the cast is the exact code the program
+            // returns.
+            //
+            // The lane is Quasar-only today. An Anchor adapter (#366) must
+            // revisit this: Anchor offsets custom codes by 6000, so `as u32`
+            // would name the wrong error there.
             out.push_str(&format!(
-                "    outcome.check(Outcome::error(program::errors::{}::{}));\n",
+                "    outcome.check(Outcome::error(program::errors::{}::{} as u32));\n",
                 err_enum, error
             ));
         }
@@ -1016,7 +1052,12 @@ fn default_value(rust_type: &str) -> &str {
         "u128" => "1_000_000",
         "i128" => "1_000_000",
         "bool" => "true",
-        "Address" => "[0u8; 32]",
+        // The host mapping names an address `Pubkey`. The previous arm here
+        // was `"Address"`, which this file never produces — it is the name
+        // the PROGRAM uses, so the arm was dead and every address-typed
+        // argument fell through to `todo!()`, including in the negative
+        // tests, where a `todo!()` panics before the transaction executes.
+        "Pubkey" => "Pubkey::new_unique()",
         _ => "todo!()",
     }
 }
@@ -1133,15 +1174,78 @@ mod tests {
         let spec = chumsky_adapter::parse_str(ESCROW_SPEC).unwrap();
         let out = render(&spec, "test").expect("render");
 
+        // `as u32` is load-bearing, not cosmetic (#383): Parallax's
+        // `Outcome::error` takes `impl Into<u32>`, and Quasar's
+        // `#[error_code]` emits `From<E> for ProgramError` plus
+        // `TryFrom<u32> for E` — never `From<E> for u32` — so the bare
+        // variant does not compile against the real framework.
         assert!(
             out.contains(
-                "outcome.check(Outcome::error(program::errors::EscrowError::Unauthorized))"
+                "outcome.check(Outcome::error(program::errors::EscrowError::Unauthorized as u32))"
             ),
             "the forged-signer test must assert the spec's authorization error:\n{out}"
         );
         assert!(
             !out.contains("assert!(outcome.is_err()"),
             "`is_err()` passes for the wrong reason and must not survive:\n{out}"
+        );
+    }
+
+    /// #383 — the account fixture builds BYTES. Quasar's `#[account]`
+    /// leaves a `repr(transparent)` view over `AccountView` behind and moves
+    /// the declared fields into a hidden companion, so the struct literal
+    /// this used to emit could not compile for any real Quasar program, and
+    /// serializing the view type is not a thing that can be made to work.
+    #[test]
+    fn state_account_builds_bytes_not_a_struct_literal() {
+        let spec = chumsky_adapter::parse_str(MULTISIG_SPEC).unwrap();
+        let out = render(&spec, "test").expect("render");
+
+        assert!(
+            !out.contains("let state = MultisigAccount {"),
+            "the view type has no constructible fields:\n{out}"
+        );
+        assert!(
+            !out.contains("wincode::serialize(&state)"),
+            "serializing the view type cannot produce account data:\n{out}"
+        );
+        // The discriminator comes from the program's own impl, so the
+        // fixture tracks `#[account(discriminator = N)]` instead of
+        // repeating the number.
+        assert!(
+            out.contains(
+                "let mut data = <MultisigAccount as quasar_lang::prelude::Discriminator>\
+                 ::DISCRIMINATOR.to_vec();"
+            ),
+            "fixture must start from the program's declared discriminator:\n{out}"
+        );
+    }
+
+    /// The synthesized `status` field is part of the account, and the
+    /// fixture emitter used to stop at the spec-declared fields plus a
+    /// hardcoded `bump`. A fixture one byte short fails the program's
+    /// `AccountCheck` as `AccountDataTooSmall`, which reads as "the handler
+    /// rejected my input" rather than "my fixture was malformed".
+    #[test]
+    fn state_account_covers_the_whole_struct() {
+        let spec = chumsky_adapter::parse_str(MULTISIG_SPEC).unwrap();
+        let out = render(&spec, "test").expect("render");
+
+        let helper = out
+            .split_once("fn state_account(")
+            .expect("state_account helper")
+            .1;
+        let (signature, _) = helper.split_once(") -> Account {").expect("signature");
+        for field in crate::codegen_shared::flat_state_fields(&spec) {
+            assert!(
+                signature.contains(&format!("{}: ", field.0)),
+                "state_account omits `{}`, so its bytes are short:\n{signature}",
+                field.0
+            );
+        }
+        assert!(
+            signature.contains("status: u8"),
+            "the lifecycle byte is part of the account:\n{signature}"
         );
     }
 
@@ -1301,33 +1405,17 @@ mod tests {
         }
     }
 
-    /// The compile gate is only meaningful if it builds the revision the
-    /// scaffold actually ships. If codegen bumps `PARALLAX_GIT_REV` and the
-    /// fixture manifest keeps the old one, the gate compiles the OLD
-    /// Parallax, passes green, and silently stops gating — the exact failure
-    /// a gate exists to prevent.
-    #[test]
-    fn parallax_gate_fixture_pins_the_same_revision() {
-        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/parallax-api-gate/stub/Cargo.toml");
-        let manifest = std::fs::read_to_string(&fixture)
-            .unwrap_or_else(|e| panic!("read {}: {e}", fixture.display()));
-
-        assert!(
-            manifest.contains(PARALLAX_GIT_REV),
-            "gate fixture pins a different Parallax revision than codegen emits.\n\
-             codegen: {PARALLAX_GIT_REV}\n\
-             fixture: {}\n\
-             Update {} so the gate compiles what ships.",
-            manifest
-                .lines()
-                .find(|line| line.contains("parallax-svm"))
-                .unwrap_or("<no parallax-svm line>")
-                .trim(),
-            fixture.display()
-        );
-        assert!(manifest.contains(PARALLAX_GIT_URL));
-    }
+    // `parallax_gate_fixture_pins_the_same_revision` lived here. It checked
+    // that the gate fixture's hand-written manifest pinned the same
+    // Parallax revision codegen emits, because a stale copy would have the
+    // gate compile the OLD Parallax and silently stop gating.
+    //
+    // The class is gone rather than untested (#383): the gate no longer
+    // carries a manifest. It generates the program crate from the fixture
+    // spec, and the pin arrives through the same `parallax_dev_dependencies`
+    // upsert a user gets, so there is no second copy to drift.
+    // `scaffold_header_and_manifest_agree_on_the_pin` still covers the one
+    // remaining pair of copies (the emitted header and the upsert).
 
     /// The emitted header must advertise the revision codegen actually
     /// writes into `[dev-dependencies]`, not a stale copy of it.

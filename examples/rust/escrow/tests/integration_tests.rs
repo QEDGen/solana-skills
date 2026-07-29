@@ -62,6 +62,13 @@ fn empty_account(address: Pubkey) -> Account {
     Account::new(address, system_program::ID, 0, vec![])
 }
 /// Create a pre-populated EscrowAccount account (program-owned).
+///
+/// Builds the account DATA, not a struct value. Quasar's
+/// `#[account]` replaces the annotated struct with a view over
+/// `AccountView` and moves the fields into a hidden zero-copy
+/// companion, so there is nothing to construct or serialize:
+/// the bytes are the discriminator followed by each field in
+/// declaration order, little-endian, no padding.
 #[allow(dead_code)]
 fn state_account(
     address: Pubkey,
@@ -72,20 +79,21 @@ fn state_account(
     taker_amount: u64,
     escrow_token_account: Pubkey,
     bump: u8,
+    status: u8,
 ) -> Account {
-    let state = EscrowAccount {
-        initializer,
-        initializer_token_account,
-        taker,
-        initializer_amount,
-        taker_amount,
-        escrow_token_account,
-        bump,
-    };
+    let mut data = <EscrowAccount as quasar_lang::prelude::Discriminator>::DISCRIMINATOR.to_vec();
+    data.extend_from_slice(initializer.as_ref());
+    data.extend_from_slice(initializer_token_account.as_ref());
+    data.extend_from_slice(taker.as_ref());
+    data.extend_from_slice(&initializer_amount.to_le_bytes());
+    data.extend_from_slice(&taker_amount.to_le_bytes());
+    data.extend_from_slice(escrow_token_account.as_ref());
+    data.push(bump);
+    data.push(status);
     Account {
         address,
         lamports: 2_000_000,
-        data: wincode::serialize(&state).unwrap(),
+        data,
         owner: program::ID,
         executable: false,
     }
@@ -299,7 +307,9 @@ fn test_initialize_unauthorized() {
     );
 
     // initialize must reject a forged initializer with the spec's authorization error.
-    outcome.check(Outcome::error(program::errors::EscrowError::Unauthorized));
+    outcome.check(Outcome::error(
+        program::errors::EscrowError::Unauthorized as u32,
+    ));
 }
 
 /// exchange must reject unauthorized callers (wrong taker).
@@ -336,7 +346,9 @@ fn test_exchange_unauthorized() {
     );
 
     // exchange must reject a forged taker with the spec's authorization error.
-    outcome.check(Outcome::error(program::errors::EscrowError::Unauthorized));
+    outcome.check(Outcome::error(
+        program::errors::EscrowError::Unauthorized as u32,
+    ));
 }
 
 /// cancel must reject unauthorized callers (wrong initializer).
@@ -370,7 +382,9 @@ fn test_cancel_unauthorized() {
     );
 
     // cancel must reject a forged initializer with the spec's authorization error.
-    outcome.check(Outcome::error(program::errors::EscrowError::Unauthorized));
+    outcome.check(Outcome::error(
+        program::errors::EscrowError::Unauthorized as u32,
+    ));
 }
 
 // ── Lifecycle sequence ────────────────────────────────────────────

@@ -691,6 +691,95 @@ pub fn map_type_pod(dsl_type: &str, spec: &ParsedSpec) -> Result<String> {
     map_type_quasar(dsl_type, spec)
 }
 
+/// Emit Rust statements appending the on-chain bytes of `expr` — a value of
+/// DSL type `dsl_ty` — to a `Vec<u8>` binding named `data`.
+///
+/// This is the write side of [`map_type_pod`]: that function names the Pod
+/// type a field becomes inside Quasar's zero-copy `#[account]`, and this one
+/// produces the bytes that type occupies. The layout is fully determined:
+/// `quasar-pod`'s Pod types are `#[repr(transparent)]` over little-endian
+/// `[u8; N]`, and `#[account]` asserts the companion struct has alignment 1,
+/// so a fixed account is its discriminator followed by each field's bytes in
+/// declaration order, with no padding anywhere.
+///
+/// Host-side fixtures need this because `#[account]` leaves no constructible
+/// struct behind. It replaces the annotated type with a `repr(transparent)`
+/// view over `AccountView` and moves the declared fields into a hidden
+/// companion, so a struct literal does not compile and serializing the view
+/// type is meaningless (#383).
+///
+/// `depth` distinguishes the loop binders of nested `Map` types; callers
+/// start at 0.
+pub fn emit_pod_bytes_append(
+    dsl_ty: &str,
+    expr: &str,
+    spec: &ParsedSpec,
+    indent: &str,
+    depth: usize,
+) -> Result<String> {
+    let dsl_ty = dsl_ty.trim();
+
+    // `Map[N] T` → `[T; N]`: N elements back to back, no length prefix.
+    // `.copied()` keeps the binder a value, so the leaf arms below do not
+    // have to know whether they were reached through a loop.
+    if dsl_ty.starts_with("Map") {
+        let Some((_, inner)) = split_map_type(dsl_ty) else {
+            anyhow::bail!("malformed Map type `{}` — expected `Map[BOUND] T`", dsl_ty);
+        };
+        let binder = format!("__e{depth}");
+        let inner_indent = format!("{indent}    ");
+        let body = emit_pod_bytes_append(inner, &binder, spec, &inner_indent, depth + 1)?;
+        return Ok(format!(
+            "{indent}for {binder} in {expr}.iter().copied() {{\n{body}{indent}}}\n"
+        ));
+    }
+
+    // `Fin[N]` packs as PodU32 — see `map_type_pod`, same choice.
+    if dsl_ty.starts_with("Fin") {
+        return Ok(format!(
+            "{indent}data.extend_from_slice(&({expr} as u32).to_le_bytes());\n"
+        ));
+    }
+
+    let leaf = match dsl_ty {
+        "U8" => Some(format!("{indent}data.push({expr});\n")),
+        // `i8 as u8` is the two's-complement byte, which is the same byte
+        // the program reads back.
+        "I8" => Some(format!("{indent}data.push({expr} as u8);\n")),
+        "U16" | "U32" | "U64" | "U128" | "I16" | "I32" | "I64" | "I128" => Some(format!(
+            "{indent}data.extend_from_slice(&{expr}.to_le_bytes());\n"
+        )),
+        // `PodBool::from(v)` is `[v as u8]`, so `false` is 0 and `true` is 1.
+        "Bool" => Some(format!("{indent}data.push({expr} as u8);\n")),
+        // `as_ref()` rather than `to_bytes()`: it borrows instead of copying
+        // and is implemented by both the `Address` the program declares and
+        // the `Pubkey` the host fixture holds (one type, two names).
+        "Pubkey" => Some(format!(
+            "{indent}data.extend_from_slice({expr}.as_ref());\n"
+        )),
+        "Bytes32" | "Bytes64" => Some(format!("{indent}data.extend_from_slice(&{expr});\n")),
+        _ => None,
+    };
+    if let Some(stmt) = leaf {
+        return Ok(stmt);
+    }
+
+    // Type alias: recurse on the RHS, matching `map_type_pod`.
+    if let Some((_, rhs)) = spec.type_aliases.iter().find(|(n, _)| n == dsl_ty) {
+        return emit_pod_bytes_append(rhs, expr, spec, indent, depth);
+    }
+
+    // Records, sums, `Vec`, and `Option` have no fixed alignment-1 layout
+    // this emitter can commit to. Refusing beats emitting bytes the program
+    // would decode as something else.
+    anyhow::bail!(
+        "cannot build account-fixture bytes for DSL type `{}` — supported: \
+         U8/U16/U32/U64/U128, I8/I16/I32/I64/I128, Bool, Pubkey, Bytes32, \
+         Bytes64, Fin[N], Map[N] T, and aliases of those",
+        dsl_ty
+    )
+}
+
 pub(crate) fn primitive_pod_map(dsl_type: &str) -> Option<&'static str> {
     Some(match dsl_type {
         "U16" => "PodU16",

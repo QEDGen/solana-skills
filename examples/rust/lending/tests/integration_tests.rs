@@ -62,6 +62,13 @@ fn empty_account(address: Pubkey) -> Account {
     Account::new(address, system_program::ID, 0, vec![])
 }
 /// Create a pre-populated LendingAccount account (program-owned).
+///
+/// Builds the account DATA, not a struct value. Quasar's
+/// `#[account]` replaces the annotated struct with a view over
+/// `AccountView` and moves the fields into a hidden zero-copy
+/// companion, so there is nothing to construct or serialize:
+/// the bytes are the discriminator followed by each field in
+/// declaration order, little-endian, no padding.
 #[allow(dead_code)]
 fn state_account(
     address: Pubkey,
@@ -70,18 +77,19 @@ fn state_account(
     total_borrows: u64,
     interest_rate: u64,
     bump: u8,
+    status: u8,
 ) -> Account {
-    let state = LendingAccount {
-        authority,
-        total_deposits,
-        total_borrows,
-        interest_rate,
-        bump,
-    };
+    let mut data = <LendingAccount as quasar_lang::prelude::Discriminator>::DISCRIMINATOR.to_vec();
+    data.extend_from_slice(authority.as_ref());
+    data.extend_from_slice(&total_deposits.to_le_bytes());
+    data.extend_from_slice(&total_borrows.to_le_bytes());
+    data.extend_from_slice(&interest_rate.to_le_bytes());
+    data.push(bump);
+    data.push(status);
     Account {
         address,
         lamports: 2_000_000,
-        data: wincode::serialize(&state).unwrap(),
+        data,
         owner: program::ID,
         executable: false,
     }
@@ -394,7 +402,9 @@ fn test_init_pool_unauthorized() {
     );
 
     // init_pool must reject a forged authority with the spec's authorization error.
-    outcome.check(Outcome::error(program::errors::LendingError::Unauthorized));
+    outcome.check(Outcome::error(
+        program::errors::LendingError::Unauthorized as u32,
+    ));
 }
 
 /// borrow must reject unauthorized callers (wrong borrower).
@@ -435,7 +445,9 @@ fn test_borrow_unauthorized() {
     );
 
     // borrow must reject a forged borrower with the spec's authorization error.
-    outcome.check(Outcome::error(program::errors::LendingError::Unauthorized));
+    outcome.check(Outcome::error(
+        program::errors::LendingError::Unauthorized as u32,
+    ));
 }
 
 /// repay must reject unauthorized callers (wrong borrower).
@@ -472,7 +484,9 @@ fn test_repay_unauthorized() {
     );
 
     // repay must reject a forged borrower with the spec's authorization error.
-    outcome.check(Outcome::error(program::errors::LendingError::Unauthorized));
+    outcome.check(Outcome::error(
+        program::errors::LendingError::Unauthorized as u32,
+    ));
 }
 
 // ── Lifecycle sequence ────────────────────────────────────────────

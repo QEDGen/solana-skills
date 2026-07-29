@@ -3207,3 +3207,83 @@ fn parallax_host_scaffold_keeps_pubkey() {
         );
     }
 }
+
+// ── Account-fixture bytes (#383) ─────────────────────────────────────
+
+/// The scalar leaves. Widths and endianness are not free choices: they are
+/// what `quasar-pod`'s `#[repr(transparent)]` little-endian Pod types
+/// occupy inside the zero-copy companion.
+#[test]
+fn pod_bytes_scalars_match_the_pod_layout() {
+    let spec = empty_spec();
+    let emit = |ty: &str| emit_pod_bytes_append(ty, "v", &spec, "", 0).unwrap();
+
+    assert_eq!(emit("U8"), "data.push(v);\n");
+    assert_eq!(emit("U64"), "data.extend_from_slice(&v.to_le_bytes());\n");
+    // `PodBool::from(b)` is `[b as u8]`, one byte, not a 4-byte int.
+    assert_eq!(emit("Bool"), "data.push(v as u8);\n");
+    // 32 bytes, borrowed rather than copied.
+    assert_eq!(emit("Pubkey"), "data.extend_from_slice(v.as_ref());\n");
+    assert_eq!(emit("Bytes32"), "data.extend_from_slice(&v);\n");
+}
+
+/// `Map[N] T` is `[T; N]` back to back with no length prefix. Getting this
+/// wrong shortens the account and the program rejects it as
+/// `AccountDataTooSmall` before the handler under test runs.
+#[test]
+fn pod_bytes_map_emits_one_append_per_element() {
+    let spec = empty_spec();
+    let out = emit_pod_bytes_append("Map[32] Pubkey", "members", &spec, "    ", 0).unwrap();
+    assert_eq!(
+        out,
+        "    for __e0 in members.iter().copied() {\n\
+         \x20       data.extend_from_slice(__e0.as_ref());\n\
+         \x20   }\n"
+    );
+}
+
+/// Nested maps must not shadow their loop binder.
+#[test]
+fn pod_bytes_nested_maps_use_distinct_binders() {
+    let spec = empty_spec();
+    let out = emit_pod_bytes_append("Map[2] Map[3] U8", "grid", &spec, "", 0).unwrap();
+    assert!(out.contains("__e0"), "outer binder missing:\n{out}");
+    assert!(out.contains("__e1"), "inner binder missing:\n{out}");
+}
+
+/// A type with no fixed alignment-1 layout must refuse rather than emit
+/// bytes the program would decode as something else.
+#[test]
+fn pod_bytes_refuses_types_without_a_fixed_layout() {
+    let spec = empty_spec();
+    let err = emit_pod_bytes_append("Vec U64", "xs", &spec, "", 0).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("cannot build account-fixture bytes"),
+        "unexpected error: {err}"
+    );
+}
+
+/// The synthesized `bump` / `status` tail belongs to the layout. The
+/// account-fixture emitter reads this same list, so omitting either here
+/// would silently shorten every generated fixture (#383).
+#[test]
+fn flat_state_fields_carry_the_synthesized_tail() {
+    let spec = crate::chumsky_adapter::parse_str(
+        "spec Tail\n\
+         type State\n  | Uninitialized\n  | Active of { total : U64, }\n\
+         pda vault [\"vault\"]\n\
+         handler init : State.Uninitialized -> State.Active {\n  \
+         auth owner\n  accounts { owner : signer, vault : writable }\n  \
+         effect { total := 0 }\n}\n",
+    )
+    .expect("parse");
+
+    let fields = flat_state_fields(&spec);
+    let names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, vec!["total", "bump", "status"]);
+    // Both synthesized fields are single bytes in the struct.
+    for (name, ty) in fields.iter().filter(|(n, _)| n != "total") {
+        assert_eq!(ty, "U8", "{name} must map to a single byte");
+    }
+}
