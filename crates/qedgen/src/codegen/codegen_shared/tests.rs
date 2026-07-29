@@ -3287,3 +3287,118 @@ fn flat_state_fields_carry_the_synthesized_tail() {
         assert_eq!(ty, "U8", "{name} must map to a single byte");
     }
 }
+
+// ── Fixed byte widths (#389) ─────────────────────────────────────────
+
+/// The widths a fixture emitter has to get right. The old repro-lane
+/// emitter knew `U8`..`U128` and gave everything else 32 bytes, which is
+/// correct for `Pubkey` and wrong for every row below it.
+#[test]
+fn fixed_byte_width_covers_the_scalar_universe() {
+    let spec = empty_spec();
+    let width = |ty: &str| fixed_byte_width(ty, &spec).unwrap();
+
+    for (ty, bytes) in [
+        ("U8", 1),
+        ("U16", 2),
+        ("U32", 4),
+        ("U64", 8),
+        ("U128", 16),
+        ("Bool", 1),
+        ("Pubkey", 32),
+        ("Bytes32", 32),
+    ] {
+        assert_eq!(width(ty), bytes, "{ty}");
+    }
+
+    // Signed integers were the silent half: `rust_int_type` returns `None`
+    // for all of them, so every one used to be sized at 32 bytes.
+    for (ty, bytes) in [("I8", 1), ("I16", 2), ("I32", 4), ("I64", 8), ("I128", 16)] {
+        assert_eq!(width(ty), bytes, "{ty}");
+    }
+
+    assert_eq!(width("Bytes64"), 64);
+}
+
+/// `Map[N] T` is N elements, not one pointer-sized anything.
+#[test]
+fn fixed_byte_width_multiplies_map_bounds() {
+    let spec = empty_spec();
+    assert_eq!(fixed_byte_width("Map[32] Pubkey", &spec).unwrap(), 1024);
+    assert_eq!(fixed_byte_width("Map[3] U8", &spec).unwrap(), 3);
+    // Nested, because a bound is a count of whatever follows it.
+    assert_eq!(fixed_byte_width("Map[2] Map[4] U64", &spec).unwrap(), 64);
+}
+
+/// A record is the sum of its fields; an alias resolves to its RHS.
+#[test]
+fn fixed_byte_width_walks_records_and_aliases() {
+    let mut spec = empty_spec();
+    spec.records.push(crate::check::ParsedRecordType {
+        name: "Entry".to_string(),
+        fields: vec![
+            ("who".to_string(), "Pubkey".to_string()),
+            ("amount".to_string(), "U64".to_string()),
+        ],
+    });
+    spec.type_aliases
+        .push(("Amount".to_string(), "U64".to_string()));
+
+    assert_eq!(fixed_byte_width("Entry", &spec).unwrap(), 40);
+    assert_eq!(fixed_byte_width("Amount", &spec).unwrap(), 8);
+    assert_eq!(fixed_byte_width("Map[2] Entry", &spec).unwrap(), 80);
+}
+
+/// Variable-length types have no fixed width, and `Fin[N]` has one only
+/// once a target is chosen. Both must refuse rather than return a number
+/// that reads as authoritative.
+#[test]
+fn fixed_byte_width_refuses_what_it_cannot_size() {
+    let spec = empty_spec();
+    for ty in ["Vec U64", "Option Pubkey", "Fin[8]"] {
+        assert!(
+            fixed_byte_width(ty, &spec).is_err(),
+            "{ty} must not produce a width"
+        );
+    }
+}
+
+/// A self-referential alias must return an error, not exhaust the stack.
+///
+/// `check` does not catch this first: the known-types lint resolves aliases
+/// with its own cycle guard, stops when it sees a repeat, and validates the
+/// name it stopped on — which for a cycle is a declared alias, so the spec
+/// lints clean and arrives here.
+#[test]
+fn self_referential_types_error_instead_of_recursing() {
+    let mut spec = empty_spec();
+    spec.type_aliases.push(("A".to_string(), "B".to_string()));
+    spec.type_aliases.push(("B".to_string(), "A".to_string()));
+    spec.records.push(crate::check::ParsedRecordType {
+        name: "Node".to_string(),
+        fields: vec![("next".to_string(), "Node".to_string())],
+    });
+
+    for ty in ["A", "B", "Node"] {
+        let err = fixed_byte_width(ty, &spec)
+            .expect_err(&format!("{ty} expands into itself and has no width"));
+        assert!(
+            err.to_string().contains("expands into itself"),
+            "unexpected error for {ty}: {err}"
+        );
+    }
+
+    // The value emitter walks aliases too, and needs its own guard: it
+    // accepts `Fin[N]`, which the width function deliberately refuses, so
+    // it cannot simply delegate.
+    let err = emit_pod_bytes_append("A", "v", &spec, "", 0)
+        .expect_err("a cyclic alias has no fixed layout");
+    assert!(
+        err.to_string().contains("expands into itself"),
+        "unexpected error: {err}"
+    );
+    assert!(
+        emit_pod_bytes_append("Fin[8]", "v", &spec, "", 0).is_ok(),
+        "the value emitter still supports Fin[N]"
+    );
+}

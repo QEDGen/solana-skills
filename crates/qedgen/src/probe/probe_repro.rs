@@ -451,13 +451,22 @@ pub fn write_parallax_repro(
     // The repro crate is ephemeral and machine-local, so it embeds the
     // artifact's ABSOLUTE path. `{:?}` quotes and escapes it into a Rust
     // string literal, which also survives spaces in the project path.
+    // A spec whose state or parameters carry a type the fixture emitter
+    // cannot size stops here rather than producing a reproducer built on a
+    // guessed width (#389). A wrong-width account fails deserialization
+    // before the guard under test runs, so such a reproducer would report
+    // "no bug" for a reason unrelated to the finding — a false negative in
+    // the one lane whose whole job is evidence.
     let generated = crate::codegen::parallax_repro::generate(
         ctx.spec,
         handler,
         attack,
         &program.address,
         &format!("{:?}", program.artifact.display().to_string()),
-    );
+    )
+    .map_err(|e| {
+        ConstructFailure::BuildError(format!("parallax reproducer not constructible: {e}"))
+    })?;
 
     let test_stem = format!("probe_{}", finding.id);
     let test_file = tests_dir.join(format!("{test_stem}.rs"));

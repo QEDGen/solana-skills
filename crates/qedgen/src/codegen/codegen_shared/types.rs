@@ -717,6 +717,29 @@ pub fn emit_pod_bytes_append(
     indent: &str,
     depth: usize,
 ) -> Result<String> {
+    emit_pod_bytes_guarded(
+        dsl_ty,
+        expr,
+        spec,
+        indent,
+        depth,
+        &mut std::collections::BTreeSet::new(),
+    )
+}
+
+/// `expanding` carries the alias names already on the stack. `type A = B`
+/// with `type B = A` passes `check` — the known-types lint stops at the
+/// cycle and validates the alias name it stopped on, which is declared — so
+/// an unguarded walk here recurses until the stack runs out rather than
+/// reporting anything. Same guard, same reason, as `fixed_byte_width`.
+fn emit_pod_bytes_guarded(
+    dsl_ty: &str,
+    expr: &str,
+    spec: &ParsedSpec,
+    indent: &str,
+    depth: usize,
+    expanding: &mut std::collections::BTreeSet<String>,
+) -> Result<String> {
     let dsl_ty = dsl_ty.trim();
 
     // `Map[N] T` → `[T; N]`: N elements back to back, no length prefix.
@@ -728,7 +751,8 @@ pub fn emit_pod_bytes_append(
         };
         let binder = format!("__e{depth}");
         let inner_indent = format!("{indent}    ");
-        let body = emit_pod_bytes_append(inner, &binder, spec, &inner_indent, depth + 1)?;
+        let body =
+            emit_pod_bytes_guarded(inner, &binder, spec, &inner_indent, depth + 1, expanding)?;
         return Ok(format!(
             "{indent}for {binder} in {expr}.iter().copied() {{\n{body}{indent}}}\n"
         ));
@@ -766,7 +790,13 @@ pub fn emit_pod_bytes_append(
 
     // Type alias: recurse on the RHS, matching `map_type_pod`.
     if let Some((_, rhs)) = spec.type_aliases.iter().find(|(n, _)| n == dsl_ty) {
-        return emit_pod_bytes_append(rhs, expr, spec, indent, depth);
+        if !expanding.insert(dsl_ty.to_string()) {
+            anyhow::bail!(
+                "type `{}` expands into itself, so it has no fixed layout",
+                dsl_ty
+            );
+        }
+        return emit_pod_bytes_guarded(rhs, expr, spec, indent, depth, expanding);
     }
 
     // Records, sums, `Vec`, and `Option` have no fixed alignment-1 layout
@@ -776,6 +806,100 @@ pub fn emit_pod_bytes_append(
         "cannot build account-fixture bytes for DSL type `{}` — supported: \
          U8/U16/U32/U64/U128, I8/I16/I32/I64/I128, Bool, Pubkey, Bytes32, \
          Bytes64, Fin[N], Map[N] T, and aliases of those",
+        dsl_ty
+    )
+}
+
+/// How many bytes a value of `dsl_ty` occupies in a fixed on-chain layout.
+///
+/// Fixture emitters need the WIDTH even when they do not care about the
+/// value: an account built at the wrong length fails deserialization before
+/// the code under test runs, and the resulting failure reads as "the program
+/// rejected my input" (#389).
+///
+/// Both layouts this repo emits agree here. Anchor/Borsh and Quasar/Pod both
+/// store fixed scalars little-endian with no padding, `bool` in one byte, an
+/// address in 32, and `[T; N]` as N elements back to back. They diverge only
+/// on the variable-length types, which this function refuses for both.
+///
+/// Refusing is the point. A type whose width cannot be derived must stop
+/// generation, because the alternative is a plausible fixed guess that turns
+/// into a wrong answer much later and much further away.
+pub fn fixed_byte_width(dsl_ty: &str, spec: &ParsedSpec) -> Result<usize> {
+    fixed_byte_width_guarded(dsl_ty, spec, &mut std::collections::BTreeSet::new())
+}
+
+/// `expanding` carries the alias and record names already on the stack, so a
+/// self-referential declaration returns an error instead of recursing until
+/// the stack runs out.
+///
+/// The guard is not theoretical and `check` is not the backstop. The
+/// known-types lint resolves aliases with its own cycle guard
+/// (`lints/known_types.rs`), and having stopped early it validates the name
+/// it stopped on, which for a cycle is a declared alias and therefore valid.
+/// So `type A = B` with `type B = A` passes `check` cleanly and arrives here.
+fn fixed_byte_width_guarded(
+    dsl_ty: &str,
+    spec: &ParsedSpec,
+    expanding: &mut std::collections::BTreeSet<String>,
+) -> Result<usize> {
+    let dsl_ty = dsl_ty.trim();
+
+    // `Map[N] T` → `[T; N]`, no length prefix in either layout.
+    if dsl_ty.starts_with("Map") {
+        let Some((bound_src, inner)) = split_map_type(dsl_ty) else {
+            anyhow::bail!("malformed Map type `{}` — expected `Map[BOUND] T`", dsl_ty);
+        };
+        let n: usize = resolve_map_bound(bound_src, spec)?
+            .parse()
+            .map_err(|_| anyhow::anyhow!("Map bound `{bound_src}` is not a usize"))?;
+        return Ok(n * fixed_byte_width_guarded(inner, spec, expanding)?);
+    }
+
+    let width = match dsl_ty {
+        "U8" | "I8" | "Bool" => Some(1),
+        "U16" | "I16" => Some(2),
+        "U32" | "I32" => Some(4),
+        "U64" | "I64" => Some(8),
+        "U128" | "I128" => Some(16),
+        "Pubkey" | "Bytes32" => Some(32),
+        "Bytes64" => Some(64),
+        _ => None,
+    };
+    if let Some(width) = width {
+        return Ok(width);
+    }
+
+    let named = spec.type_aliases.iter().any(|(n, _)| n == dsl_ty)
+        || spec.records.iter().any(|r| r.name == dsl_ty);
+    if named && !expanding.insert(dsl_ty.to_string()) {
+        anyhow::bail!(
+            "type `{}` expands into itself, so it has no fixed byte width",
+            dsl_ty
+        );
+    }
+
+    if let Some((_, rhs)) = spec.type_aliases.iter().find(|(n, _)| n == dsl_ty) {
+        return fixed_byte_width_guarded(rhs, spec, expanding);
+    }
+
+    // A record is the sum of its fields, in declaration order.
+    if let Some(record) = spec.records.iter().find(|r| r.name == dsl_ty) {
+        let mut total = 0;
+        for (_, field_ty) in &record.fields {
+            total += fixed_byte_width_guarded(field_ty, spec, expanding)?;
+        }
+        return Ok(total);
+    }
+
+    // `Fin[N]` is deliberately absent. The two targets disagree: Quasar
+    // packs it as `PodU32` (4 bytes), Anchor maps it to `usize`, whose
+    // encoded width is not something to assume. A caller that needs it
+    // should decide per target rather than get a number from here.
+    anyhow::bail!(
+        "cannot derive a fixed byte width for DSL type `{}` — supported: \
+         U8/U16/U32/U64/U128, I8/I16/I32/I64/I128, Bool, Pubkey, Bytes32, \
+         Bytes64, Map[N] T, records of those, and aliases of those",
         dsl_ty
     )
 }
