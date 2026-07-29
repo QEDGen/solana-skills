@@ -262,7 +262,7 @@ pub mod state;
 pub mod guards;
 pub mod imported;
 
-declare_id!("11111111111111111111111111111111");
+declare_id!("G8BADsJLeMRcPmXtGFK5xiuutdHRPZ6nd56mW4AuhjXc");
 
 #[program]
 pub mod vault {

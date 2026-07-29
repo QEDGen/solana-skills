@@ -137,6 +137,11 @@ mod instructions;
 pub mod math;
 pub mod state;
 
+// PLACEHOLDER: the spec declares no `program_id`, so this is the System
+// Program's address, not this program's. Replace before deploying — add
+// `program_id "<your id>"` to the spec and regenerate.
+// Get it from `anchor keys list`, or
+// `solana-keygen pubkey target/deploy/<name>-keypair.json`.
 declare_id!("11111111111111111111111111111111");
 
 #[program]

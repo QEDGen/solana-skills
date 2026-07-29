@@ -493,10 +493,13 @@ fn emit_lib(
     }
 
     let program_name = mir.name.to_lowercase();
-    let program_id = parsed
-        .program_id
-        .as_deref()
-        .unwrap_or("11111111111111111111111111111111");
+    // #368 — codegen must emit SOMETHING here, so a spec without
+    // `program_id` falls back to the System Program's address. It is a valid
+    // base58 pubkey, so nothing downstream rejects it on shape; the emitted
+    // comment below is what tells a reader (and a grep) that it is a
+    // placeholder. `missing_program_id` warns at spec time.
+    let declared_program_id = parsed.program_id.as_deref();
+    let program_id = declared_program_id.unwrap_or(crate::codegen_shared::PLACEHOLDER_PROGRAM_ID);
 
     let mut out = String::new();
     out.push_str(&crate::codegen_shared::marker(
@@ -541,6 +544,15 @@ fn emit_lib(
     }
     out.push('\n');
 
+    if declared_program_id.is_none() {
+        out.push_str(
+            "// PLACEHOLDER: the spec declares no `program_id`, so this is the System\n\
+             // Program's address, not this program's. Replace before deploying — add\n\
+             // `program_id \"<your id>\"` to the spec and regenerate.\n\
+             // Get it from `anchor keys list`, or\n\
+             // `solana-keygen pubkey target/deploy/<name>-keypair.json`.\n",
+        );
+    }
     out.push_str(&format!("declare_id!(\"{}\");\n\n", program_id));
 
     out.push_str("#[program]\n");

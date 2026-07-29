@@ -22,6 +22,12 @@
 
 spec Vulnerable
 
+// #368 — declared so codegen stamps a real address rather than the
+// System Program placeholder. The gate used to rewrite `declare_id!`
+// after generation to work around that; the reproducer lane now refuses
+// the placeholder outright, so the spec has to carry the id.
+program_id "Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS"
+
 type State
   | Uninitialized
   | Active of {

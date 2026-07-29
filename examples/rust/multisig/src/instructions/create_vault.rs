@@ -19,7 +19,7 @@ pub struct CreateVault<'info> {
 }
 
 impl<'info> CreateVault<'info> {
-    #[qed(verified, spec = "multisig.qedspec", handler = "create_vault", hash = "e9d49ea51bfc5616", spec_hash = "ca38005f77bb0ff7")]
+    #[qed(verified, spec = "multisig.qedspec", handler = "create_vault", hash = "e9d49ea51bfc5616", spec_hash = "0f74444db541b59d")]
     #[inline(always)]
     pub fn handler(&mut self, threshold: u8, member_count: u8, bumps: &CreateVaultBumps) -> Result<(), ProgramError> {
         guards::create_vault(self, threshold, member_count)?;
