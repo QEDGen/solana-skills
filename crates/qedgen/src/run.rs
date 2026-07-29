@@ -1922,17 +1922,20 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                     .unwrap_or_else(|| std::path::Path::new("."))
                     .to_path_buf()
             };
-            let against_spec =
-                |p: PathBuf| -> PathBuf { run_helpers::resolve_output_against_spec(&spec_dir, p) };
-            let output_dir = against_spec(output_dir);
-            let kani_output = against_spec(kani_output);
-            let kani_impl_output = against_spec(kani_impl_output);
-            let test_output = against_spec(test_output);
-            let proptest_output = against_spec(proptest_output);
-            let crucible_output = against_spec(crucible_output);
-            let integration_output = against_spec(integration_output);
-            let lean_output = against_spec(lean_output);
-            let ci_output = against_spec(ci_output);
+            // The flag name travels with the path so the doubling warning
+            // (#370) can name the flag the user actually typed.
+            let against_spec = |flag: &str, p: PathBuf| -> PathBuf {
+                run_helpers::resolve_output_warned(&spec_dir, flag, p)
+            };
+            let output_dir = against_spec("--output-dir", output_dir);
+            let kani_output = against_spec("--kani-output", kani_output);
+            let kani_impl_output = against_spec("--kani-impl-output", kani_impl_output);
+            let test_output = against_spec("--test-output", test_output);
+            let proptest_output = against_spec("--proptest-output", proptest_output);
+            let crucible_output = against_spec("--crucible-output", crucible_output);
+            let integration_output = against_spec("--integration-output", integration_output);
+            let lean_output = against_spec("--lean-output", lean_output);
+            let ci_output = against_spec("--ci-output", ci_output);
             // One parse + one MIR lowering, shared by every artifact stage
             // below (the arm previously re-parsed per artifact).
             let parsed = check::parse_spec_file(&spec)?;
