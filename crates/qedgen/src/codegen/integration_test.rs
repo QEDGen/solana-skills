@@ -79,7 +79,31 @@ fn parallax_dependency_line() -> String {
 
 /// Solana crates held at the versions Parallax 0.1 resolves against. A
 /// dependency's `Cargo.lock` is not inherited by consumers, so without these
-/// a fresh resolve picks the wincode-0.6 line and fails to compile.
+/// a fresh resolve straddles the wincode 0.5/0.6 boundary and fails to
+/// compile.
+///
+/// ## Why this list, and why it grows
+///
+/// `litesvm` 0.15 requires `wincode ^0.5.5`, so 0.5 is the line everything
+/// here must stay on. The solana crates each declare `wincode ^0.5` or
+/// `^0.6`, and a crate that crosses does so in a MINOR bump — `solana-rent`
+/// 4.3.0 → 4.4.0, `solana-signature` 3.4.1 → 3.5.0, `solana-epoch-schedule`
+/// 3.2.0 → 3.3.0, `solana-fee-calculator` 3.2.2 → 3.3.0. Every parent asks
+/// for them with a caret, so a fresh resolve silently takes the crossing
+/// version and lands two incompatible `wincode` majors in one graph.
+///
+/// The failure is not a version error. Both wincodes build; the derive on
+/// `solana-transaction` then targets 0.5's `SchemaRead` while
+/// `solana-signature` implements 0.6's, and rustc reports an unsatisfied
+/// trait bound deep inside a dependency, with "there are multiple different
+/// versions of crate `wincode`" as the only clue. `verify --scaffold`
+/// classifies that as `Unresolved` rather than a codegen defect (#364).
+///
+/// So this list is not a stable set: it is "every crate that has ever
+/// crossed the boundary". When the gate fails this way again, find the new
+/// one with `cargo tree -i wincode@0.6.0 --depth 1` and pin its last 0.5
+/// version here. Bumping past the boundary wholesale is the real fix and
+/// needs Parallax to move to `wincode` 0.6 first.
 pub(crate) fn parallax_dev_dependencies() -> String {
     format!(
         "{}\n\
@@ -92,26 +116,34 @@ pub(crate) fn parallax_dev_dependencies() -> String {
          solana-slot-history = \"=3.1.0\"\n\
          solana-epoch-rewards = \"=3.1.0\"\n\
          solana-slot-hashes = \"=3.1.0\"\n\
+         solana-rent = \"=4.3.0\"\n\
+         solana-signature = \"=3.4.1\"\n\
+         solana-epoch-schedule = \"=3.2.0\"\n\
+         solana-fee-calculator = \"=3.2.2\"\n\
          spl-token = {{ version = \"=9.0.0\", default-features = false, features = [\"no-entrypoint\"] }}\n\
          wincode = {{ version = \"0.5\", features = [\"derive\"] }}\n",
         parallax_dependency_line()
     )
 }
 
-const PARALLAX_DEV_DEP_NAMES: &[&str] = &[
-    "parallax-svm",
-    "solana-sdk-ids",
-    "solana-address",
-    "solana-hash",
-    "solana-nonce",
-    "solana-short-vec",
-    "solana-last-restart-slot",
-    "solana-slot-history",
-    "solana-epoch-rewards",
-    "solana-slot-hashes",
-    "spl-token",
-    "wincode",
-];
+/// The dependency names [`parallax_dev_dependencies`] emits, read off that
+/// function rather than restated beside it.
+///
+/// These were two hand-kept lists, which is the #363 bug class in miniature:
+/// a name present in the emitted block but missing here is not detected as
+/// subtabled, so upserting a manifest that declares it as
+/// `[dev-dependencies.<name>]` writes a duplicate key and the user's
+/// manifest stops parsing. The pin list grows every time a solana crate
+/// crosses the wincode boundary, so the drift window is not hypothetical.
+fn parallax_dev_dep_names() -> Vec<String> {
+    parallax_dev_dependencies()
+        .lines()
+        .filter_map(|line| {
+            let key = line.split('=').next()?.trim();
+            (!key.is_empty()).then(|| key.to_string())
+        })
+        .collect()
+}
 
 /// Upsert the dependencies owned by the Parallax integration artifact into
 /// the generated program manifest. Integration tests conventionally live at
@@ -188,18 +220,19 @@ fn upsert_dev_dependencies(existing: &str) -> String {
     // (`[dev-dependencies.parallax-svm]`). Emitting the inline key as well
     // would leave the manifest with a duplicate key, so leave those alone
     // and let the existing declaration stand.
-    let subtabled: Vec<&str> = PARALLAX_DEV_DEP_NAMES
+    let names = parallax_dev_dep_names();
+    let subtabled: Vec<&str> = names
         .iter()
-        .copied()
+        .map(String::as_str)
         .filter(|name| {
             existing
                 .lines()
                 .any(|line| strip_toml_comment(line).trim() == format!("[dev-dependencies.{name}]"))
         })
         .collect();
-    let owned_names: Vec<&str> = PARALLAX_DEV_DEP_NAMES
+    let owned_names: Vec<&str> = names
         .iter()
-        .copied()
+        .map(String::as_str)
         .filter(|name| !subtabled.contains(name))
         .collect();
     let dev_dependencies = parallax_dev_dependencies();
@@ -731,20 +764,30 @@ fn emit_unauthorized_test(
 }
 
 /// The error a forged signer is expected to produce: `Unauthorized` when the
-/// spec declares it, else `InvalidLifecycle`, matching the preference order
-/// `codegen_shared::guards` uses for the program's own authorization checks.
+/// generated enum carries it, else `InvalidLifecycle`, matching the
+/// preference order `codegen_shared::guards` uses for the program's own
+/// authorization checks.
 ///
-/// Only SPEC-DECLARED codes are named. `guards` can fall back to
-/// `InvalidLifecycle` unconditionally because it emits that check only where
-/// the variant exists; this scaffold emits one negative test per `who`
-/// handler, and `codegen_mir` synthesizes `InvalidLifecycle` / `InvalidPda`
-/// into the enum only when `needs_lifecycle` / `needs_invalid_pda` hold. So
-/// `None` here means "degrade to the marked weak form" rather than name a
-/// variant the generated enum may not carry.
+/// #363 — this used to read `spec.error_codes` directly, which is the
+/// DECLARED set, not the EMITTED one. `codegen_mir` also synthesizes
+/// `InvalidLifecycle` when any handler has a non-init pre-status, and this
+/// function had no way to ask, so it deliberately under-approximated and
+/// returned `None`. The bundled multisig spec is exactly that shape: its
+/// enum does carry `InvalidLifecycle`, yet every forged-signer test degraded
+/// to the marked weak form for no reason.
+///
+/// Now both sides read `emitted_error_variants`, so this names a variant
+/// exactly when the enum will have one. `None` still means "degrade to the
+/// marked weak form" — it just no longer happens spuriously.
+///
+/// The lane is Quasar-only (`generate` rejects other targets), so the target
+/// is known here.
 fn authorization_error(spec: &ParsedSpec) -> Option<&'static str> {
     ["Unauthorized", "InvalidLifecycle"]
         .into_iter()
-        .find(|candidate| spec.error_codes.iter().any(|code| code == candidate))
+        .find(|candidate| {
+            crate::codegen_shared::declares_error_variant(spec, Target::Quasar, candidate)
+        })
 }
 
 fn emit_lifecycle_sequence_test(out: &mut String, spec: &ParsedSpec) {
@@ -1102,22 +1145,57 @@ mod tests {
         );
     }
 
-    /// Only a spec-declared error may be named. `InvalidLifecycle` and
-    /// `InvalidPda` are synthesized into the generated enum conditionally
-    /// (`codegen_mir`'s `needs_lifecycle` / `needs_invalid_pda`), so naming
-    /// one on a spec that does not declare it can reference a variant that
-    /// was never emitted.
+    /// #363 — the name must track the EMITTED enum, not the declared block.
+    ///
+    /// This asserted `None` for multisig, on the reasoning that its
+    /// `type Error` block declares neither candidate. But `codegen_mir` also
+    /// synthesizes `InvalidLifecycle` whenever a handler has a non-init
+    /// pre-status, which multisig has, so the enum did carry it and every
+    /// forged-signer test was weakened for nothing. Both sides now read
+    /// `emitted_error_variants`.
     #[test]
-    fn authorization_error_names_only_spec_declared_codes() {
+    fn authorization_error_tracks_the_emitted_enum() {
         let spec = chumsky_adapter::parse_str(ESCROW_SPEC).unwrap();
         assert_eq!(authorization_error(&spec), Some("Unauthorized"));
 
-        // Multisig's `type Error` block declares neither candidate, so the
-        // scaffold degrades to the marked weak form instead of guessing.
         let multisig = chumsky_adapter::parse_str(MULTISIG_SPEC).unwrap();
-        assert_eq!(authorization_error(&multisig), None);
+        assert_eq!(
+            authorization_error(&multisig),
+            Some("InvalidLifecycle"),
+            "multisig declares neither candidate but its enum carries \
+             InvalidLifecycle (non-init pre-status)"
+        );
+        // Tie the claim to the emitter rather than restating it: if
+        // `emitted_error_variants` stops synthesizing the variant, naming it
+        // here becomes a dangling reference and this fails first.
+        assert!(
+            crate::codegen_shared::declares_error_variant(
+                &multisig,
+                Target::Quasar,
+                "InvalidLifecycle"
+            ),
+            "the emitted enum must actually carry what the scaffold names"
+        );
+    }
 
-        let out = render(&multisig, "test").expect("render");
+    /// A spec whose enum carries neither candidate still degrades to the
+    /// marked weak form rather than guessing a variant that was never
+    /// emitted. `None` is still reachable — it just no longer fires
+    /// spuriously.
+    #[test]
+    fn authorization_error_degrades_when_the_enum_carries_neither() {
+        // No `type Error`, and every handler is init-shaped, so neither
+        // `Unauthorized` nor `InvalidLifecycle` reaches the enum.
+        let spec = chumsky_adapter::parse_str(
+            "spec Weak\n\
+             type State\n  | Uninitialized\n  | Active of { total : U64, }\n\
+             handler init : State.Uninitialized -> State.Active {\n  \
+             auth owner\n  accounts { owner : signer }\n  effect { total := 0 }\n}\n",
+        )
+        .expect("parse");
+        assert_eq!(authorization_error(&spec), None);
+
+        let out = render(&spec, "test").expect("render");
         if out.contains("_unauthorized()") {
             assert!(
                 out.contains("the spec declares no authorization error"),
@@ -1179,6 +1257,48 @@ mod tests {
         assert!(merged.contains("[dev-dependencies.parallax-svm]"));
         // Everything not subtabled still lands.
         assert_eq!(merged.matches("solana-sdk-ids =").count(), 1);
+    }
+
+    /// The name list is derived from the emitted block, so this guards the
+    /// derivation rather than a second copy: every key the block emits must
+    /// come back, and nothing else. A stray non-`key = value` line (a
+    /// comment, a blank, a `[subtable]` header) would otherwise enter the
+    /// list and be treated as a dependency name.
+    #[test]
+    fn dev_dep_names_match_the_emitted_block_exactly() {
+        let block = parallax_dev_dependencies();
+        let names = parallax_dev_dep_names();
+
+        for name in &names {
+            assert!(
+                block.contains(&format!("{name} =")),
+                "{name} is not a key in the emitted block"
+            );
+            assert!(
+                !name.starts_with('[') && !name.starts_with('#') && !name.contains(' '),
+                "{name:?} is not a dependency name"
+            );
+        }
+        assert_eq!(
+            names.len(),
+            block.lines().filter(|l| l.contains('=')).count(),
+            "every emitted line must yield exactly one name"
+        );
+        // The pins that keep the graph on one side of the wincode 0.5/0.6
+        // boundary. Losing any of them puts two incompatible wincode majors
+        // in the graph, which surfaces as an unsatisfied trait bound inside
+        // solana-transaction rather than as a version error.
+        for pinned in [
+            "solana-rent",
+            "solana-signature",
+            "solana-epoch-schedule",
+            "solana-fee-calculator",
+        ] {
+            assert!(
+                names.iter().any(|n| n == pinned),
+                "{pinned} pin was dropped — see the doc on parallax_dev_dependencies"
+            );
+        }
     }
 
     /// The compile gate is only meaningful if it builds the revision the
@@ -1251,7 +1371,7 @@ mod tests {
         ensure_parallax_dev_dependencies(&output).unwrap();
 
         let manifest = std::fs::read_to_string(program.join("Cargo.toml")).unwrap();
-        for dependency in PARALLAX_DEV_DEP_NAMES {
+        for dependency in parallax_dev_dep_names() {
             assert_eq!(
                 manifest.matches(&format!("{dependency} =")).count(),
                 1,

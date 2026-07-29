@@ -197,6 +197,7 @@ pub fn construct_reproducer(
 /// carries no program id, and requiring one would make the whole lane
 /// opt-in. The address is the scaffold's own `declare_id!`, so it is always
 /// in sync with the program the user actually built.
+#[derive(Debug)]
 struct DeployedProgram {
     address: String,
     /// Absolute path to the artifact.
@@ -227,11 +228,15 @@ fn discover_deployed_program(project_root: &Path) -> Result<DeployedProgram, Con
             .flatten()
     });
     // FAIL CLOSED: require positive Anchor detection rather than refusing
-    // only the frameworks we happen to recognise. `target_from_text` knows
-    // Anchor and Quasar, so a Pinocchio project reads as `None` — treating
-    // "unknown" as "probably fine" would emit an Anchor-shaped harness
-    // against it and report "no bug" from a transaction that never reached
+    // only the frameworks we happen to recognise. Treating "unknown" as
+    // "probably fine" would emit an Anchor-shaped harness against another
+    // framework and report "no bug" from a transaction that never reached
     // the handler.
+    //
+    // The detector now covers all three targets (#367), so a Pinocchio
+    // project reports `Some(Pinocchio)` here instead of the `None` it used
+    // to — same refusal, but the reason names the framework rather than
+    // saying nothing was recognised.
     if detected != Some(crate::Target::Anchor) {
         return Err(ConstructFailure::BuildError(format!(
             "Parallax reproducers are Anchor-only today (detected: {detected:?}). The \
@@ -261,6 +266,21 @@ fn discover_deployed_program(project_root: &Path) -> Result<DeployedProgram, Con
                     .to_string(),
             )
         })?;
+
+    // FAIL CLOSED on the placeholder (#368). A spec without `program_id`
+    // gets the System Program's address stamped as its own `declare_id!`. It
+    // is valid base58, so it resolves here like any other address, and the
+    // attack transaction would go to the System Program: it fails for a
+    // reason that has nothing to do with the finding, and the reproducer
+    // reports "no bug". A silent wrong answer, which is worse than none.
+    if address == crate::codegen_shared::PLACEHOLDER_PROGRAM_ID {
+        return Err(ConstructFailure::BuildError(format!(
+            "`declare_id!` is the placeholder `{}` (the System Program), so the spec \
+             declares no `program_id`. Sending the attack there would prove nothing. \
+             Add `program_id \"<your id>\"` to the spec and regenerate.",
+            crate::codegen_shared::PLACEHOLDER_PROGRAM_ID,
+        )));
+    }
 
     let deploy_candidates = [
         project_root.join("programs/target/deploy"),
@@ -755,6 +775,47 @@ mod tests {
             reproducer: None,
             gated_by: None,
         }
+    }
+
+    /// #368 — a spec without `program_id` stamps the System Program's
+    /// address as the program's own `declare_id!`. It is valid base58, so it
+    /// resolves here exactly like a real address, and the attack transaction
+    /// would be aimed at the System Program: it fails for a reason unrelated
+    /// to the finding, and the reproducer reports "no bug". A silent wrong
+    /// answer is worse than no answer, so this fails closed.
+    #[test]
+    fn placeholder_program_id_is_refused() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let src = tmp.path().join("programs/src");
+        std::fs::create_dir_all(&src).expect("mkdir");
+        std::fs::write(
+            tmp.path().join("programs/Cargo.toml"),
+            "[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n\
+             [dependencies]\nanchor-lang = \"0.32\"\n",
+        )
+        .expect("write manifest");
+        std::fs::write(
+            src.join("lib.rs"),
+            format!(
+                "use anchor_lang::prelude::*;\ndeclare_id!(\"{}\");\n",
+                crate::codegen_shared::PLACEHOLDER_PROGRAM_ID
+            ),
+        )
+        .expect("write lib.rs");
+
+        let err = discover_deployed_program(tmp.path())
+            .expect_err("the placeholder address must not resolve as a target");
+        let ConstructFailure::BuildError(reason) = err else {
+            panic!("expected BuildError with a reason");
+        };
+        assert!(
+            reason.contains("placeholder") && reason.contains("System Program"),
+            "the refusal must say why: {reason}"
+        );
+        assert!(
+            reason.contains("program_id"),
+            "the refusal must say how to fix it: {reason}"
+        );
     }
 
     /// Categories whose constructors are still stubbed report

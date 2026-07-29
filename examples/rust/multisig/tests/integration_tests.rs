@@ -21,6 +21,10 @@
 //   solana-slot-history = "=3.1.0"
 //   solana-epoch-rewards = "=3.1.0"
 //   solana-slot-hashes = "=3.1.0"
+//   solana-rent = "=4.3.0"
+//   solana-signature = "=3.4.1"
+//   solana-epoch-schedule = "=3.2.0"
+//   solana-fee-calculator = "=3.2.2"
 //   spl-token = { version = "=9.0.0", default-features = false, features = ["no-entrypoint"] }
 //   wincode = { version = "0.5", features = ["derive"] }
 
@@ -407,11 +411,10 @@ fn test_create_vault_unauthorized() {
         vec![signer_account(wrong_creator), empty_account(vault)],
     );
 
-    // AGENT: the spec declares no authorization error, so this only
-    // asserts that SOME error fired — it also passes on a deserialization
-    // or missing-account failure. Declare the error in the spec, then
-    // assert it with `outcome.check(Outcome::error(..))`.
-    assert!(outcome.is_err(), "create_vault should reject wrong creator");
+    // create_vault must reject a forged creator with the spec's authorization error.
+    outcome.check(Outcome::error(
+        program::errors::MultisigError::InvalidLifecycle,
+    ));
 }
 
 /// propose must reject unauthorized callers (wrong creator).
@@ -436,11 +439,10 @@ fn test_propose_unauthorized() {
         ],
     );
 
-    // AGENT: the spec declares no authorization error, so this only
-    // asserts that SOME error fired — it also passes on a deserialization
-    // or missing-account failure. Declare the error in the spec, then
-    // assert it with `outcome.check(Outcome::error(..))`.
-    assert!(outcome.is_err(), "propose should reject wrong creator");
+    // propose must reject a forged creator with the spec's authorization error.
+    outcome.check(Outcome::error(
+        program::errors::MultisigError::InvalidLifecycle,
+    ));
 }
 
 /// approve must reject unauthorized callers (wrong approver).
@@ -466,11 +468,10 @@ fn test_approve_unauthorized() {
         ],
     );
 
-    // AGENT: the spec declares no authorization error, so this only
-    // asserts that SOME error fired — it also passes on a deserialization
-    // or missing-account failure. Declare the error in the spec, then
-    // assert it with `outcome.check(Outcome::error(..))`.
-    assert!(outcome.is_err(), "approve should reject wrong approver");
+    // approve must reject a forged approver with the spec's authorization error.
+    outcome.check(Outcome::error(
+        program::errors::MultisigError::InvalidLifecycle,
+    ));
 }
 
 /// reject must reject unauthorized callers (wrong rejecter).
@@ -496,11 +497,10 @@ fn test_reject_unauthorized() {
         ],
     );
 
-    // AGENT: the spec declares no authorization error, so this only
-    // asserts that SOME error fired — it also passes on a deserialization
-    // or missing-account failure. Declare the error in the spec, then
-    // assert it with `outcome.check(Outcome::error(..))`.
-    assert!(outcome.is_err(), "reject should reject wrong rejecter");
+    // reject must reject a forged rejecter with the spec's authorization error.
+    outcome.check(Outcome::error(
+        program::errors::MultisigError::InvalidLifecycle,
+    ));
 }
 
 /// execute must reject unauthorized callers (wrong executor).
@@ -526,11 +526,10 @@ fn test_execute_unauthorized() {
         ],
     );
 
-    // AGENT: the spec declares no authorization error, so this only
-    // asserts that SOME error fired — it also passes on a deserialization
-    // or missing-account failure. Declare the error in the spec, then
-    // assert it with `outcome.check(Outcome::error(..))`.
-    assert!(outcome.is_err(), "execute should reject wrong executor");
+    // execute must reject a forged executor with the spec's authorization error.
+    outcome.check(Outcome::error(
+        program::errors::MultisigError::InvalidLifecycle,
+    ));
 }
 
 /// add_member must reject unauthorized callers (wrong creator).
@@ -557,11 +556,10 @@ fn test_add_member_unauthorized() {
         ],
     );
 
-    // AGENT: the spec declares no authorization error, so this only
-    // asserts that SOME error fired — it also passes on a deserialization
-    // or missing-account failure. Declare the error in the spec, then
-    // assert it with `outcome.check(Outcome::error(..))`.
-    assert!(outcome.is_err(), "add_member should reject wrong creator");
+    // add_member must reject a forged creator with the spec's authorization error.
+    outcome.check(Outcome::error(
+        program::errors::MultisigError::InvalidLifecycle,
+    ));
 }
 
 /// remove_member must reject unauthorized callers (wrong creator).
@@ -586,14 +584,10 @@ fn test_remove_member_unauthorized() {
         ],
     );
 
-    // AGENT: the spec declares no authorization error, so this only
-    // asserts that SOME error fired — it also passes on a deserialization
-    // or missing-account failure. Declare the error in the spec, then
-    // assert it with `outcome.check(Outcome::error(..))`.
-    assert!(
-        outcome.is_err(),
-        "remove_member should reject wrong creator"
-    );
+    // remove_member must reject a forged creator with the spec's authorization error.
+    outcome.check(Outcome::error(
+        program::errors::MultisigError::InvalidLifecycle,
+    ));
 }
 
 // ── Lifecycle sequence ────────────────────────────────────────────

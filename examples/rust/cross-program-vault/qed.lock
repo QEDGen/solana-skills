@@ -6,8 +6,8 @@ version = 1
 [[dependency]]
 name = "admin_config"
 source = "path:imports/cross-program-vault-admin"
-spec_hash = "sha256:13d875e013278901196af4fc5d851741b5e815fe0a6ce453158a6bc4903b1c25"
-program_id = "11111111111111111111111111111111"
+spec_hash = "sha256:f47505719c8ac222d28662c08ff92efc67db68966eb2cb05bebbc0a922675185"
+program_id = "DbuXXMCFeNXev6FQNQ737J4CPmbdhBWWJ53XGp8ijcnR"
 imported_account_type_names = "State"
 
 [[dependency]]

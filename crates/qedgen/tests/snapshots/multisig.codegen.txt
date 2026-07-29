@@ -833,7 +833,7 @@ pub struct AddMember<'info> {
 }
 
 impl<'info> AddMember<'info> {
-    #[qed(verified, spec = "../multisig.qedspec", handler = "add_member", hash = "9ec9c37e98a46e02", spec_hash = "4210397198e8c8a2")]
+    #[qed(verified, spec = "../multisig.qedspec", handler = "add_member", hash = "9ec9c37e98a46e02", spec_hash = "3c7c85bdae96af04")]
     #[inline(always)]
     pub fn handler(&mut self, member_index: u8, member_pubkey: Address, bumps: &AddMemberBumps) -> Result<(), ProgramError> {
         guards::add_member(self, member_index, member_pubkey)?;
@@ -865,7 +865,7 @@ pub struct Approve<'info> {
 }
 
 impl<'info> Approve<'info> {
-    #[qed(verified, spec = "../multisig.qedspec", handler = "approve", hash = "659801016cb87703", spec_hash = "96727ecc91c0452e")]
+    #[qed(verified, spec = "../multisig.qedspec", handler = "approve", hash = "659801016cb87703", spec_hash = "449b8cead71b57cf")]
     #[inline(always)]
     pub fn handler(&mut self, member_index: u8, bumps: &ApproveBumps) -> Result<(), ProgramError> {
         guards::approve(self, member_index)?;
@@ -902,7 +902,7 @@ pub struct CancelProposal<'info> {
 }
 
 impl<'info> CancelProposal<'info> {
-    #[qed(verified, spec = "../multisig.qedspec", handler = "cancel_proposal", hash = "52627746e3ba1d83", spec_hash = "92471889753e2127")]
+    #[qed(verified, spec = "../multisig.qedspec", handler = "cancel_proposal", hash = "52627746e3ba1d83", spec_hash = "f479fc1e303dd340")]
     #[inline(always)]
     pub fn handler(&mut self, bumps: &CancelProposalBumps) -> Result<(), ProgramError> {
         guards::cancel_proposal(self)?;
@@ -940,7 +940,7 @@ pub struct CreateVault<'info> {
 }
 
 impl<'info> CreateVault<'info> {
-    #[qed(verified, spec = "../multisig.qedspec", handler = "create_vault", hash = "aea4af508fd00d17", spec_hash = "ca38005f77bb0ff7")]
+    #[qed(verified, spec = "../multisig.qedspec", handler = "create_vault", hash = "aea4af508fd00d17", spec_hash = "0f74444db541b59d")]
     #[inline(always)]
     pub fn handler(&mut self, threshold: u8, member_count: u8, bumps: &CreateVaultBumps) -> Result<(), ProgramError> {
         guards::create_vault(self, threshold, member_count)?;
@@ -980,7 +980,7 @@ pub struct Execute<'info> {
 }
 
 impl<'info> Execute<'info> {
-    #[qed(verified, spec = "../multisig.qedspec", handler = "execute", hash = "7b191352d0e9311b", spec_hash = "1db32bbd43fb72f5")]
+    #[qed(verified, spec = "../multisig.qedspec", handler = "execute", hash = "7b191352d0e9311b", spec_hash = "04ea0cae5489234a")]
     #[inline(always)]
     pub fn handler(&mut self, member_index: u8, bumps: &ExecuteBumps) -> Result<(), ProgramError> {
         guards::execute(self, member_index)?;
@@ -1028,7 +1028,7 @@ pub struct Propose<'info> {
 }
 
 impl<'info> Propose<'info> {
-    #[qed(verified, spec = "../multisig.qedspec", handler = "propose", hash = "d8710d638614d27b", spec_hash = "7e1a675c5e1599ed")]
+    #[qed(verified, spec = "../multisig.qedspec", handler = "propose", hash = "d8710d638614d27b", spec_hash = "55a7167856412030")]
     #[inline(always)]
     pub fn handler(&mut self, bumps: &ProposeBumps) -> Result<(), ProgramError> {
         guards::propose(self)?;
@@ -1064,7 +1064,7 @@ pub struct Reject<'info> {
 }
 
 impl<'info> Reject<'info> {
-    #[qed(verified, spec = "../multisig.qedspec", handler = "reject", hash = "84367b63404eb816", spec_hash = "5c1482681fbda8fd")]
+    #[qed(verified, spec = "../multisig.qedspec", handler = "reject", hash = "84367b63404eb816", spec_hash = "5f391aa7f571af45")]
     #[inline(always)]
     pub fn handler(&mut self, member_index: u8, bumps: &RejectBumps) -> Result<(), ProgramError> {
         guards::reject(self, member_index)?;
@@ -1100,7 +1100,7 @@ pub struct RemoveMember<'info> {
 }
 
 impl<'info> RemoveMember<'info> {
-    #[qed(verified, spec = "../multisig.qedspec", handler = "remove_member", hash = "3dc3392b8e529e3c", spec_hash = "107b30cb160a4348")]
+    #[qed(verified, spec = "../multisig.qedspec", handler = "remove_member", hash = "3dc3392b8e529e3c", spec_hash = "f13c3ba7bc2a27f6")]
     #[inline(always)]
     pub fn handler(&mut self, bumps: &RemoveMemberBumps) -> Result<(), ProgramError> {
         guards::remove_member(self)?;
@@ -1124,7 +1124,7 @@ pub mod errors;
 pub mod state;
 pub mod guards;
 
-declare_id!("11111111111111111111111111111111");
+declare_id!("DRaRMV9qeti1v78tjANtxzv9ejugh1GUyco6kn2QBQTK");
 
 #[program]
 mod multisig {

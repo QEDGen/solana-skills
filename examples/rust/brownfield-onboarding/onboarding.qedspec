@@ -8,7 +8,7 @@
 // source.
 
 spec BrownfieldOnboarding
-program_id "11111111111111111111111111111111"
+program_id "8Mi5iVyLBjP5PYup1GhpJ4v148xk2cCoaSH8bZv7SEsD"
 
 type State
   | Active of {
