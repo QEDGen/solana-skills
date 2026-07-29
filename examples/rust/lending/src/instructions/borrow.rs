@@ -28,7 +28,7 @@ pub struct Borrow<'info> {
 }
 
 impl<'info> Borrow<'info> {
-    #[qed(verified, spec = "lending.qedspec", handler = "borrow", hash = "97223e1769b4da86", spec_hash = "e88d76afa81506dc")]
+    #[qed(verified, spec = "lending.qedspec", handler = "borrow", hash = "97223e1769b4da86", spec_hash = "93afa223a5d36fa7")]
     #[inline(always)]
     pub fn handler(&mut self, amount: u64, collateral: u64, bumps: &BorrowBumps) -> Result<(), ProgramError> {
         guards::borrow(self, amount, collateral)?;

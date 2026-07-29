@@ -2,25 +2,27 @@ use anyhow::Result;
 use std::path::Path;
 
 use crate::check::{self, ParsedHandler, ParsedHandlerAccount, ParsedSpec};
-use crate::codegen_shared::{map_type, to_pascal_case, write_generated_file};
+use crate::codegen_shared::{
+    map_type, map_type_parallax_host, to_pascal_case, write_generated_file,
+};
 use crate::Target;
 
-/// Generate QuasarSVM integration test scaffolds: tests run the compiled
-/// binary in an in-process Solana VM, exercising the full instruction flow
+/// Generate Parallax integration test scaffolds: tests run the compiled
+/// binary in an in-process LiteSVM world, exercising the full instruction flow
 /// (account validation, deserialization, handler execution, state
 /// persistence) — unlike unit tests, which run effects on a plain struct.
 ///
-/// The scaffold is QuasarSVM-shaped end-to-end (`quasar_svm` +
-/// `<name>-client` imports, `#![no_std]`-style `extern crate std`
-/// preamble) and does not compile inside an Anchor or Pinocchio crate —
+/// The instruction-builder edge is Quasar-shaped (`program::client` imports),
+/// while world setup, execution, outcomes, and checks use Parallax. It does
+/// not yet compile inside an Anchor or Pinocchio crate —
 /// `generate` refuses non-Quasar targets so `--target anchor` can't
 /// silently drop a broken artifact into the crate.
 pub fn generate(spec_path: &Path, output_path: &Path, target: Target) -> Result<()> {
     if !matches!(target, Target::Quasar) {
         anyhow::bail!(
-            "Integration-test codegen is Quasar-only today — the scaffold \
-             imports quasar_svm and the generated <name>-client crate, which \
-             don't compile for a {:?} program.",
+            "Integration-test codegen is Quasar-client-only today — the scaffold \
+             imports the generated program::client module, which \
+             doesn't exist for a {:?} program.",
             target
         );
     }
@@ -45,9 +47,244 @@ pub fn generate(spec_path: &Path, output_path: &Path, target: Target) -> Result<
 
     let out = render(&spec, &hash)?;
     write_generated_file(output_path, &out)?;
+    ensure_parallax_dev_dependencies(output_path)?;
     eprintln!("  wrote {}", output_path.display());
 
     Ok(())
+}
+
+/// Upstream Parallax repository. Not published to crates.io, so consumers
+/// pin a git revision.
+pub(crate) const PARALLAX_GIT_URL: &str = "https://github.com/blueshift-gg/parallax";
+
+/// The pinned Parallax revision — the SINGLE source for it in this repo.
+///
+/// It previously appeared as three independent literals (this dependency
+/// set, the header comment the scaffold emits, and the compile-gate
+/// fixture's manifest). Two of those drifting apart is a silent failure in
+/// both directions: a scaffold whose comment advertises a revision its own
+/// `[dev-dependencies]` does not use, and — worse — a gate that compiles the
+/// OLD revision, stays green, and stops gating what actually ships.
+/// `parallax_gate_fixture_pins_the_same_revision` holds the fixture to this.
+///
+/// Bumping: change this, run
+/// `cargo test -p qedgen-solana-skills --test parallax_integration_gate -- --ignored`,
+/// and regenerate the bundled examples.
+pub(crate) const PARALLAX_GIT_REV: &str = "804c5662832c65330e7299901cc5195a78d87256";
+
+/// The `parallax-svm` dependency line, built from the pin above.
+fn parallax_dependency_line() -> String {
+    format!("parallax-svm = {{ git = \"{PARALLAX_GIT_URL}\", rev = \"{PARALLAX_GIT_REV}\" }}")
+}
+
+/// Solana crates held at the versions Parallax 0.1 resolves against. A
+/// dependency's `Cargo.lock` is not inherited by consumers, so without these
+/// a fresh resolve straddles the wincode 0.5/0.6 boundary and fails to
+/// compile.
+///
+/// ## Why this list, and why it grows
+///
+/// `litesvm` 0.15 requires `wincode ^0.5.5`, so 0.5 is the line everything
+/// here must stay on. The solana crates each declare `wincode ^0.5` or
+/// `^0.6`, and a crate that crosses does so in a MINOR bump — `solana-rent`
+/// 4.3.0 → 4.4.0, `solana-signature` 3.4.1 → 3.5.0, `solana-epoch-schedule`
+/// 3.2.0 → 3.3.0, `solana-fee-calculator` 3.2.2 → 3.3.0. Every parent asks
+/// for them with a caret, so a fresh resolve silently takes the crossing
+/// version and lands two incompatible `wincode` majors in one graph.
+///
+/// The failure is not a version error. Both wincodes build; the derive on
+/// `solana-transaction` then targets 0.5's `SchemaRead` while
+/// `solana-signature` implements 0.6's, and rustc reports an unsatisfied
+/// trait bound deep inside a dependency, with "there are multiple different
+/// versions of crate `wincode`" as the only clue. `verify --scaffold`
+/// classifies that as `Unresolved` rather than a codegen defect (#364).
+///
+/// So this list is not a stable set: it is "every crate that has ever
+/// crossed the boundary". When the gate fails this way again, find the new
+/// one with `cargo tree -i wincode@0.6.0 --depth 1` and pin its last 0.5
+/// version here. Bumping past the boundary wholesale is the real fix and
+/// needs Parallax to move to `wincode` 0.6 first.
+pub(crate) fn parallax_dev_dependencies() -> String {
+    format!(
+        "{}\n\
+         solana-sdk-ids = \"3.1\"\n\
+         solana-address = \"=2.6.1\"\n\
+         solana-hash = \"=4.5.0\"\n\
+         solana-nonce = \"=3.2.0\"\n\
+         solana-short-vec = \"=3.2.2\"\n\
+         solana-last-restart-slot = \"=3.1.0\"\n\
+         solana-slot-history = \"=3.1.0\"\n\
+         solana-epoch-rewards = \"=3.1.0\"\n\
+         solana-slot-hashes = \"=3.1.0\"\n\
+         solana-rent = \"=4.3.0\"\n\
+         solana-signature = \"=3.4.1\"\n\
+         solana-epoch-schedule = \"=3.2.0\"\n\
+         solana-fee-calculator = \"=3.2.2\"\n\
+         spl-token = {{ version = \"=9.0.0\", default-features = false, features = [\"no-entrypoint\"] }}\n\
+         wincode = {{ version = \"0.5\", features = [\"derive\"] }}\n",
+        parallax_dependency_line()
+    )
+}
+
+/// The dependency names [`parallax_dev_dependencies`] emits, read off that
+/// function rather than restated beside it.
+///
+/// These were two hand-kept lists, which is the #363 bug class in miniature:
+/// a name present in the emitted block but missing here is not detected as
+/// subtabled, so upserting a manifest that declares it as
+/// `[dev-dependencies.<name>]` writes a duplicate key and the user's
+/// manifest stops parsing. The pin list grows every time a solana crate
+/// crosses the wincode boundary, so the drift window is not hypothetical.
+fn parallax_dev_dep_names() -> Vec<String> {
+    parallax_dev_dependencies()
+        .lines()
+        .filter_map(|line| {
+            let key = line.split('=').next()?.trim();
+            (!key.is_empty()).then(|| key.to_string())
+        })
+        .collect()
+}
+
+/// Upsert the dependencies owned by the Parallax integration artifact into
+/// the generated program manifest. Integration tests conventionally live at
+/// `<crate>/tests/*.rs`, so only that crate root is considered; an arbitrary
+/// ancestor manifest must never be mutated for a custom output path.
+fn ensure_parallax_dev_dependencies(output_path: &Path) -> Result<()> {
+    let Some(crate_root) = output_path.parent().and_then(Path::parent) else {
+        return Ok(());
+    };
+    let manifest = crate_root.join("Cargo.toml");
+    if !manifest.is_file() {
+        return Ok(());
+    }
+
+    let existing = std::fs::read_to_string(&manifest)?;
+    let merged = upsert_dev_dependencies(&existing);
+    if merged == existing {
+        return Ok(());
+    }
+    std::fs::write(&manifest, merged)?;
+    // Cargo.toml is user-owned (see the artifact table in SKILL.md), unlike
+    // the generated test beside it. Editing it silently leaves the user to
+    // discover 12 new dependencies from a diff.
+    eprintln!(
+        "  updated {} ([dev-dependencies] for Parallax)",
+        manifest.display()
+    );
+    Ok(())
+}
+
+/// Strip a trailing `# comment` from a TOML line, respecting quoted strings
+/// so a `#` inside a value (`rev = "a#b"`) is not treated as a comment.
+fn strip_toml_comment(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    let mut quote: Option<u8> = None;
+    for (index, &byte) in bytes.iter().enumerate() {
+        match quote {
+            Some(open) if byte == open => quote = None,
+            Some(_) => {}
+            None if byte == b'"' || byte == b'\'' => quote = Some(byte),
+            None if byte == b'#' => return &line[..index],
+            None => {}
+        }
+    }
+    line
+}
+
+/// Is this line the `[dev-dependencies]` table header? Matched after
+/// stripping a trailing comment, so `[dev-dependencies]  # test only` counts.
+/// Getting this wrong is not a cosmetic miss: an unmatched header sends the
+/// upsert down the append path, which writes a SECOND `[dev-dependencies]`
+/// table and makes the user's manifest fail to parse.
+fn is_dev_dependencies_header(line: &str) -> bool {
+    strip_toml_comment(line).trim() == "[dev-dependencies]"
+}
+
+/// Does this line open a new TOML table (ending the `[dev-dependencies]`
+/// body)? Also matched after stripping comments, and true for array tables
+/// (`[[bin]]`) and dotted tables (`[target.'cfg(unix)'.dev-dependencies]`).
+fn is_table_header(line: &str) -> bool {
+    let trimmed = strip_toml_comment(line).trim();
+    trimmed.starts_with('[') && trimmed.ends_with(']')
+}
+
+/// Replace just the `[dev-dependencies]` body while preserving every other
+/// byte-level TOML header, including array tables such as `[[bin]]`.
+///
+/// Byte-level splicing rather than a parse/serialize round-trip: the `toml`
+/// crate would reformat the whole manifest and drop the user's comments.
+fn upsert_dev_dependencies(existing: &str) -> String {
+    const HEADER: &str = "[dev-dependencies]";
+
+    // A dependency may also be declared as its own subtable
+    // (`[dev-dependencies.parallax-svm]`). Emitting the inline key as well
+    // would leave the manifest with a duplicate key, so leave those alone
+    // and let the existing declaration stand.
+    let names = parallax_dev_dep_names();
+    let subtabled: Vec<&str> = names
+        .iter()
+        .map(String::as_str)
+        .filter(|name| {
+            existing
+                .lines()
+                .any(|line| strip_toml_comment(line).trim() == format!("[dev-dependencies.{name}]"))
+        })
+        .collect();
+    let owned_names: Vec<&str> = names
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !subtabled.contains(name))
+        .collect();
+    let dev_dependencies = parallax_dev_dependencies();
+    let additions: String = dev_dependencies
+        .lines()
+        .filter(|line| {
+            let key = line.split('=').next().unwrap_or("").trim();
+            !subtabled.contains(&key)
+        })
+        .map(|line| format!("{line}\n"))
+        .collect();
+
+    let mut offset = 0;
+    let mut body_start = None;
+    let mut body_end = existing.len();
+
+    for line in existing.split_inclusive('\n') {
+        if body_start.is_none() {
+            if is_dev_dependencies_header(line) {
+                body_start = Some(offset + line.len());
+            }
+        } else if is_table_header(line) {
+            body_end = offset;
+            break;
+        }
+        offset += line.len();
+    }
+
+    let Some(body_start) = body_start else {
+        let mut out = existing.to_string();
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        if !out.ends_with("\n\n") {
+            out.push('\n');
+        }
+        out.push_str(HEADER);
+        out.push('\n');
+        out.push_str(&additions);
+        return out;
+    };
+
+    let body = crate::codegen_shared::merge_dependencies_section(
+        &existing[body_start..body_end],
+        &additions,
+        &owned_names,
+    );
+    let mut out = String::with_capacity(existing.len() + body.len());
+    out.push_str(&existing[..body_start]);
+    out.push_str(&body);
+    out.push_str(&existing[body_end..]);
+    out
 }
 
 /// Render the complete integration test file.
@@ -59,8 +296,8 @@ pub fn render(spec: &ParsedSpec, hash: &str) -> Result<String> {
 
     // Header
     out.push_str(&crate::banner::banner(Some("DO NOT EDIT"), hash));
-    out.push_str("// QuasarSVM integration test scaffold.\n");
-    out.push_str("// Tests run against the compiled .so binary via quasar-svm.\n");
+    out.push_str("// Parallax integration test scaffold.\n");
+    out.push_str("// Tests run against the compiled .so binary via parallax-svm/LiteSVM.\n");
     out.push_str("//\n");
     out.push_str("// AGENT: fill instruction builder data and assertions marked with todo!().\n");
     out.push_str("//\n");
@@ -68,37 +305,49 @@ pub fn render(spec: &ParsedSpec, hash: &str) -> Result<String> {
     out.push_str("//   1. Build your program: cargo build-sbf (or cargo build --target bpfel-unknown-none)\n");
     out.push_str("//   2. Run tests: cargo test --features client\n");
     out.push_str("//\n");
-    out.push_str("// Dev-dependencies (add to Cargo.toml):\n");
+    // Rendered from `parallax_dev_dependencies()` rather than repeated as
+    // literals: a comment advertising a different revision than the one
+    // `codegen` actually writes into Cargo.toml is a lie the user would act
+    // on. `qedgen codegen --integration` upserts these automatically; the
+    // block is here so the file is self-describing when read on its own.
+    out.push_str("// Dev-dependencies (upserted into Cargo.toml by qedgen):\n");
     out.push_str("//   [dev-dependencies]\n");
-    out.push_str(&format!(
-        "//   {}-client = {{ path = \"client\" }}\n",
-        program_name
-    ));
-    out.push_str("//   quasar-svm = { git = \"https://github.com/blueshift-gg/quasar-svm\" }\n\n");
+    for (index, line) in parallax_dev_dependencies().lines().enumerate() {
+        // The compatibility pins start after parallax-svm + solana-sdk-ids.
+        if index == 2 {
+            out.push_str(
+                "//   # Parallax 0.1 compatibility pins; dependency Cargo.lock files are not inherited.\n",
+            );
+        }
+        out.push_str(&format!("//   {line}\n"));
+    }
+    out.push('\n');
 
     // Imports
     out.push_str("extern crate std;\n");
     out.push_str("use {\n");
-    if needs_token {
-        out.push_str("    alloc::vec,\n");
-    }
     out.push_str(&format!(
-        "    {}_client::*,\n",
+        "    {} as program,\n",
         program_name.replace('-', "_")
     ));
-    if needs_token {
-        out.push_str("    quasar_svm::{Account, Instruction, Pubkey, QuasarSvm},\n");
-        out.push_str(
-            "    spl_token_interface::state::{Account as TokenAccount, AccountState, Mint},\n",
-        );
-    } else {
-        out.push_str("    quasar_svm::{Account, Instruction, Pubkey, QuasarSvm},\n");
+    out.push_str("    program::client::*,\n");
+    if !spec.state_fields.is_empty() {
+        out.push_str("    program::state::*,\n");
     }
-    out.push_str("    std::{println, vec},\n");
+    out.push_str("    parallax_svm::prelude::*,\n");
+    if needs_token {
+        out.push_str("    spl_token::{\n");
+        out.push_str("        solana_program::{program_option::COption, program_pack::Pack},\n");
+        out.push_str(
+            "        state::{Account as SplTokenAccount, AccountState, Mint as SplMint},\n",
+        );
+        out.push_str("    },\n");
+    }
+    out.push_str("    std::vec,\n");
     out.push_str("};\n\n");
 
     // ── Setup ────────────────────────────────────────────────────────────────
-    emit_setup(&mut out, &program_name, needs_token);
+    emit_setup(&mut out);
 
     // ── Account helpers ──────────────────────────────────────────────────────
     emit_account_helpers(&mut out, &state_name, spec, needs_token)?;
@@ -127,20 +376,19 @@ pub fn render(spec: &ParsedSpec, hash: &str) -> Result<String> {
 // Code generation helpers
 // ============================================================================
 
-fn emit_setup(out: &mut String, program_name: &str, needs_token: bool) {
+fn emit_setup(out: &mut String) {
     out.push_str("// ── Setup ────────────────────────────────────────────────────────\n\n");
-    out.push_str("fn setup() -> QuasarSvm {\n");
-    out.push_str(&format!(
-        "    let elf = std::fs::read(\"../../target/deploy/{}.so\").unwrap();\n",
-        program_name.replace('-', "_")
-    ));
-    if needs_token {
-        out.push_str("    QuasarSvm::new()\n");
-        out.push_str("        .with_program(&crate::ID, &elf)\n");
-        out.push_str("        .with_token_program()\n");
-    } else {
-        out.push_str("    QuasarSvm::new().with_program(&crate::ID, &elf)\n");
-    }
+    // `crate_name` rather than a hardcoded relative path: Parallax resolves
+    // the artifact by honouring `PARALLAX_PROGRAM_PATH` first, then walking
+    // ancestors for `target/deploy/<crate>.so`. A literal
+    // "../../target/deploy/x.so" is CWD-relative and only holds when the
+    // package sits exactly two levels under the workspace root. This is the
+    // same resolution `#[parallax_test]` itself uses.
+    out.push_str("fn setup() -> Ctx {\n");
+    out.push_str("    Ctx::builder(program::ID)\n");
+    out.push_str("        .crate_name(env!(\"CARGO_PKG_NAME\"))\n");
+    out.push_str("        .build()\n");
+    out.push_str("        .expect(\"load compiled program into Parallax\")\n");
     out.push_str("}\n\n");
 }
 
@@ -163,15 +411,26 @@ fn emit_account_helpers(
             "/// Create a pre-populated {} account (program-owned).\n",
             state_name
         ));
+        // Every call site is an AGENT hole (`empty_account(x) /* AGENT: use
+        // state_account() */`), so this is dead until the agent wires it up.
+        // Without the allow, a DO-NOT-EDIT file warns on generation.
+        out.push_str("#[allow(dead_code)]\n");
         out.push_str("fn state_account(\n");
         out.push_str("    address: Pubkey,\n");
+        // The Parallax-host mapping, not the standalone one. This helper
+        // builds the program's own state struct, so a `[u8; 32]` parameter
+        // against the struct's real field type is a type error the moment an
+        // agent wires the helper up.
+        //
+        // Not `map_type_quasar` either (#372): that emits `Address`, which
+        // this file cannot name — Parallax's prelude exports `Pubkey`, and
+        // the program's `use quasar_lang::prelude::*` is private, so
+        // `use program::state::*` does not bring `Address` along. The two
+        // denote one type (`solana-pubkey` re-exports
+        // `solana_address::Address as Pubkey`), so the struct still matches.
         for (name, ty) in fields {
-            let rust_ty = map_type(ty, spec)?;
-            if rust_ty == "Address" {
-                out.push_str(&format!("    {}: Pubkey,\n", name));
-            } else {
-                out.push_str(&format!("    {}: {},\n", name, rust_ty));
-            }
+            let rust_ty = map_type_parallax_host(ty, spec)?;
+            out.push_str(&format!("    {}: {},\n", name, rust_ty));
         }
         out.push_str("    bump: u8,\n");
         out.push_str(") -> Account {\n");
@@ -185,7 +444,7 @@ fn emit_account_helpers(
         out.push_str("        address,\n");
         out.push_str("        lamports: 2_000_000,\n");
         out.push_str("        data: wincode::serialize(&state).unwrap(),\n");
-        out.push_str("        owner: crate::ID,\n");
+        out.push_str("        owner: program::ID,\n");
         out.push_str("        executable: false,\n");
         out.push_str("    }\n");
         out.push_str("}\n\n");
@@ -213,29 +472,35 @@ fn emit_happy_path_test(
         out.push_str(&format!("/// Happy path: {}\n", doc.trim()));
     }
     out.push_str(&format!("#[test]\nfn {}() {{\n", test_name));
-    out.push_str("    let mut svm = setup();\n\n");
+    out.push_str("    let mut ctx = setup();\n\n");
 
     // Emit system_program + rent if handler initializes accounts
     let accounts = &handler.accounts;
     let is_init_handler = handler.pre_status.as_deref() == Some("Uninitialized")
         || handler.pre_status.as_deref() == Some("Empty");
-    let has_init = is_init_handler && accounts.iter().any(|a| a.pda_seeds.is_some());
     let has_system = accounts
         .iter()
         .any(|a| a.is_program && a.name.contains("system"));
 
     out.push_str("    // Account addresses\n");
     if has_system {
-        out.push_str("    let system_program = quasar_svm::system_program::ID;\n");
+        out.push_str("    let system_program = system_program::ID;\n");
     }
     let has_token_program = accounts
         .iter()
-        .any(|a| a.is_program && a.account_type.as_deref() == Some("token"));
+        .any(|a| a.is_program && a.name.contains("token"));
     if has_token_program {
-        out.push_str("    let token_program = quasar_svm::SPL_TOKEN_PROGRAM_ID;\n");
+        out.push_str("    let token_program = SPL_TOKEN_PROGRAM_ID;\n");
     }
-    if has_init {
-        out.push_str("    let rent = quasar_svm::solana_sdk_ids::sysvar::rent::ID;\n");
+    if accounts.iter().any(|a| a.name == "rent") {
+        out.push_str("    let rent = solana_sdk_ids::sysvar::rent::ID;\n");
+    }
+    // A stand-in seed derives a PDA that matches nothing in the pre-state,
+    // so it must carry an AGENT marker like every other hole in this file.
+    for seed in missing_pda_seed_bindings(handler, spec) {
+        out.push_str(&format!(
+            "    let {seed} = Pubkey::new_unique(); // AGENT: replace with the {seed} from pre-state\n"
+        ));
     }
 
     // Emit unique keys for non-program, non-sysvar accounts
@@ -264,7 +529,7 @@ fn emit_happy_path_test(
                     })
                     .collect();
                 out.push_str(&format!(
-                    "    let ({}, _{}_bump) = Pubkey::find_program_address(\n        &[{}],\n        &crate::ID,\n    );\n",
+                    "    let ({}, _{}_bump) = Pubkey::find_program_address(\n        &[{}],\n        &program::ID,\n    );\n",
                     acct.name,
                     acct.name,
                     seed_exprs.join(", ")
@@ -313,21 +578,21 @@ fn emit_happy_path_test(
     }
     out.push_str("    }\n    .into();\n\n");
 
-    out.push_str("    let result = svm.process_instruction(\n");
-    out.push_str("        &instruction,\n");
-    out.push_str("        &[\n");
+    out.push_str("    let outcome = ctx.execute_with(\n");
+    out.push_str("        instruction,\n");
+    out.push_str("        vec![\n");
     for acct in accounts {
         if acct.is_program {
             continue; // programs are not passed as accounts
         }
-        let helper = account_helper_call(acct, handler, spec);
+        let helper = account_helper_call(acct, handler, spec, None);
         out.push_str(&format!("            {},\n", helper));
     }
     out.push_str("        ],\n");
     out.push_str("    );\n\n");
 
     out.push_str(&format!(
-        "    assert!(result.is_ok(), \"{} failed: {{:?}}\", result.raw_result);\n",
+        "    outcome.check(Outcome::success()); // {}\n",
         handler.name
     ));
 
@@ -342,7 +607,7 @@ fn emit_happy_path_test(
                     continue;
                 }
                 out.push_str(&format!(
-                    "    // let {}_data = &result.account(&{}).unwrap().data;\n",
+                    "    // let {}_data = &outcome.account({}).unwrap().data;\n",
                     acct.name, acct.name
                 ));
             }
@@ -355,10 +620,12 @@ fn emit_happy_path_test(
         }
     }
 
-    out.push_str(&format!(
-        "\n    println!(\"  {} CU: {{}}\", result.compute_units_consumed);\n",
-        handler.name.to_uppercase()
-    ));
+    // No CU assertion is emitted. A committed transaction always spends
+    // compute units, so `Cu::spent(|cu| cu > 0)` cannot fail — it reads as
+    // coverage while proving nothing. The spec carries no CU budget, so the
+    // real bound is a measurement the agent takes once and pins here.
+    out.push_str("\n    // AGENT: pin a compute budget once measured, e.g.\n");
+    out.push_str("    //   outcome.check(Cu::spent(|cu| cu <= 20_000));\n");
     out.push_str("}\n\n");
     Ok(())
 }
@@ -381,7 +648,7 @@ fn emit_unauthorized_test(
         handler.name, who
     ));
     out.push_str(&format!("#[test]\nfn {}() {{\n", test_name));
-    out.push_str("    let mut svm = setup();\n\n");
+    out.push_str("    let mut ctx = setup();\n\n");
 
     let accounts = &handler.accounts;
     let has_system = accounts
@@ -389,19 +656,15 @@ fn emit_unauthorized_test(
         .any(|a| a.is_program && a.name.contains("system"));
     let has_token_program = accounts
         .iter()
-        .any(|a| a.is_program && a.account_type.as_deref() == Some("token"));
-    let is_init_handler = handler.pre_status.as_deref() == Some("Uninitialized")
-        || handler.pre_status.as_deref() == Some("Empty");
-    let has_init = is_init_handler && accounts.iter().any(|a| a.pda_seeds.is_some());
-
+        .any(|a| a.is_program && a.name.contains("token"));
     if has_system {
-        out.push_str("    let system_program = quasar_svm::system_program::ID;\n");
+        out.push_str("    let system_program = system_program::ID;\n");
     }
     if has_token_program {
-        out.push_str("    let token_program = quasar_svm::SPL_TOKEN_PROGRAM_ID;\n");
+        out.push_str("    let token_program = SPL_TOKEN_PROGRAM_ID;\n");
     }
-    if has_init {
-        out.push_str("    let rent = quasar_svm::solana_sdk_ids::sysvar::rent::ID;\n");
+    if accounts.iter().any(|a| a.name == "rent") {
+        out.push_str("    let rent = solana_sdk_ids::sysvar::rent::ID;\n");
     }
 
     // Create a wrong_signer that differs from the `who` account
@@ -445,37 +708,100 @@ fn emit_unauthorized_test(
     }
     out.push_str("    }\n    .into();\n\n");
 
-    out.push_str("    let result = svm.process_instruction(\n");
-    out.push_str("        &instruction,\n");
-    out.push_str("        &[\n");
+    out.push_str("    let outcome = ctx.execute_with(\n");
+    out.push_str("        instruction,\n");
+    out.push_str("        vec![\n");
     for acct in accounts {
         if acct.is_program {
             continue;
         }
         if acct.name == *who {
-            out.push_str(&format!("            signer(wrong_{}),\n", who));
+            out.push_str(&format!("            signer_account(wrong_{}),\n", who));
         } else {
-            let helper = account_helper_call(acct, handler, spec);
+            let helper = account_helper_call(acct, handler, spec, Some(who));
             out.push_str(&format!("            {},\n", helper));
         }
     }
     out.push_str("        ],\n");
     out.push_str("    );\n\n");
 
-    out.push_str(&format!(
-        "    assert!(result.is_err(), \"{} should reject wrong {}\");\n",
-        handler.name, who
-    ));
+    // Assert the SPECIFIC rejection, not merely "some error". `is_err()`
+    // also passes when the instruction failed to deserialize or an account
+    // was missing, so an authorization test can go green while the
+    // authorization check under test never ran. Pick the same error the
+    // program's own guards return for this case (`codegen_shared::guards`
+    // makes the identical choice), so the assertion tracks the emitted
+    // program rather than a guess. A too-tight assertion fails loudly,
+    // which is the right direction for a negative test.
+    match authorization_error(spec) {
+        Some(error) => {
+            let err_enum = format!("{}Error", to_pascal_case(&spec.program_name));
+            out.push_str(&format!(
+                "    // {} must reject a forged {} with the spec's authorization error.\n",
+                handler.name, who
+            ));
+            out.push_str(&format!(
+                "    outcome.check(Outcome::error(program::errors::{}::{}));\n",
+                err_enum, error
+            ));
+        }
+        None => {
+            // The spec declares no authorization error, so there is nothing
+            // to name. Keep the weak form but say why it is weak instead of
+            // letting it read as a real authorization assertion.
+            out.push_str(&format!(
+                "    // AGENT: the spec declares no authorization error, so this only\n\
+                 \x20   // asserts that SOME error fired — it also passes on a deserialization\n\
+                 \x20   // or missing-account failure. Declare the error in the spec, then\n\
+                 \x20   // assert it with `outcome.check(Outcome::error(..))`.\n\
+                 \x20   assert!(outcome.is_err(), \"{} should reject wrong {}\");\n",
+                handler.name, who
+            ));
+        }
+    }
     out.push_str("}\n\n");
     Ok(())
+}
+
+/// The error a forged signer is expected to produce: `Unauthorized` when the
+/// generated enum carries it, else `InvalidLifecycle`, matching the
+/// preference order `codegen_shared::guards` uses for the program's own
+/// authorization checks.
+///
+/// #363 — this used to read `spec.error_codes` directly, which is the
+/// DECLARED set, not the EMITTED one. `codegen_mir` also synthesizes
+/// `InvalidLifecycle` when any handler has a non-init pre-status, and this
+/// function had no way to ask, so it deliberately under-approximated and
+/// returned `None`. The bundled multisig spec is exactly that shape: its
+/// enum does carry `InvalidLifecycle`, yet every forged-signer test degraded
+/// to the marked weak form for no reason.
+///
+/// Now both sides read `emitted_error_variants`, so this names a variant
+/// exactly when the enum will have one. `None` still means "degrade to the
+/// marked weak form" — it just no longer happens spuriously.
+///
+/// The lane is Quasar-only (`generate` rejects other targets), so the target
+/// is known here.
+fn authorization_error(spec: &ParsedSpec) -> Option<&'static str> {
+    ["Unauthorized", "InvalidLifecycle"]
+        .into_iter()
+        .find(|candidate| {
+            crate::codegen_shared::declares_error_variant(spec, Target::Quasar, candidate)
+        })
 }
 
 fn emit_lifecycle_sequence_test(out: &mut String, spec: &ParsedSpec) {
     out.push_str("// ── Lifecycle sequence ────────────────────────────────────────────\n\n");
     out.push_str("/// End-to-end lifecycle: execute operations in spec order.\n");
     out.push_str("/// AGENT: fill in instruction parameters and account setup for each step.\n");
-    out.push_str("#[test]\nfn test_lifecycle_sequence() {\n");
-    out.push_str("    let mut svm = setup();\n\n");
+    out.push_str("#[test]\n");
+    // The body ends in `todo!()`, so `ctx` is unused until an agent fills
+    // the sequence in. Keeping the binding named `ctx` (rather than `_ctx`)
+    // means the agent does not have to rename it; the allow keeps a
+    // DO-NOT-EDIT file warning-clean until then.
+    out.push_str("#[allow(unused_mut, unused_variables)] // until the sequence is filled in\n");
+    out.push_str("fn test_lifecycle_sequence() {\n");
+    out.push_str("    let mut ctx = setup();\n\n");
 
     let lifecycle_handlers: Vec<&ParsedHandler> = spec
         .handlers
@@ -527,23 +853,49 @@ fn emit_lifecycle_sequence_test(out: &mut String, spec: &ParsedSpec) {
 // ============================================================================
 
 /// Return an appropriate helper function call for an account entry.
+///
+/// `forged` names the `who` account that the unauthorized test replaces with
+/// a `wrong_<who>` binding. Every inferred reference has to follow that
+/// rename: the authorization test never binds `<who>` itself, so a helper
+/// that still names it does not compile. This is invisible to a text
+/// assertion — only `parallax_integration_gate` catches it.
 fn account_helper_call(
     acct: &ParsedHandlerAccount,
     handler: &ParsedHandler,
     _spec: &ParsedSpec,
+    forged: Option<&str>,
 ) -> String {
+    // Resolve an account name to the identifier actually in scope.
+    let bind = |name: &str| -> String {
+        match forged {
+            Some(who) if who == name => format!("wrong_{who}"),
+            _ => name.to_string(),
+        }
+    };
+
     if acct.is_signer && !acct.is_program {
-        return format!("signer({})", acct.name);
+        return format!("signer_account({})", bind(&acct.name));
     }
 
-    // Token accounts
+    // Token mints and accounts. Every argument the spec does not pin is
+    // inferred, and every inferred argument is named in the AGENT marker:
+    // a narrower marker than the guess behind it reads as "this is filled
+    // in" and hides a placeholder the agent must replace.
+    if acct.account_type.as_deref() == Some("mint") || acct.name == "mint" {
+        // No spec field carries a mint authority, so this is always a guess.
+        let authority = handler
+            .accounts
+            .iter()
+            .find(|account| account.is_signer)
+            .map(|account| bind(&account.name))
+            .unwrap_or_else(|| "Pubkey::new_unique()".to_string());
+        return format!(
+            "mint_account({}, {}) /* AGENT: confirm mint authority */",
+            bind(&acct.name),
+            authority
+        );
+    }
     if let Some(ref account_type) = acct.account_type {
-        if account_type == "mint" {
-            return format!(
-                "mint_account({}, Pubkey::new_unique()) /* AGENT: set authority */",
-                acct.name
-            );
-        }
         if account_type == "token" {
             // Infer init from handler lifecycle + pda_seeds
             let is_init = {
@@ -552,11 +904,46 @@ fn account_helper_call(
                 init_lifecycle && acct.pda_seeds.is_some()
             };
             if is_init {
-                return format!("empty({})", acct.name);
+                return format!("empty_account({})", acct.name);
             }
+            // `unresolved` collects every argument that did NOT come from
+            // the spec. A handler with no `mint` account (e.g. escrow's
+            // `exchange`) gets a fresh `Pubkey::new_unique()` per token
+            // account, so the accounts end up on mutually incompatible
+            // mints and no transfer between them can succeed. That must be
+            // stated, not left under a marker that only mentions the amount.
+            let mut unresolved: Vec<&str> = Vec::new();
+            let mint = match handler.accounts.iter().find(|a| a.name == "mint") {
+                Some(account) => bind(&account.name),
+                None => {
+                    unresolved.push("mint");
+                    "Pubkey::new_unique()".to_string()
+                }
+            };
+            let owner = match acct.authority.as_deref() {
+                // `authority` is spec-declared, so it is not a guess.
+                Some(authority) => bind(authority),
+                None => {
+                    unresolved.push("owner");
+                    handler
+                        .accounts
+                        .iter()
+                        .find(|a| a.is_signer)
+                        .map(|a| bind(&a.name))
+                        .unwrap_or_else(|| "Pubkey::new_unique()".to_string())
+                }
+            };
+            let marker = if unresolved.is_empty() {
+                " /* AGENT: tune amount */".to_string()
+            } else {
+                format!(" /* AGENT: set {}; tune amount */", unresolved.join(", "))
+            };
             return format!(
-                "token_account({}, Pubkey::new_unique(), Pubkey::new_unique(), 1_000_000) /* AGENT: set mint, owner, amount */",
-                acct.name
+                "token_account({}, {}, {}, 1_000_000){}",
+                bind(&acct.name),
+                mint,
+                owner,
+                marker
             );
         }
     }
@@ -568,18 +955,57 @@ fn account_helper_call(
         init_lifecycle && !acct.is_signer && acct.pda_seeds.is_some()
     };
     if is_init {
-        return format!("empty({})", acct.name);
+        return format!("empty_account({})", bind(&acct.name));
     }
 
     // Mutable non-signer, non-program accounts need pre-populated state
     if acct.is_writable && !acct.is_signer && !acct.is_program {
         return format!(
-            "empty({}) /* AGENT: use state_account() with appropriate fields */",
-            acct.name
+            "empty_account({}) /* AGENT: use state_account() with appropriate fields */",
+            bind(&acct.name)
         );
     }
 
-    format!("empty({})", acct.name)
+    format!("empty_account({})", bind(&acct.name))
+}
+
+/// Seed values used to derive a handler PDA can come from persisted state
+/// without also appearing as instruction accounts (for example
+/// `pda escrow ["escrow", initializer]` on a later `exchange` handler).
+/// Declare deterministic stand-ins so the generated scaffold is syntactically
+/// complete; the agent replaces them with values decoded from the pre-state.
+fn missing_pda_seed_bindings(handler: &ParsedHandler, spec: &ParsedSpec) -> Vec<String> {
+    let mut missing = Vec::new();
+    for account in &handler.accounts {
+        let Some(seeds) = &account.pda_seeds else {
+            continue;
+        };
+        let Some(pda) = spec
+            .pdas
+            .iter()
+            .find(|pda| !seeds.is_empty() && pda.name == account.name)
+        else {
+            continue;
+        };
+        for seed in &pda.seeds {
+            let seed = seed.trim();
+            let is_literal = seed.starts_with('"') || seed.starts_with('\'');
+            let is_identifier = !seed.is_empty()
+                && seed.chars().enumerate().all(|(index, ch)| {
+                    ch == '_' || ch.is_ascii_alphanumeric() && (index > 0 || !ch.is_ascii_digit())
+                });
+            let already_bound = handler.accounts.iter().any(|account| account.name == seed)
+                || handler.takes_params.iter().any(|(name, _)| name == seed);
+            if !is_literal
+                && is_identifier
+                && !already_bound
+                && !missing.iter().any(|existing| existing == seed)
+            {
+                missing.push(seed.to_string());
+            }
+        }
+    }
+    missing
 }
 
 /// Default value for a Rust type (for parameter placeholders).
@@ -613,10 +1039,13 @@ mod tests {
         let spec = chumsky_adapter::parse_str(MULTISIG_SPEC).unwrap();
         let out = render(&spec, "test").expect("render");
         // Has setup
-        assert!(out.contains("fn setup() -> QuasarSvm"));
+        assert!(out.contains("fn setup() -> Ctx"));
+        assert!(out.contains("parallax_svm::prelude::*"));
+        assert!(out.contains("ctx.execute_with("));
+        assert!(out.contains("outcome.check(Outcome::success())"));
         // Has signer/empty helpers
-        assert!(out.contains("fn signer(address: Pubkey)"));
-        assert!(out.contains("fn empty(address: Pubkey)"));
+        assert!(out.contains("fn signer_account(address: Pubkey)"));
+        assert!(out.contains("fn empty_account(address: Pubkey)"));
         // Has per-operation tests
         assert!(out.contains("fn test_create_vault()"));
         assert!(out.contains("fn test_propose()"));
@@ -626,8 +1055,9 @@ mod tests {
         assert!(out.contains("fn test_create_vault_unauthorized()"));
         // Has lifecycle sequence
         assert!(out.contains("fn test_lifecycle_sequence()"));
-        // Uses multisig client
-        assert!(out.contains("multisig_client::*"));
+        // Uses the Quasar program's generated host-side client module.
+        assert!(out.contains("multisig as program"));
+        assert!(out.contains("program::client::*"));
         // Uses instruction structs
         assert!(out.contains("CreateVaultInstruction"));
     }
@@ -639,11 +1069,332 @@ mod tests {
         // Escrow uses SPL tokens — should have token helpers
         assert!(out.contains("fn mint_account("));
         assert!(out.contains("fn token_account("));
-        assert!(out.contains(".with_token_program()"));
+        assert!(out.contains("SplMint::pack"));
+        assert!(out.contains("SplTokenAccount::pack"));
+        assert!(out.contains("SPL_TOKEN_PROGRAM_ID"));
         // Should have test for each operation
         assert!(out.contains("fn test_initialize()"));
         assert!(out.contains("fn test_exchange()"));
         assert!(out.contains("fn test_cancel()"));
+    }
+
+    /// An AGENT marker must name every argument the codegen guessed. Escrow's
+    /// `exchange` has no `mint` account, so each token account gets its own
+    /// `Pubkey::new_unique()` mint and they end up mutually incompatible. A
+    /// marker that mentions only the amount would hide that.
+    #[test]
+    fn inferred_token_arguments_are_named_in_the_agent_marker() {
+        let spec = chumsky_adapter::parse_str(ESCROW_SPEC).unwrap();
+        let out = render(&spec, "test").expect("render");
+
+        assert!(
+            out.contains("/* AGENT: set mint, owner; tune amount */"),
+            "a token account with neither mint nor authority resolved must name both:\n{out}"
+        );
+        assert!(
+            out.contains("/* AGENT: confirm mint authority */"),
+            "mint authority is always inferred and must say so:\n{out}"
+        );
+        // A spec-declared `authority` is not a guess, so `owner` drops out of
+        // the marker while the unresolved `mint` stays.
+        assert!(
+            out.contains("/* AGENT: set mint; tune amount */"),
+            "a spec-declared authority must not be reported as inferred:\n{out}"
+        );
+        // The pre-fix marker claimed only the amount needed attention.
+        assert!(
+            !out.contains("Pubkey::new_unique(), taker, 1_000_000) /* AGENT: tune amount */"),
+            "a placeholder mint must never sit behind an amount-only marker:\n{out}"
+        );
+    }
+
+    /// `Cu::spent(|cu| cu > 0)` holds for every committed transaction, so it
+    /// reads as coverage while proving nothing.
+    #[test]
+    fn no_tautological_compute_unit_assertion_is_emitted() {
+        let spec = chumsky_adapter::parse_str(ESCROW_SPEC).unwrap();
+        let out = render(&spec, "test").expect("render");
+
+        assert!(
+            !out.contains("Cu::spent(|cu| cu > 0)"),
+            "an assertion that cannot fail must not be emitted:\n{out}"
+        );
+        assert!(
+            out.contains("// AGENT: pin a compute budget once measured"),
+            "the scaffold must point at a real budget instead:\n{out}"
+        );
+    }
+
+    /// A negative test that accepts any error also goes green when the
+    /// instruction fails to deserialize, so the authorization check under
+    /// test never runs.
+    #[test]
+    fn unauthorized_tests_assert_the_spec_declared_error() {
+        let spec = chumsky_adapter::parse_str(ESCROW_SPEC).unwrap();
+        let out = render(&spec, "test").expect("render");
+
+        assert!(
+            out.contains(
+                "outcome.check(Outcome::error(program::errors::EscrowError::Unauthorized))"
+            ),
+            "the forged-signer test must assert the spec's authorization error:\n{out}"
+        );
+        assert!(
+            !out.contains("assert!(outcome.is_err()"),
+            "`is_err()` passes for the wrong reason and must not survive:\n{out}"
+        );
+    }
+
+    /// #363 — the name must track the EMITTED enum, not the declared block.
+    ///
+    /// This asserted `None` for multisig, on the reasoning that its
+    /// `type Error` block declares neither candidate. But `codegen_mir` also
+    /// synthesizes `InvalidLifecycle` whenever a handler has a non-init
+    /// pre-status, which multisig has, so the enum did carry it and every
+    /// forged-signer test was weakened for nothing. Both sides now read
+    /// `emitted_error_variants`.
+    #[test]
+    fn authorization_error_tracks_the_emitted_enum() {
+        let spec = chumsky_adapter::parse_str(ESCROW_SPEC).unwrap();
+        assert_eq!(authorization_error(&spec), Some("Unauthorized"));
+
+        let multisig = chumsky_adapter::parse_str(MULTISIG_SPEC).unwrap();
+        assert_eq!(
+            authorization_error(&multisig),
+            Some("InvalidLifecycle"),
+            "multisig declares neither candidate but its enum carries \
+             InvalidLifecycle (non-init pre-status)"
+        );
+        // Tie the claim to the emitter rather than restating it: if
+        // `emitted_error_variants` stops synthesizing the variant, naming it
+        // here becomes a dangling reference and this fails first.
+        assert!(
+            crate::codegen_shared::declares_error_variant(
+                &multisig,
+                Target::Quasar,
+                "InvalidLifecycle"
+            ),
+            "the emitted enum must actually carry what the scaffold names"
+        );
+    }
+
+    /// A spec whose enum carries neither candidate still degrades to the
+    /// marked weak form rather than guessing a variant that was never
+    /// emitted. `None` is still reachable — it just no longer fires
+    /// spuriously.
+    #[test]
+    fn authorization_error_degrades_when_the_enum_carries_neither() {
+        // No `type Error`, and every handler is init-shaped, so neither
+        // `Unauthorized` nor `InvalidLifecycle` reaches the enum.
+        let spec = chumsky_adapter::parse_str(
+            "spec Weak\n\
+             type State\n  | Uninitialized\n  | Active of { total : U64, }\n\
+             handler init : State.Uninitialized -> State.Active {\n  \
+             auth owner\n  accounts { owner : signer }\n  effect { total := 0 }\n}\n",
+        )
+        .expect("parse");
+        assert_eq!(authorization_error(&spec), None);
+
+        let out = render(&spec, "test").expect("render");
+        if out.contains("_unauthorized()") {
+            assert!(
+                out.contains("the spec declares no authorization error"),
+                "a weak negative assertion must say why it is weak:\n{out}"
+            );
+        }
+    }
+
+    /// A hardcoded "../../target/deploy/x.so" only resolves when the package
+    /// sits exactly two levels under the workspace root.
+    #[test]
+    fn setup_resolves_the_artifact_through_parallax() {
+        let spec = chumsky_adapter::parse_str(ESCROW_SPEC).unwrap();
+        let out = render(&spec, "test").expect("render");
+
+        assert!(out.contains(".crate_name(env!(\"CARGO_PKG_NAME\"))"));
+        assert!(
+            !out.contains("../../target/deploy/"),
+            "artifact discovery must not be CWD-relative:\n{out}"
+        );
+    }
+
+    /// An unmatched header sends the upsert down the append path, which writes
+    /// a second `[dev-dependencies]` table and breaks the user's manifest.
+    #[test]
+    fn dev_dependencies_header_matches_through_a_trailing_comment() {
+        let manifest = "[package]\nname = \"demo\"\n\n\
+                        [dev-dependencies]  # test only\nproptest = \"1\"\n";
+
+        let merged = upsert_dev_dependencies(manifest);
+
+        assert_eq!(
+            merged.matches("[dev-dependencies]").count(),
+            1,
+            "a commented header must not produce a duplicate table:\n{merged}"
+        );
+        assert!(merged.contains("[dev-dependencies]  # test only"));
+        assert_eq!(merged.matches("parallax-svm =").count(), 1);
+        assert!(merged.contains("proptest = \"1\""));
+    }
+
+    /// A dependency already declared as its own subtable must not also be
+    /// emitted inline — that is a duplicate key and a manifest parse error.
+    #[test]
+    fn dev_dependency_subtable_is_not_duplicated_inline() {
+        let manifest = "[package]\nname = \"demo\"\n\n\
+                        [dev-dependencies]\nproptest = \"1\"\n\n\
+                        [dev-dependencies.parallax-svm]\n\
+                        git = \"https://github.com/blueshift-gg/parallax\"\n\
+                        rev = \"deadbeef\"\n";
+
+        let merged = upsert_dev_dependencies(manifest);
+
+        assert_eq!(
+            merged.matches("parallax-svm =").count(),
+            0,
+            "an existing subtable declaration must be left alone:\n{merged}"
+        );
+        assert!(merged.contains("[dev-dependencies.parallax-svm]"));
+        // Everything not subtabled still lands.
+        assert_eq!(merged.matches("solana-sdk-ids =").count(), 1);
+    }
+
+    /// The name list is derived from the emitted block, so this guards the
+    /// derivation rather than a second copy: every key the block emits must
+    /// come back, and nothing else. A stray non-`key = value` line (a
+    /// comment, a blank, a `[subtable]` header) would otherwise enter the
+    /// list and be treated as a dependency name.
+    #[test]
+    fn dev_dep_names_match_the_emitted_block_exactly() {
+        let block = parallax_dev_dependencies();
+        let names = parallax_dev_dep_names();
+
+        for name in &names {
+            assert!(
+                block.contains(&format!("{name} =")),
+                "{name} is not a key in the emitted block"
+            );
+            assert!(
+                !name.starts_with('[') && !name.starts_with('#') && !name.contains(' '),
+                "{name:?} is not a dependency name"
+            );
+        }
+        assert_eq!(
+            names.len(),
+            block.lines().filter(|l| l.contains('=')).count(),
+            "every emitted line must yield exactly one name"
+        );
+        // The pins that keep the graph on one side of the wincode 0.5/0.6
+        // boundary. Losing any of them puts two incompatible wincode majors
+        // in the graph, which surfaces as an unsatisfied trait bound inside
+        // solana-transaction rather than as a version error.
+        for pinned in [
+            "solana-rent",
+            "solana-signature",
+            "solana-epoch-schedule",
+            "solana-fee-calculator",
+        ] {
+            assert!(
+                names.iter().any(|n| n == pinned),
+                "{pinned} pin was dropped — see the doc on parallax_dev_dependencies"
+            );
+        }
+    }
+
+    /// The compile gate is only meaningful if it builds the revision the
+    /// scaffold actually ships. If codegen bumps `PARALLAX_GIT_REV` and the
+    /// fixture manifest keeps the old one, the gate compiles the OLD
+    /// Parallax, passes green, and silently stops gating — the exact failure
+    /// a gate exists to prevent.
+    #[test]
+    fn parallax_gate_fixture_pins_the_same_revision() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/parallax-api-gate/stub/Cargo.toml");
+        let manifest = std::fs::read_to_string(&fixture)
+            .unwrap_or_else(|e| panic!("read {}: {e}", fixture.display()));
+
+        assert!(
+            manifest.contains(PARALLAX_GIT_REV),
+            "gate fixture pins a different Parallax revision than codegen emits.\n\
+             codegen: {PARALLAX_GIT_REV}\n\
+             fixture: {}\n\
+             Update {} so the gate compiles what ships.",
+            manifest
+                .lines()
+                .find(|line| line.contains("parallax-svm"))
+                .unwrap_or("<no parallax-svm line>")
+                .trim(),
+            fixture.display()
+        );
+        assert!(manifest.contains(PARALLAX_GIT_URL));
+    }
+
+    /// The emitted header must advertise the revision codegen actually
+    /// writes into `[dev-dependencies]`, not a stale copy of it.
+    #[test]
+    fn scaffold_header_and_manifest_agree_on_the_pin() {
+        let spec = chumsky_adapter::parse_str(ESCROW_SPEC).unwrap();
+        let out = render(&spec, "test").expect("render");
+
+        assert_eq!(
+            out.matches(PARALLAX_GIT_REV).count(),
+            1,
+            "the scaffold should name the pin exactly once (in the header block):\n{out}"
+        );
+        assert!(parallax_dev_dependencies().contains(PARALLAX_GIT_REV));
+    }
+
+    /// A `#` inside a quoted value is not a comment.
+    #[test]
+    fn toml_comment_stripping_respects_quotes() {
+        assert_eq!(strip_toml_comment("rev = \"a#b\""), "rev = \"a#b\"");
+        assert_eq!(strip_toml_comment("key = 1 # note").trim(), "key = 1");
+        assert!(is_dev_dependencies_header("[dev-dependencies] # x"));
+        assert!(!is_dev_dependencies_header("[dev-dependencies.foo]"));
+        assert!(is_table_header("[[bin]] # the binary"));
+    }
+
+    #[test]
+    fn parallax_dev_dependencies_are_upserted_idempotently() {
+        let temp = tempfile::tempdir().unwrap();
+        let program = temp.path().join("programs");
+        let output = program.join("tests/integration_tests.rs");
+        std::fs::create_dir_all(output.parent().unwrap()).unwrap();
+        std::fs::write(
+            program.join("Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n\n\
+             [dev-dependencies]\nproptest = \"1\"\ncustom-test-helper = \"2\"\n",
+        )
+        .unwrap();
+
+        ensure_parallax_dev_dependencies(&output).unwrap();
+        ensure_parallax_dev_dependencies(&output).unwrap();
+
+        let manifest = std::fs::read_to_string(program.join("Cargo.toml")).unwrap();
+        for dependency in parallax_dev_dep_names() {
+            assert_eq!(
+                manifest.matches(&format!("{dependency} =")).count(),
+                1,
+                "{dependency} must be emitted exactly once"
+            );
+        }
+        assert!(manifest.contains("proptest = \"1\""));
+        assert!(manifest.contains("custom-test-helper = \"2\""));
+    }
+
+    #[test]
+    fn parallax_dependency_upsert_preserves_array_tables() {
+        let manifest = "[package]\nname = \"demo\"\n\n\
+                        [[bin]]\nname = \"demo\"\npath = \"src/main.rs\"\n\n\
+                        [dev-dependencies]\nproptest = \"1\"\n\n\
+                        [[example]]\nname = \"client\"\n";
+
+        let merged = upsert_dev_dependencies(manifest);
+
+        assert!(merged.contains("[[bin]]\nname = \"demo\""));
+        assert!(merged.contains("[[example]]\nname = \"client\""));
+        assert!(!merged.contains("[bin]\n"));
+        assert_eq!(merged.matches("parallax-svm =").count(), 1);
     }
 
     #[test]
@@ -675,8 +1426,8 @@ mod tests {
 
     #[test]
     fn integration_test_rejects_non_quasar_targets() {
-        // The scaffold imports quasar_svm + <name>-client — refusing
-        // Anchor/Pinocchio up front (before parsing the spec) is what
+        // The scaffold uses Parallax for execution but still imports the
+        // Quasar <name>-client — refusing Anchor/Pinocchio up front is what
         // keeps `codegen --all --target anchor` from dropping a
         // non-compiling test file into an Anchor crate.
         let dir = std::env::temp_dir().join("qedgen_integration_test_target_gate");
@@ -690,7 +1441,7 @@ mod tests {
                 .expect_err("non-Quasar target must be refused")
                 .to_string();
             assert!(
-                err_msg.contains("Quasar-only"),
+                err_msg.contains("Quasar-client-only"),
                 "unexpected error for {:?}: {}",
                 target,
                 err_msg

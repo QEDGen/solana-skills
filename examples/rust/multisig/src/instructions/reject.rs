@@ -18,7 +18,7 @@ pub struct Reject<'info> {
 }
 
 impl<'info> Reject<'info> {
-    #[qed(verified, spec = "multisig.qedspec", handler = "reject", hash = "28b3ad459cfc4d61", spec_hash = "5c1482681fbda8fd")]
+    #[qed(verified, spec = "multisig.qedspec", handler = "reject", hash = "28b3ad459cfc4d61", spec_hash = "5f391aa7f571af45")]
     #[inline(always)]
     pub fn handler(&mut self, member_index: u8, bumps: &RejectBumps) -> Result<(), ProgramError> {
         guards::reject(self, member_index)?;

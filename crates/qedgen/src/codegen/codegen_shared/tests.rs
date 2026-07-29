@@ -3170,3 +3170,40 @@ handler open : Vault.Uninitialized -> Vault.Active {
         );
     }
 }
+
+/// #372 — the two program targets name the address type differently, and
+/// sharing one arm emitted `Pubkey` into every Quasar program. quasar-lang is
+/// `#![no_std]` and defines no `Pubkey`; its prelude re-exports
+/// `solana_address::Address`. No Quasar artifact had ever been compiled, so
+/// nothing caught it: the snapshots capture the default (Anchor) target, and
+/// the #294 artifact gate regenerated the bundled Quasar examples as Anchor.
+#[test]
+fn quasar_names_the_address_type_address_not_pubkey() {
+    let spec = empty_spec();
+    assert_eq!(map_type_quasar("Pubkey", &spec).unwrap(), "Address");
+    assert_eq!(map_type_anchor("Pubkey", &spec).unwrap(), "Pubkey");
+    // Harnesses stay structural.
+    assert_eq!(map_type_standalone("Pubkey", &spec).unwrap(), "[u8; 32]");
+}
+
+/// The Parallax integration scaffold is a HOST-side test importing
+/// `parallax_svm::prelude::*`, which exports `Pubkey` and no `Address`. The
+/// program's own `use quasar_lang::prelude::*` is a private import, so
+/// `use program::state::*` does not carry `Address` across either. Mapping
+/// this file with the Quasar context names something it cannot see.
+///
+/// The struct-field match still holds: `solana-pubkey` re-exports
+/// `solana_address::Address as Pubkey`, so both names denote one type.
+#[test]
+fn parallax_host_scaffold_keeps_pubkey() {
+    let spec = empty_spec();
+    assert_eq!(map_type_parallax_host("Pubkey", &spec).unwrap(), "Pubkey");
+    // Only the address type differs from the Quasar mapping.
+    for ty in ["U64", "U8", "Bool", "Bytes32"] {
+        assert_eq!(
+            map_type_parallax_host(ty, &spec).unwrap(),
+            map_type_quasar(ty, &spec).unwrap(),
+            "{ty} must map identically in both contexts"
+        );
+    }
+}

@@ -27,9 +27,12 @@ sBPF assembly is selected by `pragma sbpf` in the spec, not by a `Target`.
 | IDL → brownfield fuzz (`probe/crucible_brownfield`) | ✅ 0.30 | ✅ | ⚠️ needs on-disk Codama/0.30 IDL | ❌ deferred | ❌ parked |
 | Brownfield adapt → spec skeleton (`adapt/`) — *deprecated* | ✅ args + accounts + errors | ❌ no adapter | ⚠️ handlers-only skeleton | ⚠️ loose (no conventions) | ❌ |
 | Greenfield Rust scaffold (`codegen_mir`) | ✅ | ⚠️ generic CPI → `todo!()` | ⚠️ generic CPI → `todo!()`; imported mirrors error | n/a | n/a |
+| Scaffold compiles (`verify --scaffold`, #364) | ✅ gated (`generated_artifact_gate`) | ✅ gated (`generated_artifact_gate`, #372) | ⚠️ compiles, ungated ⁷ | n/a | n/a |
+| Regen-drift over the program crate (`check --regen-drift`) | ✅ | ✅ | ✅ (#367) | n/a | n/a |
 | Kani spec-model (`kani_mir`) | ✅ ¹ ⁴ | ✅ ¹ ⁴ | ✅ ¹ ⁴ | n/a | skip by design |
 | impl-Kani (`kani_impl`) | ✅ greenfield + state-struct (#162) + Context (#169) | ⚠️ greenfield shape only | ⚠️ own `#[repr(C)]` shape; some ix-data field types TODO | ❌ | ❌ |
 | proptest (`proptest_gen_mir`) | ✅ ⁵ | ✅ ⁵ | ✅ ⁵ | n/a | skip by design |
+| Parallax/LiteSVM integration tests (`integration_test`) | ❌ adapter pending | ⚠️ scaffold emitted + compile-gated ⁶ | ❌ adapter pending | ❌ | ❌ |
 | Lean (`lean_gen_mir`) | ✅ ² ³ | ✅ ² ³ | ✅ ² ³ | n/a | ✅ dedicated sBPF path |
 | Probe: runtime-agnostic scanners (`run_helpers`) | ✅ (#196) | ✅ (#196) | ✅ | ✅ (#196) | ❌ bootstrap only |
 | Probe: IDL-enrichment overlay (`probe/idl_overlay`) | ✅ enrich + narrow (#235); unbuilt → `derivable_idl` (#238) | ✅ enrich + narrow (#235); unbuilt → `derivable_idl` (#238) | ✅ enrich + handler fill | ⚠️ enrich only (declarative flags) | ❌ |
@@ -82,6 +85,66 @@ read or written by a per-account transition (guard, let, effect, or
 branch scrutinee) is not liftable — that spec keeps per-account ghost
 copies and its ghost obligations stay
 `unsupported(proptest_multi_account_ghost)` in the manifest.
+
+⁶ Parallax integration scaffold. World setup, execution, outcomes, and
+checks are Parallax; the instruction builders still come from the generated
+Quasar `program::client` module, which is why the lane is Quasar-only.
+Assertions are the spec's: `Outcome::success()` on happy paths and
+`Outcome::error(<Prog>Error::<Code>)` on forged-signer tests when the spec
+declares `Unauthorized` or `InvalidLifecycle` (otherwise the scaffold
+degrades to a marked weak assertion rather than naming a variant
+`codegen_mir` may not have synthesized). No compute-unit assertion is
+emitted: a committed transaction always spends CU, so a `cu > 0` check
+cannot fail, and the scaffold points at a measured budget instead.
+
+`parallax-svm` is pinned to a git revision (it is not published to
+crates.io), and `crates/qedgen/tests/parallax_integration_gate.rs` compiles
+the generated scaffold against that pin in CI.
+
+That gate went red without any qedgen change, and the mechanism is worth
+knowing because it will recur. `litesvm` 0.15 requires `wincode ^0.5.5`, so
+the whole graph must stay on wincode 0.5. Several small solana crates crossed
+to `wincode` 0.6 in a MINOR bump (`solana-rent` 4.3.0 → 4.4.0,
+`solana-signature` 3.4.1 → 3.5.0, `solana-epoch-schedule` 3.2.0 → 3.3.0,
+`solana-fee-calculator` 3.2.2 → 3.3.0), and every parent asks for them with a
+caret, so a fresh resolve took the crossing version and put two incompatible
+`wincode` majors in one graph.
+
+It does not surface as a version error. Both wincodes build; the derive on
+`solana-transaction` then targets 0.5's `SchemaRead` while `solana-signature`
+implements 0.6's, and rustc reports an unsatisfied trait bound deep inside a
+dependency. `verify --scaffold` classifies that as `Unresolved`, not a codegen
+defect (#364), which is the intended reading.
+
+Fixed by pinning those four in `parallax_dev_dependencies`, alongside the
+pins that were already there for the same reason. That list is not a stable
+set — it is "every crate that has ever crossed the boundary". When the gate
+fails this way again, find the new one with
+`cargo tree -i wincode@0.6.0 --depth 1` and pin its last 0.5 version. Moving
+past the boundary wholesale needs Parallax on `wincode` 0.6 first.
+
+Note the pin-liveness script (#371) checks that the pinned revision EXISTS,
+not that it builds, so it stayed green through all of this.
+
+Until #372, a generated Quasar program did not compile at all. `quasar-lang`
+is `#![no_std]` and its addresses are `solana_address::Address`, while
+`map_type_quasar` shared Anchor's `Pubkey` mapping — a type quasar-lang does
+not define. Every Quasar program in this repo carried it, including the three
+bundled examples, and `codegen --target quasar` on the multisig spec failed
+with 13 errors. Fixed by giving Quasar its own arm in `primitive_map`; the
+prelude already re-exports `Address`, so no import change was needed.
+
+That it survived is the more useful part. The snapshot suites compare
+generated TEXT, which was stable and wrong identically every run, and the
+#294 artifact gate regenerated all three examples as **Anchor** even though
+all three ship as Quasar crates — so the gate that existed to catch
+non-compiling output had never compiled the code the repo actually ships.
+The gate now runs both targets (`gate_quasar_example`).
+
+(An earlier revision of this note claimed `quasar-lang` "resolves from no
+registry". That was asserted from the `0.0.0` version string without checking
+crates.io, and it is wrong. The dependency resolves; the emitted code does
+not typecheck against it.)
 
 ## Codegen ownership contract: CPIs, PDA creation, and events
 
@@ -151,3 +214,8 @@ Verified through the Lean path exclusively (`asm2lean`, `qedsvm`); every
 Rust-shaped artifact (Kani, proptest, Crucible, scaffold) is skipped by
 design — generated Rust harnesses are meaningless for assembly
 (`feedback_sbpf_no_kani_proptest`). Client-side tests own runtime checks.
+
+⁷ A generated Pinocchio scaffold typechecks against `pinocchio` 0.8 /
+`pinocchio-pubkey` 0.3 / `zeropod` 0.1 — checked by hand with `verify
+--scaffold`, not asserted from the code. No gate compiles one, so nothing
+keeps it that way; `generated_artifact_gate` covers Anchor and Quasar.

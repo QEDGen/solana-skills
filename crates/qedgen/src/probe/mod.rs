@@ -291,6 +291,26 @@ pub enum Reproducer {
         /// `qedgen probe --fill-repros` fills the TODOs.
         needs_fill: bool,
     },
+    /// Parallax-driven Rust integration test under
+    /// `<project_root>/target/qedgen-repros/parallax/`. Drives an attack
+    /// transaction at the DEPLOYED `.so` through LiteSVM and asserts it
+    /// COMMITS — the evidence that the guard the finding names is absent.
+    ///
+    /// A separate variant from [`Reproducer::Sandbox`] rather than a flag on
+    /// it: the two cannot share a crate (Mollusk pulls `solana-account 3`,
+    /// Parallax `4.x`), they assert opposite polarities, and a closed enum
+    /// makes every consumer handle the difference explicitly.
+    Parallax {
+        /// Path to the generated test file, relative to the project root.
+        test_path: String,
+        /// Test function name (`probe_<handler>_<attack>`).
+        test_fn: String,
+        /// Exact invocation that runs just this test; exits 0 iff the
+        /// attack reproduces.
+        invocation: String,
+        /// The attack the harness drives, for human inspection.
+        attack: String,
+    },
     /// Pinocchio probe: structured prompt the audit subagent expands into
     /// a Mollusk-driven Rust test. The CLI emits the prompt + substitution
     /// map; the agent writes the `repro.rs` body. Template-driven (one
@@ -1044,6 +1064,69 @@ pub fn run_probe(spec_path: &Path, execute_repros: bool) -> Result<ProbeOutput> 
             continue;
         }
 
+        // Parallax lane: `missing_signer` / `lifecycle_one_shot_violation`.
+        // Same generate-then-confirm shape as the boundary harness above,
+        // and for the same reason — a generated test is not evidence that
+        // the test passes. These predicates key off an ABSENT spec clause,
+        // but a program can still be guarded by other means (an `accounts`
+        // block marking an account `signer` enforces a signature with no
+        // `auth` clause anywhere), so promoting without running would
+        // surface precisely the false positives this lane exists to drop.
+        if let Some(attack) = crate::probe_repro::parallax_attack_for(&finding.category) {
+            match crate::probe_repro::write_parallax_repro(&finding, &ctx, attack) {
+                Ok(harness) => {
+                    repro_stats.generated += 1;
+                    if !execute_repros {
+                        candidates.push(
+                            Candidate::from_dropped_finding(
+                                finding,
+                                "Parallax reproducer generated; run it (or pass \
+                                 --execute-repros) to confirm",
+                            )
+                            .with_repro_harness(harness.as_repro_harness()),
+                        );
+                        continue;
+                    }
+                    repro_stats.executed += 1;
+                    match crate::probe_repro::execute_parallax_harness(&harness) {
+                        crate::probe_repro::ExecOutcome::Reproduced => {
+                            repro_stats.reproduced += 1;
+                            finding.reproducer = Some(harness.as_reproducer());
+                            kept.push(finding);
+                        }
+                        crate::probe_repro::ExecOutcome::NotReproduced => {
+                            candidates.push(
+                                Candidate::from_dropped_finding(
+                                    finding,
+                                    "Parallax reproducer ran but the program refused the \
+                                     attack — the guard the predicate reports as absent is \
+                                     enforced by other means",
+                                )
+                                .with_repro_harness(harness.as_repro_harness()),
+                            );
+                        }
+                        crate::probe_repro::ExecOutcome::BuildError(e) => {
+                            repro_stats.build_errors += 1;
+                            candidates.push(
+                                Candidate::from_dropped_finding(
+                                    finding,
+                                    format!("Parallax reproducer could not be built/run: {e}"),
+                                )
+                                .with_repro_harness(harness.as_repro_harness()),
+                            );
+                        }
+                    }
+                }
+                Err(reason) => {
+                    candidates.push(Candidate::from_dropped_finding(
+                        finding,
+                        crate::probe_repro::describe_failure(&reason),
+                    ));
+                }
+            }
+            continue;
+        }
+
         match crate::probe_repro::construct_reproducer(&finding, &ctx) {
             Ok(repro) => {
                 finding.reproducer = Some(repro);
@@ -1296,7 +1379,12 @@ fn detect_runtime(root: &Path) -> Runtime {
 /// Pinocchio dep check. Matches `pinocchio = ...`, `pinocchio.workspace =
 /// true`, or `pinocchio-token`/`-system` siblings (siblings require the
 /// root pinocchio surface).
-fn has_pinocchio_dep(cargo_toml: &str) -> bool {
+///
+/// Line-oriented rather than a bare `contains("pinocchio")` so a mention in
+/// a comment or inside a longer crate name does not count. Shared with
+/// `verify::regen_drift` (#367) — a second copy there would be a third
+/// framework detector answering the same question a different way.
+pub(crate) fn has_pinocchio_dep(cargo_toml: &str) -> bool {
     for line in cargo_toml.lines() {
         let t = line.trim();
         if t.starts_with('#') {

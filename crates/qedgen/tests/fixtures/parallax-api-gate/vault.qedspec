@@ -1,0 +1,71 @@
+// Compile-gate fixture for the Parallax integration scaffold.
+//
+// Deliberately minimal, and deliberately FROZEN: it exists so
+// `parallax_integration_scaffold_compiles` type-checks the generated test
+// against the pinned Parallax revision, not to demonstrate the DSL. It is
+// shaped to reach every Parallax symbol the scaffold can emit:
+//
+//   - `auth` + a declared `Unauthorized`  => Outcome::error(..) negative test
+//   - Pubkey state fields                 => state_account(..) + .to_bytes()
+//   - `type token` / `type mint` accounts => mint_account/token_account
+//                                            helpers (SplMint, SplTokenAccount)
+//   - a pda with a non-account seed       => the seed stand-in binding
+//   - signer / writable / program accounts=> signer_account, empty_account,
+//                                            system_program, SPL_TOKEN_PROGRAM_ID
+//
+// Adding a handler here widens the gate; changing the shapes above narrows
+// it. The hand-written stub in the gate mirrors this spec, so the two move
+// together.
+
+spec Vault
+
+type State
+  | Uninitialized
+  | Open of {
+      owner        : Pubkey,
+      owner_ta     : Pubkey,
+      amount       : U64,
+    }
+  | Closed
+
+pda vault ["vault", owner]
+
+type Error
+  | InvalidAmount
+  | Unauthorized
+
+/// Owner opens the vault and deposits.
+handler open (deposit : U64) : State.Uninitialized -> State.Open {
+  auth owner
+
+  accounts {
+    owner          : signer, writable
+    vault          : writable, pda ["vault", owner]
+    mint           : readonly
+    owner_ta       : writable, type token
+    vault_ta       : writable, type token, authority vault
+    token_program  : program
+    system_program : program
+  }
+
+  requires deposit > 0 else InvalidAmount
+
+  effect {
+    amount   := deposit
+    owner_ta := owner_ta.pubkey
+  }
+}
+
+/// Owner closes the vault and withdraws.
+handler close : State.Open -> State.Closed {
+  auth owner
+
+  accounts {
+    owner    : signer, writable
+    vault    : writable, pda ["vault", owner]
+    owner_ta : writable, type token
+    vault_ta : writable, type token, authority vault
+  }
+
+  effect { amount := 0 }
+}

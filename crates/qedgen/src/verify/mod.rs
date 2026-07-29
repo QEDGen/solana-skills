@@ -85,6 +85,12 @@ impl BackendReport {
         self.axioms = axioms;
         self
     }
+
+    /// Attach the full backend log, when one was persisted.
+    pub fn with_log_path(mut self, log_path: Option<PathBuf>) -> Self {
+        self.log_path = log_path;
+        self
+    }
 }
 
 /// One theorem's dependence on unverified axioms. Lean built-ins
@@ -126,6 +132,12 @@ pub struct VerifyOpts {
     pub miri: bool,
     /// Project root for Miri repro discovery (typically the spec's parent dir).
     pub project_root: PathBuf,
+    /// #364: compile the generated program crate (`cargo check --tests`).
+    pub scaffold: bool,
+    /// Crate the `scaffold` backend compiles. Defaults to `./programs` when
+    /// `--scaffold` is passed without `--program`, matching the default
+    /// output directory the other backend paths are keyed to.
+    pub scaffold_path: PathBuf,
 }
 
 /// `qedgen verify --require-verified` pre-check: every imported interface
@@ -214,8 +226,16 @@ pub fn recursive_lake_walk(parsed: &crate::check::ParsedSpec) {
 
 pub fn run(opts: &VerifyOpts) -> Result<VerifyReport> {
     let mut backends = Vec::new();
-    let runners: [&dyn VerifyBackend; 4] =
-        [&ProptestBackend, &KaniBackend, &LeanBackend, &MiriBackend];
+    // `scaffold` runs first: if the generated crate does not compile, that
+    // explains far more than a downstream harness failure would, and with
+    // `--fail-fast` it is the diagnosis the user wants to see.
+    let runners: [&dyn VerifyBackend; 5] = [
+        &ScaffoldBackend,
+        &ProptestBackend,
+        &KaniBackend,
+        &LeanBackend,
+        &MiriBackend,
+    ];
 
     for runner in runners {
         if !runner.enabled(opts) {
@@ -248,6 +268,17 @@ struct ProptestBackend;
 struct KaniBackend;
 struct LeanBackend;
 struct MiriBackend;
+struct ScaffoldBackend;
+
+impl VerifyBackend for ScaffoldBackend {
+    fn enabled(&self, opts: &VerifyOpts) -> bool {
+        opts.scaffold
+    }
+
+    fn run(&self, opts: &VerifyOpts) -> BackendReport {
+        run_scaffold(&opts.scaffold_path)
+    }
+}
 
 impl VerifyBackend for ProptestBackend {
     fn enabled(&self, opts: &VerifyOpts) -> bool {
@@ -286,6 +317,31 @@ impl VerifyBackend for MiriBackend {
 
     fn run(&self, opts: &VerifyOpts) -> BackendReport {
         crate::miri_verify::run(&opts.project_root)
+    }
+}
+
+/// #364 — compile the generated program crate.
+///
+/// Only `TypeErrors` fails the run. Dependency and toolchain problems skip
+/// with the reason, because they are not statements about the generated
+/// code; `scaffold::check_compiles` documents why that distinction is the
+/// whole point of the backend.
+fn run_scaffold(crate_dir: &Path) -> BackendReport {
+    let start = Instant::now();
+
+    match scaffold::check_compiles(crate_dir) {
+        scaffold::ScaffoldOutcome::Compiled => BackendReport::passed(
+            "scaffold",
+            start,
+            Some(format!("{} typechecks", crate_dir.display())),
+        ),
+        scaffold::ScaffoldOutcome::TypeErrors { summary, log } => {
+            BackendReport::failed("scaffold", start, Some(summary)).with_log_path(log)
+        }
+        scaffold::ScaffoldOutcome::Unresolved { reason }
+        | scaffold::ScaffoldOutcome::NotApplicable { reason } => {
+            BackendReport::skipped("scaffold", start, Some(reason))
+        }
     }
 }
 
@@ -1143,6 +1199,7 @@ pub(crate) mod miri_verify;
 pub(crate) mod ratchet;
 pub(crate) mod regen_drift;
 pub(crate) mod sbpf_verify;
+pub(crate) mod scaffold;
 pub(crate) mod upstream_check;
 pub(crate) mod verify_counterexample;
 pub(crate) mod verify_kani_parse;

@@ -1,7 +1,61 @@
 //! Structural / declaration lints: error-as-record misdeclaration, unknown
-//! error variants, PDA seed collisions, and vacuous property lowering.
+//! error variants, a missing `program_id`, PDA seed collisions, and vacuous
+//! property lowering.
 
 use super::*;
+
+/// `missing_program_id`: the generated `declare_id!` will carry the System
+/// Program's address instead of this program's.
+///
+/// Two ways to get there, and both are reported, because the failure
+/// downstream is identical:
+///
+/// 1. the spec declares no `program_id`, so codegen falls back;
+/// 2. the spec declares the placeholder VERBATIM. `project/init.rs`
+///    templates that exact value into every new spec, so the default
+///    authoring path produces it and it survives until someone notices.
+///
+/// Info, deliberately, and not the Warning #368 proposed.
+///
+/// `SeverityCounts::fails_check` is `errors > 0 || warnings > 0`, so a
+/// Warning here would make `qedgen check` exit 1 for every spec that does
+/// not yet have a deployed address — which is the normal state of a
+/// greenfield spec for most of its life. Gating ordinary in-progress work on
+/// "you have not deployed yet" would get the rule muted, not obeyed.
+///
+/// The load-bearing protections for this defect are structural rather than
+/// advisory: codegen marks the emitted `declare_id!` as a placeholder in
+/// band, and the probe reproducer lane refuses to aim an attack transaction
+/// at it. This lint exists to name the situation and carry the fix, which is
+/// exactly what Info is for (#260 fixed the exit policy so Info never gates).
+pub(super) fn check_missing_program_id(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+    if spec.is_assembly_target() {
+        return Vec::new();
+    }
+    let placeholder = crate::codegen_shared::PLACEHOLDER_PROGRAM_ID;
+    let cause = match spec.program_id.as_deref() {
+        None => format!(
+            "no `program_id` declared, so the generated `declare_id!` falls back to \
+             `{placeholder}`"
+        ),
+        Some(id) if id == placeholder => format!(
+            "`program_id \"{placeholder}\"` is the placeholder `qedgen init` writes, \
+             so the generated `declare_id!` carries it"
+        ),
+        Some(_) => return Vec::new(),
+    };
+    vec![warn(
+        "missing_program_id",
+        Severity::Info,
+        3,
+        format!("{cause} — the System Program's address, not this program's."),
+    )
+    .fix(
+        "Set `program_id \"<your id>\"` in the spec. Get it from `anchor keys list`, \
+         or `solana-keygen pubkey target/deploy/<name>-keypair.json`."
+            .to_string(),
+    )]
+}
 
 /// `type Error = { ... }` (record brace form) parses as a `Record` named
 /// `Error` with `error_codes` left empty, so every error-variant consumer
@@ -47,9 +101,19 @@ pub(super) fn check_error_declared_as_record(spec: &ParsedSpec) -> Vec<Completen
     warnings
 }
 
-/// `unknown_error_variant`: a per-site `or X` override or checked_overflow/
-/// underflow pragma references a variant not declared in `type Error | …` —
-/// the generated Rust references `<ProgramName>Error::X` and won't compile.
+/// `unknown_error_variant`: a USER-WRITTEN error name that is absent from
+/// `type Error | …`. Covers three sites, all of which lower to
+/// `<ProgramName>Error::X` in generated Rust: a `requires … else X` clause,
+/// a per-site effect `or X` override, and the
+/// `checked_{over,under}flow_error` pragmas.
+///
+/// Only user-written names are reported. Codegen's OWN defaults
+/// (`MathOverflow` / `MathUnderflow` when the spec names nothing,
+/// `InvalidLifecycle`, `InvalidPda`) are synthesized into the enum by
+/// `codegen_mir`, so they always exist and are never a typo. The split
+/// matters: synthesizing user-written names too would let a misspelled
+/// `else Unathorized` compile as a brand-new variant that no guard ever
+/// raises.
 pub(super) fn check_unknown_error_variant(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let has_decl = |name: &str| spec.error_codes.iter().any(|c| c == name);
     let mut warnings = Vec::new();
@@ -58,8 +122,8 @@ pub(super) fn check_unknown_error_variant(spec: &ParsedSpec) -> Vec<Completeness
     for (key, value) in &spec.pragma_assignments {
         if (key == "checked_overflow_error" || key == "checked_underflow_error") && !has_decl(value)
         {
-            warnings.push(warn("unknown_error_variant", Severity::Warning, 2, format!(
-                    "`pragma {} = {}` references a variant absent from `type Error | …`. Generated Rust references `{}Error::{}` and won't compile.",
+            warnings.push(warn("unknown_error_variant", Severity::Error, 1, format!(
+                    "`pragma {} = {}` references a variant absent from `type Error | …`. Generated Rust references `{}Error::{}`, which does not compile.",
                     key,
                     value,
                     crate::codegen_shared::to_pascal_case(&spec.program_name),
@@ -71,12 +135,43 @@ pub(super) fn check_unknown_error_variant(spec: &ParsedSpec) -> Vec<Completeness
         }
     }
 
-    // Per-site `or X` references.
+    // `requires <expr> else X`. `guards.rs` emits `<Prog>Error::X` for these
+    // and nothing declared it, which is how a spec could pass `check` with
+    // zero errors and still generate a program that does not compile.
     for h in &spec.handlers {
-        for on_error in h.effects.iter().filter_map(|e| e.on_error.as_ref()) {
+        for name in h.requires.iter().filter_map(|r| r.error_name.as_ref()) {
+            if !has_decl(name) {
+                warnings.push(warn("unknown_error_variant", Severity::Error, 1, format!(
+                        "handler '{}' has `requires … else {}` referencing a variant absent from `type Error | …`. Generated Rust references `{}Error::{}`, which does not compile.",
+                        h.name,
+                        name,
+                        crate::codegen_shared::to_pascal_case(&spec.program_name),
+                        name,
+                    )).subject(h.name.clone()).fix(format!(
+                        "Add `{}` to your `type Error | …` block, or use a declared variant name.",
+                        name,
+                    )));
+            }
+        }
+    }
+
+    // Per-site `or X` references, including conditional `effect { match … }`
+    // arms — those keep their sites on the arm, not on `h.effects`.
+    for h in &spec.handlers {
+        let arm_effects = h
+            .effect_branches
+            .iter()
+            .flat_map(|b| b.arms.iter())
+            .flat_map(|a| a.effects.iter());
+        for on_error in h
+            .effects
+            .iter()
+            .chain(arm_effects)
+            .filter_map(|e| e.on_error.as_ref())
+        {
             if !has_decl(on_error) {
-                warnings.push(warn("unknown_error_variant", Severity::Warning, 2, format!(
-                        "handler '{}' has an effect with `else {}` referencing a variant absent from `type Error | …`. Generated Rust references `{}Error::{}` and won't compile.",
+                warnings.push(warn("unknown_error_variant", Severity::Error, 1, format!(
+                        "handler '{}' has an effect with `else {}` referencing a variant absent from `type Error | …`. Generated Rust references `{}Error::{}`, which does not compile.",
                         h.name,
                         on_error,
                         crate::codegen_shared::to_pascal_case(&spec.program_name),

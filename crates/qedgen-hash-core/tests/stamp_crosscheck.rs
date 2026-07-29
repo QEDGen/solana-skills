@@ -76,7 +76,7 @@ const STAMPS: &[Stamp] = &[
         spec: Some((
             "examples/rust/multisig/multisig.qedspec",
             "approve",
-            "96727ecc91c0452e",
+            "449b8cead71b57cf",
         )),
     },
     Stamp {
@@ -85,7 +85,7 @@ const STAMPS: &[Stamp] = &[
         spec: Some((
             "examples/rust/lending/lending.qedspec",
             "repay",
-            "9b5d2eb1d0b2b787",
+            "00ab9e4d2a885a02",
         )),
     },
     Stamp {

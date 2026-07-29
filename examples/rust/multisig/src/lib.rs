@@ -11,7 +11,7 @@ pub mod errors;
 pub mod state;
 pub mod guards;
 
-declare_id!("11111111111111111111111111111111");
+declare_id!("DRaRMV9qeti1v78tjANtxzv9ejugh1GUyco6kn2QBQTK");
 
 #[program]
 mod multisig {

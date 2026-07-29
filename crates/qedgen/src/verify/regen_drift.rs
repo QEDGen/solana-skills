@@ -324,7 +324,7 @@ fn resolve_project_target(root: &Path) -> Result<Option<Target>> {
     Ok(None)
 }
 
-fn detect_program_target(out_root: &Path) -> Result<Option<Target>> {
+pub(crate) fn detect_program_target(out_root: &Path) -> Result<Option<Target>> {
     let cargo = out_root.join("Cargo.toml");
     let cargo_target = if cargo.is_file() {
         target_from_text(&std::fs::read_to_string(&cargo)?)
@@ -352,14 +352,44 @@ fn detect_program_target(out_root: &Path) -> Result<Option<Target>> {
     Ok(lib_target.or(cargo_target))
 }
 
+/// Which greenfield target generated this `Cargo.toml` or `src/lib.rs`?
+///
+/// One arm per [`Target`] variant. `Target` is a closed three-variant enum,
+/// but this had only two arms and an `else None` (#367), so a Pinocchio
+/// crate read as "no target" — and `program_outputs` treats `None` as "skip
+/// this crate". The effect was not a silent pass: nothing regenerated into
+/// the temp tree, so every committed Pinocchio file reported as `missing
+/// generated counterpart` whether or not it had drifted. The gate could not
+/// tell a clean Pinocchio project from a drifted one, because it never
+/// compared either.
+///
+/// The `_ => None` fallback is deliberately absent. A fourth `Target`
+/// variant must fail to compile here rather than quietly become
+/// "undetectable", which is the shape that produced this bug.
 fn target_from_text(body: &str) -> Option<Target> {
-    if body.contains("anchor-lang") || body.contains("anchor_lang::prelude") {
-        Some(Target::Anchor)
-    } else if body.contains("quasar-lang") || body.contains("quasar_lang::prelude") {
-        Some(Target::Quasar)
-    } else {
-        None
+    // Order matters only in that each predicate must be specific to its
+    // framework; the three dependency sets are disjoint in practice.
+    for target in [Target::Anchor, Target::Quasar, Target::Pinocchio] {
+        let hit = match target {
+            Target::Anchor => body.contains("anchor-lang") || body.contains("anchor_lang::prelude"),
+            Target::Quasar => body.contains("quasar-lang") || body.contains("quasar_lang::prelude"),
+            // `has_pinocchio_dep` is line-oriented, so it matches the
+            // manifest (`pinocchio = "0.8"`, `pinocchio.workspace`,
+            // `pinocchio-token`) without firing on a passing mention. The
+            // `::` forms cover `src/lib.rs`, which imports
+            // `pinocchio::{account_info::AccountInfo, …}` and may declare its
+            // id via `pinocchio_pubkey::declare_id!`.
+            Target::Pinocchio => {
+                crate::probe::has_pinocchio_dep(body)
+                    || body.contains("pinocchio::")
+                    || body.contains("pinocchio_pubkey::")
+            }
+        };
+        if hit {
+            return Some(target);
+        }
     }
+    None
 }
 
 fn generate_existing_artifacts(root: &Path, temp_root: &Path, spec_path: &Path) -> Result<()> {
@@ -613,6 +643,85 @@ fn path_relative_to(path: &Path, base: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
+    /// #367 — `Target` is a closed three-variant enum, but this detector
+    /// had two arms and an `else None`, so a Pinocchio crate read as "no
+    /// target" and `program_outputs` skipped it. Nothing regenerated, so
+    /// every committed file reported `missing generated counterpart`
+    /// whether or not it had drifted: the gate could not tell a clean
+    /// Pinocchio project from a drifted one.
+    #[test]
+    fn detects_every_target_from_manifest_and_lib() {
+        // Manifests, as `codegen` emits them.
+        assert_eq!(
+            target_from_text("[dependencies]\nanchor-lang = \"0.32.1\"\n"),
+            Some(Target::Anchor)
+        );
+        assert_eq!(
+            target_from_text("[dependencies]\nquasar-lang = { version = \"0.0.0\" }\n"),
+            Some(Target::Quasar)
+        );
+        assert_eq!(
+            target_from_text("[dependencies]\npinocchio = \"0.8\"\npinocchio-pubkey = \"0.3\"\n"),
+            Some(Target::Pinocchio)
+        );
+
+        // `src/lib.rs`, as `codegen` emits them.
+        assert_eq!(
+            target_from_text("use anchor_lang::prelude::*;\n"),
+            Some(Target::Anchor)
+        );
+        assert_eq!(
+            target_from_text("use quasar_lang::prelude::*;\n"),
+            Some(Target::Quasar)
+        );
+        assert_eq!(
+            target_from_text(
+                "use pinocchio::{account_info::AccountInfo, program_error::ProgramError};\n"
+            ),
+            Some(Target::Pinocchio)
+        );
+
+        // A crate belonging to none of them still reads as unknown, which is
+        // what lets `program_outputs` skip non-generated crates.
+        assert_eq!(target_from_text("[dependencies]\nserde = \"1\"\n"), None);
+    }
+
+    /// The Pinocchio arm must not fire on a passing mention — that is why it
+    /// routes through the line-oriented `has_pinocchio_dep` rather than a
+    /// bare `contains`. A false positive here is worse than the miss it
+    /// replaced: it would regenerate an Anchor crate as Pinocchio and report
+    /// every file as drifted.
+    ///
+    /// Note `has_pinocchio_dep` counts `pinocchio-*` siblings
+    /// (`pinocchio-token`, `pinocchio-system`) on purpose — they require the
+    /// root pinocchio surface — so the guard is against MENTIONS, not
+    /// against the sibling family.
+    #[test]
+    fn pinocchio_arm_does_not_fire_on_a_mention() {
+        // Manifest comment.
+        assert_eq!(
+            target_from_text(
+                "# Ported from a pinocchio prototype.\n\
+                 [dependencies]\nanchor-lang = \"0.32.1\"\n"
+            ),
+            Some(Target::Anchor)
+        );
+        // A dependency whose name merely ends in the word.
+        assert_eq!(
+            target_from_text("[dependencies]\nnot-pinocchio = \"1\"\n"),
+            None
+        );
+        // An Anchor lib.rs that names pinocchio in prose still reads Anchor:
+        // the arms are tried in order and Anchor matches first.
+        assert_eq!(
+            target_from_text(
+                "// Unlike pinocchio:: programs, this uses Anchor.\n\
+                 use anchor_lang::prelude::*;\n"
+            ),
+            Some(Target::Anchor)
+        );
+    }
+
     #[test]
     fn reports_missing_manifest_for_tracked_example() {
         let temp = tempfile::tempdir().unwrap();
@@ -660,7 +769,7 @@ mod tests {
     #[test]
     fn resolve_project_target_reads_anchor_from_nested_programs_crate() {
         // Anchor project with the crate under `programs/` and a stale
-        // Quasar-shaped integration_tests.rs: the target must resolve to
+        // Quasar-client integration_tests.rs: the target must resolve to
         // Anchor (from Cargo.toml), NOT be inferred as Quasar from the
         // leftover file's presence.
         let temp = tempfile::tempdir().unwrap();
@@ -676,11 +785,11 @@ mod tests {
             "// ---- GENERATED BY QEDGEN ----\nuse anchor_lang::prelude::*;\n",
         )
         .unwrap();
-        // Leftover generator-owned Quasar scaffold from a prior run.
+        // Leftover generator-owned Parallax/Quasar-client scaffold.
         std::fs::create_dir_all(root.join("programs/tests")).unwrap();
         std::fs::write(
             root.join("programs/tests/integration_tests.rs"),
-            "// ---- GENERATED BY QEDGEN — DO NOT EDIT ----\n// QuasarSVM integration test scaffold.\n",
+            "// ---- GENERATED BY QEDGEN — DO NOT EDIT ----\n// Parallax integration test scaffold.\n",
         )
         .unwrap();
 

@@ -667,3 +667,75 @@ fn generated_pinocchio_profile_diversity_kani_impl_proves_with_cargo_kani() {
     }
     proof_completion_pinocchio_kani_profile_diversity_with_cargo_kani();
 }
+
+/// #368 — a spec without `program_id` gets the System Program's address
+/// stamped as its own `declare_id!`. Codegen has to emit something, so the
+/// value stays; what must not stay is silence about it.
+///
+/// The comment is the only in-band signal. The value itself is valid base58,
+/// so a reader (or a grep, or the probe reproducer lane) cannot tell it apart
+/// from a real address without it.
+#[test]
+fn missing_program_id_emits_a_marked_placeholder() {
+    let lib = codegen_lib_rs("spec NoPid\n");
+
+    assert!(
+        lib.contains("declare_id!(\"11111111111111111111111111111111\")"),
+        "the fallback value is still emitted:\n{lib}"
+    );
+    assert!(
+        lib.contains("// PLACEHOLDER: the spec declares no `program_id`"),
+        "the fallback must be marked as one:\n{lib}"
+    );
+    assert!(
+        lib.contains("Replace before deploying"),
+        "the marker must say what to do:\n{lib}"
+    );
+}
+
+/// The converse: a declared address must not be labelled a placeholder.
+#[test]
+fn declared_program_id_gets_no_placeholder_comment() {
+    let lib = codegen_lib_rs(
+        "spec RealPid\nprogram_id \"Escrow111111111111111111111111111111111111z\"\n",
+    );
+
+    assert!(
+        lib.contains("declare_id!(\"Escrow111111111111111111111111111111111111z\")"),
+        "the declared address is emitted:\n{lib}"
+    );
+    assert!(
+        !lib.contains("PLACEHOLDER"),
+        "a declared address is not a placeholder:\n{lib}"
+    );
+}
+
+/// Generate an Anchor scaffold from `header` plus a minimal body, and return
+/// the emitted `src/lib.rs`.
+fn codegen_lib_rs(header: &str) -> String {
+    common::ensure_qedgen_built();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let spec = tmp.path().join("p.qedspec");
+    std::fs::write(
+        &spec,
+        format!(
+            "{header}\
+             type State\n  | Active of {{ total : U64, }}\n\
+             handler settle (amount : U64) : State.Active -> State.Active {{\n  \
+             effect {{ total := amount }}\n}}\n"
+        ),
+    )
+    .expect("write spec");
+    std::fs::create_dir_all(tmp.path().join(".qed")).expect("mkdir .qed");
+    common::git_init(tmp.path());
+
+    let out_dir = tmp.path().join("programs");
+    run(Command::new(common::qedgen_bin())
+        .args(["codegen", "--spec"])
+        .arg(&spec)
+        .args(["--target", "anchor", "--no-check-compiles", "--output-dir"])
+        .arg(&out_dir)
+        .current_dir(tmp.path()));
+
+    std::fs::read_to_string(out_dir.join("src/lib.rs")).expect("read lib.rs")
+}

@@ -2,9 +2,11 @@
 //!
 //! Snapshot suites prove generated text is stable; users consume it as
 //! compiled and executed software. This gate closes that gap for the
-//! Anchor lane. For each bundled example it, from a clean tempdir:
+//! Anchor and Quasar lanes. For each bundled example at each target it,
+//! from a clean tempdir:
 //!
-//! 1. runs `qedgen codegen --all`;
+//! 1. runs `qedgen codegen` for every artifact this gate compiles
+//!    (see `generate_artifacts` for why Quasar does not use `--all`);
 //! 2. asserts every expected Rust artifact exists — a silently skipped
 //!    artifact fails here, not in a user's project;
 //! 3. compiles the scaffold and every test target, and RUNS the generated
@@ -71,8 +73,55 @@ fn inject_kani_stub(cargo_toml: &Path) {
     std::fs::write(cargo_toml, rewritten).expect("rewrite Cargo.toml");
 }
 
-/// Full gate for one bundled Anchor example.
 fn gate_anchor_example(example: &str) {
+    gate_example(example, "anchor");
+}
+
+/// Quasar counterpart (#372). Kept separate from the Anchor entry point so
+/// the artifact set each target must produce stays explicit.
+fn gate_quasar_example(example: &str) {
+    gate_example(example, "quasar");
+}
+
+/// Generate every artifact this gate compiles, for one target.
+///
+/// Anchor uses `--all`. Quasar cannot: `--all` additionally emits the
+/// Parallax integration scaffold and adds `parallax-svm` to
+/// `[dev-dependencies]`, and that tree does not currently build — its
+/// transitive `solana-transaction` / `solana-sysvar` / `wincode` set does
+/// not resolve to a compatible combination. Pulling that in would make a
+/// Quasar codegen regression indistinguishable from an upstream dependency
+/// break, which is the opposite of what a gate is for. The integration lane
+/// has its own gate (`parallax_integration_gate`); this one covers the
+/// program crate and the three framework-neutral harnesses.
+fn generate_artifacts(spec_path: &Path, output_dir: &Path, cwd: &Path, target: &str) {
+    let codegen = |extra: &[&str]| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_qedgen"));
+        cmd.arg("codegen")
+            .arg("--spec")
+            .arg(spec_path)
+            .arg("--target")
+            .arg(target)
+            .arg("--output-dir")
+            .arg(output_dir)
+            .args(extra)
+            .current_dir(cwd);
+        run_ok(&mut cmd);
+    };
+
+    if target == "quasar" {
+        // Bare run = the Rust scaffold; the second names the harnesses
+        // explicitly. `scaffold_requested = all || !explicit_artifact_requested`
+        // (run.rs), so one combined invocation would skip the scaffold.
+        codegen(&[]);
+        codegen(&["--test", "--proptest", "--kani"]);
+    } else {
+        codegen(&["--all"]);
+    }
+}
+
+/// Full gate for one bundled example at one target.
+fn gate_example(example: &str, target: &str) {
     let temp = tempfile::tempdir().expect("tempdir");
     let example_dir = repo_root().join("examples/rust").join(example);
     let spec_path = temp.path().join(format!("{example}.qedspec"));
@@ -84,24 +133,13 @@ fn gate_anchor_example(example: &str) {
     common::git_init(temp.path());
 
     let output_dir = temp.path().join("programs");
-    run_ok(
-        Command::new(env!("CARGO_BIN_EXE_qedgen"))
-            .arg("codegen")
-            .arg("--spec")
-            .arg(&spec_path)
-            .arg("--target")
-            .arg("anchor")
-            .arg("--all")
-            .arg("--output-dir")
-            .arg(&output_dir)
-            .current_dir(temp.path()),
-    );
+    generate_artifacts(&spec_path, &output_dir, temp.path(), target);
 
     // (2) Silent-skip guard: every expected artifact must exist.
     for rel in REQUIRED_ARTIFACTS {
         assert!(
             output_dir.join(rel).is_file(),
-            "{example}: `codegen --all` silently skipped {rel}"
+            "{example} ({target}): codegen silently skipped {rel}"
         );
     }
 
@@ -122,10 +160,11 @@ fn gate_anchor_example(example: &str) {
     );
     // Execution-level silent-skip guard: cargo must have RUN both
     // generated test targets, not merely compiled them.
-    for target in ["unit.rs", "proptest.rs"] {
+    for artifact in ["unit.rs", "proptest.rs"] {
         assert!(
-            output.contains(target),
-            "{example}: cargo test did not run the generated {target} target:\n{output}"
+            output.contains(artifact),
+            "{example} ({target}): cargo test did not run the generated \
+             {artifact} target:\n{output}"
         );
     }
 
@@ -160,6 +199,32 @@ fn lending_generated_artifacts_compile_and_run() {
 #[ignore = "compile-heavy: codegen --all + cargo test + kani compile gate"]
 fn multisig_generated_artifacts_compile_and_run() {
     gate_anchor_example("multisig");
+}
+
+// #372 — the Quasar half. Until these existed, no Quasar artifact in this
+// repo had ever been compiled: the snapshot suites compare generated TEXT,
+// which was stable and wrong in exactly the same way every run, and this
+// gate regenerated the three examples as ANCHOR even though all three ship
+// as Quasar crates. `codegen --target quasar` emitted `Pubkey` into every
+// one of them, a type quasar-lang does not define, so the bundled examples
+// shipped programs that could not build.
+
+#[test]
+#[ignore = "compile-heavy: codegen + cargo test + kani compile gate"]
+fn escrow_quasar_artifacts_compile_and_run() {
+    gate_quasar_example("escrow");
+}
+
+#[test]
+#[ignore = "compile-heavy: codegen + cargo test + kani compile gate"]
+fn lending_quasar_artifacts_compile_and_run() {
+    gate_quasar_example("lending");
+}
+
+#[test]
+#[ignore = "compile-heavy: codegen + cargo test + kani compile gate"]
+fn multisig_quasar_artifacts_compile_and_run() {
+    gate_quasar_example("multisig");
 }
 
 /// #331 — the product-state proptest artifact for a multi-account +

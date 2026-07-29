@@ -12,12 +12,26 @@
 //! ephemeral, never committed.
 //!
 //! The reproducer vertical slice (#228) lands real reproducers category by
-//! category. The first is `ArithmeticOverflowWrapping`, handled by
+//! category. `ArithmeticOverflowWrapping` is handled by
 //! [`build_arith_overflow_harness`] (a generated boundary program, run only
-//! under `--execute-repros`) rather than [`construct_reproducer`], whose
-//! per-category constructors are still stubs (`NotImplemented`) — those
-//! categories surface as candidates until their reproducer lands. The auditor
-//! SKILL writes Mollusk repros directly in the meantime.
+//! under `--execute-repros`) rather than [`construct_reproducer`].
+//!
+//! `MissingSigner` and `LifecycleOneShotViolation` are Parallax-driven: the
+//! constructor discovers the deployed program under the project root
+//! (`declare_id!` plus a built `.so`), generates a transaction that performs
+//! the attack, and writes a standalone repro crate under
+//! `target/qedgen-repros/parallax/<id>/`. These assert the attack COMMITS —
+//! an absent guard is proven by the program accepting what it should refuse
+//! — which is the opposite polarity from the integration scaffold. Verified
+//! both ways against `tests/fixtures/parallax-repro-gate`: the vulnerable
+//! handler's repros fire, the guarded handler produces no finding at all.
+//! An unbuilt program yields `BuildError`, so the candidate is dropped with
+//! a reason rather than silently confirmed.
+//!
+//! The remaining per-category constructors are still stubs
+//! (`NotImplemented`) — those categories surface as candidates until their
+//! reproducer lands. The auditor SKILL writes Mollusk repros in the
+//! meantime.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -176,6 +190,319 @@ pub fn construct_reproducer(
 // witness tests against the operator alone.
 // ---------------------------------------------------------------------------
 
+/// The deployed program a Parallax reproducer drives: its on-chain address
+/// and the built `.so`.
+///
+/// Discovered from the project root rather than configured: `qed.toml`
+/// carries no program id, and requiring one would make the whole lane
+/// opt-in. The address is the scaffold's own `declare_id!`, so it is always
+/// in sync with the program the user actually built.
+#[derive(Debug)]
+struct DeployedProgram {
+    address: String,
+    /// Absolute path to the artifact.
+    artifact: PathBuf,
+}
+
+/// Find an Anchor crate whose `declare_id!("…")` and built `.so` belong
+/// together under `project_root`.
+///
+/// `Err` when the target is unsupported or the program was never built.
+/// Both are legitimate outcomes rather than bugs: the caller drops the
+/// candidate carrying the reason, which is exactly the reproducer-only
+/// contract — no evidence, no finding.
+fn discover_deployed_program(project_root: &Path) -> Result<DeployedProgram, ConstructFailure> {
+    // Anchor only. The generated reproducer encodes Anchor's 8-byte
+    // `sha256("global:<name>")` instruction discriminator and its
+    // `sha256("account:<Name>")` account discriminator; a Pinocchio program
+    // tags instructions differently, so the same bytes would address a
+    // different handler — or none — and the reproducer would report "no bug"
+    // for a reason that has nothing to do with the finding.
+    let mut crate_roots = vec![
+        project_root.join("programs"),
+        project_root.join("program"),
+        project_root.to_path_buf(),
+    ];
+    for container in [project_root.join("programs"), project_root.join("program")] {
+        if let Ok(entries) = std::fs::read_dir(container) {
+            crate_roots.extend(
+                entries
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.path())
+                    .filter(|path| path.join("src/lib.rs").is_file()),
+            );
+        }
+    }
+    crate_roots.sort();
+    crate_roots.dedup();
+
+    let mut deployed = Vec::new();
+    let mut saw_anchor = false;
+    for crate_root in crate_roots {
+        if crate::verify::regen_drift::detect_program_target(&crate_root)
+            .ok()
+            .flatten()
+            != Some(crate::Target::Anchor)
+        {
+            continue;
+        }
+        saw_anchor = true;
+        let Some(address) = std::fs::read_to_string(crate_root.join("src/lib.rs"))
+            .ok()
+            .and_then(|source| {
+                source.lines().find_map(|line| {
+                    let rest = line.trim().strip_prefix("declare_id!(\"")?;
+                    let end = rest.find('"')?;
+                    Some(rest[..end].to_string())
+                })
+            })
+        else {
+            continue;
+        };
+        // FAIL CLOSED on the placeholder (#368). A spec without
+        // `program_id` stamps the System Program as its own address. It is
+        // valid base58, but sending the attack there would prove nothing.
+        if address == crate::codegen_shared::PLACEHOLDER_PROGRAM_ID {
+            return Err(ConstructFailure::BuildError(format!(
+                "`declare_id!` is the placeholder `{}` (the System Program), so the spec \
+                 declares no `program_id`. Sending the attack there would prove nothing. \
+                 Add `program_id \"<your id>\"` to the spec and regenerate.",
+                crate::codegen_shared::PLACEHOLDER_PROGRAM_ID,
+            )));
+        }
+        let Some(artifact_stem) = cargo_artifact_stem(&crate_root.join("Cargo.toml")) else {
+            continue;
+        };
+        let artifact_name = format!("{artifact_stem}.so");
+        let artifact = [
+            crate_root.join("target/deploy").join(&artifact_name),
+            project_root.join("target/deploy").join(&artifact_name),
+        ]
+        .into_iter()
+        .find(|path| path.is_file())
+        .and_then(|path| path.canonicalize().ok());
+        if let Some(artifact) = artifact {
+            deployed.push(DeployedProgram { address, artifact });
+        }
+    }
+
+    match deployed.len() {
+        1 => Ok(deployed.remove(0)),
+        0 if saw_anchor => Err(ConstructFailure::BuildError(
+            "no matching compiled program found — build the Anchor crate (`cargo build-sbf`) \
+             so its `declare_id!` and same-crate `.so` can be used together"
+                .to_string(),
+        )),
+        0 => Err(ConstructFailure::BuildError(
+            "Parallax reproducers are Anchor-only today, and no Anchor program crate was \
+             detected. The harness encodes Anchor instruction and account discriminators."
+                .to_string(),
+        )),
+        count => Err(ConstructFailure::BuildError(format!(
+            "found {count} deployed Anchor programs; cannot choose one without risking an \
+             address/artifact mismatch"
+        ))),
+    }
+}
+
+fn cargo_artifact_stem(manifest_path: &Path) -> Option<String> {
+    let manifest: toml::Value = std::fs::read_to_string(manifest_path).ok()?.parse().ok()?;
+    let name = manifest
+        .get("lib")
+        .and_then(|lib| lib.get("name"))
+        .and_then(toml::Value::as_str)
+        .or_else(|| {
+            manifest
+                .get("package")
+                .and_then(|package| package.get("name"))
+                .and_then(toml::Value::as_str)
+        })?;
+    Some(name.replace('-', "_"))
+}
+
+/// A generated Parallax reproducer crate: where it lives and how to run it.
+///
+/// Deliberately NOT a [`Reproducer`]. Generating a test is not evidence that
+/// the test passes, and `construct_reproducer` returning `Ok` is what
+/// promotes a candidate to a finding. A predicate can fire on a handler that
+/// is in fact guarded — `missing_signer` keys off a missing `auth` clause,
+/// but an `accounts` block marking an account `signer` enforces a signature
+/// independently — so confirming without running would surface exactly the
+/// false positives this lane exists to eliminate.
+pub struct ParallaxHarness {
+    /// Test path relative to the project root.
+    rel_test_path: String,
+    /// Absolute path to the generated crate's manifest.
+    manifest: PathBuf,
+    /// `cargo test --test <stem>` target name.
+    test_stem: String,
+    test_fn: String,
+    invocation: String,
+    attack: String,
+}
+
+impl ParallaxHarness {
+    /// The candidate-facing pointer: harness generated, NOT yet run.
+    pub fn as_repro_harness(&self) -> ReproHarness {
+        ReproHarness {
+            path: self.rel_test_path.clone(),
+            invocation: self.invocation.clone(),
+            kind: "parallax_transaction".to_string(),
+            failing_input: self.attack.clone(),
+        }
+    }
+
+    /// The confirmed-finding reproducer — only after the test actually ran
+    /// and the attack committed.
+    pub fn as_reproducer(&self) -> Reproducer {
+        Reproducer::Parallax {
+            test_path: self.rel_test_path.clone(),
+            test_fn: self.test_fn.clone(),
+            invocation: self.invocation.clone(),
+            attack: self.attack.clone(),
+        }
+    }
+}
+
+/// Which attack, if any, this category's reproducer drives. `None` means the
+/// category is not handled by this lane.
+pub fn parallax_attack_for(
+    category: &Category,
+) -> Option<crate::codegen::parallax_repro::ParallaxAttack> {
+    use crate::codegen::parallax_repro::ParallaxAttack;
+    match category {
+        Category::MissingSigner => Some(ParallaxAttack::UnsignedInvocation),
+        Category::LifecycleOneShotViolation => Some(ParallaxAttack::Replay),
+        _ => None,
+    }
+}
+
+/// Build and run the reproducer crate. The generated test emits an explicit
+/// committed/rejected marker; process status alone is never treated as a
+/// verdict because an unrelated panic is not evidence that the guard held.
+pub fn execute_parallax_harness(harness: &ParallaxHarness) -> ExecOutcome {
+    let output = std::process::Command::new("cargo")
+        .arg("test")
+        .arg("--manifest-path")
+        .arg(&harness.manifest)
+        .arg("--test")
+        .arg(&harness.test_stem)
+        .arg("--")
+        .arg("--nocapture")
+        .output();
+    match output {
+        Ok(out) => classify_parallax_output(out.status.success(), &out.stdout, &out.stderr),
+        Err(e) => ExecOutcome::BuildError(format!("could not run cargo test: {e}")),
+    }
+}
+
+fn classify_parallax_output(success: bool, stdout: &[u8], stderr: &[u8]) -> ExecOutcome {
+    const COMMITTED: &str = "QEDGEN_PARALLAX_ATTACK_COMMITTED";
+    const REJECTED: &str = "QEDGEN_PARALLAX_ATTACK_REJECTED";
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(stdout),
+        String::from_utf8_lossy(stderr)
+    );
+    match (text.contains(COMMITTED), text.contains(REJECTED), success) {
+        (true, false, true) => ExecOutcome::Reproduced,
+        (false, true, false) => ExecOutcome::NotReproduced,
+        (false, false, _) if text.contains("could not compile") || text.contains("error[E") => {
+            ExecOutcome::BuildError(
+                text.lines()
+                    .find(|line| line.starts_with("error"))
+                    .unwrap_or("cargo test failed to build the reproducer")
+                    .to_string(),
+            )
+        }
+        _ => ExecOutcome::BuildError(
+            "Parallax harness exited without one unambiguous attack verdict".to_string(),
+        ),
+    }
+}
+
+/// Write the Parallax reproducer crate for `finding`.
+///
+/// One crate per finding under `target/qedgen-repros/parallax/<id>/`:
+/// ephemeral, never committed, and isolated from the Mollusk repro crate
+/// whose `solana-account 3` cannot coexist with Parallax's `4.x`.
+pub fn write_parallax_repro(
+    finding: &Finding,
+    ctx: &ReproducerContext,
+    attack: crate::codegen::parallax_repro::ParallaxAttack,
+) -> Result<ParallaxHarness, ConstructFailure> {
+    let handler = ctx
+        .spec
+        .handlers
+        .iter()
+        .find(|h| h.name == finding.handler)
+        .ok_or(ConstructFailure::NotImplemented)?;
+
+    let program = discover_deployed_program(&ctx.project_root)?;
+
+    let crate_dir = ctx
+        .project_root
+        .join("target/qedgen-repros/parallax")
+        .join(&finding.id);
+    let tests_dir = crate_dir.join("tests");
+    std::fs::create_dir_all(&tests_dir)
+        .map_err(|e| ConstructFailure::Io(format!("create repro crate dir: {e}")))?;
+
+    // The repro crate is ephemeral and machine-local, so it embeds the
+    // artifact's ABSOLUTE path. `{:?}` quotes and escapes it into a Rust
+    // string literal, which also survives spaces in the project path.
+    let generated = crate::codegen::parallax_repro::generate(
+        ctx.spec,
+        handler,
+        attack,
+        &program.address,
+        &format!("{:?}", program.artifact.display().to_string()),
+    );
+
+    let test_stem = format!("probe_{}", finding.id);
+    let test_file = tests_dir.join(format!("{test_stem}.rs"));
+    std::fs::write(&test_file, &generated.source)
+        .map_err(|e| ConstructFailure::Io(format!("write repro test: {e}")))?;
+
+    let manifest = format!(
+        "[package]\nname = \"qedgen-repro-{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+         # Standalone workspace: the repro must not be absorbed by the user's.\n\
+         [workspace]\n\n[dependencies]\n\n[dev-dependencies]\n{}",
+        finding.id,
+        crate::codegen::integration_test::parallax_dev_dependencies()
+    );
+    std::fs::write(crate_dir.join("Cargo.toml"), manifest)
+        .map_err(|e| ConstructFailure::Io(format!("write repro manifest: {e}")))?;
+
+    let rel = |path: &Path| {
+        path.strip_prefix(&ctx.project_root)
+            .unwrap_or(path)
+            .display()
+            .to_string()
+    };
+    let manifest_path = crate_dir.join("Cargo.toml");
+    Ok(ParallaxHarness {
+        rel_test_path: rel(&test_file),
+        test_fn: format!("probe_{}_{}", handler.name, attack_suffix(attack)),
+        invocation: format!(
+            "cargo test --manifest-path {} --test {}",
+            rel(&manifest_path),
+            test_stem
+        ),
+        attack: generated.attack,
+        manifest: manifest_path,
+        test_stem,
+    })
+}
+
+fn attack_suffix(attack: crate::codegen::parallax_repro::ParallaxAttack) -> &'static str {
+    use crate::codegen::parallax_repro::ParallaxAttack;
+    match attack {
+        ParallaxAttack::UnsignedInvocation => "unsigned_invocation_is_accepted",
+        ParallaxAttack::Replay => "replay_is_accepted",
+    }
+}
+
 /// Mollusk sandbox tx: drive overflow-triggering params (e.g. `u64::MAX`
 /// into a `+=?` field), observe the wrap propagated to post-state.
 fn construct_arithmetic_overflow_wrapping(
@@ -196,6 +523,11 @@ fn construct_unbounded_amount_param(
 
 /// Proptest seed: invoke in an unintended lifecycle state, assert effects
 /// fired anyway.
+///
+/// Handled upstream in `run_probe` via [`write_parallax_repro`] +
+/// [`execute_parallax_harness`], because confirmation requires RUNNING the
+/// reproducer and this dispatcher's `Ok` means "confirmed". Reaching here is
+/// out-of-band.
 fn construct_lifecycle_one_shot_violation(
     _finding: &Finding,
     _ctx: &ReproducerContext,
@@ -205,6 +537,10 @@ fn construct_lifecycle_one_shot_violation(
 
 /// Sandbox tx: invoke from an unauthorized signer (litesvm); observe the
 /// state change occurs without auth.
+///
+/// Handled upstream in `run_probe` — see
+/// [`construct_lifecycle_one_shot_violation`] for why confirmation cannot
+/// happen in this dispatcher.
 fn construct_missing_signer(
     _finding: &Finding,
     _ctx: &ReproducerContext,
@@ -441,6 +777,7 @@ pub fn execute_harness(harness: &ArithHarness, _budget: Duration) -> ExecOutcome
 mod tests {
     use super::*;
     use crate::probe::Severity;
+    use std::fs;
 
     fn dummy_finding(category: Category, tag: &str) -> Finding {
         Finding {
@@ -455,6 +792,47 @@ mod tests {
             reproducer: None,
             gated_by: None,
         }
+    }
+
+    /// #368 — a spec without `program_id` stamps the System Program's
+    /// address as the program's own `declare_id!`. It is valid base58, so it
+    /// resolves here exactly like a real address, and the attack transaction
+    /// would be aimed at the System Program: it fails for a reason unrelated
+    /// to the finding, and the reproducer reports "no bug". A silent wrong
+    /// answer is worse than no answer, so this fails closed.
+    #[test]
+    fn placeholder_program_id_is_refused() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let src = tmp.path().join("programs/src");
+        std::fs::create_dir_all(&src).expect("mkdir");
+        std::fs::write(
+            tmp.path().join("programs/Cargo.toml"),
+            "[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n\
+             [dependencies]\nanchor-lang = \"0.32\"\n",
+        )
+        .expect("write manifest");
+        std::fs::write(
+            src.join("lib.rs"),
+            format!(
+                "use anchor_lang::prelude::*;\ndeclare_id!(\"{}\");\n",
+                crate::codegen_shared::PLACEHOLDER_PROGRAM_ID
+            ),
+        )
+        .expect("write lib.rs");
+
+        let err = discover_deployed_program(tmp.path())
+            .expect_err("the placeholder address must not resolve as a target");
+        let ConstructFailure::BuildError(reason) = err else {
+            panic!("expected BuildError with a reason");
+        };
+        assert!(
+            reason.contains("placeholder") && reason.contains("System Program"),
+            "the refusal must say why: {reason}"
+        );
+        assert!(
+            reason.contains("program_id"),
+            "the refusal must say how to fix it: {reason}"
+        );
     }
 
     /// Categories whose constructors are still stubbed report
@@ -526,6 +904,59 @@ mod tests {
         let ctx = ReproducerContext::from_spec_path(&spec, spec_path);
         let dir = ctx.repro_dir("abc12345");
         assert_eq!(dir, PathBuf::from("/tmp/foo/target/qedgen-repros/abc12345"));
+    }
+
+    #[test]
+    fn deployed_program_discovery_does_not_pair_an_id_with_an_unrelated_artifact() {
+        let dir = tempfile::tempdir().expect("temp project");
+        let programs = dir.path().join("programs");
+        fs::create_dir_all(programs.join("src")).expect("program source dir");
+        fs::create_dir_all(programs.join("target/deploy")).expect("deploy dir");
+        fs::write(
+            programs.join("Cargo.toml"),
+            "[package]\nname = \"alpha-program\"\nversion = \"0.1.0\"\n\
+             [dependencies]\nanchor-lang = \"0.31\"\n",
+        )
+        .expect("manifest");
+        fs::write(
+            programs.join("src/lib.rs"),
+            "use anchor_lang::prelude::*;\ndeclare_id!(\"Alpha1111111111111111111111111111111111111\");\n",
+        )
+        .expect("lib");
+        fs::write(programs.join("target/deploy/beta_program.so"), b"not alpha")
+            .expect("unrelated artifact");
+
+        let result = discover_deployed_program(dir.path());
+
+        assert!(
+            matches!(result, Err(ConstructFailure::BuildError(message))
+                if message.contains("matching compiled program")),
+            "an address must never be paired with another crate's artifact"
+        );
+    }
+
+    #[test]
+    fn parallax_verdict_requires_an_explicit_attack_signal() {
+        assert!(matches!(
+            classify_parallax_output(true, b"test result: ok", b""),
+            ExecOutcome::BuildError(message) if message.contains("verdict")
+        ));
+        assert!(matches!(
+            classify_parallax_output(false, b"", b"thread panicked unexpectedly"),
+            ExecOutcome::BuildError(message) if message.contains("verdict")
+        ));
+    }
+
+    #[test]
+    fn parallax_verdict_distinguishes_committed_from_rejected_attacks() {
+        assert!(matches!(
+            classify_parallax_output(true, b"QEDGEN_PARALLAX_ATTACK_COMMITTED\n", b""),
+            ExecOutcome::Reproduced
+        ));
+        assert!(matches!(
+            classify_parallax_output(false, b"QEDGEN_PARALLAX_ATTACK_REJECTED\n", b"test failed"),
+            ExecOutcome::NotReproduced
+        ));
     }
 
     fn spec_with_field(field: &str, ty: &str) -> ParsedSpec {

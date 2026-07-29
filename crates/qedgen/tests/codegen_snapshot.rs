@@ -41,6 +41,11 @@ fn render_mir_codegen(fixture_dir: &str, spec_arg: &str) -> String {
 
     let status = Command::new(common::qedgen_bin())
         .arg("codegen")
+        // These fixtures carry a `programs/Cargo.lock`, so the #364 compile
+        // check would run on every snapshot render: minutes of cargo work to
+        // assert on generated TEXT, which is all this suite reads. The
+        // scaffold backend has its own gate.
+        .arg("--no-check-compiles")
         .arg("--spec")
         .arg(spec_arg)
         .current_dir(tmp.path())
@@ -115,6 +120,11 @@ fn render_pinocchio_codegen(fixture_dir: &str, spec_arg: &str) -> String {
 
     let status = Command::new(common::qedgen_bin())
         .arg("codegen")
+        // These fixtures carry a `programs/Cargo.lock`, so the #364 compile
+        // check would run on every snapshot render: minutes of cargo work to
+        // assert on generated TEXT, which is all this suite reads. The
+        // scaffold backend has its own gate.
+        .arg("--no-check-compiles")
         .arg("--spec")
         .arg(spec_arg)
         .arg("--target")
