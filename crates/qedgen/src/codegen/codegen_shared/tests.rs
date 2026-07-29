@@ -3285,6 +3285,8 @@ fn flat_state_fields_carry_the_synthesized_tail() {
     // Both synthesized fields are single bytes in the struct.
     for (name, ty) in fields.iter().filter(|(n, _)| n != "total") {
         assert_eq!(ty, "U8", "{name} must map to a single byte");
+    }
+}
 
 // ── Fixed byte widths (#389) ─────────────────────────────────────────
 
@@ -3359,4 +3361,44 @@ fn fixed_byte_width_refuses_what_it_cannot_size() {
             "{ty} must not produce a width"
         );
     }
+}
+
+/// A self-referential alias must return an error, not exhaust the stack.
+///
+/// `check` does not catch this first: the known-types lint resolves aliases
+/// with its own cycle guard, stops when it sees a repeat, and validates the
+/// name it stopped on — which for a cycle is a declared alias, so the spec
+/// lints clean and arrives here.
+#[test]
+fn self_referential_types_error_instead_of_recursing() {
+    let mut spec = empty_spec();
+    spec.type_aliases.push(("A".to_string(), "B".to_string()));
+    spec.type_aliases.push(("B".to_string(), "A".to_string()));
+    spec.records.push(crate::check::ParsedRecordType {
+        name: "Node".to_string(),
+        fields: vec![("next".to_string(), "Node".to_string())],
+    });
+
+    for ty in ["A", "B", "Node"] {
+        let err = fixed_byte_width(ty, &spec)
+            .expect_err(&format!("{ty} expands into itself and has no width"));
+        assert!(
+            err.to_string().contains("expands into itself"),
+            "unexpected error for {ty}: {err}"
+        );
+    }
+
+    // The value emitter walks aliases too, and needs its own guard: it
+    // accepts `Fin[N]`, which the width function deliberately refuses, so
+    // it cannot simply delegate.
+    let err = emit_pod_bytes_append("A", "v", &spec, "", 0)
+        .expect_err("a cyclic alias has no fixed layout");
+    assert!(
+        err.to_string().contains("expands into itself"),
+        "unexpected error: {err}"
+    );
+    assert!(
+        emit_pod_bytes_append("Fin[8]", "v", &spec, "", 0).is_ok(),
+        "the value emitter still supports Fin[N]"
+    );
 }

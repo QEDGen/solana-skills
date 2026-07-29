@@ -685,7 +685,7 @@ handler bump_total (amount : U64) {
              flags : Map[3] U8, delta : I64, sig : Bytes64, live : Bool, }\n\
              type Error\n  | Nope\n\
              pda vault [\"vault\"]\n\
-             handler bump : State.Active -> State.Active {\n  \
+             handler bump (flag : Bool) : State.Active -> State.Active {\n  \
              accounts { vault : writable, pda [\"vault\"] }\n  \
              effect { delta := delta }\n}\n",
         )
@@ -703,8 +703,7 @@ handler bump_total (amount : U64) {
         // 8 discriminator + 32 owner + 4*32 members + 3*1 flags + 8 delta
         // + 64 sig + 1 live + 1 bump + 1 status.
         let expected = 8 + 32 + 128 + 3 + 8 + 64 + 1 + 1 + 1;
-        let emitted: usize = generated
-            .source
+        let emitted: usize = state_bytes_body(&generated.source)
             .lines()
             .filter_map(emitted_byte_count)
             .sum::<usize>()
@@ -714,6 +713,20 @@ handler bump_total (amount : U64) {
             "state_bytes builds the wrong number of bytes:\n{}",
             generated.source
         );
+    }
+
+    /// The body of the generated `state_bytes` function, so the byte count
+    /// above measures the account fixture and nothing else. Scoped rather
+    /// than scanning the whole file, because instruction arguments append to
+    /// a `data` binding too: giving the fixture handler a parameter would
+    /// otherwise fold its witness bytes into the account total and the
+    /// assertion would fail for the wrong reason.
+    fn state_bytes_body(source: &str) -> &str {
+        let (_, after) = source
+            .split_once("fn state_bytes(bump: u8) -> Vec<u8> {")
+            .expect("generated source declares state_bytes");
+        let (body, _) = after.split_once("\n}").expect("state_bytes is closed");
+        body
     }
 
     /// Bytes appended by one emitted line of `state_bytes`. Counts the two

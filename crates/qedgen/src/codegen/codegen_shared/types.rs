@@ -717,6 +717,29 @@ pub fn emit_pod_bytes_append(
     indent: &str,
     depth: usize,
 ) -> Result<String> {
+    emit_pod_bytes_guarded(
+        dsl_ty,
+        expr,
+        spec,
+        indent,
+        depth,
+        &mut std::collections::BTreeSet::new(),
+    )
+}
+
+/// `expanding` carries the alias names already on the stack. `type A = B`
+/// with `type B = A` passes `check` — the known-types lint stops at the
+/// cycle and validates the alias name it stopped on, which is declared — so
+/// an unguarded walk here recurses until the stack runs out rather than
+/// reporting anything. Same guard, same reason, as `fixed_byte_width`.
+fn emit_pod_bytes_guarded(
+    dsl_ty: &str,
+    expr: &str,
+    spec: &ParsedSpec,
+    indent: &str,
+    depth: usize,
+    expanding: &mut std::collections::BTreeSet<String>,
+) -> Result<String> {
     let dsl_ty = dsl_ty.trim();
 
     // `Map[N] T` → `[T; N]`: N elements back to back, no length prefix.
@@ -728,7 +751,8 @@ pub fn emit_pod_bytes_append(
         };
         let binder = format!("__e{depth}");
         let inner_indent = format!("{indent}    ");
-        let body = emit_pod_bytes_append(inner, &binder, spec, &inner_indent, depth + 1)?;
+        let body =
+            emit_pod_bytes_guarded(inner, &binder, spec, &inner_indent, depth + 1, expanding)?;
         return Ok(format!(
             "{indent}for {binder} in {expr}.iter().copied() {{\n{body}{indent}}}\n"
         ));
@@ -766,7 +790,13 @@ pub fn emit_pod_bytes_append(
 
     // Type alias: recurse on the RHS, matching `map_type_pod`.
     if let Some((_, rhs)) = spec.type_aliases.iter().find(|(n, _)| n == dsl_ty) {
-        return emit_pod_bytes_append(rhs, expr, spec, indent, depth);
+        if !expanding.insert(dsl_ty.to_string()) {
+            anyhow::bail!(
+                "type `{}` expands into itself, so it has no fixed layout",
+                dsl_ty
+            );
+        }
+        return emit_pod_bytes_guarded(rhs, expr, spec, indent, depth, expanding);
     }
 
     // Records, sums, `Vec`, and `Option` have no fixed alignment-1 layout
@@ -776,6 +806,9 @@ pub fn emit_pod_bytes_append(
         "cannot build account-fixture bytes for DSL type `{}` — supported: \
          U8/U16/U32/U64/U128, I8/I16/I32/I64/I128, Bool, Pubkey, Bytes32, \
          Bytes64, Fin[N], Map[N] T, and aliases of those",
+        dsl_ty
+    )
+}
 
 /// How many bytes a value of `dsl_ty` occupies in a fixed on-chain layout.
 ///
