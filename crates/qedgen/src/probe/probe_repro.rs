@@ -228,11 +228,15 @@ fn discover_deployed_program(project_root: &Path) -> Result<DeployedProgram, Con
             .flatten()
     });
     // FAIL CLOSED: require positive Anchor detection rather than refusing
-    // only the frameworks we happen to recognise. `target_from_text` knows
-    // Anchor and Quasar, so a Pinocchio project reads as `None` — treating
-    // "unknown" as "probably fine" would emit an Anchor-shaped harness
-    // against it and report "no bug" from a transaction that never reached
+    // only the frameworks we happen to recognise. Treating "unknown" as
+    // "probably fine" would emit an Anchor-shaped harness against another
+    // framework and report "no bug" from a transaction that never reached
     // the handler.
+    //
+    // The detector now covers all three targets (#367), so a Pinocchio
+    // project reports `Some(Pinocchio)` here instead of the `None` it used
+    // to — same refusal, but the reason names the framework rather than
+    // saying nothing was recognised.
     if detected != Some(crate::Target::Anchor) {
         return Err(ConstructFailure::BuildError(format!(
             "Parallax reproducers are Anchor-only today (detected: {detected:?}). The \
