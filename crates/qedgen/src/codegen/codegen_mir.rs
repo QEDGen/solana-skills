@@ -1206,22 +1206,16 @@ fn emit_state(
         }
         out.push_str(&format!("pub struct {} {{\n", state_name));
 
-        for (fname, ftype) in &parsed.state_fields {
+        // `flat_state_fields` is the shared layout, including the
+        // synthesized `bump` / `status` tail — the account-fixture emitter
+        // in `integration_test` reads the same list, so fixture bytes
+        // cannot drift from this struct (#383).
+        for (fname, ftype) in crate::codegen_shared::flat_state_fields(parsed) {
             out.push_str(&format!(
                 "    pub {}: {},\n",
                 fname,
-                map_type_for_target(ftype, parsed, target)?
+                map_type_for_target(&ftype, parsed, target)?
             ));
-        }
-
-        if !parsed.pdas.is_empty() && !parsed.state_fields.iter().any(|(n, _)| n == "bump") {
-            out.push_str("    pub bump: u8,\n");
-        }
-
-        if !parsed.lifecycle_states.is_empty()
-            && !parsed.state_fields.iter().any(|(n, _)| n == "status")
-        {
-            out.push_str("    pub status: u8,\n");
         }
 
         out.push_str("}\n");

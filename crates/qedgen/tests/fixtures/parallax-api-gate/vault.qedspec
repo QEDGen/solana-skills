@@ -2,11 +2,12 @@
 //
 // Deliberately minimal, and deliberately FROZEN: it exists so
 // `parallax_integration_scaffold_compiles` type-checks the generated test
-// against the pinned Parallax revision, not to demonstrate the DSL. It is
-// shaped to reach every Parallax symbol the scaffold can emit:
+// against the pinned Parallax revision and the published quasar-lang, not
+// to demonstrate the DSL. It is shaped to reach every Parallax symbol the
+// scaffold can emit:
 //
 //   - `auth` + a declared `Unauthorized`  => Outcome::error(..) negative test
-//   - Pubkey state fields                 => state_account(..) + .to_bytes()
+//   - Pubkey state fields                 => state_account(..) fixture bytes
 //   - `type token` / `type mint` accounts => mint_account/token_account
 //                                            helpers (SplMint, SplTokenAccount)
 //   - a pda with a non-account seed       => the seed stand-in binding
@@ -14,8 +15,8 @@
 //                                            system_program, SPL_TOKEN_PROGRAM_ID
 //
 // Adding a handler here widens the gate; changing the shapes above narrows
-// it. The hand-written stub in the gate mirrors this spec, so the two move
-// together.
+// it. The gate generates the `program` crate from this spec as well (#383),
+// so there is no second hand-written copy of these shapes to keep in step.
 
 spec Vault
 

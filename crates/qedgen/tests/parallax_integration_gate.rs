@@ -8,38 +8,39 @@
 //! shape. That class of break reaches a user as a red `cargo test` in their
 //! own crate.
 //!
-//! So this gate does what the text tests cannot: it runs `codegen
-//! --integration` against a frozen fixture spec, drops the result into a
-//! crate that provides the `program` surface the scaffold imports, and
-//! type-checks the whole thing against the real pinned Parallax.
+//! So this gate does what the text tests cannot: it runs codegen against a
+//! frozen fixture spec and type-checks the result against the real pinned
+//! Parallax and the real published `quasar-lang`.
 //!
-//! ## What is and is not covered
+//! ## Both halves are real (#383)
 //!
-//! COVERED — everything the scaffold touches on the Parallax side:
-//! `Ctx::builder`/`crate_name`/`build`, `execute_with` argument shapes,
-//! `Outcome::check` chaining and its receiver, `Outcome::success` /
-//! `Outcome::error` (including the `Into<u32>` blanket impl the negative
-//! tests rely on), `Account` construction both ways, and every prelude
-//! symbol the emitters name (`system_program`, `DEFAULT_WALLET_LAMPORTS`,
-//! `SPL_TOKEN_PROGRAM_ID`, `Instruction`, `Pubkey`, `Cu`).
+//! This gate used to compile the scaffold against a hand-written stub crate
+//! that mirrored what Quasar codegen was believed to produce. The stub was
+//! a fiction in two places, and each fiction hid a defect that shipped:
 //!
-//! NOT COVERED — the Quasar client boundary. The stub below mirrors the
-//! shapes Quasar codegen produces, so if Quasar's own output moves this gate
-//! will not catch it.
+//! - its state struct was a plain `wincode`-derived struct, so the gate
+//!   never saw that Quasar's `#[account]` leaves behind a view type over
+//!   `AccountView` with no constructible fields. The scaffold's struct
+//!   literal could not compile, and did not, for every real Quasar program.
+//! - its error enum hand-wrote `impl From<VaultError> for u32`, which
+//!   Quasar's `#[error_code]` does not emit. `Outcome::error(Err::X)`
+//!   therefore resolved in the gate and nowhere else.
 //!
-//! The blocker that forced the stub is gone: #372 gave Quasar its own
-//! `Address` mapping, and `generated_artifact_gate` now compiles all three
-//! bundled examples as Quasar. Replacing this stub with a real generated
-//! Quasar program is the remaining step, and it is blocked on the dependency
-//! problem below rather than on codegen.
+//! Both halves are now generated. The `program` surface the scaffold
+//! imports — `client` instruction builders, `state`, `errors`, `ID` — comes
+//! from `codegen --target quasar` on the fixture spec, so a Quasar codegen
+//! change that breaks the client boundary fails here.
 //!
-//! This gate is also the only thing that catches the wincode 0.5/0.6 split:
-//! `litesvm` requires `wincode ^0.5.5`, and solana crates cross to 0.6 in
-//! MINOR bumps that a caret requirement takes silently, landing two
-//! incompatible majors in one graph. It went red exactly that way with no
-//! qedgen change. `parallax_dev_dependencies` documents the pin list and how
-//! to extend it; the pin-liveness script (#371) does NOT catch this, because
-//! it checks that the revision exists, not that it builds.
+//! ## What is covered
+//!
+//! Everything the scaffold touches on the Parallax side: `Ctx::builder` /
+//! `crate_name` / `build`, `execute_with` argument shapes, `Outcome::check`
+//! chaining and its receiver, `Outcome::success` / `Outcome::error`
+//! (including the `Into<u32>` blanket impl the negative tests rely on),
+//! `Account` construction both ways, and every prelude symbol the emitters
+//! name (`system_program`, `DEFAULT_WALLET_LAMPORTS`,
+//! `SPL_TOKEN_PROGRAM_ID`, `Instruction`, `Pubkey`, `Cu`) — plus, now, the
+//! generated Quasar program those symbols are wired to.
 //!
 //! This gate is also the only thing that catches the wincode 0.5/0.6 split:
 //! `litesvm` requires `wincode ^0.5.5`, and solana crates cross to 0.6 in
@@ -55,7 +56,9 @@
 
 mod common;
 
-use common::{ensure_qedgen_built, qedgen_bin, run_capture_ok, run_ok, stage_fixture};
+use common::{
+    ensure_qedgen_built, qedgen_bin, redirect_macros_to_path, run_capture_ok, run_ok, stage_fixture,
+};
 use std::process::Command;
 
 /// Shared target dir so the Agave dependency tree compiles once per machine
@@ -71,23 +74,26 @@ fn gate_target_dir() -> std::path::PathBuf {
 fn parallax_integration_scaffold_compiles() {
     ensure_qedgen_built();
     let tmp = stage_fixture("crates/qedgen/tests/fixtures/parallax-api-gate");
+    std::fs::create_dir_all(tmp.path().join(".qed")).expect("create .qed");
     common::git_init(tmp.path());
 
-    let stub = tmp.path().join("stub");
-    let manifest = stub.join("Cargo.toml");
-    let generated = stub.join("tests/integration_tests.rs");
+    let output_dir = tmp.path().join("programs");
+    let manifest = output_dir.join("Cargo.toml");
+    let generated = output_dir.join("tests/integration_tests.rs");
 
-    // Only the DEV section must start empty. The stub lib itself depends on
-    // `parallax-svm` (its state struct is typed with Parallax's `Pubkey`),
-    // so a whole-file search would trip on `[dependencies]`.
-    let before = std::fs::read_to_string(&manifest).expect("read stub manifest");
-    let dev_section = before
-        .split_once("[dev-dependencies]")
-        .map(|(_, rest)| rest.trim())
-        .expect("fixture manifest declares [dev-dependencies]");
-    assert!(
-        dev_section.is_empty(),
-        "the fixture's [dev-dependencies] must start empty so the upsert is what fills it, got:\n{dev_section}"
+    // The program scaffold FIRST. Bare `codegen` writes `Cargo.toml` from
+    // scratch, so running it after the integration pass would drop the
+    // Parallax dev-dependencies that pass upserts.
+    run_ok(
+        Command::new(qedgen_bin())
+            .arg("codegen")
+            .arg("--spec")
+            .arg("vault.qedspec")
+            .arg("--target")
+            .arg("quasar")
+            .arg("--output-dir")
+            .arg(&output_dir)
+            .current_dir(tmp.path()),
     );
 
     run_ok(
@@ -98,8 +104,8 @@ fn parallax_integration_scaffold_compiles() {
             .arg("--target")
             .arg("quasar")
             .arg("--integration")
-            .arg("--integration-output")
-            .arg(&generated)
+            .arg("--output-dir")
+            .arg(&output_dir)
             .current_dir(tmp.path()),
     );
 
@@ -110,8 +116,9 @@ fn parallax_integration_scaffold_compiles() {
 
     // The dev-dependency upsert is part of the contract: without it the
     // scaffold cannot resolve `parallax_svm` and the compile below is
-    // meaningless.
-    let after = std::fs::read_to_string(&manifest).expect("read stub manifest");
+    // meaningless. Nothing pre-seeds these — the manifest is generated by
+    // the pass above, so every one of them got there by upsert.
+    let after = std::fs::read_to_string(&manifest).expect("read generated manifest");
     for dependency in ["parallax-svm", "spl-token", "solana-sdk-ids", "wincode"] {
         assert!(
             after.contains(&format!("{dependency} =")),
@@ -119,9 +126,14 @@ fn parallax_integration_scaffold_compiles() {
         );
     }
 
-    // The actual gate: type-check the generated test target against the
-    // pinned Parallax. `--tests` so the test target is compiled, not just
-    // the stub lib.
+    // The generated manifest pins `qedgen-macros` to a git tag at the
+    // current crate version, which does not exist upstream until release.
+    redirect_macros_to_path(&manifest);
+
+    // The actual gate: type-check the generated program AND its generated
+    // test target against the pinned Parallax and the published
+    // `quasar-lang`. `--tests` so the test target is compiled, not just the
+    // lib.
     //
     // `-D warnings` is the warning-clean check: a generated DO-NOT-EDIT file
     // must not land dead code or an unused import, and denying promotes

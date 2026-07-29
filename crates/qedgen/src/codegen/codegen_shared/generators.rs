@@ -625,6 +625,38 @@ pub fn state_struct_name(spec: &ParsedSpec, on_account: Option<&str>) -> String 
     }
 }
 
+/// Every field of the FLAT state struct, in declaration order, as
+/// `(name, DSL type)`.
+///
+/// Single source for the two sites that must agree on the layout: the
+/// struct `generate_state` emits, and the account-fixture bytes the
+/// Parallax integration scaffold builds. They were derived independently,
+/// and had already drifted — the fixture hardcoded `bump` and omitted
+/// `status` entirely (#383), so its bytes were one field short of what the
+/// program decodes even before the struct literal failed to compile.
+///
+/// `bump` and `status` are synthesized by `generate_state` rather than
+/// declared, so they carry the `U8` DSL type here: every target maps it to
+/// `u8`, which is what the struct emits for both.
+pub fn flat_state_fields(spec: &ParsedSpec) -> Vec<(String, String)> {
+    let mut fields: Vec<(String, String)> = spec
+        .state_fields
+        .iter()
+        .map(|(n, t)| (n.clone(), t.clone()))
+        .collect();
+
+    let declared = |name: &str| spec.state_fields.iter().any(|(n, _)| n == name);
+
+    if !spec.pdas.is_empty() && !declared("bump") {
+        fields.push(("bump".to_string(), "U8".to_string()));
+    }
+    if !spec.lifecycle_states.is_empty() && !declared("status") {
+        fields.push(("status".to_string(), "U8".to_string()));
+    }
+
+    fields
+}
+
 /// Index an ADT account's variant fields: field name → every
 /// `(variant_name, declared_type)` occurrence, in name-sorted (BTreeMap)
 /// order. Raw view — includes fields whose type differs across variants;

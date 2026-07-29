@@ -90,16 +90,32 @@ copies and its ghost obligations stay
 checks are Parallax; the instruction builders still come from the generated
 Quasar `program::client` module, which is why the lane is Quasar-only.
 Assertions are the spec's: `Outcome::success()` on happy paths and
-`Outcome::error(<Prog>Error::<Code>)` on forged-signer tests when the spec
-declares `Unauthorized` or `InvalidLifecycle` (otherwise the scaffold
+`Outcome::error(<Prog>Error::<Code> as u32)` on forged-signer tests when the
+spec declares `Unauthorized` or `InvalidLifecycle` (otherwise the scaffold
 degrades to a marked weak assertion rather than naming a variant
-`codegen_mir` may not have synthesized). No compute-unit assertion is
-emitted: a committed transaction always spends CU, so a `cu > 0` check
-cannot fail, and the scaffold points at a measured budget instead.
+`codegen_mir` may not have synthesized). The `as u32` is required, not
+stylistic: Parallax accepts anything `Into<u32>`, and Quasar's
+`#[error_code]` emits `From<E> for ProgramError` and `TryFrom<u32> for E`
+but never `From<E> for u32`. No compute-unit assertion is emitted: a
+committed transaction always spends CU, so a `cu > 0` check cannot fail, and
+the scaffold points at a measured budget instead.
+
+The `state_account` fixture builds account BYTES rather than a struct value
+(#383). Quasar's `#[account]` replaces the annotated struct with a
+`repr(transparent)` view over `AccountView` and moves the declared fields
+into a hidden zero-copy companion, so there is no struct to construct and
+nothing meaningful to serialize. The bytes are the type's own
+`DISCRIMINATOR` followed by every field in declaration order — including the
+synthesized `bump` / `status` tail — little-endian, no padding, which is
+what the alignment-1 assertion inside `#[account]` guarantees.
 
 `parallax-svm` is pinned to a git revision (it is not published to
 crates.io), and `crates/qedgen/tests/parallax_integration_gate.rs` compiles
-the generated scaffold against that pin in CI.
+the generated scaffold against that pin in CI. Since #383 both halves of
+that gate are generated: it runs `codegen --target quasar` for the program
+crate as well, so the Quasar client boundary is covered rather than mirrored
+by a hand-written stub. The stub had invented two APIs that the real macros
+do not provide, and each fiction hid a defect that shipped.
 
 That gate went red without any qedgen change, and the mechanism is worth
 knowing because it will recur. `litesvm` 0.15 requires `wincode ^0.5.5`, so
