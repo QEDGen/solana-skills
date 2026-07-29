@@ -3,7 +3,7 @@ use quasar_lang::prelude::*;
 
 #[account(discriminator = 1)]
 pub struct PoolAccount {
-    pub authority: Pubkey,
+    pub authority: Address,
     pub total_deposits: u64,
     pub total_borrows: u64,
     pub interest_rate: u64,
@@ -22,8 +22,8 @@ pub enum PoolStatus {
 
 #[account(discriminator = 2)]
 pub struct LoanAccount {
-    pub borrower: Pubkey,
-    pub pool: Pubkey,
+    pub borrower: Address,
+    pub pool: Address,
     pub amount: u64,
     pub collateral: u64,
     pub bump: u8,

@@ -23,10 +23,24 @@ pub(crate) use std::path::Path;
 /// error instead of shipping silently.
 pub(crate) const BODY_HASH_PLACEHOLDER: &str = "QEDGEN_FIXUP_BODY_HASH";
 
+/// `declare_id!` value emitted when the spec declares no `program_id`
+/// (#368). This is the System Program's address, which cannot be a user
+/// program's own address, so it is a placeholder in every sense — but it is
+/// a VALID base58 pubkey, so nothing downstream rejects it on shape.
+///
+/// Single-sourced because three places have to agree about it: codegen
+/// emits it, the `missing_program_id` lint warns about it, and the probe
+/// reproducer lane must refuse to aim an attack transaction at it. When
+/// those were independent, the repro lane happily resolved the System
+/// Program as the target and could report "no bug" for a reason unrelated
+/// to the finding.
+pub(crate) const PLACEHOLDER_PROGRAM_ID: &str = "11111111111111111111111111111111";
+
 mod account_attr;
 mod cargo_toml;
 mod cpi;
 mod effect;
+mod error_variants;
 mod generators;
 mod guards;
 mod scaffold;
@@ -36,6 +50,7 @@ pub(crate) use account_attr::*;
 pub(crate) use cargo_toml::*;
 pub(crate) use cpi::*;
 pub(crate) use effect::*;
+pub(crate) use error_variants::*;
 pub(crate) use generators::*;
 pub(crate) use guards::*;
 pub(crate) use scaffold::*;

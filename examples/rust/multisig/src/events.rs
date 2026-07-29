@@ -3,36 +3,36 @@ use quasar_lang::prelude::*;
 
 #[event(discriminator = 1)]
 pub struct VaultCreated {
-    pub creator: Pubkey,
+    pub creator: Address,
     pub threshold: u8,
     pub member_count: u8,
 }
 
 #[event(discriminator = 2)]
 pub struct ProposalCreated {
-    pub proposer: Pubkey,
+    pub proposer: Address,
 }
 
 #[event(discriminator = 3)]
 pub struct ProposalApproved {
-    pub approver: Pubkey,
+    pub approver: Address,
     pub approval_count: u8,
 }
 
 #[event(discriminator = 4)]
 pub struct ProposalRejected {
-    pub rejecter: Pubkey,
+    pub rejecter: Address,
     pub rejection_count: u8,
 }
 
 #[event(discriminator = 5)]
 pub struct ProposalExecuted {
-    pub executor: Pubkey,
+    pub executor: Address,
 }
 
 #[event(discriminator = 6)]
 pub struct ProposalCancelled {
-    pub canceller: Pubkey,
+    pub canceller: Address,
 }
 
 // ---- END GENERATED ----

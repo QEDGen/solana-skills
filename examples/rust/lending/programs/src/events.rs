@@ -3,31 +3,31 @@ use quasar_lang::prelude::*;
 
 #[event(discriminator = 1)]
 pub struct PoolInitialized {
-    pub authority: Pubkey,
+    pub authority: Address,
     pub rate: u64,
 }
 
 #[event(discriminator = 2)]
 pub struct Deposited {
-    pub depositor: Pubkey,
+    pub depositor: Address,
     pub amount: u64,
 }
 
 #[event(discriminator = 3)]
 pub struct Borrowed {
-    pub borrower: Pubkey,
+    pub borrower: Address,
     pub amount: u64,
 }
 
 #[event(discriminator = 4)]
 pub struct Repaid {
-    pub borrower: Pubkey,
+    pub borrower: Address,
     pub amount: u64,
 }
 
 #[event(discriminator = 5)]
 pub struct LoanLiquidated {
-    pub borrower: Pubkey,
+    pub borrower: Address,
     pub amount: u64,
 }
 
