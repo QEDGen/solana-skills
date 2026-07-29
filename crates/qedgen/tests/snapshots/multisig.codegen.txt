@@ -568,7 +568,7 @@ client = []
 debug = []
 
 [dependencies]
-qedgen-macros = { git = "https://github.com/qedgen/solana-skills", tag = "v2.48.1" }
+qedgen-macros = { git = "https://github.com/qedgen/solana-skills", tag = "v2.49.0" }
 
 anchor-lang = "0.32.1"
 
