@@ -9,6 +9,61 @@ use crate::*;
 use anyhow::{ensure, Result};
 use std::path::{Path, PathBuf};
 
+/// #364 — post-`codegen` compile check over the crate just written.
+///
+/// Runs only when the dependency tree is already resolved, so a first
+/// generation stays fast and offline instead of stalling on a cold
+/// `anchor-lang` build; by the second run the answer arrives in seconds.
+/// `qedgen verify --scaffold` is the surface that always runs.
+///
+/// Reports and returns. It never changes the exit code — see the call site
+/// for why.
+pub(crate) fn report_scaffold_compile_check(crate_dir: &Path) {
+    use crate::verify::scaffold::{self, ScaffoldOutcome};
+
+    if !scaffold::deps_resolved(crate_dir) {
+        // One line, not silence: the check that did not run is exactly the
+        // kind of thing that becomes an unexamined assumption later.
+        eprintln!(
+            "note: skipping the generated-crate compile check — no Cargo.lock \
+             under {} yet. It runs once dependencies resolve; \
+             `qedgen verify --scaffold` runs it now.",
+            crate_dir.display()
+        );
+        return;
+    }
+
+    match scaffold::check_compiles(crate_dir) {
+        ScaffoldOutcome::Compiled => {
+            eprintln!("Generated crate typechecks: {}", crate_dir.display());
+        }
+        ScaffoldOutcome::TypeErrors { summary, log } => {
+            eprintln!(
+                "warning: the generated crate at {} does not compile.",
+                crate_dir.display()
+            );
+            for line in summary.lines() {
+                eprintln!("  {}", line);
+            }
+            if let Some(path) = log {
+                eprintln!("  full output: {}", path.display());
+            }
+            eprintln!(
+                "  This is a qedgen codegen defect, not something to fix by hand: \
+                 a regenerate would overwrite the edit. Please report it with the \
+                 spec that produced it."
+            );
+            eprintln!("  Gate on this in CI with `qedgen verify --scaffold`.");
+        }
+        ScaffoldOutcome::Unresolved { reason } | ScaffoldOutcome::NotApplicable { reason } => {
+            eprintln!(
+                "note: generated-crate compile check did not run — {}",
+                reason
+            );
+        }
+    }
+}
+
 /// Shared argument validation for the two Leanstral dispatch verbs
 /// (`generate`, `fill-sorry`).
 pub(crate) fn validate_dispatch_args(

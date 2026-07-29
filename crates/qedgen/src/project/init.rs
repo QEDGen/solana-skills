@@ -378,6 +378,9 @@ Edit operations, context blocks, and properties to match your program.
 -/
 
 qedspec {cap} where
+  // Replace before deploying: this is the System Program's address, not
+  // your program's. `anchor keys list`, or
+  // `solana-keygen pubkey target/deploy/<name>-keypair.json`.
   program_id: "11111111111111111111111111111111"
 
   state

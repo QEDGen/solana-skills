@@ -1,7 +1,61 @@
 //! Structural / declaration lints: error-as-record misdeclaration, unknown
-//! error variants, PDA seed collisions, and vacuous property lowering.
+//! error variants, a missing `program_id`, PDA seed collisions, and vacuous
+//! property lowering.
 
 use super::*;
+
+/// `missing_program_id`: the generated `declare_id!` will carry the System
+/// Program's address instead of this program's.
+///
+/// Two ways to get there, and both are reported, because the failure
+/// downstream is identical:
+///
+/// 1. the spec declares no `program_id`, so codegen falls back;
+/// 2. the spec declares the placeholder VERBATIM. `project/init.rs`
+///    templates that exact value into every new spec, so the default
+///    authoring path produces it and it survives until someone notices.
+///
+/// Info, deliberately, and not the Warning #368 proposed.
+///
+/// `SeverityCounts::fails_check` is `errors > 0 || warnings > 0`, so a
+/// Warning here would make `qedgen check` exit 1 for every spec that does
+/// not yet have a deployed address — which is the normal state of a
+/// greenfield spec for most of its life. Gating ordinary in-progress work on
+/// "you have not deployed yet" would get the rule muted, not obeyed.
+///
+/// The load-bearing protections for this defect are structural rather than
+/// advisory: codegen marks the emitted `declare_id!` as a placeholder in
+/// band, and the probe reproducer lane refuses to aim an attack transaction
+/// at it. This lint exists to name the situation and carry the fix, which is
+/// exactly what Info is for (#260 fixed the exit policy so Info never gates).
+pub(super) fn check_missing_program_id(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+    if spec.is_assembly_target() {
+        return Vec::new();
+    }
+    let placeholder = crate::codegen_shared::PLACEHOLDER_PROGRAM_ID;
+    let cause = match spec.program_id.as_deref() {
+        None => format!(
+            "no `program_id` declared, so the generated `declare_id!` falls back to \
+             `{placeholder}`"
+        ),
+        Some(id) if id == placeholder => format!(
+            "`program_id \"{placeholder}\"` is the placeholder `qedgen init` writes, \
+             so the generated `declare_id!` carries it"
+        ),
+        Some(_) => return Vec::new(),
+    };
+    vec![warn(
+        "missing_program_id",
+        Severity::Info,
+        3,
+        format!("{cause} — the System Program's address, not this program's."),
+    )
+    .fix(
+        "Set `program_id \"<your id>\"` in the spec. Get it from `anchor keys list`, \
+         or `solana-keygen pubkey target/deploy/<name>-keypair.json`."
+            .to_string(),
+    )]
+}
 
 /// `type Error = { ... }` (record brace form) parses as a `Record` named
 /// `Error` with `error_codes` left empty, so every error-variant consumer

@@ -799,6 +799,19 @@ pub(crate) enum Commands {
         #[arg(long)]
         miri: bool,
 
+        /// #364: compile the generated program crate (`cargo check --tests`)
+        /// and fail if it does not typecheck. Nothing else in the loop ever
+        /// builds what codegen wrote, so a codegen defect otherwise reaches
+        /// the user as a red `cargo build` with no qedgen diagnostic.
+        ///
+        /// Compiles the crate at `--program`, defaulting to `./programs`.
+        /// Dependency-resolution and toolchain failures report as `skipped`
+        /// with the reason, not as a failure: they say nothing about the
+        /// generated code. A pass does NOT authorize `qedgen stamp` —
+        /// compiling is not verifying.
+        #[arg(long)]
+        scaffold: bool,
+
         /// Stop on the first failing backend
         #[arg(long)]
         fail_fast: bool,
@@ -1192,6 +1205,18 @@ pub(crate) enum Commands {
         /// and the test file, edits in place.
         #[arg(long)]
         fill_tests: bool,
+
+        /// #364: skip the post-codegen compile check.
+        ///
+        /// By default, after writing the program crate, codegen runs
+        /// `cargo check --tests` over it and reports any error rather than
+        /// letting non-compiling output reach a `cargo build`. The check is
+        /// itself skipped when the dependency tree is not already resolved
+        /// (no `Cargo.lock`), so a first generation never pays a cold build.
+        /// It never changes the exit code: codegen's job is to write files,
+        /// and it did. `qedgen verify --scaffold` is the gating surface.
+        #[arg(long)]
+        no_check_compiles: bool,
     },
 
     /// Aristotle theorem prover (Harmonic) — sorry-filling via long-running agent

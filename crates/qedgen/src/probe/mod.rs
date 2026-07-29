@@ -1379,7 +1379,12 @@ fn detect_runtime(root: &Path) -> Runtime {
 /// Pinocchio dep check. Matches `pinocchio = ...`, `pinocchio.workspace =
 /// true`, or `pinocchio-token`/`-system` siblings (siblings require the
 /// root pinocchio surface).
-fn has_pinocchio_dep(cargo_toml: &str) -> bool {
+///
+/// Line-oriented rather than a bare `contains("pinocchio")` so a mention in
+/// a comment or inside a longer crate name does not count. Shared with
+/// `verify::regen_drift` (#367) — a second copy there would be a third
+/// framework detector answering the same question a different way.
+pub(crate) fn has_pinocchio_dep(cargo_toml: &str) -> bool {
     for line in cargo_toml.lines() {
         let t = line.trim();
         if t.starts_with('#') {

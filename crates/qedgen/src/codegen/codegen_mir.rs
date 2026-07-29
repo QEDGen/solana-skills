@@ -493,10 +493,13 @@ fn emit_lib(
     }
 
     let program_name = mir.name.to_lowercase();
-    let program_id = parsed
-        .program_id
-        .as_deref()
-        .unwrap_or("11111111111111111111111111111111");
+    // #368 — codegen must emit SOMETHING here, so a spec without
+    // `program_id` falls back to the System Program's address. It is a valid
+    // base58 pubkey, so nothing downstream rejects it on shape; the emitted
+    // comment below is what tells a reader (and a grep) that it is a
+    // placeholder. `missing_program_id` warns at spec time.
+    let declared_program_id = parsed.program_id.as_deref();
+    let program_id = declared_program_id.unwrap_or(crate::codegen_shared::PLACEHOLDER_PROGRAM_ID);
 
     let mut out = String::new();
     out.push_str(&crate::codegen_shared::marker(
@@ -515,7 +518,7 @@ fn emit_lib(
     if !mir.events.is_empty() {
         out.push_str("pub mod events;\n");
     }
-    if !mir.errors.variants.is_empty() {
+    if !crate::codegen_shared::emitted_error_variants(parsed, target).is_empty() {
         out.push_str("pub mod errors;\n");
     }
     out.push_str("pub mod state;\n");
@@ -541,6 +544,15 @@ fn emit_lib(
     }
     out.push('\n');
 
+    if declared_program_id.is_none() {
+        out.push_str(
+            "// PLACEHOLDER: the spec declares no `program_id`, so this is the System\n\
+             // Program's address, not this program's. Replace before deploying — add\n\
+             // `program_id \"<your id>\"` to the spec and regenerate.\n\
+             // Get it from `anchor keys list`, or\n\
+             // `solana-keygen pubkey target/deploy/<name>-keypair.json`.\n",
+        );
+    }
     out.push_str(&format!("declare_id!(\"{}\");\n\n", program_id));
 
     out.push_str("#[program]\n");
@@ -1417,7 +1429,8 @@ fn emit_errors(
     output_dir: &Path,
     target: Target,
 ) -> Result<()> {
-    if mir.errors.variants.is_empty() {
+    let codes = crate::codegen_shared::emitted_error_variants(parsed, target);
+    if codes.is_empty() {
         return Ok(());
     }
     let src_dir = output_dir.join("src");
@@ -1442,48 +1455,12 @@ fn emit_errors(
     out.push_str(prelude_import);
     out.push('\n');
 
-    // R26: a non-init lifecycle pre-status auto-adds `InvalidLifecycle`.
-    let needs_lifecycle = parsed.handlers.iter().any(|h| {
-        let pre = h.pre_status.as_deref().unwrap_or("");
-        let is_init = matches!(pre, "Uninitialized" | "Empty");
-        !pre.is_empty() && !is_init
-    });
-
-    // R28: runtime PDA verification auto-adds `InvalidPda`. Both this error
-    // declaration and guard emission consume the account plan's SeedPlan, so
-    // the variant cannot drift from the generated check.
-    let needs_invalid_pda = !matches!(target, Target::Pinocchio)
-        && parsed.handlers.iter().any(|h| {
-            let state_acct = crate::codegen_shared::resolve_handler_state_account(h, parsed);
-            h.accounts.iter().any(|acct| {
-                let is_state = state_acct.map(|sa| sa.name == acct.name).unwrap_or(false);
-                let plan =
-                    crate::codegen_shared::AccountPlan::derive(acct, h, target, parsed, is_state);
-                matches!(plan.seeds, crate::codegen_shared::SeedPlan::Runtime)
-            })
-        });
-
-    let mut codes: Vec<String> = mir.errors.variants.clone();
-    if needs_lifecycle && !codes.iter().any(|c| c == "InvalidLifecycle") {
-        codes.push("InvalidLifecycle".to_string());
-    }
-    if needs_invalid_pda && !codes.iter().any(|c| c == "InvalidPda") {
-        codes.push("InvalidPda".to_string());
-    }
-    // Checked arithmetic (`+=` / `-=`) lowers to
-    // `ok_or(<Prog>Error::<Variant>)?`, where the variant comes from
-    // `checked_arith_error_variants`. Its built-in tier names
-    // `MathOverflow` / `MathUnderflow` whether or not the spec declared
-    // them, so without this the generated program referenced a variant that
-    // was never emitted and failed to compile — with `qedgen check`
-    // reporting zero errors. Declaration and use share one resolver, so
-    // they cannot drift.
-    for variant in crate::codegen_shared::checked_arith_error_variants_in_use(parsed) {
-        if !codes.iter().any(|c| c == &variant) {
-            codes.push(variant);
-        }
-    }
-
+    // #363 — the declared set comes from the shared resolver, not from
+    // predicates local to this function. Every other emitter that needs to
+    // know what this enum will contain reads the same answer; when the two
+    // were derived independently, one site named a variant the enum lacked
+    // (non-compiling program, `check` silent) and another refused to name one
+    // the enum had (needlessly weakened assertion).
     if matches!(target, Target::Pinocchio) {
         // Pinocchio: plain `#[repr(u32)]` enum + `From<…> for ProgramError`
         // (guards/handlers convert via `ProgramError::from(<Enum>::<V>)`).

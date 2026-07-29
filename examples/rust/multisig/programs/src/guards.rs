@@ -201,7 +201,7 @@ pub fn cancel_proposal<'info>(ctx: &mut CancelProposal<'info>) -> Result<(), Pro
 pub fn add_member<'info>(
     ctx: &mut AddMember<'info>,
     member_index: u8,
-    member_pubkey: Pubkey,
+    member_pubkey: Address,
 ) -> Result<(), ProgramError> {
     // lifecycle: require status == Active
     if ctx.vault.status != Status::Active as u8 {

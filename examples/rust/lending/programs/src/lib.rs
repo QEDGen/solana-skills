@@ -11,7 +11,7 @@ pub mod errors;
 pub mod state;
 pub mod guards;
 
-declare_id!("11111111111111111111111111111111");
+declare_id!("8LkvBaAMyniLPESYdmmDKkLJYsVXgUT1nx3KA6ycafvW");
 
 #[program]
 mod lending {

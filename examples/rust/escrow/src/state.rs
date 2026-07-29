@@ -3,12 +3,12 @@ use quasar_lang::prelude::*;
 
 #[account(discriminator = 1)]
 pub struct EscrowAccount {
-    pub initializer: Pubkey,
-    pub initializer_token_account: Pubkey,
-    pub taker: Pubkey,
+    pub initializer: Address,
+    pub initializer_token_account: Address,
+    pub taker: Address,
     pub initializer_amount: u64,
     pub taker_amount: u64,
-    pub escrow_token_account: Pubkey,
+    pub escrow_token_account: Address,
     pub bump: u8,
     pub status: u8,
 }

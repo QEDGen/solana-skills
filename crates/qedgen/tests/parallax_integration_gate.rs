@@ -23,20 +23,31 @@
 //! symbol the emitters name (`system_program`, `DEFAULT_WALLET_LAMPORTS`,
 //! `SPL_TOKEN_PROGRAM_ID`, `Instruction`, `Pubkey`, `Cu`).
 //!
-//! NOT COVERED — the Quasar client boundary, because the generated Quasar
-//! program does not compile at all today.
+//! NOT COVERED — the Quasar client boundary. The stub below mirrors the
+//! shapes Quasar codegen produces, so if Quasar's own output moves this gate
+//! will not catch it.
 //!
-//! `quasar-lang` 0.0.0 IS published and resolves (an earlier version of this
-//! comment claimed otherwise; that was wrong and unverified). The real
-//! blocker is a type mismatch: quasar-lang is `#![no_std]` and addresses are
-//! `solana_address::Address`, while `map_type_quasar` shares Anchor's
-//! mapping and emits `Pubkey`, which quasar-lang does not define. A
-//! `codegen --target quasar` of the bundled multisig example fails with 13
-//! errors, starting with "cannot find type `Pubkey` in this scope".
+//! The blocker that forced the stub is gone: #372 gave Quasar its own
+//! `Address` mapping, and `generated_artifact_gate` now compiles all three
+//! bundled examples as Quasar. Replacing this stub with a real generated
+//! Quasar program is the remaining step, and it is blocked on the dependency
+//! problem below rather than on codegen.
 //!
-//! So the stub below mirrors the shapes Quasar codegen produces, and if
-//! Quasar's own output moves this gate will not catch it. Closing that needs
-//! the codegen fixed first, not more gate. Separately tracked.
+//! This gate is also the only thing that catches the wincode 0.5/0.6 split:
+//! `litesvm` requires `wincode ^0.5.5`, and solana crates cross to 0.6 in
+//! MINOR bumps that a caret requirement takes silently, landing two
+//! incompatible majors in one graph. It went red exactly that way with no
+//! qedgen change. `parallax_dev_dependencies` documents the pin list and how
+//! to extend it; the pin-liveness script (#371) does NOT catch this, because
+//! it checks that the revision exists, not that it builds.
+//!
+//! This gate is also the only thing that catches the wincode 0.5/0.6 split:
+//! `litesvm` requires `wincode ^0.5.5`, and solana crates cross to 0.6 in
+//! MINOR bumps that a caret requirement takes silently, landing two
+//! incompatible majors in one graph. It went red exactly that way with no
+//! qedgen change. `parallax_dev_dependencies` documents the pin list and how
+//! to extend it; the pin-liveness script (#371) does NOT catch this, because
+//! it checks that the revision exists, not that it builds.
 //!
 //! `#[ignore]`: pulls LiteSVM + the Agave runtime on first run (network,
 //! multi-minute cold compile). CI runs it with `-- --ignored`, like

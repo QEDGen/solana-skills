@@ -424,11 +424,19 @@ pub(crate) fn relative_spec_path(spec_path: &Path, manifest_dir: &Path) -> Strin
     }
 }
 
+/// Which set of names is in scope where the emitted type will be read.
+///
+/// This is about the FILE's import environment, not the program's target.
+/// The Parallax integration scaffold is a host-side test that imports
+/// `parallax_svm::prelude::*`, so it names types from Parallax even when the
+/// program under test is Quasar (#372).
 #[derive(Clone, Copy)]
 pub(crate) enum TypeMapContext {
     Standalone,
     Anchor,
     Quasar,
+    /// `parallax_svm::prelude::*` — the integration-test scaffold.
+    ParallaxHost,
 }
 
 /// Split a `Map[BOUND] T` DSL compound into `(bound_src, inner_src)`,
@@ -553,6 +561,14 @@ pub(crate) fn map_type_anchor(dsl_type: &str, spec: &ParsedSpec) -> Result<Strin
 
 pub(crate) fn map_type_quasar(dsl_type: &str, spec: &ParsedSpec) -> Result<String> {
     map_type_with_context(dsl_type, spec, TypeMapContext::Quasar)
+}
+
+/// Types as named inside the Parallax integration-test scaffold, whose
+/// imports are `parallax_svm::prelude::*` plus the program's public items.
+/// Differs from [`map_type_quasar`] only for addresses — see the `Pubkey`
+/// arm in [`primitive_map`].
+pub(crate) fn map_type_parallax_host(dsl_type: &str, spec: &ParsedSpec) -> Result<String> {
+    map_type_with_context(dsl_type, spec, TypeMapContext::ParallaxHost)
 }
 
 pub(crate) fn map_type_for_target(
@@ -699,9 +715,26 @@ pub(crate) fn primitive_map(dsl_type: &str, context: TypeMapContext) -> Option<&
         // Standalone harnesses (proptest/kani/unit tests) lower Pubkey to
         // `[u8; 32]` — structurally compatible with Solana's Pubkey
         // newtype, and proptest's uniform32 strategy already produces it.
-        // Anchor/Quasar program targets keep the real `Pubkey` type.
+        //
+        // The two program targets name the address type differently, and
+        // sharing one arm between them (#372) emitted `Pubkey` into every
+        // Quasar program, none of which compiled: quasar-lang is `#![no_std]`
+        // and defines no `Pubkey` at all. Its prelude re-exports
+        // `solana_address::Address`, which the generated crate already has in
+        // scope via `use quasar_lang::prelude::*`.
         "Pubkey" => match context {
-            TypeMapContext::Anchor | TypeMapContext::Quasar => "Pubkey",
+            TypeMapContext::Anchor => "Pubkey",
+            TypeMapContext::Quasar => "Address",
+            // Parallax's prelude exports `Pubkey` and no `Address`, and the
+            // program's `use quasar_lang::prelude::*` is a private import, so
+            // `use program::state::*` does not re-export `Address` either.
+            // Emitting `Address` here names something the file cannot see.
+            //
+            // This still matches the Quasar state struct it builds:
+            // `solana-pubkey` is a compatibility shim that re-exports
+            // `solana_address::Address as Pubkey`, so the two names denote
+            // one type.
+            TypeMapContext::ParallaxHost => "Pubkey",
             TypeMapContext::Standalone => "[u8; 32]",
         },
         // Opaque byte tokens (#191): hashes/digests (`Bytes32`) and
