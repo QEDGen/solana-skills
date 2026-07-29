@@ -85,15 +85,30 @@ fn gate_quasar_example(example: &str) {
 
 /// Generate every artifact this gate compiles, for one target.
 ///
-/// Anchor uses `--all`. Quasar cannot: `--all` additionally emits the
-/// Parallax integration scaffold and adds `parallax-svm` to
-/// `[dev-dependencies]`, and that tree does not currently build — its
-/// transitive `solana-transaction` / `solana-sysvar` / `wincode` set does
-/// not resolve to a compatible combination. Pulling that in would make a
-/// Quasar codegen regression indistinguishable from an upstream dependency
-/// break, which is the opposite of what a gate is for. The integration lane
-/// has its own gate (`parallax_integration_gate`); this one covers the
-/// program crate and the three framework-neutral harnesses.
+/// Never `--all`, because `--all` emits the Parallax integration scaffold
+/// and this gate RUNS what it generates. Those tests load the program under
+/// test into LiteSVM, and nothing here produces a `.so` — no `cargo
+/// build-sbf` — so every one of them panics in `setup()`:
+///
+/// ```text
+/// thread 'test_cancel' panicked at tests/integration_tests.rs:63:
+///   load compiled program into Parallax
+/// ```
+///
+/// Pulling `parallax-svm` into `[dev-dependencies]` is the second reason:
+/// it drags a large git-sourced tree into a gate that exists to catch
+/// CODEGEN regressions, where an upstream dependency break would be
+/// indistinguishable from a codegen break.
+///
+/// Quasar has always been excluded this way. Anchor joined it when #366
+/// gave Anchor an instruction builder, since `--all --target anchor` began
+/// emitting the scaffold too — which is exactly how this gate went red on
+/// that change.
+///
+/// The integration lane has its own gate (`parallax_integration_gate`),
+/// which type-checks a real generated crate per target without executing
+/// it. This one covers the program crate and the three framework-neutral
+/// harnesses, and it does execute those.
 fn generate_artifacts(spec_path: &Path, output_dir: &Path, cwd: &Path, target: &str) {
     let codegen = |extra: &[&str]| {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_qedgen"));
@@ -109,15 +124,11 @@ fn generate_artifacts(spec_path: &Path, output_dir: &Path, cwd: &Path, target: &
         run_ok(&mut cmd);
     };
 
-    if target == "quasar" {
-        // Bare run = the Rust scaffold; the second names the harnesses
-        // explicitly. `scaffold_requested = all || !explicit_artifact_requested`
-        // (run.rs), so one combined invocation would skip the scaffold.
-        codegen(&[]);
-        codegen(&["--test", "--proptest", "--kani"]);
-    } else {
-        codegen(&["--all"]);
-    }
+    // Bare run = the Rust scaffold; the second names the harnesses
+    // explicitly. `scaffold_requested = all || !explicit_artifact_requested`
+    // (run.rs), so one combined invocation would skip the scaffold.
+    codegen(&[]);
+    codegen(&["--test", "--proptest", "--kani"]);
 }
 
 /// Full gate for one bundled example at one target.

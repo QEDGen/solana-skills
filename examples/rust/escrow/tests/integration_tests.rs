@@ -43,8 +43,13 @@ use {
 
 // ── Setup ────────────────────────────────────────────────────────
 
+/// The program under test, in the address type Parallax uses.
+fn program_id() -> Pubkey {
+    Pubkey::new_from_array(program::ID.to_bytes())
+}
+
 fn setup() -> Ctx {
-    Ctx::builder(program::ID)
+    Ctx::builder(program_id())
         .crate_name(env!("CARGO_PKG_NAME"))
         .build()
         .expect("load compiled program into Parallax")
@@ -94,7 +99,7 @@ fn state_account(
         address,
         lamports: 2_000_000,
         data,
-        owner: program::ID,
+        owner: program_id(),
         executable: false,
     }
 }
@@ -140,7 +145,7 @@ fn test_initialize() {
     let token_program = SPL_TOKEN_PROGRAM_ID;
     let initializer = Pubkey::new_unique();
     let (escrow, _escrow_bump) =
-        Pubkey::find_program_address(&[b"escrow", initializer.as_ref()], &program::ID);
+        Pubkey::find_program_address(&[b"escrow", initializer.as_ref()], &program_id());
     let mint = Pubkey::new_unique();
     let initializer_ta = Pubkey::new_unique();
     let escrow_ta = Pubkey::new_unique();
@@ -198,7 +203,7 @@ fn test_exchange() {
     let initializer = Pubkey::new_unique(); // AGENT: replace with the initializer from pre-state
     let taker = Pubkey::new_unique();
     let (escrow, _escrow_bump) =
-        Pubkey::find_program_address(&[b"escrow", initializer.as_ref()], &program::ID);
+        Pubkey::find_program_address(&[b"escrow", initializer.as_ref()], &program_id());
     let initializer_ta = Pubkey::new_unique();
     let taker_ta = Pubkey::new_unique();
     let escrow_ta = Pubkey::new_unique();
@@ -240,7 +245,7 @@ fn test_cancel() {
     let token_program = SPL_TOKEN_PROGRAM_ID;
     let initializer = Pubkey::new_unique();
     let (escrow, _escrow_bump) =
-        Pubkey::find_program_address(&[b"escrow", initializer.as_ref()], &program::ID);
+        Pubkey::find_program_address(&[b"escrow", initializer.as_ref()], &program_id());
     let escrow_ta = Pubkey::new_unique();
     let initializer_ta = Pubkey::new_unique();
 

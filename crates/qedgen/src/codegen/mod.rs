@@ -1,3 +1,4 @@
+pub(crate) mod anchor_ix;
 pub(crate) mod asm2lean;
 pub(crate) mod banner;
 pub(crate) mod codegen_mir;

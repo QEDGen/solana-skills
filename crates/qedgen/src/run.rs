@@ -2254,22 +2254,23 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                     if integration {
                         note_sbpf_skip("integration-test");
                     }
-                } else if !matches!(target, Target::Quasar) {
-                    // The execution harness is Parallax-backed, but its
-                    // instruction builders still come from the generated
-                    // Quasar program::client module. It does not yet compile
-                    // inside Anchor or Pinocchio crates — skip with a note
-                    // instead of writing an artifact that can't build. A
-                    // generator-owned integration file
-                    // left over from a prior Quasar run is now obsolete
-                    // (and would fool `regen_drift` into assuming a
-                    // Quasar project); remove it so the crate stays
-                    // consistent. A user-authored file at that path is
-                    // left in place with a warning.
+                } else if matches!(target, Target::Pinocchio) {
+                    // Anchor and Quasar both have an instruction builder
+                    // now (#366). Pinocchio does not: it dispatches on a
+                    // leading discriminant byte rather than an 8-byte hash,
+                    // which is a different builder, not this one with a
+                    // flag. Skip with a note instead of writing an artifact
+                    // that cannot build.
+                    //
+                    // A generator-owned integration file left over from a
+                    // prior run is obsolete here (and would fool
+                    // `regen_drift` about the project's framework); remove
+                    // it so the crate stays consistent. A user-authored
+                    // file at that path is left in place with a warning.
                     remove_obsolete_quasar_integration_file(&integration_output, target)?;
                     eprintln!(
                         "note: skipping integration-test codegen for {:?} target — \
-                         the Parallax harness uses Quasar client builders today.",
+                         no Pinocchio instruction builder yet.",
                         target
                     );
                 } else {
