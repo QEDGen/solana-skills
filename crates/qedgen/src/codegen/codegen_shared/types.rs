@@ -793,6 +793,23 @@ pub fn emit_pod_bytes_append(
 /// generation, because the alternative is a plausible fixed guess that turns
 /// into a wrong answer much later and much further away.
 pub fn fixed_byte_width(dsl_ty: &str, spec: &ParsedSpec) -> Result<usize> {
+    fixed_byte_width_guarded(dsl_ty, spec, &mut std::collections::BTreeSet::new())
+}
+
+/// `expanding` carries the alias and record names already on the stack, so a
+/// self-referential declaration returns an error instead of recursing until
+/// the stack runs out.
+///
+/// The guard is not theoretical and `check` is not the backstop. The
+/// known-types lint resolves aliases with its own cycle guard
+/// (`lints/known_types.rs`), and having stopped early it validates the name
+/// it stopped on, which for a cycle is a declared alias and therefore valid.
+/// So `type A = B` with `type B = A` passes `check` cleanly and arrives here.
+fn fixed_byte_width_guarded(
+    dsl_ty: &str,
+    spec: &ParsedSpec,
+    expanding: &mut std::collections::BTreeSet<String>,
+) -> Result<usize> {
     let dsl_ty = dsl_ty.trim();
 
     // `Map[N] T` → `[T; N]`, no length prefix in either layout.
@@ -803,7 +820,7 @@ pub fn fixed_byte_width(dsl_ty: &str, spec: &ParsedSpec) -> Result<usize> {
         let n: usize = resolve_map_bound(bound_src, spec)?
             .parse()
             .map_err(|_| anyhow::anyhow!("Map bound `{bound_src}` is not a usize"))?;
-        return Ok(n * fixed_byte_width(inner, spec)?);
+        return Ok(n * fixed_byte_width_guarded(inner, spec, expanding)?);
     }
 
     let width = match dsl_ty {
@@ -820,15 +837,24 @@ pub fn fixed_byte_width(dsl_ty: &str, spec: &ParsedSpec) -> Result<usize> {
         return Ok(width);
     }
 
+    let named = spec.type_aliases.iter().any(|(n, _)| n == dsl_ty)
+        || spec.records.iter().any(|r| r.name == dsl_ty);
+    if named && !expanding.insert(dsl_ty.to_string()) {
+        anyhow::bail!(
+            "type `{}` expands into itself, so it has no fixed byte width",
+            dsl_ty
+        );
+    }
+
     if let Some((_, rhs)) = spec.type_aliases.iter().find(|(n, _)| n == dsl_ty) {
-        return fixed_byte_width(rhs, spec);
+        return fixed_byte_width_guarded(rhs, spec, expanding);
     }
 
     // A record is the sum of its fields, in declaration order.
     if let Some(record) = spec.records.iter().find(|r| r.name == dsl_ty) {
         let mut total = 0;
         for (_, field_ty) in &record.fields {
-            total += fixed_byte_width(field_ty, spec)?;
+            total += fixed_byte_width_guarded(field_ty, spec, expanding)?;
         }
         return Ok(total);
     }
