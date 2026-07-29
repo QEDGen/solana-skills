@@ -2282,11 +2282,10 @@ fn emit_sequence_test_for(
         })
         .collect();
 
-    // Snapshot the pre-state (State is `Copy`) before the transition so the
-    // check below can read the property at `pre`.
-    if !seq_props.is_empty() {
-        out.push_str("            let pre = s;\n");
-    }
+    // Snapshot the pre-state (State is `Copy`) before the transition: the
+    // property checks below read it, and a rejected op restores from it.
+    // Unconditional — the rollback needs it even with no checked property.
+    out.push_str("            let pre = s;\n");
     out.push_str("            if apply_op(&mut s, op) {\n");
 
     if has_lifecycle {
@@ -2337,6 +2336,13 @@ fn emit_sequence_test_for(
         out.push_str("                }\n");
     }
 
+    // A rejected transition must not mutate the state. The generated
+    // transition fns assign field-by-field and `return false` from the
+    // middle when a later effect fails its checked arithmetic, so the
+    // earlier fields stay written. Restoring the snapshot keeps the
+    // sequence exploring only states a real transition can produce.
+    out.push_str("            } else {\n");
+    out.push_str("                s = pre; // rejected op must not half-apply\n");
     out.push_str("            }\n");
     out.push_str("        }\n");
     out.push_str("    }\n");
@@ -3073,10 +3079,10 @@ fn emit_product_sequence_test(
         })
         .collect();
     out.push_str("            for (i, op) in ops.iter().enumerate() {\n");
-    // Snapshot the pre-state (ProductState is `Copy`) for the `pre -> post` check.
-    if !seq_ghost_props.is_empty() {
-        out.push_str("                let pre = s;\n");
-    }
+    // Snapshot the pre-state (ProductState is `Copy`): the `pre -> post`
+    // checks read it, and a rejected op restores from it. Unconditional —
+    // the rollback needs it even with no checked ghost property.
+    out.push_str("                let pre = s;\n");
     out.push_str("                if apply_op(&mut s, op) {\n");
     out.push_str("                    if !initialized {\n");
     out.push_str("                        initialized = true;\n");
@@ -3100,6 +3106,11 @@ fn emit_product_sequence_test(
         ));
         out.push_str("                    }\n");
     }
+    // Rejected transitions must not half-apply — see the single-account
+    // sequence emitter for why the generated transition fns can leave
+    // partial state behind on a `false` return.
+    out.push_str("                } else {\n");
+    out.push_str("                    s = pre; // rejected op must not half-apply\n");
     out.push_str("                }\n");
     out.push_str("            }\n");
     out.push_str("        }\n");
@@ -4290,6 +4301,64 @@ property a_ge_b :
         assert!(
             seq.contains("if matches!(op, Op::GrowA(..)) && a_ge_b(&pre) {"),
             "scoped property must be guarded by its preserver and pre-state:\n{seq}"
+        );
+    }
+
+    /// A transition assigns field-by-field and can `return false` from the
+    /// middle when a later effect fails its checked arithmetic, leaving the
+    /// earlier fields written. The sequence harness must restore the
+    /// pre-state on a rejected op, or it explores states no real transition
+    /// produces. Regression for #385.
+    #[test]
+    fn sequence_restores_pre_state_when_an_op_is_rejected() {
+        let (_spec, body) = emit_full_harness(
+            r#"
+spec Atomic
+
+state { a : U64, b : U64 }
+
+type Error | Bad
+
+handler bump (x : U64) {
+  requires x > 0 else Bad
+  effect {
+    a += x
+    b += x
+  }
+}
+
+handler noop {
+  effect { a := state.a }
+}
+
+property a_eq_b :
+  state.a == state.b
+  preserved_by all
+"#,
+        );
+
+        // The half-apply shape this guards against: `a` commits before `b`
+        // can reject.
+        let bump_start = body.find("fn bump(").expect("bump present");
+        let bump = &body[bump_start..bump_start + body[bump_start..].find("\n}").unwrap_or(400)];
+        assert!(
+            bump.contains("s.a = __v") && bump.contains("None => return false"),
+            "transition should assign then be able to reject mid-body:\n{bump}"
+        );
+
+        let start = body
+            .find("fn state_machine_sequence")
+            .expect("sequence present");
+        let seq = &body[start..];
+        // Snapshot is unconditional — the rollback needs it regardless of
+        // whether any property is checked in this section.
+        assert!(
+            seq.contains("let pre = s;"),
+            "sequence must snapshot the pre-state:\n{seq}"
+        );
+        assert!(
+            seq.contains("} else {") && seq.contains("s = pre;"),
+            "a rejected op must restore the pre-state:\n{seq}"
         );
     }
 }

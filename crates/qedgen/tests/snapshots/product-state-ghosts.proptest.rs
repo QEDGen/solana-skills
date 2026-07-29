@@ -274,6 +274,8 @@ mod product {
                         prop_assert!(ghost_tracks_total(&s),
                             "ghost_tracks_total violated after op {:?} (step {})", op, i);
                     }
+                } else {
+                    s = pre; // rejected op must not half-apply
                 }
             }
         }

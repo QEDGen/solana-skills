@@ -4525,6 +4525,8 @@ proptest! {
                     prop_assert!(votes_bounded(&s),
                         "votes_bounded violated after op {:?} (step {})", op, i);
                 }
+            } else {
+                s = pre; // rejected op must not half-apply
             }
         }
     }

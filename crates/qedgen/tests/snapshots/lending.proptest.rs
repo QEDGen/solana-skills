@@ -246,6 +246,8 @@ mod pool {
                         prop_assert!(pool_solvency(&s),
                             "pool_solvency violated after op {:?} (step {})", op, i);
                     }
+                } else {
+                    s = pre; // rejected op must not half-apply
                 }
             }
         }
