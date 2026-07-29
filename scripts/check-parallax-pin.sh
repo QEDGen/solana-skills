@@ -8,6 +8,11 @@
 #
 # Run: bash scripts/check-parallax-pin.sh
 #
+# Also run mechanically (#371): `scripts/release-gate.sh` calls it, and
+# `.github/workflows/parallax-pin.yml` runs it weekly. The failing condition
+# lands in a user's crate, not ours, so a human release step was the wrong
+# owner for it.
+#
 # Exit codes, chosen so this never blocks a release for being merely old:
 #   0 = pin current, OR pin behind upstream (expected — pinning is the point),
 #       OR upstream unreachable (offline dev / rate limit / CI flake)
@@ -17,9 +22,12 @@
 #   2 = could not read the pin from source (the single-source const moved)
 #
 # Bumping the pin: edit PARALLAX_GIT_REV in
-# crates/qedgen/src/codegen/integration_test.rs, update the gate fixture
-# manifest (a unit test enforces they match), run the gate with `--ignored`,
-# then regenerate the bundled examples.
+# crates/qedgen/src/codegen/integration_test.rs, run the gate with
+# `--ignored`, then regenerate the bundled examples. There is no fixture
+# manifest to update any more — since #383 the gate generates its program
+# crate, so the pin reaches it through the same dev-dependency upsert a user
+# gets, and the unit test that held a hand-written copy to this constant is
+# gone with the copy.
 set -uo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
