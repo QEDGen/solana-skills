@@ -116,6 +116,59 @@ pub(crate) fn resolve_output_against_spec(spec_dir: &Path, p: PathBuf) -> PathBu
     }
 }
 
+/// [`resolve_output_against_spec`] plus the doubling warning (#370).
+pub(crate) fn resolve_output_warned(spec_dir: &Path, flag: &str, given: PathBuf) -> PathBuf {
+    let resolved = resolve_output_against_spec(spec_dir, given.clone());
+    if let Some(warning) = doubled_spec_dir_warning(spec_dir, flag, &given, &resolved) {
+        eprintln!("{warning}");
+    }
+    resolved
+}
+
+/// Warn when a relative output path looks like it was typed against the
+/// INVOKER's directory rather than the spec's.
+///
+/// Resolving against the spec directory is deliberate (#279), but a user
+/// standing one level up naturally writes `proj/tests/x.rs`, which resolves
+/// to `proj/proj/tests/x.rs`. Both exit 0, and the only signal is the
+/// resolved path inside a success message.
+///
+/// The shape is narrow on purpose: the path is relative AND its first
+/// component equals the spec directory's own name. A genuine nested
+/// directory of the same name trips it, which is rare and costs a warning
+/// on a run that still does what it says.
+///
+/// Split from the printing so the predicate is testable.
+pub(crate) fn doubled_spec_dir_warning(
+    spec_dir: &Path,
+    flag: &str,
+    given: &Path,
+    resolved: &Path,
+) -> Option<String> {
+    if given.is_absolute() {
+        return None;
+    }
+    let spec_dir_name = spec_dir.file_name()?;
+    let first = given.components().next()?;
+    if first.as_os_str() != spec_dir_name {
+        return None;
+    }
+    // The path with its leading (duplicated) component removed — what the
+    // user most likely meant.
+    let suggestion: PathBuf = given.components().skip(1).collect();
+    if suggestion.as_os_str().is_empty() {
+        return None;
+    }
+    Some(format!(
+        "warning: `{flag}` resolves against the spec directory `{}`, so `{}` resolved to `{}`.\n\
+         \x20        Pass a path relative to the spec directory (`{}`) or an absolute path.",
+        spec_dir.display(),
+        given.display(),
+        resolved.display(),
+        suggestion.display(),
+    ))
+}
+
 /// Resolve the built program `.so` the Crucible harness loads (#342).
 /// `cargo build-sbf` writes to the WORKSPACE `target/deploy/`, so a
 /// crate-rooted join never exists in the standard Anchor
@@ -1202,6 +1255,42 @@ mod tests {
             ),
             PathBuf::from("/elsewhere/out")
         );
+    }
+
+    /// #370: a relative output path whose first component repeats the
+    /// spec directory's name was almost certainly typed against the
+    /// INVOKER's directory. Both the doubled and the correct forms exit 0,
+    /// so without this the only signal is the resolved path inside a
+    /// success message.
+    #[test]
+    fn doubled_spec_dir_is_warned_and_plain_relative_is_not() {
+        let spec_dir = std::path::Path::new("/work/proj");
+        let warn = |given: &str| {
+            let given = PathBuf::from(given);
+            let resolved = super::resolve_output_against_spec(spec_dir, given.clone());
+            super::doubled_spec_dir_warning(spec_dir, "--integration-output", &given, &resolved)
+        };
+
+        let doubled = warn("proj/tests/integration_tests.rs").expect("doubling must warn");
+        assert!(doubled.contains("--integration-output"), "{doubled}");
+        assert!(
+            doubled.contains("/work/proj/proj/tests/integration_tests.rs"),
+            "the warning must show what the path resolved to: {doubled}"
+        );
+        assert!(
+            doubled.contains("tests/integration_tests.rs`)"),
+            "the warning must suggest the de-doubled path: {doubled}"
+        );
+
+        // The ordinary forms stay silent.
+        assert!(warn("tests/integration_tests.rs").is_none());
+        assert!(warn("./programs").is_none());
+        assert!(warn("/elsewhere/out.rs").is_none());
+        // A directory that merely CONTAINS the name is not the shape.
+        assert!(warn("projects/tests/x.rs").is_none());
+        // Bare repetition with nothing after it has no de-doubled form to
+        // suggest, so there is nothing useful to say.
+        assert!(warn("proj").is_none());
     }
 
     /// #289: `--program .` resolves to a directory with a real name

@@ -1023,6 +1023,14 @@ pub(crate) enum Commands {
     /// the chosen `--target` (default: `anchor`). Explicit artifact flags
     /// generate only those artifacts; use `--all` for the scaffold and every
     /// artifact.
+    ///
+    /// OUTPUT PATHS: every `--*-output` (and `--output-dir`) resolves
+    /// RELATIVE TO THE SPEC's directory, not the current one, so artifacts
+    /// land beside the spec however you invoke qedgen. Absolute paths are
+    /// used as given. Running from a parent directory, write
+    /// `--integration-output tests/x.rs`, not `proj/tests/x.rs` — the
+    /// latter resolves to `proj/proj/tests/x.rs` (qedgen warns on that
+    /// shape).
     Codegen {
         /// Path to the spec file (.qedspec or a directory of fragments).
         /// Optional — falls back to the `spec` field in the nearest
@@ -1040,6 +1048,8 @@ pub(crate) enum Commands {
         target: Target,
 
         /// Output directory for the generated Rust program crate
+        ///
+        /// Relative to the SPEC's directory (see OUTPUT PATHS above).
         #[arg(long, default_value = "./programs")]
         output_dir: PathBuf,
 
@@ -1072,6 +1082,8 @@ pub(crate) enum Commands {
         /// via `programs/Cargo.toml`. Before v2.6 the default was
         /// `./tests/kani.rs`, which landed without a governing Cargo.toml;
         /// that layout silently broke `qedgen verify`.)
+        ///
+        /// Relative to the SPEC's directory (see OUTPUT PATHS above).
         #[arg(long, default_value = "./programs/tests/kani.rs")]
         kani_output: PathBuf,
 
@@ -1092,6 +1104,8 @@ pub(crate) enum Commands {
         /// `./programs/tests/kani_impl.rs`). Separate file from the
         /// spec-model `kani.rs` so `cargo kani --harness` can target
         /// either set without ambiguity.
+        ///
+        /// Relative to the SPEC's directory (see OUTPUT PATHS above).
         #[arg(long, default_value = "./programs/tests/kani_impl.rs")]
         kani_impl_output: PathBuf,
 
@@ -1121,6 +1135,8 @@ pub(crate) enum Commands {
         /// Lives in `tests/` so cargo auto-discovers it as a test target —
         /// a `src/` location needs a `mod` hook the scaffold never emits
         /// (pre-v2.47 default `./programs/src/tests.rs` was dead code).
+        ///
+        /// Relative to the SPEC's directory (see OUTPUT PATHS above).
         #[arg(long, default_value = "./programs/tests/unit.rs")]
         test_output: PathBuf,
 
@@ -1130,6 +1146,8 @@ pub(crate) enum Commands {
 
         /// Output path for proptest harnesses
         /// (default: ./programs/tests/proptest.rs — see --kani-output for why).
+        ///
+        /// Relative to the SPEC's directory (see OUTPUT PATHS above).
         #[arg(long, default_value = "./programs/tests/proptest.rs")]
         proptest_output: PathBuf,
 
@@ -1141,6 +1159,8 @@ pub(crate) enum Commands {
         /// Parent directory for the generated Crucible harness. The harness
         /// lives at `<dir>/<program_name>/` (or `<dir>/` when `<dir>` already
         /// ends with the program name). Default: `./fuzz`.
+        ///
+        /// Relative to the SPEC's directory (see OUTPUT PATHS above).
         #[arg(long, default_value = "./fuzz")]
         crucible_output: PathBuf,
 
@@ -1150,6 +1170,8 @@ pub(crate) enum Commands {
         integration: bool,
 
         /// Output path for integration tests (default: ./programs/tests/integration_tests.rs)
+        ///
+        /// Relative to the SPEC's directory (see OUTPUT PATHS above).
         #[arg(long, default_value = "./programs/tests/integration_tests.rs")]
         integration_output: PathBuf,
 
@@ -1158,6 +1180,8 @@ pub(crate) enum Commands {
         lean: bool,
 
         /// Output path for Lean file (default: ./formal_verification/Spec.lean)
+        ///
+        /// Relative to the SPEC's directory (see OUTPUT PATHS above).
         #[arg(long, default_value = "./formal_verification/Spec.lean")]
         lean_output: PathBuf,
 
