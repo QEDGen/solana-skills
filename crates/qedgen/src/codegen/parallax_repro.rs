@@ -67,6 +67,8 @@
 //! `signer` account and a caller-seeded PDA was not exploitable at all, and
 //! the reproducer correctly refused to confirm it.
 
+use anyhow::Result;
+
 use crate::check::{ParsedHandler, ParsedSpec};
 
 /// A generated Parallax reproducer: source plus the human-readable
@@ -130,7 +132,7 @@ pub fn generate(
     attack: ParallaxAttack,
     program_id: &str,
     program_path_expr: &str,
-) -> GeneratedParallaxRepro {
+) -> Result<GeneratedParallaxRepro> {
     let mut out = String::new();
     let test_fn = format!("probe_{}_{}", handler.name, attack.test_fn_suffix());
 
@@ -176,14 +178,14 @@ pub fn generate(
     out.push_str("}\n\n");
 
     if reads_existing_state(handler) {
-        emit_state_bytes_helper(&mut out, spec, handler);
+        emit_state_bytes_helper(&mut out, spec, handler)?;
     }
-    emit_test(&mut out, spec, handler, attack, &test_fn);
+    emit_test(&mut out, spec, handler, attack, &test_fn)?;
 
-    GeneratedParallaxRepro {
+    Ok(GeneratedParallaxRepro {
         source: out,
         attack: attack.describes(&handler.name),
-    }
+    })
 }
 
 /// Does this handler READ an account the program expects to already exist,
@@ -206,7 +208,11 @@ fn reads_existing_state(handler: &ParsedHandler) -> bool {
 /// fields in declaration order, then `bump` and `status`. This mirrors
 /// `codegen_mir`'s emitted `#[account]` struct; the layout is fully
 /// determined by the spec, so it is mechanical.
-fn emit_state_bytes_helper(out: &mut String, spec: &ParsedSpec, handler: &ParsedHandler) {
+fn emit_state_bytes_helper(
+    out: &mut String,
+    spec: &ParsedSpec,
+    handler: &ParsedHandler,
+) -> Result<()> {
     let state_name = format!(
         "{}Account",
         crate::codegen_shared::to_pascal_case(&spec.program_name)
@@ -228,7 +234,10 @@ fn emit_state_bytes_helper(out: &mut String, spec: &ParsedSpec, handler: &Parsed
     out.push_str("fn state_bytes(bump: u8) -> Vec<u8> {\n");
     out.push_str("    let mut data = ACCOUNT_DISCRIMINATOR.to_vec();\n");
     for (name, ty) in &spec.state_fields {
-        out.push_str(&format!("    {} // {name}: {ty}\n", zero_field_expr(ty)));
+        out.push_str(&format!(
+            "    {} // {name}: {ty}\n",
+            zero_field_expr(ty, spec)?
+        ));
     }
     out.push_str("    data.push(bump);\n");
     out.push_str(&format!(
@@ -238,19 +247,26 @@ fn emit_state_bytes_helper(out: &mut String, spec: &ParsedSpec, handler: &Parsed
     ));
     out.push_str("    data\n");
     out.push_str("}\n\n");
+    Ok(())
 }
 
 /// A zero value of the right WIDTH for a state field. The reproducer proves
 /// an absent guard, so field contents are irrelevant — but the byte length
-/// is not: a short buffer fails Anchor's deserialization before the guard.
-fn zero_field_expr(dsl_ty: &str) -> String {
-    match crate::codegen::repro_gen::rust_int_type(dsl_ty) {
-        Some("u8") => "data.push(0);".to_string(),
-        Some(rust_ty) => format!("data.extend_from_slice(&0{rust_ty}.to_le_bytes());"),
-        // Pubkey and anything else addressable is 32 bytes.
-        None if dsl_ty.trim() == "Bool" => "data.push(0);".to_string(),
-        None => "data.extend_from_slice(&[0u8; 32]);".to_string(),
-    }
+/// is not: a wrong-length buffer fails Anchor's deserialization before the
+/// guard, and the lane then reports "no bug" for entirely the wrong reason.
+///
+/// This used to ask `rust_int_type`, which knows `U8`..`U128` and nothing
+/// else, and gave every other type a flat 32 bytes (#389). That is right for
+/// `Pubkey` and wrong for every signed integer, `Bytes64`, and every
+/// `Map[N] T` — a `Map[32] Pubkey` field came out 992 bytes short. Width now
+/// comes from the shared `fixed_byte_width`, which refuses what it cannot
+/// size instead of guessing.
+fn zero_field_expr(dsl_ty: &str, spec: &ParsedSpec) -> Result<String> {
+    let width = crate::codegen_shared::fixed_byte_width(dsl_ty, spec)?;
+    Ok(match width {
+        1 => "data.push(0);".to_string(),
+        n => format!("data.extend_from_slice(&[0u8; {n}]);"),
+    })
 }
 
 /// The lifecycle discriminant the handler expects to find. Uses the declared
@@ -281,7 +297,7 @@ fn emit_test(
     handler: &ParsedHandler,
     attack: ParallaxAttack,
     test_fn: &str,
-) {
+) -> Result<()> {
     out.push_str("#[test]\n");
     out.push_str(&format!("fn {test_fn}() {{\n"));
     out.push_str("    let mut test = ctx();\n\n");
@@ -348,7 +364,7 @@ fn emit_test(
         for (name, ty) in &handler.takes_params {
             out.push_str(&format!(
                 "            data.extend_from_slice(&{}); // {name}: {ty}\n",
-                param_witness(ty)
+                param_witness(ty, spec)?
             ));
         }
         out.push_str("            data\n        },\n");
@@ -385,6 +401,7 @@ fn emit_test(
     out.push_str("    }\n");
 
     out.push_str("}\n");
+    Ok(())
 }
 
 /// Seed expressions for a declared PDA, matching the scaffold's rendering.
@@ -440,11 +457,18 @@ fn discriminator_literal(preimage: &str) -> String {
 /// value demonstrates an absent guard, so `1` is used for integers rather
 /// than a boundary value — this lane proves the guard is missing, not that
 /// arithmetic overflows (that is `repro_gen`'s job).
-fn param_witness(dsl_ty: &str) -> String {
-    match crate::codegen::repro_gen::rust_int_type(dsl_ty) {
-        Some(rust_ty) => format!("1{rust_ty}.to_le_bytes()"),
-        None => "[0u8; 32]".to_string(),
+///
+/// Non-integer parameters get zeros at their real width. The old flat
+/// `[0u8; 32]` was right only for `Pubkey`: it made a `Bool` parameter 32
+/// bytes of instruction data where the program reads 1, so the program
+/// failed to deserialize the instruction and the attack was recorded as
+/// refused (#389).
+fn param_witness(dsl_ty: &str, spec: &ParsedSpec) -> Result<String> {
+    if let Some(rust_ty) = crate::codegen::repro_gen::rust_int_type(dsl_ty) {
+        return Ok(format!("1{rust_ty}.to_le_bytes()"));
     }
+    let width = crate::codegen_shared::fixed_byte_width(dsl_ty, spec)?;
+    Ok(format!("[0u8; {width}]"))
 }
 
 #[cfg(test)]
@@ -504,7 +528,8 @@ handler bump_total (amount : U64) {
             ParallaxAttack::UnsignedInvocation,
             "Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS",
             "concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../program/target/deploy/vulnerable.so\")",
-        );
+        )
+        .expect("generate reproducer");
 
         assert!(
             !generated.source.contains(", true)"),
@@ -526,7 +551,8 @@ handler bump_total (amount : U64) {
                 attack,
                 "Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS",
                 "concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../program/target/deploy/vulnerable.so\")",
-            );
+            )
+        .expect("generate reproducer");
             assert!(
                 generated.source.contains("check(Outcome::success())"),
                 "{attack:?} must assert the attack commits:\n{}",
@@ -549,7 +575,8 @@ handler bump_total (amount : U64) {
             ParallaxAttack::UnsignedInvocation,
             "Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS",
             "\"/tmp/vulnerable.so\"",
-        );
+        )
+        .expect("generate reproducer");
 
         assert!(generated
             .source
@@ -566,7 +593,8 @@ handler bump_total (amount : U64) {
             ParallaxAttack::Replay,
             "Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS",
             "concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../program/target/deploy/vulnerable.so\")",
-        );
+        )
+        .expect("generate reproducer");
         assert_eq!(
             generated.source.matches("test.execute(").count(),
             2,
@@ -588,7 +616,8 @@ handler bump_total (amount : U64) {
             ParallaxAttack::UnsignedInvocation,
             "Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS",
             "concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../program/target/deploy/vulnerable.so\")",
-        );
+        )
+        .expect("generate reproducer");
 
         assert!(
             generated
@@ -625,14 +654,109 @@ handler bump_total (amount : U64) {
             "the derived PDA must be installed with those bytes:\n{}",
             generated.source
         );
-        // Widths must match the emitted `#[account]` struct exactly: a short
-        // buffer fails deserialization just like an empty account.
+        // Widths must match the emitted `#[account]` struct exactly: a
+        // wrong-length buffer fails deserialization just like an empty
+        // account. The emitted form states the width literally (#389), so a
+        // wrong one is visible in the generated file rather than hidden
+        // behind a type name.
         assert!(generated
             .source
             .contains("data.extend_from_slice(&[0u8; 32]); // owner: Pubkey"));
         assert!(generated
             .source
-            .contains("data.extend_from_slice(&0u64.to_le_bytes()); // total: U64"));
+            .contains("data.extend_from_slice(&[0u8; 8]); // total: U64"));
+    }
+
+    /// #389 — the width gate. `zero_field_expr` asked `rust_int_type`, which
+    /// knows `U8`..`U128` and nothing else, and gave everything else a flat
+    /// 32 bytes. That is right for `Pubkey` and wrong for every signed
+    /// integer, `Bytes64`, and every `Map[N] T`.
+    ///
+    /// Asserted as a TOTAL length rather than per-type strings: the total is
+    /// what Anchor actually checks, and a per-type list only covers the
+    /// types someone thought to write down.
+    #[test]
+    fn state_bytes_length_matches_the_account_layout() {
+        let spec = chumsky_adapter::parse_str(
+            "spec Wide\n\
+             type State\n  \
+             | Uninitialized\n  \
+             | Active of { owner : Pubkey, members : Map[4] Pubkey, \
+             flags : Map[3] U8, delta : I64, sig : Bytes64, live : Bool, }\n\
+             type Error\n  | Nope\n\
+             pda vault [\"vault\"]\n\
+             handler bump : State.Active -> State.Active {\n  \
+             accounts { vault : writable, pda [\"vault\"] }\n  \
+             effect { delta := delta }\n}\n",
+        )
+        .expect("parse");
+
+        let generated = generate(
+            &spec,
+            &handler(&spec, "bump"),
+            ParallaxAttack::UnsignedInvocation,
+            "Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS",
+            "concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/x.so\")",
+        )
+        .expect("generate reproducer");
+
+        // 8 discriminator + 32 owner + 4*32 members + 3*1 flags + 8 delta
+        // + 64 sig + 1 live + 1 bump + 1 status.
+        let expected = 8 + 32 + 128 + 3 + 8 + 64 + 1 + 1 + 1;
+        let emitted: usize = generated
+            .source
+            .lines()
+            .filter_map(emitted_byte_count)
+            .sum::<usize>()
+            + 8; // ACCOUNT_DISCRIMINATOR.to_vec()
+        assert_eq!(
+            emitted, expected,
+            "state_bytes builds the wrong number of bytes:\n{}",
+            generated.source
+        );
+    }
+
+    /// Bytes appended by one emitted line of `state_bytes`. Counts the two
+    /// shapes the emitter produces and ignores everything else.
+    fn emitted_byte_count(line: &str) -> Option<usize> {
+        let line = line.trim();
+        if line.starts_with("data.push(") {
+            return Some(1);
+        }
+        let rest = line.strip_prefix("data.extend_from_slice(&[0u8; ")?;
+        rest.split(']').next()?.parse().ok()
+    }
+
+    /// A type the emitter cannot size must stop generation. The alternative
+    /// is a guessed width that turns into a reproducer reporting "no bug"
+    /// for a reason unrelated to the finding.
+    #[test]
+    fn unsizable_state_field_refuses_to_generate() {
+        let spec = chumsky_adapter::parse_str(
+            "spec Dyn\n\
+             type State\n  \
+             | Uninitialized\n  \
+             | Active of { owner : Pubkey, notes : Vec U64, }\n\
+             type Error\n  | Nope\n\
+             pda vault [\"vault\"]\n\
+             handler bump : State.Active -> State.Active {\n  \
+             accounts { vault : writable, pda [\"vault\"] }\n  \
+             effect { owner := owner }\n}\n",
+        )
+        .expect("parse");
+
+        let err = generate(
+            &spec,
+            &handler(&spec, "bump"),
+            ParallaxAttack::UnsignedInvocation,
+            "Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS",
+            "concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/x.so\")",
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("fixed byte width"),
+            "unexpected error: {err}"
+        );
     }
 
     /// An `init` handler CREATES its PDA, so installing an account makes the
@@ -646,7 +770,8 @@ handler bump_total (amount : U64) {
             ParallaxAttack::UnsignedInvocation,
             "Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS",
             "concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../program/target/deploy/vulnerable.so\")",
-        );
+        )
+        .expect("generate reproducer");
 
         assert!(
             !generated.source.contains("state_bytes"),
@@ -674,7 +799,8 @@ handler bump_total (amount : U64) {
             ParallaxAttack::UnsignedInvocation,
             "Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS",
             "concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../program/target/deploy/vulnerable.so\")",
-        );
+        )
+        .expect("generate reproducer");
         assert!(generated
             .source
             .contains("Pubkey::find_program_address(&[b\"vault\", owner.as_ref()]"));
@@ -694,7 +820,8 @@ handler bump_total (amount : U64) {
             ParallaxAttack::UnsignedInvocation,
             "Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS",
             "concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../program/target/deploy/vulnerable.so\")",
-        );
+        )
+        .expect("generate reproducer");
         assert!(generated.source.contains("1u64.to_le_bytes()"));
     }
 }

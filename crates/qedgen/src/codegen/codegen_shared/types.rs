@@ -776,6 +776,71 @@ pub fn emit_pod_bytes_append(
         "cannot build account-fixture bytes for DSL type `{}` — supported: \
          U8/U16/U32/U64/U128, I8/I16/I32/I64/I128, Bool, Pubkey, Bytes32, \
          Bytes64, Fin[N], Map[N] T, and aliases of those",
+
+/// How many bytes a value of `dsl_ty` occupies in a fixed on-chain layout.
+///
+/// Fixture emitters need the WIDTH even when they do not care about the
+/// value: an account built at the wrong length fails deserialization before
+/// the code under test runs, and the resulting failure reads as "the program
+/// rejected my input" (#389).
+///
+/// Both layouts this repo emits agree here. Anchor/Borsh and Quasar/Pod both
+/// store fixed scalars little-endian with no padding, `bool` in one byte, an
+/// address in 32, and `[T; N]` as N elements back to back. They diverge only
+/// on the variable-length types, which this function refuses for both.
+///
+/// Refusing is the point. A type whose width cannot be derived must stop
+/// generation, because the alternative is a plausible fixed guess that turns
+/// into a wrong answer much later and much further away.
+pub fn fixed_byte_width(dsl_ty: &str, spec: &ParsedSpec) -> Result<usize> {
+    let dsl_ty = dsl_ty.trim();
+
+    // `Map[N] T` → `[T; N]`, no length prefix in either layout.
+    if dsl_ty.starts_with("Map") {
+        let Some((bound_src, inner)) = split_map_type(dsl_ty) else {
+            anyhow::bail!("malformed Map type `{}` — expected `Map[BOUND] T`", dsl_ty);
+        };
+        let n: usize = resolve_map_bound(bound_src, spec)?
+            .parse()
+            .map_err(|_| anyhow::anyhow!("Map bound `{bound_src}` is not a usize"))?;
+        return Ok(n * fixed_byte_width(inner, spec)?);
+    }
+
+    let width = match dsl_ty {
+        "U8" | "I8" | "Bool" => Some(1),
+        "U16" | "I16" => Some(2),
+        "U32" | "I32" => Some(4),
+        "U64" | "I64" => Some(8),
+        "U128" | "I128" => Some(16),
+        "Pubkey" | "Bytes32" => Some(32),
+        "Bytes64" => Some(64),
+        _ => None,
+    };
+    if let Some(width) = width {
+        return Ok(width);
+    }
+
+    if let Some((_, rhs)) = spec.type_aliases.iter().find(|(n, _)| n == dsl_ty) {
+        return fixed_byte_width(rhs, spec);
+    }
+
+    // A record is the sum of its fields, in declaration order.
+    if let Some(record) = spec.records.iter().find(|r| r.name == dsl_ty) {
+        let mut total = 0;
+        for (_, field_ty) in &record.fields {
+            total += fixed_byte_width(field_ty, spec)?;
+        }
+        return Ok(total);
+    }
+
+    // `Fin[N]` is deliberately absent. The two targets disagree: Quasar
+    // packs it as `PodU32` (4 bytes), Anchor maps it to `usize`, whose
+    // encoded width is not something to assume. A caller that needs it
+    // should decide per target rather than get a number from here.
+    anyhow::bail!(
+        "cannot derive a fixed byte width for DSL type `{}` — supported: \
+         U8/U16/U32/U64/U128, I8/I16/I32/I64/I128, Bool, Pubkey, Bytes32, \
+         Bytes64, Map[N] T, records of those, and aliases of those",
         dsl_ty
     )
 }

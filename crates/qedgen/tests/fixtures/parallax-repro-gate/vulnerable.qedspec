@@ -28,11 +28,24 @@ spec Vulnerable
 // the placeholder outright, so the spec has to carry the id.
 program_id "Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS"
 
+// The wide fields are load-bearing, not decoration (#389). The reproducer
+// installs a pre-state account, and its byte WIDTH has to match what the
+// program decodes. The emitter used to size every non-`U*` field at 32
+// bytes, which is right for `Pubkey` and wrong for a signed integer or an
+// array — a `Map[4] Pubkey` came out 96 bytes short. The account then failed
+// deserialization before the guard under test ran, and the lane reported
+// "no bug" for a reason unrelated to the finding.
+//
+// A fixture of `Pubkey` and `U64` alone cannot catch that, because those are
+// the two types the old code sized correctly. Keep a signed field and an
+// array field here.
 type State
   | Uninitialized
   | Active of {
-      owner : Pubkey,
-      total : U64,
+      owner   : Pubkey,
+      total   : U64,
+      members : Map[4] Pubkey,
+      delta   : I64,
     }
 
 // `MathOverflow` is deliberately NOT declared: the checked add in `set_fee`
