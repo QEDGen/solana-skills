@@ -40,15 +40,23 @@ until 2026-07-30 and described a callback path the runtime does not permit.
 **Claim.** Closing an Anchor account safely requires writing a special closed
 account discriminator, and a program that does not is vulnerable.
 
-**Why it does not hold.** Anchor has no closed-account discriminator. The
-mechanism it refers to was removed in Anchor v0.30.0.
+**Why it does not hold.** The `CLOSED_ACCOUNT_DISCRIMINATOR` sentinel, eight
+bytes of `0xFF`, was removed in Anchor v0.30.0 and appears nowhere in the
+current `anchor-lang` source. Anchor still protects the close path; it just no
+longer does it with a sentinel. `#[account(close = ...)]` moves the lamports
+out, assigns the account to the System Program, and resizes the data to zero,
+after which `is_closed` tests `owner == System::id() && data_is_empty()`.
 
-**Where something real might be.** Account closure is still sensitive, and the
-underlying concern is legitimate: lamports must move out, data must be zeroed,
-and ownership must return to the system program. A native program doing this by
-hand can get it wrong. File that as `pda_lifecycle_reuse_after_close` or
-`close_account_redirection` with the actual missing step named. Do not file the
-discriminator itself.
+The non-finding is narrow: "this program does not write the closed-account
+discriminator". Absence of the sentinel is not absence of protection.
+
+**Where something real might be.** Every step of that mechanism is worth
+checking when the program does not use `#[account(close)]`. A native or manual
+close has to move the lamports, drop the data, and hand ownership back on its
+own, and any one of those can be missed. A close that zeroes lamports while
+leaving data and owner intact is a real revival bug. File the specific missing
+step as `pda_lifecycle_reuse_after_close` or `close_account_redirection`, which
+is a different finding from the discriminator claim.
 
 ## Float non-determinism
 
