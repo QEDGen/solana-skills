@@ -767,17 +767,48 @@ When to suppress / downgrade:
   so it was firm-rated MEDIUM; the strand-funds capability is HIGH absent
   that documented trust.
 
-### `transfer_hook_reentrancy` — HIGH (Token-2022 only)
-Token-2022 transfer hooks can call back into the calling program
-during a transfer. Handler that updates state across a transfer
-boundary without the new state visible to the hook is reentrancy-
-vulnerable.
-- **Anchor / Native:** Token-2022 transfer (`transfer_checked` with
-  `mint = TOKEN_2022_PROGRAM_ID`) where program state is mutated
-  *after* the transfer with the pre-transfer state still trusted.
-- Corpus: first Solana-native reentrancy class; documented across
-  audit-firm Token-2022 advisories. No single famous public
-  incident yet — the extension shipped after the last large
+### `transfer_hook_untrusted_callback` — HIGH (Token-2022 only)
+A Token-2022 mint carrying the `TransferHook` extension makes the
+token program CPI into a hook program on every transfer. A handler
+that accepts a caller-supplied mint without constraining which mints
+it services therefore runs attacker-chosen code in the middle of its
+own handler, with attacker-chosen extra accounts.
+
+**The hook cannot call back into the calling program.** The runtime
+returns `ReentrancyNotAllowed` for `A -> B -> A`; only direct
+self-recursion (`A -> A`) is permitted, inside a stack depth of 5 (9
+with SIMD-0268). Filing this as reentrancy is a misreport — see
+[known non-findings](known-non-findings.md). The real mechanism is
+untrusted code in the caller's critical section:
+
+- The hook runs arbitrary logic chosen by whoever created the mint.
+- It receives the extra accounts resolved from the mint's
+  extra-account-metas list, which the mint creator also controls.
+- It can fail, turning every transfer into a griefing vector on a path
+  the caller assumed was infallible.
+- It can CPI into any program *not already on the stack*, including
+  one that reads the caller's accounts while the caller's invariants
+  are mid-update.
+
+- **Detect** by finding every `transfer_checked` reached through
+  `token_interface` or `Program<'info, Token2022>` where the mint is
+  caller-supplied. Then ask which of the caller's invariants are
+  temporarily false at the moment of the transfer, and whether a third
+  program could observe or act inside that window.
+- **Anchor / Native:** the shape is a transfer sitting between the two
+  halves of a state update. Mutating state *after* the transfer while
+  still trusting a pre-transfer read is the highest-value instance,
+  because the hook's window sits exactly in the gap.
+- **When to suppress:** the mint is pinned to an allowlist, the program
+  rejects mints configured with `TransferHook` at entry, or the program
+  accepts legacy `TOKEN_PROGRAM_ID` only. Catch the explicit rejection
+  in source before suppressing.
+- Compose-with-what: `token_2022_extension_arithmetic_skew` (same
+  untrusted-mint root cause, different consequence); any handler whose
+  solvency or accounting invariant is briefly false across the
+  transfer.
+- Corpus: documented across audit-firm Token-2022 advisories. No single
+  large public incident yet — the extension shipped after the last big
   exploit window.
 
 ### `rounding_direction_round_trip` — HIGH (DeFi-specific)
@@ -857,6 +888,64 @@ dust into a self-funding strategy.
 - Distinct from `rounding_direction_round_trip` because there's only
   one "round" — the user calls it multiple times, not two legs in one
   tx.
+
+### `payout_exceeds_recorded_principal` — HIGH (DeFi-specific)
+Spec-less only. A handler disburses funds from a computed schedule or
+accrual formula — vesting, streaming, reward accrual, interest — and
+the cumulative disbursement is never clamped to the principal that was
+actually deposited. The conservation invariant `sum(payouts) <=
+deposited` holds only as long as the formula is exactly right, so any
+error in the formula converts directly into an over-payment against the
+vault. Escalate to CRITICAL when the excess is repeatable rather than a
+single bounded unit, or when the vault is shared and the excess is
+drawn from other depositors' principal.
+
+The tell is structural, not arithmetic. Every operation can be
+`checked_*` and nothing overflows, and the result still exceeds the
+principal. Grepping for unchecked arithmetic will not find this.
+
+- **Detect** by evaluating each payout schedule at its boundary. Take
+  the maximum the formula can return (`now >= end_time`, the final
+  interval, the last epoch) and compare it to the recorded principal.
+  If they are not equal at the boundary, the difference is the leak.
+  The generic defect shape:
+
+  ```rust
+  // periods counts the *current* period as already released
+  let periods = elapsed.checked_div(period_len)?.checked_add(1)?;
+  periods.checked_mul(per_period)?.checked_sub(already_paid)
+  ```
+
+  At maturity this returns `principal + per_period`. Every operation is
+  checked; nothing wraps.
+
+- **Anchor:** find handlers that call a state-struct method
+  (`claimable`, `pending`, `accrued`, `releasable`) and pass the result
+  straight into `transfer` / `transfer_checked`, then add it to a
+  running total afterwards. The missing clamp against the stored
+  principal is the finding, not the formula's internals.
+- **Native / Pinocchio:** same shape with the schedule inlined in the
+  processor. Trace the value from its computation to the lamport or
+  token movement and ask what bounds it.
+- **When to suppress:** the handler clamps to the remaining principal
+  before transferring (`min(computed, principal - already_paid)`), or a
+  post-condition asserts the running total stays within the deposit. A
+  shared vault balance is **not** a ceiling — it only means the last
+  claimant absorbs the shortfall, which is the composition below, not a
+  mitigation.
+- Compose-with-what: permissionless claim / crank (the attacker fires
+  it themselves, no victim action); shared vault holding many
+  depositors' principal (converts a bounded per-position leak into a
+  pool drain); no reconciliation between recorded totals and the actual
+  vault balance (nothing ever notices).
+- Distinct from `arithmetic_overflow_wrapping` because every operation
+  is checked and nothing wraps. Distinct from
+  `rounding_direction_round_trip` because there is one leg, not two.
+  Distinct from `liquidation_rounding_dust_accumulation` because the
+  leak is a full schedule unit, not accumulated dust.
+- Corpus: public auditor-training material, interval-vesting escrow
+  (2026-07) — an off-by-one in the released-period count let the
+  recipient withdraw one full period beyond the escrowed amount.
 
 ### `flash_loan_amplified_governance` — HIGH (DeFi-specific)
 Spec-less only. Composition class: governance handler reads voting
@@ -1051,7 +1140,7 @@ codegen mechanizes them by construction:
   re-check is rarely productive unless the user added hand-written
   divergence.
 - `arbitrary_cpi`, `cpi_param_swap`, `account_not_reloaded_after_cpi`,
-  `transfer_hook_reentrancy`: codegen owns the CPI block (driven
+  `transfer_hook_untrusted_callback`: codegen owns the CPI block (driven
   by `transfers { }` or `call Interface.handler(...)`); user-owned
   bodies typically don't write `invoke` / `invoke_signed`. If the
   user *adds* hand-written CPI to a body, that's
@@ -1205,7 +1294,7 @@ exhaustive; use as a thinking primer, not a checklist.
 | account_not_reloaded_after_cpi | + | mid-handler trust on stale balance | = | CPI return-value trust → fund loss (HIGH) |
 | unvalidated_remaining_accounts | + | iterator-driven state mutation | = | injected accounts mutate authorized state (HIGH) |
 | discriminator_collision | + | shared deserializer between handlers | = | cross-type spoof → privileged action (HIGH) |
-| transfer_hook_reentrancy | + | mid-transfer state read | = | classic reentrancy (Solana-native, HIGH→CRIT) |
+| transfer_hook_untrusted_callback | + | caller invariant false across the transfer | = | attacker-authored hook code runs inside the window and can act on the inconsistent state through any program not already on the stack (HIGH→CRIT). Not reentrancy: the hook cannot re-enter the caller |
 | permissionless marker | + | unbounded amount param | = | griefing / draining via repeated calls (HIGH) |
 | permissionless init | + | unchecked authority field on init | = | attacker bakes their own pubkey as `mint_authority` / `withdraw_authority` / `admin` at init time → privileged CPI authority on every later operation (CRIT) |
 | field_chain_missing_root_anchor | + | typed-but-unanchored CPI authority field | = | forge a fake collateral chain that the validator accepts as internally-consistent → invoke privileged CPI (mint, withdraw) under the real authority (CRIT, forged-collateral-chain shape) |
@@ -1216,6 +1305,7 @@ exhaustive; use as a thinking primer, not a checklist.
 | spec_impl_drift_user_owned (body writes a state field the spec doesn't model) | + | downstream guard reads that field | = | unmodeled side-channel that formal verification is blind to (HIGH) |
 | lamport_write_demotion | + | rent-exempt PDA | = | silent rent extraction, downstream rent failure (MED→HIGH) |
 | saturating_by_design (`+=!`) | + | amount-shaped field | = | silent value loss, no error path (MED→HIGH) |
+| payout_exceeds_recorded_principal | + | shared vault, permissionless claim | = | every claim draws its excess from other depositors' principal, turning a bounded per-position leak into a pool drain that no per-position check can see (HIGH→CRIT) |
 | token_account_role_anchoring (`<role>_token_account.owner` field not pinned) | + | authority-signed revoke / payout handler | = | authority redirects role's vested-but-unclaimed tokens to any same-mint wallet they control, no victim consent (CRIT) |
 | token_account_role_anchoring | + | claimant-signed claim handler | = | malicious dapp UI tricks the claimant into signing with attacker's ATA in the destination slot → tokens leave the program to the attacker (HIGH, requires victim interaction) |
 | pda_lifecycle_reuse_after_close | + | dependent child PDAs not cascade-closed | = | re-create parent at same seeds revives stale children with carryover state (MED on its own; chains to higher when child state controls funds) |

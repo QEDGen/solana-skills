@@ -53,8 +53,6 @@ verification.
    collateral-side lock.
 
 **Grep for:**
-- `load_instruction_at(` (deprecated; use
-  `load_instruction_at_checked`)
 - Any read of `Sysvar::Instructions` data without
   `solana_program::sysvar::instructions::ID` equality check
 - Anchor: `AccountInfo<'info>` for the instructions sysvar
@@ -62,6 +60,14 @@ verification.
 - More generally: any "well-known" account (token program, system
   program, rent, clock) typed as `AccountInfo` rather than its
   strongly-typed wrapper
+
+`load_instruction_at(` was the original signal and this entry used to
+lead with it. The unchecked variant was fixed in 2022 and later
+removed, so that grep is dead against any current toolchain. The
+account-typing signals above are the durable ones. Reporting the mere
+presence of an instruction-introspection call as a vulnerability is a
+misreport — see
+`skills/qedgen-auditor/references/known-non-findings.md`.
 
 **Composes with:** missing program-id check on CPI target;
 account type confusion (treating any AccountInfo as a sysvar).
