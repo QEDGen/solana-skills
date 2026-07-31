@@ -138,4 +138,3 @@ Before the pull request:
 - run the repository’s standard CI-equivalent Rust suite where practical;
 - review the final diff issue by issue;
 - ensure each closing keyword corresponds to a fully satisfied issue gate.
-
