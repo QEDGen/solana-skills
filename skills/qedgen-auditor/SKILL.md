@@ -178,6 +178,10 @@ Read only the relevant detailed references:
   rules, the severity grading procedure, and the report format.
 - [audit handbook](references/audit-handbook.md): adversarial mindset, tool
   surface, and the reproducer-only contract.
+- [known non-findings](references/known-non-findings.md): always before filing
+  a reentrancy, closed-account-discriminator, float-determinism, token
+  self-transfer, instruction-introspection, partial-state-commitment, or
+  unchecked-CPI-return finding.
 - [trust-surface primitives](references/trust_surface_primitives.md): only when
   a small dependency supplies a security-critical primitive.
 - [data-structure dependency invariants](references/data_structure_dep_invariants.md):
@@ -236,7 +240,9 @@ Assign exactly one evidence state:
 - `structural`: source establishes the vulnerable and reachable path, but the
   execution environment could not run it.
 - `hypothesis`: intent, reachability, or a required precondition is unresolved.
-- `rejected`: disproved, framework-protected, unreachable, or suppressed.
+- `rejected`: disproved, framework-protected, unreachable, or suppressed. Name
+  the specific guarantee that rejects it; see
+  [known non-findings](references/known-non-findings.md).
 
 Then grade impact using [severity and evidence](references/severity-and-evidence.md).
 Hypotheses are not vulnerability findings and must appear in a separate

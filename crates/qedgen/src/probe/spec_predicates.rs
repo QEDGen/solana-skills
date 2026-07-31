@@ -316,7 +316,7 @@ pub(crate) fn predicate_permissionless_state_writer(handler: &ParsedHandler) -> 
              unbounded amount params (compose with `unbounded_amount_param`), \
              missing per-actor PDA derivation. The corpus entry \
              `Frontrun the permissionless claim / crank` and Token-2022 \
-             `transfer_hook_reentrancy` are common amplifiers.",
+             `transfer_hook_untrusted_callback` are common amplifiers.",
             handler.name,
             mutated_fields.join(", ")
         ),
