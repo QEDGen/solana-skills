@@ -597,6 +597,63 @@ the runtime would otherwise enforce.
   audit-firm reports as "manual lamport mutation freezes
   rent-exempt / executable accounts."
 
+### `lamport_balance_not_program_controlled` — HIGH
+An account's lamport balance is not program-controlled state. Anyone
+can increase it without the owning program's consent, and the runtime
+constrains when it may decrease. A program that treats the balance as
+its own accounting, or that depends on a push payment succeeding, is
+trusting something it does not own. Two sub-shapes share this root.
+
+**Read side, unsolicited credit.** The handler derives accounting
+truth from `account.lamports()` or a quantity computed from it: a
+deposit total, a share denominator, a "has this been funded" test, a
+solvency check. An attacker transfers lamports in directly, the
+program never sees an instruction, and the derived value is now wrong
+in the attacker's favour. This is the Solana form of a forced balance
+credit.
+
+**Write side, unpayable target.** The handler pushes lamports to an
+address taken from state or from caller input, and the program's
+liveness depends on that transfer succeeding. The runtime can refuse
+permanently, in three ways: the debit would drop the source below
+rent exemption; the target is executable, which the runtime rejects;
+or the target sits in the reserved account list and is silently
+demoted to read-only. An address stored earlier can become unpayable
+later, which bricks the handler with no way to recover.
+
+- **Detect (read side)** by grepping every `.lamports()` read and
+  sorting it into two piles: rent-exemption checks, which are fine,
+  and anything feeding accounting or a guard, which is the finding.
+  Ask whether an unsolicited transfer changes the result.
+- **Detect (write side)** by finding every payout whose destination
+  comes from stored state or an instruction argument, then asking what
+  the program does if that transfer can never succeed. If the answer
+  is "the handler always fails from now on", the finding is a
+  permanent denial of service, not a transient error.
+- **Anchor / Native:** the read-side tell is
+  `vault.lamports() - Rent::get()?.minimum_balance(...)` used as a
+  withdrawable amount. The write-side tell is a stored `Pubkey`
+  destination combined with `#[account(mut)]` and no check that the
+  target is neither executable nor reserved.
+- **When to suppress:** the lamport read only feeds a rent-exemption
+  assertion, or the payout target is a PDA the program derives and
+  controls.
+- **Fix pattern:** track deposits in explicit program state rather
+  than in the balance, and make payouts pull-based. Credit a claimable
+  amount to a PDA vault and let the recipient withdraw, so an
+  unpayable address cannot stall anyone else.
+- Compose-with-what: `pda_lifecycle_reuse_after_close` (an unsolicited
+  credit is also how a closed account gets revived); permissionless
+  deposit or claim (the attacker funds the skew themselves).
+- Distinct from `lamport_write_demotion`, which is about the direct
+  `try_borrow_mut_lamports` write mechanic freezing an account. This
+  category is about trusting the balance as state, and about pushing
+  payments to addresses the program does not control.
+- Corpus: public research on lamport transfer semantics and
+  reserved-account write demotion (2025-05), where a stored winner
+  address became read-only after a feature gate activated and the
+  reimbursement path could no longer run.
+
 ### `init_config_field_unanchored` — CRITICAL (DAMM-v2 shape)
 Spec-less only. The **write-side companion** to
 `field_chain_missing_root_anchor`. An init handler accepts a
@@ -766,6 +823,54 @@ When to suppress / downgrade:
   strand the funds. Remediation was doc-only (admin treated as trusted),
   so it was firm-rated MEDIUM; the strand-funds capability is HIGH absent
   that documented trust.
+
+### `compressed_nft_ownership_unverified` — HIGH (CRITICAL when it gates funds)
+A program grants a right — a vote, a claim, an airdrop, access, a
+transfer — on the strength of compressed NFT ownership. Unlike a
+regular NFT there is no account to own and no owner field to read.
+Ownership is a leaf in a concurrent Merkle tree, and it only exists as
+a proof supplied per transaction. Every guarantee therefore rests on
+the program recalculating the leaf from the signer and verifying the
+proof against the tree's live root.
+
+Four ways integrators lose that guarantee:
+
+1. Trusting a leaf, asset id, or owner supplied by the caller or read
+   from an off-chain indexer, instead of recalculating the leaf from
+   the signing account. The recalculation is the ownership check; skip
+   it and there is no check.
+2. Verifying against a caller-supplied root rather than the current
+   root in the tree account. A stale root plus its matching proof is a
+   replay of ownership the caller no longer has.
+3. Not pinning the Merkle tree account or its authority, so a caller
+   substitutes a tree they control and proves whatever they like.
+4. Caching a proof across transactions. The tree's `max_buffer_size`
+   changelog bounds how many mutations a proof survives; past that it
+   is stale.
+
+- **Detect** by tracing every right the program grants back to the
+  account that proves it. If the answer is a leaf or an asset id that
+  arrived as instruction data, the program is trusting the claimant.
+- **Anchor / Native:** look for leaf construction from unchecked input
+  (`LeafSchema::new_v1` and equivalents), CPI into the account
+  compression program with a root that came from the caller, and a
+  Merkle tree account typed as a bare `AccountInfo` with no equality
+  check against the expected tree.
+- **When to suppress:** the program CPIs into the account compression
+  program with the tree account itself, recalculates the leaf from the
+  signer, and lets that program verify against its own stored root.
+- **On canopy depth, do not file a finding.** The canopy is upper tree
+  nodes cached on-chain so the submitted proof is short enough to fit
+  the transaction size limit. It shortens the proof; it does not
+  weaken verification. Treat canopy depth as a liveness and
+  transaction-sizing constraint. It becomes reportable only when a
+  deep tree with too little canopy makes a required operation
+  unlandable, and that is a denial of service, not an ownership bug.
+- Compose-with-what: `field_chain_missing_root_anchor` (the same
+  unanchored-root shape on a different primitive); `arbitrary_cpi`
+  when the compression program itself is not pinned.
+- Corpus: public research on concurrent Merkle trees and compressed
+  NFT integration hazards.
 
 ### `transfer_hook_untrusted_callback` — HIGH (Token-2022 only)
 A Token-2022 mint carrying the `TransferHook` extension makes the
@@ -982,6 +1087,55 @@ high-impact when it materializes.
 - Corpus: recurring audit-firm pattern across DeFi programs; the
   two-step handshake is now the default safe form across mature
   Solana protocols.
+
+### `privileged_action_no_delay_window` — MEDIUM (operational hardening)
+Every privileged handler takes effect in the transaction that lands
+it. That is fine until the question is not "was this authorized" but
+"was this authorized *now*". A Solana signature anchored to a durable
+nonce does not expire, so an approval collected under one pretext can
+be submitted weeks later under another, and a leaked key is fatal the
+moment it is used. A protocol with no delay between request and effect
+has no window in which anyone can notice and revoke.
+
+`authority_transfer_missing_nominate_accept` covers exactly one
+handler, the authority transfer. This category covers the rest of the
+privileged surface: `withdraw_admin`, `set_config`, `set_oracle`,
+`whitelist_collateral`, `set_fee`, `pause`, `upgrade`. A nominate and
+accept handshake on `set_authority` is worth little if
+`whitelist_collateral` still executes instantly and can list an
+attacker's token.
+
+- **Detect** by listing every handler gated only on an admin signer,
+  then asking for each one: between the transaction landing and the
+  effect being irreversible, is there any interval in which an honest
+  party could intervene? Two-step handlers store a pending value plus
+  a `not_before` timestamp and refuse to apply early. One-step
+  handlers write the live field directly.
+- **Anchor:** the shape is `has_one = admin` plus `Signer<'info>` and
+  a direct field assignment, with no `pending_*` field on the config
+  account and no `Clock::get()` in the handler body. The absence of a
+  clock read in a privileged setter is the fastest signal.
+- **Native / Pinocchio:** same shape with the admin comparison done by
+  hand.
+- **When to suppress:** the action is genuinely emergency-scoped and
+  reversible, such as a pause that only ever restricts, where a delay
+  would defeat the purpose. Say which direction the action can move
+  before suppressing; a pause that can also unpause is not
+  one-directional.
+- **Severity note:** MEDIUM as hardening, HIGH when a single
+  privileged call can seize or strand user funds in one transaction,
+  since there the delay window is the only thing between a captured
+  signature and a loss.
+- Compose-with-what: single-key admin custody; an unanchored admin
+  field (`init_config_field_unanchored`) so the attacker is the admin;
+  approvals anchored to a durable nonce, which never expire and turn a
+  months-old signature into a live one.
+- Corpus: public research on multisig signing hygiene and durable
+  nonce replay (2025-02). The off-chain half of that work is signing
+  procedure, which an audit can recommend but not enforce. This
+  category is the on-chain half the program can actually implement.
+  See `docs/security-primer.md` Part 2 for the durable-nonce takeover
+  flow this defends against.
 
 ### `missing_rent_exemption_check_on_init` — HIGH
 Spec-less only. Account initialization accepts a caller-supplied
@@ -1304,6 +1458,10 @@ exhaustive; use as a thinking primer, not a checklist.
 | bounty_intent_drift (spec docstring claims behavior the spec body doesn't enforce) | + | qedgen-codegen mechanization | = | formal-verification artifacts (Lean / Kani / proptest) faithfully translate the broken spec — `lake build` green proves the broken behavior, **giving false confidence that the program is correct** (HIGH-CRIT depending on what the docstring claimed) |
 | spec_impl_drift_user_owned (body writes a state field the spec doesn't model) | + | downstream guard reads that field | = | unmodeled side-channel that formal verification is blind to (HIGH) |
 | lamport_write_demotion | + | rent-exempt PDA | = | silent rent extraction, downstream rent failure (MED→HIGH) |
+| lamport_balance_not_program_controlled (read side) | + | `withdrawable = lamports() - rent_minimum` | = | attacker donates lamports to inflate the withdrawable amount, then withdraws a surplus they never deposited (HIGH) |
+| lamport_balance_not_program_controlled (write side) | + | payout address stored at init | = | the stored address later becomes executable, reserved-and-demoted, or would fall below rent exemption, and the payout handler can never succeed again (MED→HIGH, permanent DoS with no recovery path) |
+| compressed_nft_ownership_unverified | + | claim / vote gated on cNFT ownership | = | replay a stale-root proof or prove against a self-owned tree to claim assets the caller never held (HIGH→CRIT) |
+| privileged_action_no_delay_window | + | durable-nonce-anchored approval | = | a signature collected months earlier under a different pretext lands and takes effect instantly, with no window for the honest signers to revoke (MED→CRIT depending on what the action controls) |
 | saturating_by_design (`+=!`) | + | amount-shaped field | = | silent value loss, no error path (MED→HIGH) |
 | payout_exceeds_recorded_principal | + | shared vault, permissionless claim | = | every claim draws its excess from other depositors' principal, turning a bounded per-position leak into a pool drain that no per-position check can see (HIGH→CRIT) |
 | token_account_role_anchoring (`<role>_token_account.owner` field not pinned) | + | authority-signed revoke / payout handler | = | authority redirects role's vested-but-unclaimed tokens to any same-mint wallet they control, no victim consent (CRIT) |
