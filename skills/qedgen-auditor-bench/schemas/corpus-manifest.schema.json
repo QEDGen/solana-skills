@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qedgen.dev/schemas/auditor-bench/corpus-manifest-v1.schema.json",
+  "title": "QEDGen auditor benchmark corpus manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "schema_uri", "entries"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "schema_uri": {
+      "const": "https://qedgen.dev/schemas/auditor-bench/corpus-manifest-v1.schema.json"
+    },
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/entry" }
+    }
+  },
+  "$defs": {
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "difficulty",
+        "repository",
+        "audited_commit",
+        "program_root",
+        "runtime",
+        "setup_commands",
+        "test_commands",
+        "sanitization_rules",
+        "labeled_findings"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "difficulty": {
+          "enum": ["smoke", "standard", "hard", "adversarial"]
+        },
+        "repository": { "type": "string", "minLength": 1 },
+        "audited_commit": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{7,64}$"
+        },
+        "program_root": { "type": "string", "minLength": 1 },
+        "runtime": {
+          "enum": ["anchor", "pinocchio", "quasar", "native-rust", "sbpf-assembly"]
+        },
+        "setup_commands": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "test_commands": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "sanitization_rules": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "labeled_findings": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/labeled_finding" }
+        },
+        "domain_expectations": {
+          "$ref": "#/$defs/domain_expectations"
+        }
+      }
+    },
+    "labeled_finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "severity", "category", "location", "root_cause"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "severity": {
+          "enum": ["critical", "high", "medium", "low", "info"]
+        },
+        "category": { "type": "string", "minLength": 1 },
+        "location": { "type": "string", "minLength": 1 },
+        "root_cause": { "type": "string", "minLength": 1 }
+      }
+    },
+    "domain_expectations": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "units": { "type": "array", "items": { "type": "string" } },
+        "equations": { "type": "array", "items": { "type": "string" } },
+        "lifecycle": { "type": "array", "items": { "type": "string" } },
+        "authorities": { "type": "array", "items": { "type": "string" } },
+        "external_assumptions": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    }
+  }
+}

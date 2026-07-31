@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "schema_uri": "https://qedgen.dev/schemas/auditor-bench/normalized-report-v1.schema.json",
+  "corpus_entry_id": "synthetic-escrow-smoke",
+  "run_id": "synthetic-run-1",
+  "findings": [
+    {
+      "id": "RUN-001",
+      "severity": "high",
+      "evidence": "confirmed",
+      "category": "missing_signer",
+      "location": "src/lib.rs:42",
+      "root_cause": "authority is not required to sign",
+      "title": "Withdraw authority need not sign",
+      "repro_status": "fired"
+    }
+  ]
+}

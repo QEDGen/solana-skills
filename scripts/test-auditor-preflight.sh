@@ -153,4 +153,53 @@ fi
 grep -q 'category identity drift' <<<"$err"
 grep -q 'category_that_does_not_exist' <<<"$err"
 
+# --- benchmark schemas: every machine-readable contract is required ---
+cp -R "$repo_root/skills/qedgen-auditor-bench" "$tmp/bench-missing-schema"
+rm -f "$tmp/bench-missing-schema/schemas/corpus-manifest.schema.json"
+if QEDGEN_AUDITOR_BENCH_ROOT="$tmp/bench-missing-schema" \
+  "$repo_root/scripts/check-auditor-skill.sh" >/dev/null 2>&1; then
+  echo "expected missing benchmark corpus schema to fail the check" >&2
+  exit 1
+fi
+
+# --- benchmark scoring: mixed tiers cannot be hidden in one headline ---
+cp -R "$repo_root/skills/qedgen-auditor-bench" "$tmp/bench-missing-tier-rule"
+sed -i.bak \
+  '/MUST NOT collapse mixed difficulty tiers into one headline score/d' \
+  "$tmp/bench-missing-tier-rule/SKILL.md"
+if QEDGEN_AUDITOR_BENCH_ROOT="$tmp/bench-missing-tier-rule" \
+  "$repo_root/scripts/check-auditor-skill.sh" >/dev/null 2>&1; then
+  echo "expected missing benchmark tier rule to fail the check" >&2
+  exit 1
+fi
+
+# --- benchmark fixtures: difficulty and comparison composition are validated ---
+cp -R "$repo_root/skills/qedgen-auditor-bench/fixtures/synthetic" \
+  "$tmp/bench-missing-difficulty"
+jq 'del(.entries[0].difficulty)' \
+  "$tmp/bench-missing-difficulty/corpus-manifest.json" \
+  > "$tmp/corpus-manifest-without-difficulty.json"
+mv "$tmp/corpus-manifest-without-difficulty.json" \
+  "$tmp/bench-missing-difficulty/corpus-manifest.json"
+if err="$(QEDGEN_BENCH_FIXTURE_ROOT="$tmp/bench-missing-difficulty" \
+  "$repo_root/skills/qedgen-auditor-bench/schemas/validate.sh" 2>&1)"; then
+  echo "expected missing benchmark difficulty to fail validation" >&2
+  exit 1
+fi
+grep -q 'required difficulty' <<<"$err"
+
+cp -R "$repo_root/skills/qedgen-auditor-bench/fixtures/synthetic" \
+  "$tmp/bench-mismatched-composition"
+jq '.comparison.candidate_tier_entry_counts.smoke = 0' \
+  "$tmp/bench-mismatched-composition/score.json" \
+  > "$tmp/score-with-mismatched-composition.json"
+mv "$tmp/score-with-mismatched-composition.json" \
+  "$tmp/bench-mismatched-composition/score.json"
+if err="$(QEDGEN_BENCH_FIXTURE_ROOT="$tmp/bench-mismatched-composition" \
+  "$repo_root/skills/qedgen-auditor-bench/schemas/validate.sh" 2>&1)"; then
+  echo "expected mismatched benchmark composition to fail validation" >&2
+  exit 1
+fi
+grep -q 'composition_valid must equal per-tier count equality' <<<"$err"
+
 echo "auditor preflight tests passed"
