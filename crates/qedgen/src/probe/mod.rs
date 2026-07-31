@@ -1322,6 +1322,58 @@ pub fn applicable_categories_public(runtime: &Runtime) -> Vec<String> {
     applicable_categories(runtime)
 }
 
+/// Deterministic source/IDL handler-set disagreement for deployment gates.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct IdlSourceDrift {
+    pub source_only: Vec<String>,
+    pub idl_only: Vec<String>,
+}
+
+/// Compare the exact IDL selected by a deployment-gate caller with the
+/// handlers exposed by the project's source dispatcher.
+pub(crate) fn idl_source_drift(
+    project_root: &Path,
+    idl_path: &Path,
+    runtime: Runtime,
+) -> Result<IdlSourceDrift> {
+    if !project_root.exists() {
+        return Err(anyhow!(
+            "project root does not exist: {}",
+            project_root.display()
+        ));
+    }
+    let mut handlers = match runtime {
+        Runtime::Anchor | Runtime::Quasar | Runtime::QedgenCodegen => {
+            discover_anchor_handlers(project_root)?
+        }
+        _ => {
+            return Err(anyhow!(
+                "source/IDL deployment reconciliation is unsupported for runtime {:?}",
+                runtime
+            ))
+        }
+    };
+    if handlers.is_empty() {
+        return Err(anyhow!(
+            "no source handlers discovered under {}",
+            project_root.display()
+        ));
+    }
+
+    let categories = applicable_categories(&runtime);
+    let outcome =
+        idl_overlay::apply_explicit(project_root, &runtime, &mut handlers, &categories, idl_path)?;
+    let mut drift = IdlSourceDrift {
+        source_only: outcome.source_only_handlers,
+        idl_only: outcome.idl_only_handlers,
+    };
+    drift.source_only.sort();
+    drift.source_only.dedup();
+    drift.idl_only.sort();
+    drift.idl_only.dedup();
+    Ok(drift)
+}
+
 /// Runtime detection by filesystem heuristics. Order matters: a project
 /// with both `Anchor.toml` and `solana-program` dep is Anchor.
 fn detect_runtime(root: &Path) -> Runtime {
