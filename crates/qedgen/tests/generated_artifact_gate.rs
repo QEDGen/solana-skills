@@ -44,6 +44,25 @@ const REQUIRED_ARTIFACTS: &[&str] = &[
     "tests/kani.rs",
 ];
 
+/// The complete file set promised by one Anchor `codegen --all` invocation.
+///
+/// Paths are relative to the spec's project root, not `--output-dir`, because
+/// non-Rust artifacts intentionally use their documented project-level
+/// defaults.
+const ANCHOR_ALL_ARTIFACTS: &[&str] = &[
+    "programs/Cargo.toml",
+    "programs/src/lib.rs",
+    "programs/tests/unit.rs",
+    "programs/tests/proptest.rs",
+    "programs/tests/kani.rs",
+    "programs/tests/integration_tests.rs",
+    "fuzz/escrow/Cargo.toml",
+    "fuzz/escrow/src/main.rs",
+    "formal_verification/Spec.lean",
+    "formal_verification/Proofs.lean",
+    ".github/workflows/verify.yml",
+];
+
 /// Shared cargo target dir for all gate compiles (dep reuse + CI cache).
 fn gate_target_dir() -> std::path::PathBuf {
     repo_root().join("target").join("generated-artifact-gate")
@@ -210,6 +229,55 @@ fn lending_generated_artifacts_compile_and_run() {
 #[ignore = "compile-heavy: codegen --all + cargo test + kani compile gate"]
 fn multisig_generated_artifacts_compile_and_run() {
     gate_anchor_example("multisig");
+}
+
+/// #395 — prove the documented one-command path emits a coherent Anchor
+/// project. Integration tests are compiled but deliberately never executed:
+/// execution requires a separately built program `.so` and is covered by the
+/// Parallax integration gate.
+#[test]
+#[ignore = "compile-heavy: codegen --all + cargo check --tests"]
+fn anchor_all_artifacts_compile_without_execution() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let example_dir = repo_root().join("examples/rust/escrow");
+    let spec_path = temp.path().join("escrow.qedspec");
+    std::fs::copy(example_dir.join("escrow.qedspec"), &spec_path).expect("copy escrow spec");
+    std::fs::copy(example_dir.join("qed.toml"), temp.path().join("qed.toml"))
+        .expect("copy escrow manifest");
+    std::fs::create_dir(temp.path().join(".qed")).expect("create .qed");
+    common::git_init(temp.path());
+
+    run_ok(
+        Command::new(env!("CARGO_BIN_EXE_qedgen"))
+            .arg("codegen")
+            .arg("--spec")
+            .arg(&spec_path)
+            .arg("--target")
+            .arg("anchor")
+            .arg("--output-dir")
+            .arg(temp.path().join("programs"))
+            .arg("--all")
+            .current_dir(temp.path()),
+    );
+
+    for rel in ANCHOR_ALL_ARTIFACTS {
+        assert!(
+            temp.path().join(rel).is_file(),
+            "Anchor codegen --all silently skipped {rel}"
+        );
+    }
+
+    let cargo_toml = temp.path().join("programs/Cargo.toml");
+    redirect_macros_to_path(&cargo_toml);
+    inject_kani_stub(&cargo_toml);
+    run_ok(
+        Command::new("cargo")
+            .arg("check")
+            .arg("--manifest-path")
+            .arg(&cargo_toml)
+            .arg("--tests")
+            .env("CARGO_TARGET_DIR", gate_target_dir()),
+    );
 }
 
 // #372 — the Quasar half. Until these existed, no Quasar artifact in this
