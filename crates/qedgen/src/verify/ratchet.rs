@@ -127,10 +127,10 @@ fn apply_source_drift(
     let drift = crate::probe::idl_source_drift(root, idl, runtime)?;
 
     for finding in &mut report.findings {
-        let is_idl_only = drift.idl_only.iter().any(|handler| {
-            let segment = format!("ix:{handler}");
-            finding.path.iter().any(|part| part == &segment)
-        });
+        let is_idl_only = finding
+            .path
+            .iter()
+            .any(|part| drift.is_idl_only_path_segment(part));
         if is_idl_only {
             finding.severity = Severity::Additive;
             finding.message = format!(
@@ -144,6 +144,11 @@ fn apply_source_drift(
         }
     }
 
+    // A source-only handler has no IDL instruction, so it has no raw IDL name
+    // to key on. Its `ix:` segment is therefore the Rust symbol, always
+    // snake_case, while sibling Ratchet findings carry whatever casing the IDL
+    // used. That asymmetry is intended: the segment names the only thing that
+    // exists. The message says so, so a mixed-casing report stays readable.
     for handler in drift.source_only {
         let allow_flag = format!("allow-source-only-{handler}");
         let severity = if acknowledged.iter().any(|flag| flag == &allow_flag) {
@@ -155,7 +160,7 @@ fn apply_source_drift(
             Finding::new(severity, "QED001", "source-handler-missing-from-idl")
                 .at([format!("ix:{handler}")])
                 .message(format!(
-                    "undeclared surface reaching mainnet: source exposes `{handler}`, IDL does not declare it"
+                    "undeclared surface reaching mainnet: source handler `{handler}` is not declared by the IDL"
                 ))
                 .suggestion(
                     "Rebuild and review the IDL, or acknowledge an intentional private handler.",
@@ -323,6 +328,66 @@ mod tests {
     fn anchor_idl_drift_fixture() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/probe-corpus/specless/anchor-idl")
+    }
+
+    /// The drift fixture's own source surface, re-declared with a camelCase
+    /// IDL-only instruction. Anchor 0.29 and earlier, Codama, and Shank all
+    /// emit camelCase instruction names.
+    const CAMEL_CASE_IDL: &str = r#"{
+        "address": "Vault1111111111111111111111111111111111111",
+        "metadata": { "name": "vault", "version": "0.1.0", "spec": "0.1.0" },
+        "instructions": [
+            {
+                "name": "initialize",
+                "accounts": [
+                    { "name": "admin", "signer": true, "writable": true },
+                    { "name": "vault", "writable": true }
+                ],
+                "args": [ { "name": "cap", "type": "u64" } ]
+            },
+            {
+                "name": "staleReconcile",
+                "accounts": [ { "name": "vault", "writable": true } ],
+                "args": []
+            }
+        ]
+    }"#;
+
+    #[test]
+    fn readiness_demotes_stale_idl_findings_for_camel_case_instruction_names() {
+        let tmp = TempDir::new().unwrap();
+        let idl = write(tmp.path(), "vault.json", CAMEL_CASE_IDL);
+        let report = run_readiness(&ReadinessOpts {
+            idl,
+            framework: Framework::Anchor,
+            root: Some(anchor_idl_drift_fixture()),
+            unsafes: vec![],
+        })
+        .unwrap();
+
+        // `staleReconcile` normalizes to `stale_reconcile`, which no source
+        // handler provides. Ratchet paths carry the raw IDL name, so the
+        // comparison has to normalize before it can match.
+        assert!(
+            report.findings.iter().any(|finding| {
+                finding.rule_id == "P006"
+                    && finding.path.iter().any(|part| part == "ix:staleReconcile")
+                    && finding.severity == Severity::Additive
+                    && finding.message.contains("stale IDL")
+            }),
+            "camelCase IDL-only instruction must still be demoted: {:?}",
+            report.findings
+        );
+        // `crank` is source-only under this IDL and must stay unsafe.
+        assert!(
+            report.findings.iter().any(|finding| {
+                finding.rule_id == "QED001"
+                    && finding.path == ["ix:crank"]
+                    && finding.severity == Severity::Unsafe
+            }),
+            "source-only handler must stay unsafe: {:?}",
+            report.findings
+        );
     }
 
     #[test]

@@ -63,7 +63,7 @@ use spec_predicates::*;
 /// see `docs/design/probe-schema-v3-migration.md`.
 const SCHEMA_VERSION: u32 = 3;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[allow(dead_code)] // Variants populated incrementally across v2.x retrofits
 pub enum Category {
@@ -1353,10 +1353,34 @@ pub fn applicable_categories_public(runtime: &Runtime) -> Vec<String> {
 }
 
 /// Deterministic source/IDL handler-set disagreement for deployment gates.
+///
+/// Both name lists are snake_case: `source_only` holds Rust handler symbols,
+/// and `idl_only` holds IDL instruction names already normalized by
+/// [`crucible_brownfield::camel_to_snake`]. Callers comparing these against a
+/// name that came straight out of an IDL must normalize it first. See
+/// [`IdlSourceDrift::is_idl_only_path_segment`].
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct IdlSourceDrift {
     pub source_only: Vec<String>,
     pub idl_only: Vec<String>,
+}
+
+impl IdlSourceDrift {
+    /// Does a Ratchet finding path segment name an IDL-only instruction?
+    ///
+    /// Ratchet keys its `ix:<name>` path segments on the **raw** IDL
+    /// instruction name (`ratchet_anchor::normalize` clones `ix.name`
+    /// verbatim), which is camelCase for Anchor 0.29 and earlier, Codama, and
+    /// Shank IDLs. `idl_only` is snake_case. Comparing the two directly
+    /// silently matches nothing for every multi-word instruction, so the
+    /// segment is normalized here before the lookup.
+    pub(crate) fn is_idl_only_path_segment(&self, segment: &str) -> bool {
+        let Some(raw) = segment.strip_prefix("ix:") else {
+            return false;
+        };
+        let normalized = crucible_brownfield::camel_to_snake(raw);
+        self.idl_only.iter().any(|handler| handler == &normalized)
+    }
 }
 
 /// Compare the exact IDL selected by a deployment-gate caller with the

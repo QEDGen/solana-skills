@@ -1,8 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-bench_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-fixture_root="${QEDGEN_BENCH_FIXTURE_ROOT:-$bench_root/fixtures/synthetic}"
+# Validate a benchmark run's three machine-readable artifacts.
+#
+# Usage:
+#   validate.sh [<directory>]
+#
+# The directory must contain `corpus-manifest.json`, `normalized-report.json`,
+# and `score.json`. It defaults to the checked-in synthetic fixtures, so the
+# repository gate has something to run against, but the point of the script is
+# to be pointed at a real run's output directory.
+#
+# Structure is checked against the `.schema.json` files by `jsonschema.jq`.
+# Only rules JSON Schema cannot express live here: referential integrity
+# between the three documents, and the tier-composition arithmetic that keeps
+# a mixed-difficulty comparison from being read as a regression.
+
+schemas_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+bench_root="$(cd "$schemas_dir/.." && pwd -P)"
+fixture_root="${1:-${QEDGEN_BENCH_FIXTURE_ROOT:-$bench_root/fixtures/synthetic}}"
 
 manifest="$fixture_root/corpus-manifest.json"
 report="$fixture_root/normalized-report.json"
@@ -13,130 +29,49 @@ fail() {
   exit 1
 }
 
+command -v jq >/dev/null || fail "jq is required"
+
 for file in "$manifest" "$report" "$score"; do
-  [[ -f "$file" ]] || fail "missing fixture: $file"
+  [[ -f "$file" ]] || fail "missing artifact: $file"
   jq -e . "$file" >/dev/null || fail "invalid JSON: $file"
 done
 
-jq -e '
-  .schema_version == 1 and
-  .schema_uri == "https://qedgen.dev/schemas/auditor-bench/corpus-manifest-v1.schema.json" and
-  ((keys_unsorted | sort) == ["entries", "schema_uri", "schema_version"]) and
-  (.entries | type == "array" and length > 0) and
-  (all(.entries[];
-    ((keys_unsorted - [
-      "id", "difficulty", "repository", "audited_commit", "program_root",
-      "runtime", "setup_commands", "test_commands", "sanitization_rules",
-      "labeled_findings", "domain_expectations"
-    ]) | length == 0) and
-    (.id | type == "string" and length > 0) and
-    (.difficulty | IN("smoke", "standard", "hard", "adversarial")) and
-    (.repository | type == "string" and length > 0) and
-    (.audited_commit | test("^[0-9a-fA-F]{7,64}$")) and
-    (.program_root | type == "string" and length > 0) and
-    (.runtime | IN("anchor", "pinocchio", "quasar", "native-rust", "sbpf-assembly")) and
-    (.setup_commands | type == "array" and
-      all(.[]; type == "string" and length > 0)) and
-    (.test_commands | type == "array" and length > 0 and
-      all(.[]; type == "string" and length > 0)) and
-    (.sanitization_rules | type == "array" and length > 0 and
-      all(.[]; type == "string" and length > 0)) and
-    (.labeled_findings | type == "array") and
-    (all(.labeled_findings[];
-      ((keys_unsorted | sort) == ["category", "id", "location", "root_cause", "severity"]) and
-      (all(.id, .category, .location, .root_cause;
-        type == "string" and length > 0)) and
-      (.severity | IN("critical", "high", "medium", "low", "info"))
-    )) and
-    ((has("domain_expectations") | not) or
-      (.domain_expectations |
-        type == "object" and
-        ((keys_unsorted - [
-          "units", "equations", "lifecycle", "authorities", "external_assumptions"
-        ]) | length == 0) and
-        all(.[]; type == "array" and all(.[]; type == "string"))
-      ))
-  )) and
-  ([.entries[].id] | length == (unique | length))
-' "$manifest" >/dev/null || fail "corpus manifest violates its contract (including required difficulty)"
+# --- structure: the schemas are the contract ---
 
-jq -e '
-  .schema_version == 1 and
-  .schema_uri == "https://qedgen.dev/schemas/auditor-bench/normalized-report-v1.schema.json" and
-  ((keys_unsorted | sort) == [
-    "corpus_entry_id", "findings", "run_id", "schema_uri", "schema_version"
-  ]) and
-  (.corpus_entry_id | type == "string" and length > 0) and
-  (.run_id | type == "string" and length > 0) and
-  (.findings | type == "array") and
-  (all(.findings[];
-    ((keys_unsorted | sort) == [
-      "category", "evidence", "id", "location", "repro_status", "root_cause",
-      "severity", "title"
-    ]) and
-    (all(.id, .category, .location, .root_cause, .title;
-      type == "string" and length > 0)) and
-    (.severity | IN("critical", "high", "medium", "low", "info")) and
-    (.evidence | IN("confirmed", "structural", "hypothesis", "rejected")) and
-    (.repro_status | IN("fired", "inconclusive", "silent", "not-required"))
-  ))
-' "$report" >/dev/null || fail "normalized report violates its contract"
+conform() {
+  local doc="$1" schema="$2" label="$3" violations
+  violations="$(jq -r --slurpfile schema "$schemas_dir/$schema" \
+    -f "$schemas_dir/jsonschema.jq" "$doc")"
+  if [[ -n "$violations" ]]; then
+    echo "benchmark schema validation failed: $label does not conform to $schema" >&2
+    sed 's/^/  /' <<<"$violations" >&2
+    exit 1
+  fi
+}
+
+# The manifest message names `difficulty` explicitly: a corpus entry without a
+# tier is the failure this contract exists to prevent, and it should be
+# greppable in CI output rather than buried in a generic conformance error.
+conform "$manifest" corpus-manifest.schema.json \
+  "corpus manifest (every entry needs a required difficulty)"
+conform "$report" normalized-report.schema.json "normalized report"
+conform "$score" score.schema.json "score"
+
+# --- referential integrity across documents ---
+
+jq -e '[.entries[].id] | length == (unique | length)' "$manifest" >/dev/null ||
+  fail "corpus manifest repeats an entry id"
 
 entry_id="$(jq -r '.corpus_entry_id' "$report")"
 jq -e --arg id "$entry_id" 'any(.entries[]; .id == $id)' "$manifest" >/dev/null ||
   fail "normalized report references unknown corpus entry: $entry_id"
 
-jq -e '
-  def counts:
-    type == "object" and
-    ((keys_unsorted | sort) == ["adversarial", "hard", "smoke", "standard"]) and
-    all(.[]; type == "number" and floor == . and . >= 0);
-  def metrics:
-    type == "object" and
-    ((keys_unsorted - [
-      "entry_count", "ground_truth_count", "reported_count", "true_positives",
-      "recall", "precision"
-    ]) | length == 0) and
-    all(.entry_count, .ground_truth_count, .reported_count, .true_positives;
-      type == "number" and floor == . and . >= 0) and
-    all(.recall, .precision; type == "number" and . >= 0 and . <= 1);
-  .schema_version == 1 and
-  .schema_uri == "https://qedgen.dev/schemas/auditor-bench/score-v1.schema.json" and
-  ((keys_unsorted - [
-    "schema_version", "schema_uri", "corpus_entry_ids", "tier_entry_counts",
-    "per_difficulty", "aggregate", "comparison"
-  ]) | length == 0) and
-  (.corpus_entry_ids | type == "array" and length > 0 and
-    all(.[]; type == "string" and length > 0) and
-    length == (unique | length)) and
-  (.tier_entry_counts | counts) and
-  (.per_difficulty | type == "object" and length > 0) and
-  (all(.per_difficulty | keys[];
-    IN("smoke", "standard", "hard", "adversarial"))) and
-  (all(.per_difficulty[]; metrics)) and
-  (all(.per_difficulty | to_entries[];
-    .value.entry_count == (.key as $tier | $ARGS.named.counts[$tier]))) and
-  (all($ARGS.named.counts | to_entries[];
-    .value == 0 or ($ARGS.named.per_difficulty[.key] | metrics))) and
-  ((has("aggregate") | not) or (.aggregate | metrics)) and
-  ((has("comparison") | not) or
-    (((.comparison | keys_unsorted | sort) == [
-       "baseline_tier_entry_counts", "candidate_tier_entry_counts",
-       "composition_valid", "kind"
-     ]) and
-     (.comparison.kind | IN("skill-regression", "model-regression")) and
-     (.comparison.baseline_tier_entry_counts | counts) and
-     (.comparison.candidate_tier_entry_counts | counts) and
-     (.comparison.composition_valid | type == "boolean")))
-' --argjson counts "$(jq '.tier_entry_counts' "$score")" \
-  --argjson per_difficulty "$(jq '.per_difficulty' "$score")" \
-  "$score" >/dev/null ||
-  fail "score violates its per-difficulty contract"
-
 while IFS= read -r id; do
   jq -e --arg id "$id" 'any(.entries[]; .id == $id)' "$manifest" >/dev/null ||
     fail "score references unknown corpus entry: $id"
 done < <(jq -r '.corpus_entry_ids[]' "$score")
+
+# --- tier composition ---
 
 expected_counts="$(jq --argjson ids "$(jq '.corpus_entry_ids' "$score")" '
   reduce (.entries[] | select(.id as $id | $ids | index($id))) as $entry
@@ -148,7 +83,19 @@ if [[ "$(jq -c . <<<"$expected_counts")" != "$actual_counts" ]]; then
   fail "tier_entry_counts do not match the referenced corpus entries"
 fi
 
-if jq -e '.comparison != null' "$score" >/dev/null; then
+# Every reported tier's entry count must agree with the headline tier counts,
+# and no tier with entries may be silently omitted from `per_difficulty`.
+jq -e '
+  . as $score
+  | all(.per_difficulty | to_entries[];
+        .value.entry_count == $score.tier_entry_counts[.key])
+    and all($score.tier_entry_counts | to_entries[];
+            .key as $tier
+            | .value == 0 or ($score.per_difficulty | has($tier)))
+' "$score" >/dev/null ||
+  fail "per_difficulty entry counts disagree with tier_entry_counts"
+
+if jq -e 'has("comparison")' "$score" >/dev/null; then
   same="$(jq -r '
     .comparison.baseline_tier_entry_counts ==
     .comparison.candidate_tier_entry_counts

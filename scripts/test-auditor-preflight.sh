@@ -153,6 +153,28 @@ fi
 grep -q 'category identity drift' <<<"$err"
 grep -q 'category_that_does_not_exist' <<<"$err"
 
+# --- category identity: an unallowlisted Rust tag is rejected too ---
+# The catalog direction above cannot catch an awk regression in the Rust
+# extractor, so drive the other half of the comparison as well.
+awk '
+  injected || !/Category::ArbitraryCpi => "arbitrary_cpi",/ { print; next }
+  {
+    print
+    print "            Category::TagThatHasNoCatalogEntry => \"tag_that_has_no_catalog_entry\","
+    injected = 1
+  }
+' "$repo_root/crates/qedgen/src/probe/mod.rs" > "$tmp/probe-mod-rust-orphan.rs"
+grep -q 'tag_that_has_no_catalog_entry' "$tmp/probe-mod-rust-orphan.rs" ||
+  { echo "preflight fixture failed to inject a Rust tag" >&2; exit 1; }
+if err="$(QEDGEN_CATEGORY_RUST="$tmp/probe-mod-rust-orphan.rs" \
+  QEDGEN_CATEGORY_CATALOG="$repo_root/skills/qedgen-auditor/references/category-catalog.md" \
+  "$repo_root/scripts/check-category-catalog.sh" 2>&1)"; then
+  echo "expected orphan Rust category to fail identity reconciliation" >&2
+  exit 1
+fi
+grep -q 'Rust categories missing from catalog/allowlist' <<<"$err"
+grep -q 'tag_that_has_no_catalog_entry' <<<"$err"
+
 # --- benchmark schemas: every machine-readable contract is required ---
 cp -R "$repo_root/skills/qedgen-auditor-bench" "$tmp/bench-missing-schema"
 rm -f "$tmp/bench-missing-schema/schemas/corpus-manifest.schema.json"
@@ -238,6 +260,44 @@ if QEDGEN_BENCH_FIXTURE_ROOT="$tmp/bench-null-aggregate" \
   echo "expected null score aggregate to fail validation" >&2
   exit 1
 fi
+
+# --- schema drift: a keyword the evaluator cannot enforce is rejected ---
+# The schemas are the single source of truth only while `jsonschema.jq`
+# implements every keyword they use. A schema that grows an unimplemented
+# keyword must fail loudly instead of leaving that constraint unenforced.
+cp -R "$repo_root/skills/qedgen-auditor-bench" "$tmp/bench-unsupported-keyword"
+jq '.properties.entries.maxItems = 3' \
+  "$tmp/bench-unsupported-keyword/schemas/corpus-manifest.schema.json" \
+  > "$tmp/corpus-manifest-schema-with-maxitems.json"
+mv "$tmp/corpus-manifest-schema-with-maxitems.json" \
+  "$tmp/bench-unsupported-keyword/schemas/corpus-manifest.schema.json"
+if err="$("$tmp/bench-unsupported-keyword/schemas/validate.sh" 2>&1)"; then
+  echo "expected an unimplemented schema keyword to fail validation" >&2
+  exit 1
+fi
+grep -q 'does not implement: maxItems' <<<"$err"
+
+# --- schema is the contract: a structural violation is caught by the schema ---
+cp -R "$repo_root/skills/qedgen-auditor-bench/fixtures/synthetic" \
+  "$tmp/bench-unexpected-property"
+jq '.entries[0].undeclared_field = "x"' \
+  "$tmp/bench-unexpected-property/corpus-manifest.json" \
+  > "$tmp/corpus-manifest-with-unexpected-property.json"
+mv "$tmp/corpus-manifest-with-unexpected-property.json" \
+  "$tmp/bench-unexpected-property/corpus-manifest.json"
+if err="$("$repo_root/skills/qedgen-auditor-bench/schemas/validate.sh" \
+  "$tmp/bench-unexpected-property" 2>&1)"; then
+  echo "expected an undeclared manifest property to fail validation" >&2
+  exit 1
+fi
+grep -q 'unexpected property undeclared_field' <<<"$err"
+
+# --- the validator runs against a real output directory, not just fixtures ---
+cp -R "$repo_root/skills/qedgen-auditor-bench/fixtures/synthetic" \
+  "$tmp/bench-run-output"
+"$repo_root/skills/qedgen-auditor-bench/schemas/validate.sh" \
+  "$tmp/bench-run-output" >/dev/null ||
+  { echo "expected a positional output directory to validate" >&2; exit 1; }
 
 # --- knowledge bases: every catalog entry and primer signal is attributable ---
 knowledge_check="$repo_root/skills/qedgen-auditor/scripts/check-knowledge-bases.sh"

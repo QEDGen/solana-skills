@@ -7,7 +7,7 @@ surface — it's intended as human-readable background for someone
 exploring the repo, **not** loaded into the auditor's context on
 every invocation. The auditor's working memory stays on
 `.claude/skills/qedgen-auditor/SKILL.md`; this primer is what you
-read when you want the *story* behind a Corpus reference.
+read when you want the *story* behind a Basis reference.
 
 If you're writing or extending an audit catalog rule, the loop is:
 read the loss / attack flow here, generalize the shape, and add it
@@ -26,7 +26,7 @@ is not.
 
 The nine classes below are public, code-pattern exploits (not
 key-management / supply-chain incidents — those are in Part 2).
-Each maps to one or more SKILL.md categories' `Corpus:` line.
+Each maps to one or more SKILL.md categories' `Basis:` line.
 Auditors investigating that category should re-read the relevant
 entry here to refresh their mental model of *how the primitive
 actually got exercised at scale*.

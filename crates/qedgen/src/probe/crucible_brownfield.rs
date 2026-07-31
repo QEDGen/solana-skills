@@ -429,7 +429,7 @@ fn render_idl_pda_seeds(pda: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
-fn camel_to_snake(name: &str) -> String {
+pub(super) fn camel_to_snake(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     for (i, ch) in name.chars().enumerate() {
         if ch.is_ascii_uppercase() {

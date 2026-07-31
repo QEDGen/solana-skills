@@ -122,6 +122,10 @@ while IFS=$'\t' read -r section count basis; do
   fi
   validate_basis "primer:$section" "$basis"
 done < <(
+  # `**Grep for:**` opens the block and `**Basis:**` must appear inside it, so
+  # in the primer the Basis line has to sit AFTER its `**Grep for:**` header,
+  # not before. Moving it above the header would read better but would leave
+  # the block with no Basis and fail this gate.
   awk '
     function emit() {
       if (active) print section "\t" count "\t" basis

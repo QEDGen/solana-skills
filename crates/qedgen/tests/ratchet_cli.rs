@@ -230,15 +230,24 @@ fn readiness_workspace_scopes_source_handlers_to_selected_idl() {
     ]);
     let report: serde_json::Value =
         serde_json::from_slice(&out.stdout).expect("readiness JSON report");
+    // Asserting only that `beta_handler` is absent would also pass if alpha's
+    // own handler failed to reconcile, so pin the whole source-only set to
+    // empty: alpha declares `alphaHandler`, source provides `alpha_handler`,
+    // and the two must match through normalization.
+    let source_only: Vec<&serde_json::Value> = report["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|finding| finding["rule_id"] == "QED001")
+        .collect();
     assert!(
-        !report["findings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|finding| {
-                finding["rule_id"] == "QED001"
-                    && finding["path"] == serde_json::json!(["ix:beta_handler"])
-            }),
-        "sibling program handler was compared to alpha IDL: {report:#}"
+        source_only.is_empty(),
+        "scoped workspace must reconcile alpha cleanly and ignore beta: {report:#}"
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "a reconciled workspace program is not a deployment blocker:\n{}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }

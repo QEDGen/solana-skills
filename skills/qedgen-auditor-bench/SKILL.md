@@ -190,6 +190,20 @@ positives. Report structural precision separately from confirmed precision.
 Write the machine-readable result against
 [`schemas/score.schema.json`](schemas/score.schema.json).
 
+Then validate this run's own artifacts. Put `corpus-manifest.json`,
+`normalized-report.json`, and `score.json` in the benchmark output directory
+and run:
+
+```bash
+skills/qedgen-auditor-bench/schemas/validate.sh <benchmark-output-dir>
+```
+
+A run whose artifacts do not validate is not a scored run. Reporting numbers
+from it is the same error as reporting a collapsed mixed-tier headline. The
+script checks structure against the schemas, that every referenced corpus
+entry exists, and that `tier_entry_counts` matches the entries actually
+scored.
+
 ### 8. Detect invalid runs
 
 Assign a run-level status before computing recall:

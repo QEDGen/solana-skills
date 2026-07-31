@@ -41,6 +41,7 @@ for required in \
   "$bench_root/schemas/normalized-report.schema.json" \
   "$bench_root/schemas/score.schema.json" \
   "$bench_root/schemas/validate.sh" \
+  "$bench_root/schemas/jsonschema.jq" \
   "$bench_root/fixtures/synthetic/corpus-manifest.json" \
   "$bench_root/fixtures/synthetic/normalized-report.json" \
   "$bench_root/fixtures/synthetic/score.json"; do
@@ -53,7 +54,9 @@ done
 for required in \
   'MUST NOT collapse mixed difficulty tiers into one headline score' \
   'comparison.composition_valid' \
-  'identical per-tier entry counts'; do
+  'identical per-tier entry counts' \
+  'schemas/validate.sh <benchmark-output-dir>' \
+  'A run whose artifacts do not validate is not a scored run'; do
   if ! grep -Fq "$required" "$bench_skill"; then
     echo "benchmark scoring contract is missing required tier rule: $required" >&2
     fail=1
@@ -145,8 +148,10 @@ for required in \
   fi
 done
 
+# stdout is suppressed like every other sub-gate above; the script's coverage
+# warnings go to stderr and are meant to stay visible.
 if [[ -x "$skill_root/scripts/check-knowledge-bases.sh" ]] &&
-   ! "$skill_root/scripts/check-knowledge-bases.sh"; then
+   ! "$skill_root/scripts/check-knowledge-bases.sh" >/dev/null; then
   echo "auditor knowledge-base validation failed" >&2
   fail=1
 fi
