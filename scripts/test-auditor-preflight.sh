@@ -202,6 +202,43 @@ if err="$(QEDGEN_BENCH_FIXTURE_ROOT="$tmp/bench-mismatched-composition" \
 fi
 grep -q 'composition_valid must equal per-tier count equality' <<<"$err"
 
+cp -R "$repo_root/skills/qedgen-auditor-bench/fixtures/synthetic" \
+  "$tmp/bench-invalid-command-type"
+jq '.entries[0].setup_commands = [true]' \
+  "$tmp/bench-invalid-command-type/corpus-manifest.json" \
+  > "$tmp/corpus-manifest-with-invalid-command.json"
+mv "$tmp/corpus-manifest-with-invalid-command.json" \
+  "$tmp/bench-invalid-command-type/corpus-manifest.json"
+if QEDGEN_BENCH_FIXTURE_ROOT="$tmp/bench-invalid-command-type" \
+  "$repo_root/skills/qedgen-auditor-bench/schemas/validate.sh" >/dev/null 2>&1; then
+  echo "expected non-string benchmark command to fail validation" >&2
+  exit 1
+fi
+
+cp -R "$repo_root/skills/qedgen-auditor-bench/fixtures/synthetic" \
+  "$tmp/bench-null-domain-expectations"
+jq '.entries[0].domain_expectations = null' \
+  "$tmp/bench-null-domain-expectations/corpus-manifest.json" \
+  > "$tmp/corpus-manifest-with-null-domain.json"
+mv "$tmp/corpus-manifest-with-null-domain.json" \
+  "$tmp/bench-null-domain-expectations/corpus-manifest.json"
+if QEDGEN_BENCH_FIXTURE_ROOT="$tmp/bench-null-domain-expectations" \
+  "$repo_root/skills/qedgen-auditor-bench/schemas/validate.sh" >/dev/null 2>&1; then
+  echo "expected null domain expectations to fail validation" >&2
+  exit 1
+fi
+
+cp -R "$repo_root/skills/qedgen-auditor-bench/fixtures/synthetic" \
+  "$tmp/bench-null-aggregate"
+jq '.aggregate = null' "$tmp/bench-null-aggregate/score.json" \
+  > "$tmp/score-with-null-aggregate.json"
+mv "$tmp/score-with-null-aggregate.json" "$tmp/bench-null-aggregate/score.json"
+if QEDGEN_BENCH_FIXTURE_ROOT="$tmp/bench-null-aggregate" \
+  "$repo_root/skills/qedgen-auditor-bench/schemas/validate.sh" >/dev/null 2>&1; then
+  echo "expected null score aggregate to fail validation" >&2
+  exit 1
+fi
+
 # --- knowledge bases: every catalog entry and primer signal is attributable ---
 knowledge_check="$repo_root/skills/qedgen-auditor/scripts/check-knowledge-bases.sh"
 catalog="$repo_root/skills/qedgen-auditor/references/category-catalog.md"
@@ -251,5 +288,17 @@ if err="$(QEDGEN_CATEGORY_CATALOG="$catalog" \
   exit 1
 fi
 grep -q 'primer Grep for block missing Basis:' <<<"$err"
+
+awk '
+  replaced || !/^\*\*Basis:\*\*/ { print; next }
+  { print "**Basis:** corpus:unregistered-incident"; replaced = 1 }
+' "$primer" > "$tmp/primer-unregistered-corpus.md"
+if err="$(QEDGEN_CATEGORY_CATALOG="$catalog" \
+  QEDGEN_SECURITY_PRIMER="$tmp/primer-unregistered-corpus.md" \
+  QEDGEN_BASIS_ALLOWLIST="$allowlist" "$knowledge_check" 2>&1)"; then
+  echo "expected unregistered primer corpus basis to fail validation" >&2
+  exit 1
+fi
+grep -q 'corpus basis is not registered' <<<"$err"
 
 echo "auditor preflight tests passed"

@@ -35,9 +35,12 @@ jq -e '
     (.audited_commit | test("^[0-9a-fA-F]{7,64}$")) and
     (.program_root | type == "string" and length > 0) and
     (.runtime | IN("anchor", "pinocchio", "quasar", "native-rust", "sbpf-assembly")) and
-    (.setup_commands | type == "array") and
-    (.test_commands | type == "array" and length > 0) and
-    (.sanitization_rules | type == "array" and length > 0) and
+    (.setup_commands | type == "array" and
+      all(.[]; type == "string" and length > 0)) and
+    (.test_commands | type == "array" and length > 0 and
+      all(.[]; type == "string" and length > 0)) and
+    (.sanitization_rules | type == "array" and length > 0 and
+      all(.[]; type == "string" and length > 0)) and
     (.labeled_findings | type == "array") and
     (all(.labeled_findings[];
       ((keys_unsorted | sort) == ["category", "id", "location", "root_cause", "severity"]) and
@@ -45,11 +48,14 @@ jq -e '
         type == "string" and length > 0)) and
       (.severity | IN("critical", "high", "medium", "low", "info"))
     )) and
-    ((.domain_expectations // null) == null or
-      (((.domain_expectations | keys_unsorted) - [
-        "units", "equations", "lifecycle", "authorities", "external_assumptions"
-      ] | length == 0) and
-       all(.domain_expectations[]; type == "array")))
+    ((has("domain_expectations") | not) or
+      (.domain_expectations |
+        type == "object" and
+        ((keys_unsorted - [
+          "units", "equations", "lifecycle", "authorities", "external_assumptions"
+        ]) | length == 0) and
+        all(.[]; type == "array" and all(.[]; type == "string"))
+      ))
   )) and
   ([.entries[].id] | length == (unique | length))
 ' "$manifest" >/dev/null || fail "corpus manifest violates its contract (including required difficulty)"
@@ -100,7 +106,9 @@ jq -e '
     "schema_version", "schema_uri", "corpus_entry_ids", "tier_entry_counts",
     "per_difficulty", "aggregate", "comparison"
   ]) | length == 0) and
-  (.corpus_entry_ids | type == "array" and length > 0 and length == (unique | length)) and
+  (.corpus_entry_ids | type == "array" and length > 0 and
+    all(.[]; type == "string" and length > 0) and
+    length == (unique | length)) and
   (.tier_entry_counts | counts) and
   (.per_difficulty | type == "object" and length > 0) and
   (all(.per_difficulty | keys[];
@@ -110,9 +118,13 @@ jq -e '
     .value.entry_count == (.key as $tier | $ARGS.named.counts[$tier]))) and
   (all($ARGS.named.counts | to_entries[];
     .value == 0 or ($ARGS.named.per_difficulty[.key] | metrics))) and
-  ((.aggregate // null) == null or (.aggregate | metrics)) and
-  ((.comparison // null) == null or
-    ((.comparison.kind | IN("skill-regression", "model-regression")) and
+  ((has("aggregate") | not) or (.aggregate | metrics)) and
+  ((has("comparison") | not) or
+    (((.comparison | keys_unsorted | sort) == [
+       "baseline_tier_entry_counts", "candidate_tier_entry_counts",
+       "composition_valid", "kind"
+     ]) and
+     (.comparison.kind | IN("skill-regression", "model-regression")) and
      (.comparison.baseline_tier_entry_counts | counts) and
      (.comparison.candidate_tier_entry_counts | counts) and
      (.comparison.composition_valid | type == "boolean")))

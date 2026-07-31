@@ -360,6 +360,7 @@ pub(crate) fn apply(
         global_categories,
         idl_path,
         idl_text,
+        false,
     )
 }
 
@@ -386,6 +387,7 @@ pub(super) fn apply_explicit(
         global_categories,
         idl_path.to_path_buf(),
         idl_text,
+        true,
     ))
 }
 
@@ -435,6 +437,7 @@ fn apply_anchor_workspace(
             global_categories,
             idl_path,
             idl_text,
+            false,
         );
         for (index, handler) in indices.into_iter().zip(program_handlers) {
             handlers[index] = handler;
@@ -502,13 +505,16 @@ fn apply_discovered_idl(
     global_categories: &[String],
     idl_path: PathBuf,
     idl_text: String,
+    explicit: bool,
 ) -> OverlayOutcome {
     let mut outcome = OverlayOutcome::default();
 
     let instructions = parse_instructions(&idl_text);
-    if instructions.is_empty() {
+    if instructions.is_empty() && !explicit {
         // A JSON file at a canonical path that carries no instructions is
-        // not an IDL we can use — treat as absent.
+        // not an IDL we can use for discovery — treat as absent. An explicit
+        // deployment-gate IDL is different: an empty instruction set is a
+        // valid surface that must be compared with source, not a false-green.
         outcome.derivable_idl = detect_derivable_idl(project_root, runtime).map(str::to_string);
         return outcome;
     }

@@ -53,7 +53,7 @@ verification.
    collateral-side lock.
 
 **Grep for:**
-**Basis:** corpus:security-primer/sysvar-instructions-spoof-2022
+**Basis:** url:https://wormholecrypto.medium.com/wormhole-incident-report-02-02-22-ad9b8f21eec6
 - Any read of `Sysvar::Instructions` data without
   `solana_program::sysvar::instructions::ID` equality check
 - Anchor: `AccountInfo<'info>` for the instructions sysvar
@@ -96,7 +96,7 @@ worthless underlying.
    dump.
 
 **Grep for:**
-**Basis:** corpus:security-primer/fake-account-collateral-chain-2022
+**Basis:** url:https://www.certik.com/skynet-report/cashio-app-incident-analysis
 - Account-A reads pubkey field from Account-B without verifying
   B's owner *and* B's contents pin back to a known-good root
 - Multi-account validation chains where each link is checked
@@ -132,7 +132,7 @@ collateral against real assets.
    already left.
 
 **Grep for:**
-**Basis:** corpus:security-primer/thin-spot-cross-margin-2022
+**Basis:** url:https://www.cftc.gov/PressRoom/PressReleases/8647-23
 - Oracle reads with no TWAP / no min-confidence-interval check
 - Single-source price feeds (one oracle product, no cross-check)
 - Collateral valuation that uses spot price without
@@ -165,7 +165,7 @@ the program trusted.
 4. Collect inflated fees, repay flash loan, profit.
 
 **Grep for:**
-**Basis:** corpus:security-primer/fake-clmm-tick-account-2022
+**Basis:** url:https://www.certik.com/blog/crema-finance-exploit
 - Tick / order / position accounts passed via `AccountInfo`
   without `seeds = [b"tick", pool, tick_index]` Anchor
   constraint
@@ -196,7 +196,7 @@ draining one token per instruction.
 4. Pack 100s of swap instructions per tx; drain pool over hours.
 
 **Grep for:**
-**Basis:** corpus:security-primer/stable-swap-rounding-2022
+**Basis:** url:https://osec.io/blog/2022-04-26-spl-swap-rounding/
 - Bidirectional pair functions (deposit/withdraw, mint/redeem,
   swap A↔B) using the *same* rounding direction on both sides
 - `try_round_u64`, `.round()`, `ceil_div` used without asymmetric
@@ -228,7 +228,7 @@ the oracle update to prevent arbitrage and inflate the read.
    assets, walk.
 
 **Grep for:**
-**Basis:** corpus:security-primer/dex-oracle-write-lock-2022
+**Basis:** url:https://www.coindesk.com/business/2022/11/02/defi-protocol-solend-struck-by-126m-oracle-exploit
 - Oracle wrapper reading from a DEX pool reserve as the price
   source
 - No min-liquidity threshold before accepting an oracle read
@@ -260,7 +260,7 @@ buys.
 4. Repay flash loan, keep delta.
 
 **Grep for:**
-**Basis:** corpus:security-primer/self-priced-token-flash-loan-2022
+**Basis:** url:https://ackee.xyz/blog/2022-solana-hacks-explained-nirvana/
 - Treasury / redemption logic that prices its own token via its
   own AMM / bonding curve in the same tx
 - Mint and redeem in the same instruction without TWAP between
@@ -290,7 +290,7 @@ collateral.
 4. Walk; the rest of the market is collateralized in real assets.
 
 **Grep for:**
-**Basis:** corpus:security-primer/niche-collateral-mispricing-2025
+**Basis:** url:https://www.halborn.com/blog/post/explained-the-loopscale-hack-april-2025
 - New / niche / illiquid token added as collateral with the same
   oracle pattern as blue-chip
 - Per-market collateral pricing where the function pulls a fresh
@@ -322,7 +322,7 @@ so they were skipped during the collateralization check.
    at slot 0).
 
 **Grep for:**
-**Basis:** corpus:security-primer/sentinel-null-close-bypass-2022
+**Basis:** source:jet-lab/jet-v1@e4617be106449faed319feeadca18887ab97f9da:programs/jet/src/state/obligation.rs
 - `for position in positions { if position.key ==
   Pubkey::default() { break; } }` patterns
 - Sentinel-terminated arrays where account closure inserts the

@@ -57,10 +57,14 @@ const ANCHOR_ALL_ARTIFACTS: &[&str] = &[
     "programs/tests/kani.rs",
     "programs/tests/integration_tests.rs",
     "fuzz/escrow/Cargo.toml",
+    "fuzz/escrow/rust-toolchain.toml",
+    "fuzz/escrow/.gitignore",
+    "fuzz/escrow/idls/README.md",
     "fuzz/escrow/src/main.rs",
     "formal_verification/Spec.lean",
     "formal_verification/Proofs.lean",
     ".github/workflows/verify.yml",
+    ".qed/obligations.json",
 ];
 
 /// Shared cargo target dir for all gate compiles (dep reuse + CI cache).

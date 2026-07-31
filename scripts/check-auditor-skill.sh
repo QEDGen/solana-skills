@@ -137,7 +137,8 @@ fi
 
 for required in \
   "$skill_root/scripts/check-knowledge-bases.sh" \
-  "$skill_root/references/basis-legacy-allowlist.txt"; do
+  "$skill_root/references/basis-legacy-allowlist.txt" \
+  "$skill_root/references/basis-corpus-registry.txt"; do
   if [[ ! -f "$required" ]]; then
     echo "auditor knowledge-base gate is missing: $required" >&2
     fail=1

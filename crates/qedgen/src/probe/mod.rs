@@ -1389,6 +1389,7 @@ pub(crate) fn idl_source_drift(
             project_root.display()
         ));
     }
+    scope_workspace_handlers_to_idl(project_root, idl_path, &mut handlers)?;
 
     let categories = applicable_category_tags(&runtime);
     let outcome =
@@ -1402,6 +1403,79 @@ pub(crate) fn idl_source_drift(
     drift.idl_only.sort();
     drift.idl_only.dedup();
     Ok(drift)
+}
+
+/// An explicit workspace IDL represents one program, while source discovery
+/// intentionally aggregates every `programs/*` crate for ordinary probing.
+/// Deployment reconciliation must narrow that aggregate before comparing it.
+fn scope_workspace_handlers_to_idl(
+    project_root: &Path,
+    idl_path: &Path,
+    handlers: &mut Vec<BootstrapHandler>,
+) -> Result<()> {
+    if project_root.join("src/lib.rs").is_file() || !project_root.join("programs").is_dir() {
+        return Ok(());
+    }
+
+    let idl_text = std::fs::read_to_string(idl_path)?;
+    let idl: serde_json::Value = serde_json::from_str(&idl_text)?;
+    let idl_name = idl
+        .get("metadata")
+        .and_then(|metadata| metadata.get("name"))
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| idl.get("name").and_then(serde_json::Value::as_str))
+        .or_else(|| idl_path.file_stem().and_then(|stem| stem.to_str()))
+        .ok_or_else(|| anyhow!("cannot determine program name for {}", idl_path.display()))?
+        .replace('-', "_");
+
+    let mut matching_dirs = Vec::new();
+    for entry in std::fs::read_dir(project_root.join("programs"))?.flatten() {
+        let crate_root = entry.path();
+        if !crate_root.join("src/lib.rs").is_file() {
+            continue;
+        }
+        let fallback = entry.file_name().to_string_lossy().replace('-', "_");
+        let manifest = std::fs::read_to_string(crate_root.join("Cargo.toml")).unwrap_or_default();
+        let manifest: Option<toml::Value> = toml::from_str(&manifest).ok();
+        let crate_name = manifest
+            .as_ref()
+            .and_then(|value| value.get("lib"))
+            .and_then(|lib| lib.get("name"))
+            .and_then(toml::Value::as_str)
+            .or_else(|| {
+                manifest
+                    .as_ref()
+                    .and_then(|value| value.get("package"))
+                    .and_then(|package| package.get("name"))
+                    .and_then(toml::Value::as_str)
+            })
+            .map(|name| name.replace('-', "_"))
+            .unwrap_or(fallback);
+        if crate_name == idl_name {
+            matching_dirs.push(entry.file_name().to_string_lossy().to_string());
+        }
+    }
+
+    if matching_dirs.len() != 1 {
+        return Err(anyhow!(
+            "IDL program `{idl_name}` matched {} source programs under {}",
+            matching_dirs.len(),
+            project_root.join("programs").display()
+        ));
+    }
+    let selected = &matching_dirs[0];
+    handlers.retain(|handler| {
+        let mut components = Path::new(&handler.source_file).components();
+        components.next().and_then(|part| part.as_os_str().to_str()) == Some("programs")
+            && components.next().and_then(|part| part.as_os_str().to_str())
+                == Some(selected.as_str())
+    });
+    if handlers.is_empty() {
+        return Err(anyhow!(
+            "no source handlers discovered for IDL program `{idl_name}`"
+        ));
+    }
+    Ok(())
 }
 
 /// Runtime detection by filesystem heuristics. Order matters: a project

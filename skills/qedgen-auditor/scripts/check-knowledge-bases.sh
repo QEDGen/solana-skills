@@ -5,13 +5,15 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd -P)"
 catalog="${QEDGEN_CATEGORY_CATALOG:-$repo_root/skills/qedgen-auditor/references/category-catalog.md}"
 primer="${QEDGEN_SECURITY_PRIMER:-$repo_root/docs/security-primer.md}"
 allowlist="${QEDGEN_BASIS_ALLOWLIST:-$repo_root/skills/qedgen-auditor/references/basis-legacy-allowlist.txt}"
+corpus_registry="${QEDGEN_BASIS_CORPUS_REGISTRY:-$repo_root/skills/qedgen-auditor/references/basis-corpus-registry.txt}"
 
 fail=0
 uncovered=()
 prose_only=()
 
-if [[ ! -f "$catalog" || ! -f "$primer" || ! -f "$allowlist" ]]; then
-  echo "knowledge-base input missing: catalog=$catalog primer=$primer allowlist=$allowlist" >&2
+if [[ ! -f "$catalog" || ! -f "$primer" || ! -f "$allowlist" ||
+      ! -f "$corpus_registry" ]]; then
+  echo "knowledge-base input missing: catalog=$catalog primer=$primer allowlist=$allowlist corpus_registry=$corpus_registry" >&2
   exit 1
 fi
 
@@ -44,6 +46,10 @@ validate_basis() {
     corpus:*)
       if [[ ! "$basis" =~ ^corpus:[A-Za-z0-9._/-]+$ ]]; then
         echo "invalid corpus basis for $owner: $basis" >&2
+        fail=1
+      elif ! grep -Ev '^[[:space:]]*(#|$)' "$corpus_registry" |
+        grep -Fxq "${basis#corpus:}"; then
+        echo "corpus basis is not registered for $owner: ${basis#corpus:}" >&2
         fail=1
       fi
       ;;
