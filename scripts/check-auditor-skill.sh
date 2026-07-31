@@ -136,6 +136,21 @@ if ! "$repo_root/scripts/check-category-catalog.sh" >/dev/null; then
 fi
 
 for required in \
+  "$skill_root/scripts/check-knowledge-bases.sh" \
+  "$skill_root/references/basis-legacy-allowlist.txt"; do
+  if [[ ! -f "$required" ]]; then
+    echo "auditor knowledge-base gate is missing: $required" >&2
+    fail=1
+  fi
+done
+
+if [[ -x "$skill_root/scripts/check-knowledge-bases.sh" ]] &&
+   ! "$skill_root/scripts/check-knowledge-bases.sh"; then
+  echo "auditor knowledge-base validation failed" >&2
+  fail=1
+fi
+
+for required in \
   'Asset-flow graph' \
   'Quantity and unit table' \
   'Lifecycle graph' \

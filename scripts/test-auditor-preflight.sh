@@ -202,4 +202,54 @@ if err="$(QEDGEN_BENCH_FIXTURE_ROOT="$tmp/bench-mismatched-composition" \
 fi
 grep -q 'composition_valid must equal per-tier count equality' <<<"$err"
 
+# --- knowledge bases: every catalog entry and primer signal is attributable ---
+knowledge_check="$repo_root/skills/qedgen-auditor/scripts/check-knowledge-bases.sh"
+catalog="$repo_root/skills/qedgen-auditor/references/category-catalog.md"
+primer="$repo_root/docs/security-primer.md"
+allowlist="$repo_root/skills/qedgen-auditor/references/basis-legacy-allowlist.txt"
+
+awk 'removed || !/^Basis:/ { print; next } { removed = 1 }' "$catalog" \
+  > "$tmp/catalog-missing-basis.md"
+if err="$(QEDGEN_CATEGORY_CATALOG="$tmp/catalog-missing-basis.md" \
+  QEDGEN_SECURITY_PRIMER="$primer" QEDGEN_BASIS_ALLOWLIST="$allowlist" \
+  "$knowledge_check" 2>&1)"; then
+  echo "expected missing category basis to fail validation" >&2
+  exit 1
+fi
+grep -q 'catalog entry missing Basis:' <<<"$err"
+
+awk '
+  replaced || !/^Basis: fixture:/ { print; next }
+  { print "Basis: fixture:crates/qedgen/tests/fixtures/does-not-exist"; replaced = 1 }
+' "$catalog" > "$tmp/catalog-bad-fixture.md"
+if err="$(QEDGEN_CATEGORY_CATALOG="$tmp/catalog-bad-fixture.md" \
+  QEDGEN_SECURITY_PRIMER="$primer" QEDGEN_BASIS_ALLOWLIST="$allowlist" \
+  "$knowledge_check" 2>&1)"; then
+  echo "expected nonexistent category fixture basis to fail validation" >&2
+  exit 1
+fi
+grep -q 'fixture basis does not exist' <<<"$err"
+
+cp "$catalog" "$tmp/catalog-unallowlisted-prose.md"
+printf '%s\n' '' '### `unknown_prose_category` — HIGH' \
+  'Basis: prose:synthetic unsupported provenance' \
+  'Synthetic preflight entry.' >> "$tmp/catalog-unallowlisted-prose.md"
+if err="$(QEDGEN_CATEGORY_CATALOG="$tmp/catalog-unallowlisted-prose.md" \
+  QEDGEN_SECURITY_PRIMER="$primer" QEDGEN_BASIS_ALLOWLIST="$allowlist" \
+  "$knowledge_check" 2>&1)"; then
+  echo "expected unallowlisted prose basis to fail validation" >&2
+  exit 1
+fi
+grep -q 'prose basis is not allowlisted: unknown_prose_category' <<<"$err"
+
+awk 'removed || !/^\*\*Basis:\*\*/ { print; next } { removed = 1 }' "$primer" \
+  > "$tmp/primer-missing-basis.md"
+if err="$(QEDGEN_CATEGORY_CATALOG="$catalog" \
+  QEDGEN_SECURITY_PRIMER="$tmp/primer-missing-basis.md" \
+  QEDGEN_BASIS_ALLOWLIST="$allowlist" "$knowledge_check" 2>&1)"; then
+  echo "expected missing primer grep basis to fail validation" >&2
+  exit 1
+fi
+grep -q 'primer Grep for block missing Basis:' <<<"$err"
+
 echo "auditor preflight tests passed"
