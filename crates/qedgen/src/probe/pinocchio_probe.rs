@@ -748,12 +748,12 @@ pub fn findings_from_catalogue(cat: &PinocchioCatalogue) -> Vec<crate::probe::Fi
                 "unchecked_account_load",
             ),
             SiteKind::SetAmountArith => (
-                Category::PinocchioUncheckedArith,
+                Category::PinocchioUncheckedAmountArith,
                 Severity::High,
                 "unchecked_amount_arith",
             ),
             SiteKind::SetLamportsArith => (
-                Category::PinocchioUncheckedArith,
+                Category::PinocchioUncheckedLamportArith,
                 Severity::High,
                 "unchecked_lamport_arith",
             ),
@@ -865,7 +865,9 @@ pub fn findings_from_catalogue(cat: &PinocchioCatalogue) -> Vec<crate::probe::Fi
         if site.safety_comment.is_some()
             && matches!(
                 category,
-                Category::PinocchioUncheckedAccountLoad | Category::PinocchioUncheckedArith
+                Category::PinocchioUncheckedAccountLoad
+                    | Category::PinocchioUncheckedAmountArith
+                    | Category::PinocchioUncheckedLamportArith
             )
         {
             findings.push(Finding {
@@ -1061,7 +1063,7 @@ fn adversarial_for(
 
     // Category-specific defaults — fire even with no SAFETY comment.
     match category {
-        Category::PinocchioUncheckedArith => {
+        Category::PinocchioUncheckedAmountArith | Category::PinocchioUncheckedLamportArith => {
             out.push(AdversarialInput {
                 claim_text: "arithmetic does not overflow".to_string(),
                 negation_strategy: "oversized_amount".to_string(),
@@ -1084,7 +1086,7 @@ fn adversarial_for(
 fn invariants_for(category: &crate::probe::Category) -> Vec<String> {
     use crate::probe::Category;
     match category {
-        Category::PinocchioUncheckedArith => vec![
+        Category::PinocchioUncheckedAmountArith | Category::PinocchioUncheckedLamportArith => vec![
             "assert_lamport_conservation".to_string(),
             "assert_token_conservation_per_mint".to_string(),
         ],

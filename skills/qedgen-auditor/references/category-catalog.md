@@ -1392,6 +1392,89 @@ verification claim.
   what was verified" needs an in-band content pin plus a CI gate
   that enforces it.
 
+### `permissionless_state_writer` — MEDIUM
+A permissionless handler mutates shared durable state. Confirm that the
+mutation is intentionally public and bounded; otherwise repeated calls can
+grief, fill, or contend the resource. Compose with unbounded amounts or
+unchecked initialization fields when grading impact.
+
+### `quorum_dup_inflation` — CRITICAL
+A quorum check counts signer occurrences rather than distinct authorized
+members. Repeating one valid signer can inflate the apparent approval count.
+Deduplicate by pubkey before threshold comparison and reject duplicate account
+positions.
+
+### `quorum_set_dup_at_init` — HIGH
+Initialization accepts a signer/member set containing duplicate pubkeys. Even
+if execution deduplicates correctly, the stored threshold can become
+unreachable or one participant can occupy several nominal seats.
+
+### `nonce_absent_action_replay` — HIGH
+A signed or quorum-approved action carries no monotonic nonce or action digest
+consumption. The same authorization can be replayed after the first successful
+execution.
+
+### `creator_admin_outside_quorum` — HIGH
+The creator retains a direct administrative path that bypasses the stored
+quorum. Compare every privileged instruction's authority predicate with the
+quorum contract rather than assuming initialization transferred control.
+
+### `signer_set_pinned_to_creator_pda_only` — HIGH
+The signer set or approval record is derived only from a creator-controlled PDA,
+so the creator can replace or shadow the purported multi-party authority.
+Require the signer-set identity and membership commitment to be independently
+anchored.
+
+### `pinocchio_unchecked_account_load` — HIGH
+Pinocchio `_unchecked` account-data loads bypass the owner, length,
+initialization, discriminator, and alias guarantees Anchor normally supplies.
+Validate every SAFETY precondition on every path before the load. See
+`references/probes/pinocchio/unchecked_account_load.md`.
+
+### `pinocchio_unchecked_amount_arith` — HIGH
+Token amount mutation uses raw arithmetic rather than checked operations and a
+locally visible bound. Exercise extreme instruction amounts and confirm token
+conservation. See
+`references/probes/pinocchio/unchecked_amount_arith.md`.
+
+### `pinocchio_unchecked_lamport_arith` — HIGH
+Direct lamport mutation uses raw addition or subtraction. Check underflow,
+overflow, rent-exemption effects, and conservation across all touched
+accounts. See
+`references/probes/pinocchio/unchecked_lamport_arith.md`.
+
+### `pinocchio_account_type_confusion` — CRITICAL
+The same account bytes can be interpreted as different Rust types without a
+validated discriminator. An attacker can select a layout whose fields satisfy
+the wrong handler's checks. See
+`references/probes/pinocchio/account_type_confusion.md`.
+
+### `pinocchio_mutable_borrow_aliasing` — CRITICAL
+Overlapping unchecked mutable borrows target the same account buffer, bypassing
+the runtime checks that would reject aliasing. See
+`references/probes/pinocchio/mutable_borrow_aliasing.md`.
+
+### `pinocchio_position_without_type_tag` — HIGH
+An account is trusted because it appears at a particular positional index, but
+its owner and type tag are not validated before reading or writing. See
+`references/probes/pinocchio/position_based_account_without_type_tag.md`.
+
+### `pinocchio_offset_overrun` — MEDIUM
+An indexed data slice can exceed the minimum validated account length. Confirm
+`OFFSET + width <= data.len()` for every typed read and write. See
+`references/probes/pinocchio/offset_overrun.md`.
+
+### `pinocchio_missing_pda_verification` — CRITICAL
+An account is treated as a program-derived authority without recomputing and
+comparing its PDA from canonical seeds and the program id. See
+`references/probes/pinocchio/missing_pda_verification.md`.
+
+### `pinocchio_stale_safety_comment` — HIGH
+A SAFETY comment states owner, length, initialization, or alias preconditions
+that control-flow inspection cannot find on every path reaching the unsafe
+operation. Treat the comment as a claim to falsify, not as evidence. See
+`references/probes/pinocchio/stale_safety_comment.md`.
+
 ## Cluster taxonomy (scaffold-to-spec interview)
 
 *In v2.20, this taxonomy is a **Phase-2 fallback only** — surfaced as
@@ -1468,4 +1551,3 @@ exhaustive; use as a thinking primer, not a checklist.
 | token_account_role_anchoring | + | claimant-signed claim handler | = | malicious dapp UI tricks the claimant into signing with attacker's ATA in the destination slot → tokens leave the program to the attacker (HIGH, requires victim interaction) |
 | pda_lifecycle_reuse_after_close | + | dependent child PDAs not cascade-closed | = | re-create parent at same seeds revives stale children with carryover state (MED on its own; chains to higher when child state controls funds) |
 | cleanup_incentive_mismatch (signer ≠ rent recipient) | + | program assumes cleanup happens | = | ghost state accumulates on-chain, compounding with any later finding that reads stale state (LOW alone; compounds) |
-

@@ -18,12 +18,12 @@
       "high"
     ],
     [
-      "pinocchio_unchecked_arith",
+      "pinocchio_unchecked_amount_arith",
       "unchecked_amount_arith",
       "high"
     ],
     [
-      "pinocchio_unchecked_arith",
+      "pinocchio_unchecked_lamport_arith",
       "unchecked_lamport_arith",
       "high"
     ]

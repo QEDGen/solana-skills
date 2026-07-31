@@ -99,6 +99,11 @@ if ! "$repo_root/scripts/check-auditor-domain-artifacts.sh" >/dev/null; then
   fail=1
 fi
 
+if ! "$repo_root/scripts/check-category-catalog.sh" >/dev/null; then
+  echo "auditor category identity validation failed" >&2
+  fail=1
+fi
+
 for required in \
   'Asset-flow graph' \
   'Quantity and unit table' \

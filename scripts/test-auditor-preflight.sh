@@ -138,4 +138,19 @@ if QEDGEN_AUDITOR_INSTALLED_ROOT="$tmp/installed-skill" \
   exit 1
 fi
 
+# --- category identity: an unallowlisted catalog entry is rejected ---
+cp "$repo_root/crates/qedgen/src/probe/mod.rs" "$tmp/probe-mod.rs"
+cp "$repo_root/skills/qedgen-auditor/references/category-catalog.md" \
+  "$tmp/category-catalog.md"
+printf '%s\n' '' '### `category_that_does_not_exist` — HIGH' \
+  'Synthetic drift fixture.' >> "$tmp/category-catalog.md"
+if err="$(QEDGEN_CATEGORY_RUST="$tmp/probe-mod.rs" \
+  QEDGEN_CATEGORY_CATALOG="$tmp/category-catalog.md" \
+  "$repo_root/scripts/check-category-catalog.sh" 2>&1)"; then
+  echo "expected orphan catalog category to fail identity reconciliation" >&2
+  exit 1
+fi
+grep -q 'category identity drift' <<<"$err"
+grep -q 'category_that_does_not_exist' <<<"$err"
+
 echo "auditor preflight tests passed"
