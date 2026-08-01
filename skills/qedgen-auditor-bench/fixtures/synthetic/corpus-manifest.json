@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "schema_uri": "https://qedgen.dev/schemas/auditor-bench/corpus-manifest-v1.schema.json",
+  "entries": [
+    {
+      "id": "synthetic-escrow-smoke",
+      "difficulty": "smoke",
+      "repository": "https://example.invalid/qedgen/synthetic-escrow",
+      "audited_commit": "0123456789abcdef0123456789abcdef01234567",
+      "program_root": "programs/escrow",
+      "runtime": "anchor",
+      "setup_commands": ["cargo fetch"],
+      "test_commands": ["cargo test"],
+      "sanitization_rules": ["remove reports and prior benchmark outputs"],
+      "labeled_findings": [
+        {
+          "id": "SYN-001",
+          "severity": "high",
+          "category": "missing_signer",
+          "location": "src/lib.rs:42",
+          "root_cause": "authority is not required to sign"
+        }
+      ],
+      "domain_expectations": {
+        "units": ["lamports"],
+        "equations": ["vault_delta + user_delta = 0"],
+        "lifecycle": ["initialize before withdraw"],
+        "authorities": ["owner controls withdraw"],
+        "external_assumptions": ["system program transfers are atomic"]
+      }
+    }
+  ]
+}

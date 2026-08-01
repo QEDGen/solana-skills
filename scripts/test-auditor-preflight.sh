@@ -138,4 +138,227 @@ if QEDGEN_AUDITOR_INSTALLED_ROOT="$tmp/installed-skill" \
   exit 1
 fi
 
+# --- category identity: an unallowlisted catalog entry is rejected ---
+cp "$repo_root/crates/qedgen/src/probe/mod.rs" "$tmp/probe-mod.rs"
+cp "$repo_root/skills/qedgen-auditor/references/category-catalog.md" \
+  "$tmp/category-catalog.md"
+printf '%s\n' '' '### `category_that_does_not_exist` — HIGH' \
+  'Synthetic drift fixture.' >> "$tmp/category-catalog.md"
+if err="$(QEDGEN_CATEGORY_RUST="$tmp/probe-mod.rs" \
+  QEDGEN_CATEGORY_CATALOG="$tmp/category-catalog.md" \
+  "$repo_root/scripts/check-category-catalog.sh" 2>&1)"; then
+  echo "expected orphan catalog category to fail identity reconciliation" >&2
+  exit 1
+fi
+grep -q 'category identity drift' <<<"$err"
+grep -q 'category_that_does_not_exist' <<<"$err"
+
+# --- category identity: an unallowlisted Rust tag is rejected too ---
+# The catalog direction above cannot catch an awk regression in the Rust
+# extractor, so drive the other half of the comparison as well.
+awk '
+  injected || !/Category::ArbitraryCpi => "arbitrary_cpi",/ { print; next }
+  {
+    print
+    print "            Category::TagThatHasNoCatalogEntry => \"tag_that_has_no_catalog_entry\","
+    injected = 1
+  }
+' "$repo_root/crates/qedgen/src/probe/mod.rs" > "$tmp/probe-mod-rust-orphan.rs"
+grep -q 'tag_that_has_no_catalog_entry' "$tmp/probe-mod-rust-orphan.rs" ||
+  { echo "preflight fixture failed to inject a Rust tag" >&2; exit 1; }
+if err="$(QEDGEN_CATEGORY_RUST="$tmp/probe-mod-rust-orphan.rs" \
+  QEDGEN_CATEGORY_CATALOG="$repo_root/skills/qedgen-auditor/references/category-catalog.md" \
+  "$repo_root/scripts/check-category-catalog.sh" 2>&1)"; then
+  echo "expected orphan Rust category to fail identity reconciliation" >&2
+  exit 1
+fi
+grep -q 'Rust categories missing from catalog/allowlist' <<<"$err"
+grep -q 'tag_that_has_no_catalog_entry' <<<"$err"
+
+# --- benchmark schemas: every machine-readable contract is required ---
+cp -R "$repo_root/skills/qedgen-auditor-bench" "$tmp/bench-missing-schema"
+rm -f "$tmp/bench-missing-schema/schemas/corpus-manifest.schema.json"
+if QEDGEN_AUDITOR_BENCH_ROOT="$tmp/bench-missing-schema" \
+  "$repo_root/scripts/check-auditor-skill.sh" >/dev/null 2>&1; then
+  echo "expected missing benchmark corpus schema to fail the check" >&2
+  exit 1
+fi
+
+# --- benchmark scoring: mixed tiers cannot be hidden in one headline ---
+cp -R "$repo_root/skills/qedgen-auditor-bench" "$tmp/bench-missing-tier-rule"
+sed -i.bak \
+  '/MUST NOT collapse mixed difficulty tiers into one headline score/d' \
+  "$tmp/bench-missing-tier-rule/SKILL.md"
+if QEDGEN_AUDITOR_BENCH_ROOT="$tmp/bench-missing-tier-rule" \
+  "$repo_root/scripts/check-auditor-skill.sh" >/dev/null 2>&1; then
+  echo "expected missing benchmark tier rule to fail the check" >&2
+  exit 1
+fi
+
+# --- benchmark fixtures: difficulty and comparison composition are validated ---
+cp -R "$repo_root/skills/qedgen-auditor-bench/fixtures/synthetic" \
+  "$tmp/bench-missing-difficulty"
+jq 'del(.entries[0].difficulty)' \
+  "$tmp/bench-missing-difficulty/corpus-manifest.json" \
+  > "$tmp/corpus-manifest-without-difficulty.json"
+mv "$tmp/corpus-manifest-without-difficulty.json" \
+  "$tmp/bench-missing-difficulty/corpus-manifest.json"
+if err="$(QEDGEN_BENCH_FIXTURE_ROOT="$tmp/bench-missing-difficulty" \
+  "$repo_root/skills/qedgen-auditor-bench/schemas/validate.sh" 2>&1)"; then
+  echo "expected missing benchmark difficulty to fail validation" >&2
+  exit 1
+fi
+grep -q 'required difficulty' <<<"$err"
+
+cp -R "$repo_root/skills/qedgen-auditor-bench/fixtures/synthetic" \
+  "$tmp/bench-mismatched-composition"
+jq '.comparison.candidate_tier_entry_counts.smoke = 0' \
+  "$tmp/bench-mismatched-composition/score.json" \
+  > "$tmp/score-with-mismatched-composition.json"
+mv "$tmp/score-with-mismatched-composition.json" \
+  "$tmp/bench-mismatched-composition/score.json"
+if err="$(QEDGEN_BENCH_FIXTURE_ROOT="$tmp/bench-mismatched-composition" \
+  "$repo_root/skills/qedgen-auditor-bench/schemas/validate.sh" 2>&1)"; then
+  echo "expected mismatched benchmark composition to fail validation" >&2
+  exit 1
+fi
+grep -q 'composition_valid must equal per-tier count equality' <<<"$err"
+
+cp -R "$repo_root/skills/qedgen-auditor-bench/fixtures/synthetic" \
+  "$tmp/bench-invalid-command-type"
+jq '.entries[0].setup_commands = [true]' \
+  "$tmp/bench-invalid-command-type/corpus-manifest.json" \
+  > "$tmp/corpus-manifest-with-invalid-command.json"
+mv "$tmp/corpus-manifest-with-invalid-command.json" \
+  "$tmp/bench-invalid-command-type/corpus-manifest.json"
+if QEDGEN_BENCH_FIXTURE_ROOT="$tmp/bench-invalid-command-type" \
+  "$repo_root/skills/qedgen-auditor-bench/schemas/validate.sh" >/dev/null 2>&1; then
+  echo "expected non-string benchmark command to fail validation" >&2
+  exit 1
+fi
+
+cp -R "$repo_root/skills/qedgen-auditor-bench/fixtures/synthetic" \
+  "$tmp/bench-null-domain-expectations"
+jq '.entries[0].domain_expectations = null' \
+  "$tmp/bench-null-domain-expectations/corpus-manifest.json" \
+  > "$tmp/corpus-manifest-with-null-domain.json"
+mv "$tmp/corpus-manifest-with-null-domain.json" \
+  "$tmp/bench-null-domain-expectations/corpus-manifest.json"
+if QEDGEN_BENCH_FIXTURE_ROOT="$tmp/bench-null-domain-expectations" \
+  "$repo_root/skills/qedgen-auditor-bench/schemas/validate.sh" >/dev/null 2>&1; then
+  echo "expected null domain expectations to fail validation" >&2
+  exit 1
+fi
+
+cp -R "$repo_root/skills/qedgen-auditor-bench/fixtures/synthetic" \
+  "$tmp/bench-null-aggregate"
+jq '.aggregate = null' "$tmp/bench-null-aggregate/score.json" \
+  > "$tmp/score-with-null-aggregate.json"
+mv "$tmp/score-with-null-aggregate.json" "$tmp/bench-null-aggregate/score.json"
+if QEDGEN_BENCH_FIXTURE_ROOT="$tmp/bench-null-aggregate" \
+  "$repo_root/skills/qedgen-auditor-bench/schemas/validate.sh" >/dev/null 2>&1; then
+  echo "expected null score aggregate to fail validation" >&2
+  exit 1
+fi
+
+# --- schema drift: a keyword the evaluator cannot enforce is rejected ---
+# The schemas are the single source of truth only while `jsonschema.jq`
+# implements every keyword they use. A schema that grows an unimplemented
+# keyword must fail loudly instead of leaving that constraint unenforced.
+cp -R "$repo_root/skills/qedgen-auditor-bench" "$tmp/bench-unsupported-keyword"
+jq '.properties.entries.maxItems = 3' \
+  "$tmp/bench-unsupported-keyword/schemas/corpus-manifest.schema.json" \
+  > "$tmp/corpus-manifest-schema-with-maxitems.json"
+mv "$tmp/corpus-manifest-schema-with-maxitems.json" \
+  "$tmp/bench-unsupported-keyword/schemas/corpus-manifest.schema.json"
+if err="$("$tmp/bench-unsupported-keyword/schemas/validate.sh" 2>&1)"; then
+  echo "expected an unimplemented schema keyword to fail validation" >&2
+  exit 1
+fi
+grep -q 'does not implement: maxItems' <<<"$err"
+
+# --- schema is the contract: a structural violation is caught by the schema ---
+cp -R "$repo_root/skills/qedgen-auditor-bench/fixtures/synthetic" \
+  "$tmp/bench-unexpected-property"
+jq '.entries[0].undeclared_field = "x"' \
+  "$tmp/bench-unexpected-property/corpus-manifest.json" \
+  > "$tmp/corpus-manifest-with-unexpected-property.json"
+mv "$tmp/corpus-manifest-with-unexpected-property.json" \
+  "$tmp/bench-unexpected-property/corpus-manifest.json"
+if err="$("$repo_root/skills/qedgen-auditor-bench/schemas/validate.sh" \
+  "$tmp/bench-unexpected-property" 2>&1)"; then
+  echo "expected an undeclared manifest property to fail validation" >&2
+  exit 1
+fi
+grep -q 'unexpected property undeclared_field' <<<"$err"
+
+# --- the validator runs against a real output directory, not just fixtures ---
+cp -R "$repo_root/skills/qedgen-auditor-bench/fixtures/synthetic" \
+  "$tmp/bench-run-output"
+"$repo_root/skills/qedgen-auditor-bench/schemas/validate.sh" \
+  "$tmp/bench-run-output" >/dev/null ||
+  { echo "expected a positional output directory to validate" >&2; exit 1; }
+
+# --- knowledge bases: every catalog entry and primer signal is attributable ---
+knowledge_check="$repo_root/skills/qedgen-auditor/scripts/check-knowledge-bases.sh"
+catalog="$repo_root/skills/qedgen-auditor/references/category-catalog.md"
+primer="$repo_root/docs/security-primer.md"
+allowlist="$repo_root/skills/qedgen-auditor/references/basis-legacy-allowlist.txt"
+
+awk 'removed || !/^Basis:/ { print; next } { removed = 1 }' "$catalog" \
+  > "$tmp/catalog-missing-basis.md"
+if err="$(QEDGEN_CATEGORY_CATALOG="$tmp/catalog-missing-basis.md" \
+  QEDGEN_SECURITY_PRIMER="$primer" QEDGEN_BASIS_ALLOWLIST="$allowlist" \
+  "$knowledge_check" 2>&1)"; then
+  echo "expected missing category basis to fail validation" >&2
+  exit 1
+fi
+grep -q 'catalog entry missing Basis:' <<<"$err"
+
+awk '
+  replaced || !/^Basis: fixture:/ { print; next }
+  { print "Basis: fixture:crates/qedgen/tests/fixtures/does-not-exist"; replaced = 1 }
+' "$catalog" > "$tmp/catalog-bad-fixture.md"
+if err="$(QEDGEN_CATEGORY_CATALOG="$tmp/catalog-bad-fixture.md" \
+  QEDGEN_SECURITY_PRIMER="$primer" QEDGEN_BASIS_ALLOWLIST="$allowlist" \
+  "$knowledge_check" 2>&1)"; then
+  echo "expected nonexistent category fixture basis to fail validation" >&2
+  exit 1
+fi
+grep -q 'fixture basis does not exist' <<<"$err"
+
+cp "$catalog" "$tmp/catalog-unallowlisted-prose.md"
+printf '%s\n' '' '### `unknown_prose_category` — HIGH' \
+  'Basis: prose:synthetic unsupported provenance' \
+  'Synthetic preflight entry.' >> "$tmp/catalog-unallowlisted-prose.md"
+if err="$(QEDGEN_CATEGORY_CATALOG="$tmp/catalog-unallowlisted-prose.md" \
+  QEDGEN_SECURITY_PRIMER="$primer" QEDGEN_BASIS_ALLOWLIST="$allowlist" \
+  "$knowledge_check" 2>&1)"; then
+  echo "expected unallowlisted prose basis to fail validation" >&2
+  exit 1
+fi
+grep -q 'prose basis is not allowlisted: unknown_prose_category' <<<"$err"
+
+awk 'removed || !/^\*\*Basis:\*\*/ { print; next } { removed = 1 }' "$primer" \
+  > "$tmp/primer-missing-basis.md"
+if err="$(QEDGEN_CATEGORY_CATALOG="$catalog" \
+  QEDGEN_SECURITY_PRIMER="$tmp/primer-missing-basis.md" \
+  QEDGEN_BASIS_ALLOWLIST="$allowlist" "$knowledge_check" 2>&1)"; then
+  echo "expected missing primer grep basis to fail validation" >&2
+  exit 1
+fi
+grep -q 'primer Grep for block missing Basis:' <<<"$err"
+
+awk '
+  replaced || !/^\*\*Basis:\*\*/ { print; next }
+  { print "**Basis:** corpus:unregistered-incident"; replaced = 1 }
+' "$primer" > "$tmp/primer-unregistered-corpus.md"
+if err="$(QEDGEN_CATEGORY_CATALOG="$catalog" \
+  QEDGEN_SECURITY_PRIMER="$tmp/primer-unregistered-corpus.md" \
+  QEDGEN_BASIS_ALLOWLIST="$allowlist" "$knowledge_check" 2>&1)"; then
+  echo "expected unregistered primer corpus basis to fail validation" >&2
+  exit 1
+fi
+grep -q 'corpus basis is not registered' <<<"$err"
+
 echo "auditor preflight tests passed"

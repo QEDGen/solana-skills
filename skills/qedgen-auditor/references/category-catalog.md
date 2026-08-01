@@ -20,7 +20,8 @@ cover **Anchor and native Rust only** — sBPF/assembly is out of scope
 Some categories below are the per-shape *predicate* for a cross-cutting pass
 (§3a–§3h in [manual-review-passes.md](manual-review-passes.md)): the
 **pass is the read-driven primary surface**, the catalog entry
-is where its exact recognition signals and corpus line live. Run the pass;
+is where its exact recognition signals and machine-checkable `Basis:` live.
+Run the pass;
 open the category entry for detail. Do NOT treat a pass and its category as two
 separate checklists — that double-counts effort and is how the two lists drift.
 One home per class:
@@ -41,6 +42,7 @@ which is why they were added; there is nothing to cross-link, only net-new
 coverage.
 
 ### `missing_signer` — CRITICAL
+Basis: fixture:crates/qedgen/tests/fixtures/probe-corpus/spec/missing_signer
 Spec-aware: handler has no `auth X` clause and is not marked
 `permissionless` (the CLI surfaces this directly).
 
@@ -55,6 +57,7 @@ Spec-less per-runtime:
   signer is enforced downstream by the callee program. Not a finding.
 
 ### `arbitrary_cpi` — HIGH
+Basis: fixture:crates/qedgen/tests/fixtures/probe-corpus/spec/arbitrary_cpi
 Spec-aware: handler has a writable `token`-typed account but spec
 declares no `transfers` block or `call Interface.handler(...)` site.
 
@@ -71,6 +74,7 @@ Spec-less per-runtime:
   specifically to close it.
 
 ### `arithmetic_overflow_wrapping` — HIGH (wrap) / MEDIUM (sat)
+Basis: fixture:crates/qedgen/tests/fixtures/probe-corpus/spec/arithmetic_overflow_wrapping
 Spec-aware: handler effects use `+=?` / `-=?` (wrapping) or `+=!` /
 `-=!` (saturating). Default `+=` / `-=` are silent (checked-by-default
 v2.7 G3 semantics).
@@ -108,6 +112,7 @@ Detection cue: pattern-match on `.saturating_sub(<expr with raw * or
   catches subtraction underflow.
 
 ### `lifecycle_one_shot_violation` — MEDIUM
+Basis: fixture:crates/qedgen/tests/fixtures/probe-corpus/spec/lifecycle_one_shot_violation
 Spec-aware: spec models lifecycle states; handler mutates state but
 declares no `pre_status` and is not `permissionless`.
 
@@ -121,6 +126,7 @@ Spec-less per-runtime:
   reasoning (transitions to spec-aware mode on next audit).
 
 ### `cpi_param_swap` — HIGH (Anchor + Native)
+Basis: prose:legacy audit pattern for swapped CPI account and amount roles
 Spec-less only — spec-aware shape is weak (the spec already declares
 `transfer from X to Y`).
 
@@ -136,6 +142,7 @@ itself. This is the intended pattern for vault withdrawals; do **not**
 flag it as a swap.
 
 ### `pda_canonical_bump` — MEDIUM (Anchor + Native)
+Basis: prose:legacy audit pattern for noncanonical PDA bump acceptance
 Spec-less only.
 - **Anchor:** `#[account(seeds = [...], bump)]` signals canonical-bump
   enforcement, but absence of the keyword is only an investigation cue. Check
@@ -150,6 +157,7 @@ Spec-less only.
   confusion before assigning MED+ severity.
 
 ### `account_type_confusion` — CRITICAL (well-known-account spoof shape)
+Basis: prose:legacy audit pattern for untyped well-known account substitution
 Spec-less only — a "well-known" account (sysvar, token program,
 mint, mint-authority, vault) is typed as `AccountInfo<'info>` /
 `UncheckedAccount` instead of its strongly-typed wrapper. Attacker
@@ -172,6 +180,7 @@ shape; downstream reads trust the spoof.
   shape).
 
 ### `missing_owner_check` — CRITICAL
+Basis: prose:legacy audit pattern for attacker-owned account substitution
 Spec-less only — handler reads or trusts data from an account
 whose **runtime `owner` field** (the program that owns the account
 on Solana) is not validated against the expected program. A token
@@ -197,6 +206,7 @@ finding class — see `token_account_role_anchoring` below.
   byte-range is `token_account_role_anchoring` (above).
 
 ### `token_account_role_anchoring` — CRITICAL when authority signs, HIGH when role signs
+Basis: prose:legacy audit pattern for valid token accounts in the wrong protocol role
 For any handler parameter named after a role
 (`recipient_token_account`, `claimant_token_account`,
 `beneficiary_token_account`, `to_token_account`, etc.), the
@@ -257,6 +267,7 @@ Spec-less per-runtime:
   recipient.address())` in PR #33.
 
 ### `pda_lifecycle_reuse_after_close` — MEDIUM
+Basis: prose:legacy audit pattern for close and same-transaction PDA reinitialization
 A close handler fully deletes a parent PDA (returns lamports to
 zero, leaves the account system-owned) instead of marking it
 permanently closed in place. The PDA address is deterministic
@@ -316,6 +327,7 @@ Three observable signals; flag the finding when all three hold:
   `DirectDistributionClosed` permanent-marker discriminator.
 
 ### `token_2022_extension_arithmetic_skew` — MEDIUM
+Basis: prose:legacy audit pattern for extension-adjusted transfer amount mismatch
 Handler records a nominal token amount into program state — e.g.,
 `config.total_allocated += amount`, `position.deposit = amount`,
 `vault.outstanding = amount` — before or instead of measuring what
@@ -381,6 +393,7 @@ Three observable signals; flag when all three hold:
   pre/post-balance pattern.
 
 ### `cleanup_incentive_mismatch` — LOW (forward-compat / griefing)
+Basis: prose:legacy audit pattern for cleanup reward and eligibility drift
 A close-style handler requires signer X but routes the recovered
 rent to recipient Y, where X ≠ Y AND the signing wallet is the
 only signer required. The only party authorized to invoke the
@@ -428,6 +441,7 @@ no one whose signature is required has a reason to invoke.
   `claimed == total`.
 
 ### `field_chain_missing_root_anchor` — CRITICAL (forged-collateral-chain shape)
+Basis: prose:legacy audit pattern for locally valid account chains without a trusted root
 Spec-less only. **Distinct from `missing_owner_check`** — Anchor's
 typed wrappers (`Account<T>`) close the runtime-owner question for
 an incoming account, but **the *fields* on that typed account
@@ -462,6 +476,7 @@ for field-level forgery. The forged-collateral-chain class is exactly this gap.
   2022).
 
 ### `close_account_redirection` — HIGH
+Basis: prose:legacy audit pattern for attacker-selected close destinations
 Anchor `close = <destination>` field, or manual close via lamport
 transfer to a destination, where the destination is signer-controlled
 and not validated against an expected wallet (creator, treasury, etc.).
@@ -477,6 +492,7 @@ and not validated against an expected wallet (creator, treasury, etc.).
   `close = receiver` variant of the same shape.
 
 ### `discriminator_collision` — HIGH
+Basis: prose:legacy audit pattern for short or omitted account type tags
 Two account types with the same first-8-bytes discriminator (Anchor
 default). Attacker submits an account of type A where type B is
 expected; deserialize succeeds; reads return attacker-controlled
@@ -496,6 +512,7 @@ state.
   a forged-state-trust kill-chain.
 
 ### `pda_seed_collision` — HIGH
+Basis: prose:legacy audit pattern for ambiguous variable-length PDA seed tuples
 PDA seeds insufficient to discriminate between different domains —
 e.g., user-vault PDA seeded with `["vault"]` instead of
 `["vault", user.key()]` lets one user's vault occupy another's.
@@ -509,6 +526,7 @@ e.g., user-vault PDA seeded with `["vault"]` instead of
   of the same root.
 
 ### `unvalidated_remaining_accounts` — HIGH
+Basis: prose:legacy audit pattern for untyped remaining-account inputs
 Handler iterates `ctx.remaining_accounts` (or
 `accounts.iter().skip(N)`) without validating type / owner / key.
 Attacker passes a malicious account that satisfies the iteration but
@@ -524,6 +542,7 @@ not the implicit type assumption.
   pinning the account to a stored allowlist.
 
 ### `account_not_reloaded_after_cpi` — HIGH
+Basis: prose:legacy audit pattern for stale deserialized state after CPI
 Handler invokes a CPI that may mutate a passed-in account, then
 reads that account's state without `account.reload()` (Anchor) /
 re-deserialize (native). Stale read decisions trust pre-CPI values
@@ -541,6 +560,7 @@ that the CPI just changed.
   fee-on-transfer (recorded `amount` ≠ actual delta).
 
 ### `init_without_is_initialized` — HIGH
+Basis: prose:legacy audit pattern for repeatable initialization
 Init-style handler that doesn't check whether the target account
 has already been initialized. Re-init replays state, wipes existing
 balance/votes/whatever.
@@ -556,6 +576,7 @@ balance/votes/whatever.
   with `pda_lifecycle_reuse_after_close` for full account replay.
 
 ### `oracle_staleness` — HIGH (DeFi-specific)
+Basis: prose:legacy audit pattern for price use without freshness validation
 Spec-less only — handler reads a price/rate-shaped field from an
 oracle account without verifying freshness (timestamp window) or
 confidence (deviation bound).
@@ -571,6 +592,7 @@ confidence (deviation bound).
   in one block) see `twap_gameable_single_block`.
 
 ### `frontrunnable_no_slippage` — HIGH (DeFi-specific)
+Basis: prose:legacy audit pattern for value-sensitive actions without user bounds
 Permissionless swap-shape handler accepts no `min_amount_out` /
 `max_amount_in` parameter, or accepts one but never asserts on it.
 Sandwich-bot bait.
@@ -586,6 +608,7 @@ Sandwich-bot bait.
   same primitive on rate-limited cleanup handlers.
 
 ### `lamport_write_demotion` — MEDIUM
+Basis: prose:legacy audit pattern for direct lamport writes that bypass transfer semantics
 Direct lamport mutation via `**account.try_borrow_mut_lamports()? +=
 x;` instead of `system_program::transfer(...)`. Demotes an executable
 or rent-exempt account silently, can also bypass ownership checks
@@ -598,6 +621,7 @@ the runtime would otherwise enforce.
   rent-exempt / executable accounts."
 
 ### `lamport_balance_not_program_controlled` — HIGH
+Basis: prose:legacy audit pattern for lamport mutation without ownership control
 An account's lamport balance is not program-controlled state. Anyone
 can increase it without the owning program's consent, and the runtime
 constrains when it may decrease. A program that treats the balance as
@@ -655,6 +679,7 @@ later, which bricks the handler with no way to recover.
   reimbursement path could no longer run.
 
 ### `init_config_field_unanchored` — CRITICAL (DAMM-v2 shape)
+Basis: prose:legacy audit pattern for initialization config fields without trusted anchors
 Spec-less only. The **write-side companion** to
 `field_chain_missing_root_anchor`. An init handler accepts a
 `Pubkey` (or address-shaped arg) and stores it directly into the
@@ -693,6 +718,7 @@ attacker-controlled address.
   `route_fees` as the canonical fee destination.
 
 ### `bounty_intent_drift` — varies (HIGH when intent is a security invariant)
+Basis: prose:legacy audit pattern for implementation behavior diverging from bounty intent
 Spec-less only. The handler / program ships with stated intent
 (bounty description, README, docstring, comment, mode flag) that
 the implementation **doesn't enforce**. Not a structural primitive
@@ -739,6 +765,7 @@ unenforced, 24h crank entirely absent, `y0_total_allocation`
 stored-and-never-read.
 
 ### `custody_terms_retroactive_mutation` — varies (HIGH when a retroactive change can strand or seize committed funds; MEDIUM when remediation is doc-only / bounded)
+Basis: prose:legacy audit pattern for mutable terms applied to existing custody
 Spec-less primary (no CLI predicate yet — candidate `qedgen probe`
 addition). A program takes custody of user value at one handler
 (deposit / lock / stake / escrow) and releases it at another
@@ -825,6 +852,7 @@ When to suppress / downgrade:
   that documented trust.
 
 ### `compressed_nft_ownership_unverified` — HIGH (CRITICAL when it gates funds)
+Basis: prose:legacy audit pattern for compressed ownership claims without proof verification
 A program grants a right — a vote, a claim, an airdrop, access, a
 transfer — on the strength of compressed NFT ownership. Unlike a
 regular NFT there is no account to own and no owner field to read.
@@ -873,6 +901,7 @@ Four ways integrators lose that guarantee:
   NFT integration hazards.
 
 ### `transfer_hook_untrusted_callback` — HIGH (Token-2022 only)
+Basis: prose:legacy audit pattern for untrusted Token-2022 hook execution
 A Token-2022 mint carrying the `TransferHook` extension makes the
 token program CPI into a hook program on every transfer. A handler
 that accepts a caller-supplied mint without constraining which mints
@@ -917,6 +946,7 @@ untrusted code in the caller's critical section:
   exploit window.
 
 ### `rounding_direction_round_trip` — HIGH (DeFi-specific)
+Basis: prose:legacy audit pattern for profitable bidirectional rounding
 Spec-less only. Two-leg conversion pair (`A → B` then `B → A`, or
 `mint` + `redeem`, or `liquidity_to_collateral` + `collateral_to_liquidity`)
 where both legs round in the same direction — favoring the caller on
@@ -941,6 +971,7 @@ swap pairs per transaction and drains the pool over hours.
   rounding direction" across audit-firm reports.
 
 ### `duplicate_mutable_accounts_aliasing` — HIGH
+Basis: prose:legacy audit pattern for mutable role aliasing
 Spec-less only. A handler accepts two or more accounts of the same
 type as mutable parameters (e.g. `from_token_account`,
 `to_token_account`). If the program doesn't assert `from.key !=
@@ -960,6 +991,7 @@ Often combined with a fee or supply update that fires regardless.
   state — but no atoms moved).
 
 ### `twap_gameable_single_block` — HIGH (DeFi-specific)
+Basis: prose:legacy audit pattern for manipulable same-block oracle windows
 Spec-less only. Distinct from `oracle_staleness`: the oracle is fresh,
 but its TWAP window is short enough (typically ≤ 1-2 slots) that a
 single attacker-controlled transaction can move the window-averaged
@@ -978,6 +1010,7 @@ pool's current `sqrt_price`.
   capital); single-block atomic execution (move-borrow-repay).
 
 ### `liquidation_rounding_dust_accumulation` — MEDIUM (DeFi-specific)
+Basis: prose:legacy audit pattern for repeated liquidation rounding leakage
 Spec-less only. Liquidation handler rounds collateral seizure down
 ("attacker only gets `floor(value)` of collateral") AND rounds debt
 repayment down ("only `floor(value)` of debt cleared"). Each
@@ -995,6 +1028,7 @@ dust into a self-funding strategy.
   tx.
 
 ### `payout_exceeds_recorded_principal` — HIGH (DeFi-specific)
+Basis: prose:legacy audit pattern for aggregate payouts exceeding principal
 Spec-less only. A handler disburses funds from a computed schedule or
 accrual formula — vesting, streaming, reward accrual, interest — and
 the cumulative disbursement is never clamped to the principal that was
@@ -1053,6 +1087,7 @@ principal. Grepping for unchecked arithmetic will not find this.
   recipient withdraw one full period beyond the escrowed amount.
 
 ### `flash_loan_amplified_governance` — HIGH (DeFi-specific)
+Basis: prose:legacy audit pattern for unsnapshotted transient voting power
 Spec-less only. Composition class: governance handler reads voting
 power from a live source (current LP balance, current staked balance,
 current token holdings) rather than a snapshot at proposal-creation
@@ -1071,6 +1106,7 @@ returned in same transaction.
   the live-balance read at decision time is the gap in both.
 
 ### `authority_transfer_missing_nominate_accept` — MEDIUM (operational hardening)
+Basis: prose:legacy audit pattern for one-step authority transfer
 Spec-less only. `set_authority` (or `transfer_admin`) writes the new
 authority directly in one instruction, with no two-step nominate →
 accept handshake. A fat-finger or compromised key writes a wrong /
@@ -1089,6 +1125,7 @@ high-impact when it materializes.
   Solana protocols.
 
 ### `privileged_action_no_delay_window` — MEDIUM (operational hardening)
+Basis: prose:legacy audit pattern for immediate high-impact administration
 Every privileged handler takes effect in the transaction that lands
 it. That is fine until the question is not "was this authorized" but
 "was this authorized *now*". A Solana signature anchored to a durable
@@ -1138,6 +1175,7 @@ attacker's token.
   flow this defends against.
 
 ### `missing_rent_exemption_check_on_init` — HIGH
+Basis: prose:legacy audit pattern for initialization without rent sufficiency
 Spec-less only. Account initialization accepts a caller-supplied
 lamports amount and doesn't enforce `lamports >=
 Rent::get()?.minimum_balance(size)` in a manual creation path whose active
@@ -1155,6 +1193,7 @@ behavior before assigning impact; do not assume rent garbage collection.
   reinit); `close_account_redirection` (post-purge takeover).
 
 ### `realloc_zero_init_data_leak` — HIGH (Anchor)
+Basis: prose:legacy audit pattern for account growth exposing stale bytes
 Spec-less only. Anchor `realloc` grows an account's data section without
 zero-initializing the new bytes and the program subsequently exposes or trusts
 those bytes before explicitly initializing them. The risk is especially
@@ -1171,6 +1210,7 @@ the active runtime's byte contents.
   field). Recurs in published audit-firm checklists.
 
 ### `sentinel_null_key_array_short_circuit` — MEDIUM
+Basis: prose:legacy audit pattern for sentinel-terminated authority arrays
 Spec-less only. Program iterates a fixed-size array of pubkeys (multisig
 signers, validator set, oracle providers) and short-circuits on
 `Pubkey::default()` (all-zeros) as "empty slot." This is not a vulnerability by
@@ -1185,6 +1225,7 @@ non-signature comparison makes the sentinel satisfy authorization.
   the concrete path that treats it as authorized without runtime signer proof.
 
 ### `permissionless_instruction_no_rate_limit` — MEDIUM (composition class)
+Basis: prose:legacy audit pattern for permissionless costly actions without throttling
 Spec-less only. A permissionless handler does meaningful state work
 (emits an event, accrues a counter, advances a state machine, writes
 a log) without any rate-limit, cooldown, or proof-of-work gate. An
@@ -1200,6 +1241,7 @@ DoS via state-bloat or counter-saturation.
   amplifier that makes it happen.
 
 ### `permissionless_create_account_dos` — MEDIUM
+Basis: prose:legacy audit pattern for attacker-forced account creation exhaustion
 Spec-less only. Handler creates an account at a deterministically-
 derivable PDA address using `system_instruction::create_account`
 (rather than the safer transfer+allocate+assign pattern). Any caller
@@ -1218,6 +1260,7 @@ can grief the future creation by pre-funding the PDA address with
   `create_account` helper that does transfer+allocate+assign.
 
 ### `execution_order_state_before_check` — MEDIUM
+Basis: prose:legacy audit pattern for state mutation before fallible validation
 Spec-less only. A handler mutates state field X in an early branch,
 then a later branch reads X to make a decision. If the early branch
 always precedes the later one (no conditional gate), the check reads
@@ -1235,6 +1278,7 @@ for being nonzero / unmodified.
   fixed by reordering the branches.
 
 ### `flag_branch_no_op` — MEDIUM
+Basis: prose:legacy audit pattern for accepted flags with inert branches
 Spec-less only. A `match` / `if-else` arm distinguishes two variants
 A and B, but the body's primary effect is identical for both — only
 secondary bookkeeping (a counter increment, a log line) differs. The
@@ -1312,6 +1356,7 @@ and the admin setter that mutates it both live in bodies).
 Plus four qedgen-codegen-specific categories below.
 
 ### `spec_impl_drift_user_owned` — HIGH (qedgen-codegen)
+Basis: source:QEDGen/solana-skills@v2.49.0:crates/qedgen/src/verify/regen_drift.rs
 User-owned handler body deviates from the spec's `effect` block.
 Three flavors:
 
@@ -1336,6 +1381,7 @@ Severity: HIGH because the formal-verification artifacts become
 stale silently — `lake build` green ≠ "program correct."
 
 ### `generated_guard_bypass` — CRITICAL (qedgen-codegen)
+Basis: source:QEDGen/solana-skills@v2.49.0:crates/qedgen/src/probe/dead_guard_probe.rs
 User-owned handler body skips the codegen-emitted
 `guards::<handler>(self, ...)?;` call (or comments it out, or
 narrows it to a subset). The codegen ships with the guard call
@@ -1350,6 +1396,7 @@ drop it.
   authorization.
 
 ### `stored_field_never_written` — CRITICAL (qedgen-codegen)
+Basis: fixture:crates/qedgen/tests/fixtures/probe-corpus/spec/stored_field_never_written
 The spec's state struct (or sum-type variant) declares a field
 that **no handler `effect` block writes**, but other handler
 guards or effect RHSes read it. Distinct from
@@ -1374,6 +1421,7 @@ so reads always return the type's zero / default.
   signer.
 
 ### `qed_hash_drift_or_forgery` — HIGH (qedgen-codegen)
+Basis: source:QEDGen/solana-skills@v2.49.0:crates/qedgen-macros/src/lib.rs
 The `#[qed(verified, hash = "...", spec_hash = "...")]` proc-macro
 content-pin can drift (the body changed, the hash didn't update —
 `qedgen check --frozen` catches it) or be forged (a malicious
@@ -1391,6 +1439,104 @@ verification claim.
   pinned" pattern — any out-of-band claim that "this code matches
   what was verified" needs an in-band content pin plus a CI gate
   that enforces it.
+
+### `permissionless_state_writer` — MEDIUM
+Basis: fixture:crates/qedgen/tests/fixtures/probe-corpus/spec/permissionless_state_writer
+A permissionless handler mutates shared durable state. Confirm that the
+mutation is intentionally public and bounded; otherwise repeated calls can
+grief, fill, or contend the resource. Compose with unbounded amounts or
+unchecked initialization fields when grading impact.
+
+### `quorum_dup_inflation` — CRITICAL
+Basis: source:QEDGen/solana-skills@v2.49.0:skills/qedgen-auditor/references/manual-review-passes.md#multi-actor-authority-sweep
+A quorum check counts signer occurrences rather than distinct authorized
+members. Repeating one valid signer can inflate the apparent approval count.
+Deduplicate by pubkey before threshold comparison and reject duplicate account
+positions.
+
+### `quorum_set_dup_at_init` — HIGH
+Basis: source:QEDGen/solana-skills@v2.49.0:skills/qedgen-auditor/references/manual-review-passes.md#multi-actor-authority-sweep
+Initialization accepts a signer/member set containing duplicate pubkeys. Even
+if execution deduplicates correctly, the stored threshold can become
+unreachable or one participant can occupy several nominal seats.
+
+### `nonce_absent_action_replay` — HIGH
+Basis: source:QEDGen/solana-skills@v2.49.0:skills/qedgen-auditor/references/manual-review-passes.md#multi-actor-authority-sweep
+A signed or quorum-approved action carries no monotonic nonce or action digest
+consumption. The same authorization can be replayed after the first successful
+execution.
+
+### `creator_admin_outside_quorum` — HIGH
+Basis: source:QEDGen/solana-skills@v2.49.0:skills/qedgen-auditor/references/manual-review-passes.md#multi-actor-authority-sweep
+The creator retains a direct administrative path that bypasses the stored
+quorum. Compare every privileged instruction's authority predicate with the
+quorum contract rather than assuming initialization transferred control.
+
+### `signer_set_pinned_to_creator_pda_only` — HIGH
+Basis: source:QEDGen/solana-skills@v2.49.0:skills/qedgen-auditor/references/manual-review-passes.md#multi-actor-authority-sweep
+The signer set or approval record is derived only from a creator-controlled PDA,
+so the creator can replace or shadow the purported multi-party authority.
+Require the signer-set identity and membership commitment to be independently
+anchored.
+
+### `pinocchio_unchecked_account_load` — HIGH
+Basis: fixture:crates/qedgen/tests/fixtures/pinocchio-fixtures/ptoken-transfer/expected_findings.json
+Pinocchio `_unchecked` account-data loads bypass the owner, length,
+initialization, discriminator, and alias guarantees Anchor normally supplies.
+Validate every SAFETY precondition on every path before the load. See
+`references/probes/pinocchio/unchecked_account_load.md`.
+
+### `pinocchio_unchecked_amount_arith` — HIGH
+Basis: fixture:crates/qedgen/tests/fixtures/pinocchio-fixtures/ptoken-transfer/expected_findings.json
+Token amount mutation uses raw arithmetic rather than checked operations and a
+locally visible bound. Exercise extreme instruction amounts and confirm token
+conservation. See
+`references/probes/pinocchio/unchecked_amount_arith.md`.
+
+### `pinocchio_unchecked_lamport_arith` — HIGH
+Basis: fixture:crates/qedgen/tests/fixtures/pinocchio-fixtures/ptoken-transfer/expected_findings.json
+Direct lamport mutation uses raw addition or subtraction. Check underflow,
+overflow, rent-exemption effects, and conservation across all touched
+accounts. See
+`references/probes/pinocchio/unchecked_lamport_arith.md`.
+
+### `pinocchio_account_type_confusion` — CRITICAL
+Basis: source:QEDGen/solana-skills@v2.49.0:crates/qedgen/src/adapt/pinocchio_extractor.rs
+The same account bytes can be interpreted as different Rust types without a
+validated discriminator. An attacker can select a layout whose fields satisfy
+the wrong handler's checks. See
+`references/probes/pinocchio/account_type_confusion.md`.
+
+### `pinocchio_mutable_borrow_aliasing` — CRITICAL
+Basis: source:QEDGen/solana-skills@v2.49.0:crates/qedgen/src/adapt/pinocchio_extractor.rs
+Overlapping unchecked mutable borrows target the same account buffer, bypassing
+the runtime checks that would reject aliasing. See
+`references/probes/pinocchio/mutable_borrow_aliasing.md`.
+
+### `pinocchio_position_without_type_tag` — HIGH
+Basis: fixture:crates/qedgen/tests/fixtures/pinocchio-fixtures/pata-create/expected_findings.json
+An account is trusted because it appears at a particular positional index, but
+its owner and type tag are not validated before reading or writing. See
+`references/probes/pinocchio/position_based_account_without_type_tag.md`.
+
+### `pinocchio_offset_overrun` — MEDIUM
+Basis: fixture:crates/qedgen/tests/fixtures/pinocchio-fixtures/ptoken-transfer/expected_findings.json
+An indexed data slice can exceed the minimum validated account length. Confirm
+`OFFSET + width <= data.len()` for every typed read and write. See
+`references/probes/pinocchio/offset_overrun.md`.
+
+### `pinocchio_missing_pda_verification` — CRITICAL
+Basis: source:QEDGen/solana-skills@v2.49.0:crates/qedgen/src/adapt/pinocchio_extractor.rs
+An account is treated as a program-derived authority without recomputing and
+comparing its PDA from canonical seeds and the program id. See
+`references/probes/pinocchio/missing_pda_verification.md`.
+
+### `pinocchio_stale_safety_comment` — HIGH
+Basis: fixture:crates/qedgen/tests/fixtures/pinocchio-fixtures/ptoken-close-account/expected_findings.json
+A SAFETY comment states owner, length, initialization, or alias preconditions
+that control-flow inspection cannot find on every path reaching the unsafe
+operation. Treat the comment as a claim to falsify, not as evidence. See
+`references/probes/pinocchio/stale_safety_comment.md`.
 
 ## Cluster taxonomy (scaffold-to-spec interview)
 
@@ -1468,4 +1614,3 @@ exhaustive; use as a thinking primer, not a checklist.
 | token_account_role_anchoring | + | claimant-signed claim handler | = | malicious dapp UI tricks the claimant into signing with attacker's ATA in the destination slot → tokens leave the program to the attacker (HIGH, requires victim interaction) |
 | pda_lifecycle_reuse_after_close | + | dependent child PDAs not cascade-closed | = | re-create parent at same seeds revives stale children with carryover state (MED on its own; chains to higher when child state controls funds) |
 | cleanup_incentive_mismatch (signer ≠ rent recipient) | + | program assumes cleanup happens | = | ghost state accumulates on-chain, compounding with any later finding that reads stale state (LOW alone; compounds) |
-

@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qedgen.dev/schemas/auditor-bench/normalized-report-v1.schema.json",
+  "title": "QEDGen auditor benchmark normalized report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "schema_uri",
+    "corpus_entry_id",
+    "run_id",
+    "findings"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "schema_uri": {
+      "const": "https://qedgen.dev/schemas/auditor-bench/normalized-report-v1.schema.json"
+    },
+    "corpus_entry_id": { "type": "string", "minLength": 1 },
+    "run_id": { "type": "string", "minLength": 1 },
+    "findings": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/finding" }
+    }
+  },
+  "$defs": {
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "severity",
+        "evidence",
+        "category",
+        "location",
+        "root_cause",
+        "title",
+        "repro_status"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "severity": {
+          "enum": ["critical", "high", "medium", "low", "info"]
+        },
+        "evidence": {
+          "enum": ["confirmed", "structural", "hypothesis", "rejected"]
+        },
+        "category": { "type": "string", "minLength": 1 },
+        "location": { "type": "string", "minLength": 1 },
+        "root_cause": { "type": "string", "minLength": 1 },
+        "title": { "type": "string", "minLength": 1 },
+        "repro_status": {
+          "enum": ["fired", "inconclusive", "silent", "not-required"]
+        }
+      }
+    }
+  }
+}

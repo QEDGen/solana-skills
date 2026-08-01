@@ -1,0 +1,3 @@
+# Stable corpus identifiers accepted by `check-knowledge-bases.sh`.
+# Add an identifier here only when its labeled corpus is managed outside this
+# repository and the benchmark owner has assigned it a durable public name.

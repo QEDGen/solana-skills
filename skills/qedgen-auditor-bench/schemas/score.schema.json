@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qedgen.dev/schemas/auditor-bench/score-v1.schema.json",
+  "title": "QEDGen auditor benchmark score",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "schema_uri",
+    "corpus_entry_ids",
+    "tier_entry_counts",
+    "per_difficulty"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "schema_uri": {
+      "const": "https://qedgen.dev/schemas/auditor-bench/score-v1.schema.json"
+    },
+    "corpus_entry_ids": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "tier_entry_counts": { "$ref": "#/$defs/tier_counts" },
+    "per_difficulty": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "smoke": { "$ref": "#/$defs/tier_score" },
+        "standard": { "$ref": "#/$defs/tier_score" },
+        "hard": { "$ref": "#/$defs/tier_score" },
+        "adversarial": { "$ref": "#/$defs/tier_score" }
+      }
+    },
+    "aggregate": { "$ref": "#/$defs/metrics" },
+    "comparison": { "$ref": "#/$defs/comparison" }
+  },
+  "$defs": {
+    "tier_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["smoke", "standard", "hard", "adversarial"],
+      "properties": {
+        "smoke": { "type": "integer", "minimum": 0 },
+        "standard": { "type": "integer", "minimum": 0 },
+        "hard": { "type": "integer", "minimum": 0 },
+        "adversarial": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entry_count",
+        "ground_truth_count",
+        "reported_count",
+        "true_positives",
+        "recall",
+        "precision"
+      ],
+      "properties": {
+        "entry_count": { "type": "integer", "minimum": 0 },
+        "ground_truth_count": { "type": "integer", "minimum": 0 },
+        "reported_count": { "type": "integer", "minimum": 0 },
+        "true_positives": { "type": "integer", "minimum": 0 },
+        "recall": { "type": "number", "minimum": 0, "maximum": 1 },
+        "precision": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "tier_score": {
+      "allOf": [{ "$ref": "#/$defs/metrics" }]
+    },
+    "comparison": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "baseline_tier_entry_counts",
+        "candidate_tier_entry_counts",
+        "composition_valid"
+      ],
+      "properties": {
+        "kind": { "enum": ["skill-regression", "model-regression"] },
+        "baseline_tier_entry_counts": { "$ref": "#/$defs/tier_counts" },
+        "candidate_tier_entry_counts": { "$ref": "#/$defs/tier_counts" },
+        "composition_valid": { "type": "boolean" }
+      }
+    }
+  }
+}

@@ -36,7 +36,7 @@ pub fn extract_proto_clauses(findings: &[Finding]) -> Vec<ProtoClause> {
                     }
                 }
             }
-            Category::PinocchioUncheckedArith => {
+            Category::PinocchioUncheckedAmountArith | Category::PinocchioUncheckedLamportArith => {
                 out.push(make(
                     ClusterKind::ArithmeticNoOverflow,
                     finding,
@@ -186,7 +186,8 @@ mod tests {
     fn category_tag_for(c: &Category) -> &'static str {
         match c {
             Category::PinocchioUncheckedAccountLoad => "uncheckedload",
-            Category::PinocchioUncheckedArith => "uncheckedarith",
+            Category::PinocchioUncheckedAmountArith => "uncheckedamountarith",
+            Category::PinocchioUncheckedLamportArith => "uncheckedlamportarith",
             Category::PinocchioAccountTypeConfusion => "typeconf",
             Category::PinocchioMutableBorrowAliasing => "alias",
             _ => "other",
@@ -248,7 +249,11 @@ mod tests {
 
     #[test]
     fn unchecked_arith_yields_no_overflow_clause() {
-        let f = finding_with(Category::PinocchioUncheckedArith, "process_transfer", None);
+        let f = finding_with(
+            Category::PinocchioUncheckedAmountArith,
+            "process_transfer",
+            None,
+        );
         let protos = extract_proto_clauses(&[f]);
         assert_eq!(protos.len(), 1);
         assert_eq!(protos[0].kind, ClusterKind::ArithmeticNoOverflow);

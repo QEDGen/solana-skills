@@ -160,7 +160,22 @@ pub fn construct_reproducer(
         // (pinocchio_probe.rs / arithmetic_symbol_probe.rs); flowing
         // through this dispatcher is out-of-band — drop.
         Category::PinocchioUncheckedAccountLoad
-        | Category::PinocchioUncheckedArith
+        | Category::CpiParamSwap
+        | Category::PdaCanonicalBump
+        | Category::PermissionlessCreateAccountDos
+        | Category::SpecImplDriftUserOwned
+        | Category::GeneratedGuardBypass
+        | Category::QedHashDriftOrForgery
+        | Category::FieldChainMissingRootAnchor
+        | Category::InitConfigFieldUnanchored
+        | Category::BountyIntentDrift
+        | Category::QuorumDupInflation
+        | Category::QuorumSetDupAtInit
+        | Category::NonceAbsentActionReplay
+        | Category::CreatorAdminOutsideQuorum
+        | Category::SignerSetPinnedToCreatorPdaOnly
+        | Category::PinocchioUncheckedAmountArith
+        | Category::PinocchioUncheckedLamportArith
         | Category::PinocchioAccountTypeConfusion
         | Category::PinocchioMutableBorrowAliasing
         | Category::PinocchioPositionWithoutTypeTag

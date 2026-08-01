@@ -14,10 +14,11 @@ home directory or agent harness.
 Require:
 
 - canonical auditor skill directory;
-- corpus manifest containing repository, audited commit, program root, runtime,
-  setup/test commands, sanitization rules, labeled findings, and optional
-  domain expectations (units, equations, lifecycle, authorities, and external
-  assumptions);
+- a corpus manifest conforming to
+  [`schemas/corpus-manifest.schema.json`](schemas/corpus-manifest.schema.json),
+  with repository, audited commit, program root, runtime, setup/test commands,
+  sanitization rules, labeled findings, optional domain expectations, and a
+  required entry-level `difficulty`;
 - explicit benchmark output directory;
 - audit profile and run count;
 - exact discovery and judge model identifiers when the venue permits selection.
@@ -112,7 +113,8 @@ do not count hypotheses as vulnerabilities.
 
 ### 6. Normalize and reconcile
 
-Normalize reports to:
+Normalize reports to
+[`schemas/normalized-report.schema.json`](schemas/normalized-report.schema.json):
 
 ```json
 {
@@ -142,6 +144,13 @@ Deduplicate the union by root cause and affected operation, not just line
 number. Preserve which worker found each item.
 
 ### 7. Score
+
+Every corpus entry has exactly one difficulty: `smoke`, `standard`, `hard`, or
+`adversarial`. Report recall and precision separately for every represented
+difficulty and include that tier's entry count.
+**MUST NOT collapse mixed difficulty tiers into one headline score.**
+An optional aggregate may accompany the per-tier results only when the
+`tier_entry_counts` that produced it are printed beside it.
 
 Emit per-run and union metrics:
 
@@ -178,6 +187,22 @@ intentional tooling fault is not counted as a missed finding.
 
 Do not count fixed ground truth as a miss. Do not count hypotheses as true
 positives. Report structural precision separately from confirmed precision.
+Write the machine-readable result against
+[`schemas/score.schema.json`](schemas/score.schema.json).
+
+Then validate this run's own artifacts. Put `corpus-manifest.json`,
+`normalized-report.json`, and `score.json` in the benchmark output directory
+and run:
+
+```bash
+skills/qedgen-auditor-bench/schemas/validate.sh <benchmark-output-dir>
+```
+
+A run whose artifacts do not validate is not a scored run. Reporting numbers
+from it is the same error as reporting a collapsed mixed-tier headline. The
+script checks structure against the schemas, that every referenced corpus
+entry exists, and that `tier_entry_counts` matches the entries actually
+scored.
 
 ### 8. Detect invalid runs
 
@@ -216,6 +241,10 @@ the venue's safeguards.
   prior release but label both changed dimensions.
 
 Avoid changing model and skill simultaneously when attributing improvement.
+Skill-regression and model-regression comparisons must assert
+**identical per-tier entry counts**. If their tier composition differs, set
+`comparison.composition_valid` to `false` and label the comparison invalid;
+never interpret the score delta as a model or skill regression.
 
 ## Output
 

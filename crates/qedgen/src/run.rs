@@ -1859,6 +1859,8 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             idl,
             list_rules,
             quasar,
+            root,
+            unsafes,
             json,
         } => {
             if list_rules {
@@ -1869,7 +1871,12 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             // `idl` is Some here — unwrap is safe in shape.
             let idl = idl.expect("--idl is required unless --list-rules");
             let framework = resolve_framework(quasar, json);
-            let report = match ratchet::run_readiness(&ratchet::ReadinessOpts { idl, framework }) {
+            let report = match ratchet::run_readiness(&ratchet::ReadinessOpts {
+                idl,
+                framework,
+                root,
+                unsafes,
+            }) {
                 Ok(r) => r,
                 Err(e) => {
                     eprintln!("Error: {:#}", e);
@@ -1897,6 +1904,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             migrated_accounts,
             realloc_accounts,
             list_rules,
+            root,
             quasar,
             json,
         } => {
@@ -1914,6 +1922,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 migrated_accounts,
                 realloc_accounts,
                 framework,
+                root,
             }) {
                 Ok(r) => r,
                 Err(e) => {

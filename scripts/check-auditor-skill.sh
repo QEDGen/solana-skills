@@ -3,7 +3,8 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 skill_root="$repo_root/skills/qedgen-auditor"
-bench_skill="$repo_root/skills/qedgen-auditor-bench/SKILL.md"
+bench_root="${QEDGEN_AUDITOR_BENCH_ROOT:-$repo_root/skills/qedgen-auditor-bench}"
+bench_skill="$bench_root/SKILL.md"
 installed_root="${QEDGEN_AUDITOR_INSTALLED_ROOT:-}"
 if [[ -z "$installed_root" && -d "$repo_root/.claude/skills/qedgen-auditor" ]]; then
   installed_root="$repo_root/.claude/skills/qedgen-auditor"
@@ -32,6 +33,39 @@ fi
 if grep -En 'model:[[:space:]]*(opus|gpt-5\.5)|Default audit worker:.*GPT-5\.5' \
   "$bench_skill" >/dev/null; then
   echo "benchmark dispatcher uses a stale model default" >&2
+  fail=1
+fi
+
+for required in \
+  "$bench_root/schemas/corpus-manifest.schema.json" \
+  "$bench_root/schemas/normalized-report.schema.json" \
+  "$bench_root/schemas/score.schema.json" \
+  "$bench_root/schemas/validate.sh" \
+  "$bench_root/schemas/jsonschema.jq" \
+  "$bench_root/fixtures/synthetic/corpus-manifest.json" \
+  "$bench_root/fixtures/synthetic/normalized-report.json" \
+  "$bench_root/fixtures/synthetic/score.json"; do
+  if [[ ! -f "$required" ]]; then
+    echo "auditor benchmark contract is missing: $required" >&2
+    fail=1
+  fi
+done
+
+for required in \
+  'MUST NOT collapse mixed difficulty tiers into one headline score' \
+  'comparison.composition_valid' \
+  'identical per-tier entry counts' \
+  'schemas/validate.sh <benchmark-output-dir>' \
+  'A run whose artifacts do not validate is not a scored run'; do
+  if ! grep -Fq "$required" "$bench_skill"; then
+    echo "benchmark scoring contract is missing required tier rule: $required" >&2
+    fail=1
+  fi
+done
+
+if [[ -x "$bench_root/schemas/validate.sh" ]] &&
+   ! "$bench_root/schemas/validate.sh" >/dev/null; then
+  echo "auditor benchmark schema validation failed" >&2
   fail=1
 fi
 
@@ -96,6 +130,29 @@ done
 
 if ! "$repo_root/scripts/check-auditor-domain-artifacts.sh" >/dev/null; then
   echo "auditor domain artifact validation failed" >&2
+  fail=1
+fi
+
+if ! "$repo_root/scripts/check-category-catalog.sh" >/dev/null; then
+  echo "auditor category identity validation failed" >&2
+  fail=1
+fi
+
+for required in \
+  "$skill_root/scripts/check-knowledge-bases.sh" \
+  "$skill_root/references/basis-legacy-allowlist.txt" \
+  "$skill_root/references/basis-corpus-registry.txt"; do
+  if [[ ! -f "$required" ]]; then
+    echo "auditor knowledge-base gate is missing: $required" >&2
+    fail=1
+  fi
+done
+
+# stdout is suppressed like every other sub-gate above; the script's coverage
+# warnings go to stderr and are meant to stay visible.
+if [[ -x "$skill_root/scripts/check-knowledge-bases.sh" ]] &&
+   ! "$skill_root/scripts/check-knowledge-bases.sh" >/dev/null; then
+  echo "auditor knowledge-base validation failed" >&2
   fail=1
 fi
 

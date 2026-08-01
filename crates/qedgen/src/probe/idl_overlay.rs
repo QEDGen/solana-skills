@@ -63,6 +63,10 @@ pub struct OverlayOutcome {
     pub derivable_idl: Option<String>,
     /// `idl_source_drift` investigation leads (both directions).
     pub drift_candidates: Vec<Candidate>,
+    /// Source dispatcher handlers absent from the consumed IDL.
+    pub source_only_handlers: Vec<String>,
+    /// IDL instructions absent from the discovered source dispatcher.
+    pub idl_only_handlers: Vec<String>,
 }
 
 /// Find an on-disk IDL under the canonical paths (first match wins):
@@ -356,7 +360,35 @@ pub(crate) fn apply(
         global_categories,
         idl_path,
         idl_text,
+        false,
     )
+}
+
+/// Compare an explicitly selected IDL with already-discovered source handlers.
+///
+/// Deployment gates accept `--idl` outside the project's canonical IDL
+/// directories, so they must compare the exact file the caller selected
+/// rather than asking [`discover_idl`] to choose another one.
+pub(super) fn apply_explicit(
+    project_root: &Path,
+    runtime: &Runtime,
+    handlers: &mut Vec<BootstrapHandler>,
+    global_categories: &[String],
+    idl_path: &Path,
+) -> anyhow::Result<OverlayOutcome> {
+    use anyhow::Context;
+
+    let idl_text = std::fs::read_to_string(idl_path)
+        .with_context(|| format!("reading {}", idl_path.display()))?;
+    Ok(apply_discovered_idl(
+        project_root,
+        runtime,
+        handlers,
+        global_categories,
+        idl_path.to_path_buf(),
+        idl_text,
+        true,
+    ))
 }
 
 fn apply_anchor_workspace(
@@ -405,6 +437,7 @@ fn apply_anchor_workspace(
             global_categories,
             idl_path,
             idl_text,
+            false,
         );
         for (index, handler) in indices.into_iter().zip(program_handlers) {
             handlers[index] = handler;
@@ -415,6 +448,12 @@ fn apply_anchor_workspace(
         aggregate
             .drift_candidates
             .append(&mut outcome.drift_candidates);
+        aggregate
+            .source_only_handlers
+            .append(&mut outcome.source_only_handlers);
+        aggregate
+            .idl_only_handlers
+            .append(&mut outcome.idl_only_handlers);
     }
     if aggregate.idl_path.is_none() {
         // Unbuilt workspace: no program had an IDL on disk, so the same
@@ -466,13 +505,16 @@ fn apply_discovered_idl(
     global_categories: &[String],
     idl_path: PathBuf,
     idl_text: String,
+    explicit: bool,
 ) -> OverlayOutcome {
     let mut outcome = OverlayOutcome::default();
 
     let instructions = parse_instructions(&idl_text);
-    if instructions.is_empty() {
+    if instructions.is_empty() && !explicit {
         // A JSON file at a canonical path that carries no instructions is
-        // not an IDL we can use — treat as absent.
+        // not an IDL we can use for discovery — treat as absent. An explicit
+        // deployment-gate IDL is different: an empty instruction set is a
+        // valid surface that must be compared with source, not a false-green.
         outcome.derivable_idl = detect_derivable_idl(project_root, runtime).map(str::to_string);
         return outcome;
     }
@@ -512,6 +554,7 @@ fn apply_discovered_idl(
     for h in handlers.iter_mut() {
         let keys = match_keys(h);
         let Some(ix) = instructions.iter().find(|ix| keys.contains(&ix.snake_name)) else {
+            outcome.source_only_handlers.push(h.name.clone());
             outcome.drift_candidates.push(drift_candidate(
                 &h.name,
                 "source_only",
@@ -541,6 +584,7 @@ fn apply_discovered_idl(
 
     for ix in &instructions {
         if !matched_idl.contains(ix.snake_name.as_str()) {
+            outcome.idl_only_handlers.push(ix.snake_name.clone());
             outcome.drift_candidates.push(drift_candidate(
                 &ix.snake_name,
                 "idl_only",

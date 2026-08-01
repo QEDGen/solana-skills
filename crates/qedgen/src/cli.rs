@@ -958,6 +958,17 @@ pub(crate) enum Commands {
         #[arg(long)]
         quasar: bool,
 
+        /// Optional project root for source-vs-IDL reconciliation. When set,
+        /// source-only handlers are unsafe deployment findings and findings
+        /// attached only to stale IDL instructions are demoted.
+        #[arg(long)]
+        root: Option<PathBuf>,
+
+        /// Acknowledge an intentional unsafe finding (repeatable). Use the
+        /// value printed by the finding's `allow_flag`.
+        #[arg(long = "unsafe")]
+        unsafes: Vec<String>,
+
         /// Output as JSON (for agent / CI consumption)
         #[arg(long)]
         json: bool,
@@ -1002,6 +1013,11 @@ pub(crate) enum Commands {
         /// binary on PATH — this flag fills the gap.
         #[arg(long)]
         list_rules: bool,
+
+        /// Optional candidate-project root for source-vs-IDL reconciliation.
+        /// Applied to the `--new` IDL only.
+        #[arg(long)]
+        root: Option<PathBuf>,
 
         /// Treat both IDLs as Quasar-emitted rather than Anchor.
         /// Auto-detected from `Quasar.toml`; the flag forces Quasar

@@ -63,7 +63,7 @@ use spec_predicates::*;
 /// see `docs/design/probe-schema-v3-migration.md`.
 const SCHEMA_VERSION: u32 = 3;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[allow(dead_code)] // Variants populated incrementally across v2.x retrofits
 pub enum Category {
@@ -71,6 +71,8 @@ pub enum Category {
     ArbitraryCpi,
     ArithmeticOverflowWrapping,
     LifecycleOneShotViolation,
+    CpiParamSwap,
+    PdaCanonicalBump,
     /// Handler accepts an integer-shaped param used in `transfers.amount` or
     /// in an `effects` RHS, with no `requires` clause that bounds it. Pair
     /// with `permissionless` or `missing_signer` → drain.
@@ -79,6 +81,7 @@ pub enum Category {
     /// can grief, fill, or contend the resource. Composes with
     /// `unbounded_amount_param` and `arithmetic_overflow_wrapping` to amplify.
     PermissionlessStateWriter,
+    PermissionlessCreateAccountDos,
     /// Init-shape handler (transitions from initial lifecycle state) but no
     /// writable account with `pda` seeds. Default-address state collision —
     /// two callers can both target the same canonical address. Pair with
@@ -91,6 +94,17 @@ pub enum Category {
     /// makes the constraint unsatisfiable; a never-written counter makes a
     /// `preserved_by all` invariant prove vacuously.
     StoredFieldNeverWritten,
+    SpecImplDriftUserOwned,
+    GeneratedGuardBypass,
+    QedHashDriftOrForgery,
+    FieldChainMissingRootAnchor,
+    InitConfigFieldUnanchored,
+    BountyIntentDrift,
+    QuorumDupInflation,
+    QuorumSetDupAtInit,
+    NonceAbsentActionReplay,
+    CreatorAdminOutsideQuorum,
+    SignerSetPinnedToCreatorPdaOnly,
     /// Coverage-guided fuzz crash — Crucible found an action sequence that
     /// violates a spec invariant or triggers a runtime abort. Unlike the
     /// pattern-match categories above, carries concrete path evidence.
@@ -101,11 +115,12 @@ pub enum Category {
     /// claims owner / init / length / discriminator preconditions the
     /// agent cannot verify are upheld on every CF path.
     PinocchioUncheckedAccountLoad,
-    /// Manual arithmetic on token amounts / lamports that doesn't use
-    /// `checked_add` / `checked_sub` and isn't guarded by a bound
-    /// proof. Covers `set_amount(amount() + delta)` and
-    /// `*lamports -= n` patterns.
-    PinocchioUncheckedArith,
+    /// Manual arithmetic on token amounts that doesn't use `checked_add` /
+    /// `checked_sub` and isn't guarded by a bound proof.
+    PinocchioUncheckedAmountArith,
+    /// Direct lamport arithmetic that doesn't use checked operations or a
+    /// locally enforced conservation bound.
+    PinocchioUncheckedLamportArith,
     /// Same `AccountInfo` loaded as type T1 in handler A and T2 in
     /// handler B without a discriminator distinguishing them — a
     /// Pinocchio program has no `#[derive(Accounts)]` validating layout.
@@ -195,13 +210,28 @@ impl Category {
             Category::ArbitraryCpi => "arbitrary_cpi",
             Category::ArithmeticOverflowWrapping => "arithmetic_overflow_wrapping",
             Category::LifecycleOneShotViolation => "lifecycle_one_shot_violation",
+            Category::CpiParamSwap => "cpi_param_swap",
+            Category::PdaCanonicalBump => "pda_canonical_bump",
             Category::UnboundedAmountParam => "unbounded_amount_param",
             Category::PermissionlessStateWriter => "permissionless_state_writer",
+            Category::PermissionlessCreateAccountDos => "permissionless_create_account_dos",
             Category::InitWithoutPda => "init_without_pda",
             Category::StoredFieldNeverWritten => "stored_field_never_written",
+            Category::SpecImplDriftUserOwned => "spec_impl_drift_user_owned",
+            Category::GeneratedGuardBypass => "generated_guard_bypass",
+            Category::QedHashDriftOrForgery => "qed_hash_drift_or_forgery",
+            Category::FieldChainMissingRootAnchor => "field_chain_missing_root_anchor",
+            Category::InitConfigFieldUnanchored => "init_config_field_unanchored",
+            Category::BountyIntentDrift => "bounty_intent_drift",
+            Category::QuorumDupInflation => "quorum_dup_inflation",
+            Category::QuorumSetDupAtInit => "quorum_set_dup_at_init",
+            Category::NonceAbsentActionReplay => "nonce_absent_action_replay",
+            Category::CreatorAdminOutsideQuorum => "creator_admin_outside_quorum",
+            Category::SignerSetPinnedToCreatorPdaOnly => "signer_set_pinned_to_creator_pda_only",
             Category::CrucibleFuzzCrash => "crucible_fuzz_crash",
             Category::PinocchioUncheckedAccountLoad => "pinocchio_unchecked_account_load",
-            Category::PinocchioUncheckedArith => "pinocchio_unchecked_arith",
+            Category::PinocchioUncheckedAmountArith => "pinocchio_unchecked_amount_arith",
+            Category::PinocchioUncheckedLamportArith => "pinocchio_unchecked_lamport_arith",
             Category::PinocchioAccountTypeConfusion => "pinocchio_account_type_confusion",
             Category::PinocchioMutableBorrowAliasing => "pinocchio_mutable_borrow_aliasing",
             Category::PinocchioPositionWithoutTypeTag => "pinocchio_position_without_type_tag",
@@ -1237,7 +1267,7 @@ pub fn run_bootstrap(project_root: &Path) -> Result<ProbeOutput> {
         // narrowed `applicable_categories`.
         Runtime::Native => match crate::shank_probe::detect_shank_dispatcher(project_root) {
             Ok(Some(cat)) => {
-                let global = applicable_categories(&runtime);
+                let global = applicable_category_tags(&runtime);
                 let h: Vec<BootstrapHandler> = cat
                     .handlers
                     .into_iter()
@@ -1272,7 +1302,7 @@ pub fn run_bootstrap(project_root: &Path) -> Result<ProbeOutput> {
         }
         _ => (Vec::new(), None),
     };
-    let applicable = applicable_categories(&runtime);
+    let applicable = applicable_category_tags(&runtime);
 
     // #235: opportunistic IDL overlay — enrich handlers with account/arg
     // metas, narrow untagged Anchor/Quasar handlers via enforced signer
@@ -1319,7 +1349,157 @@ pub fn detect_runtime_public(root: &Path) -> Runtime {
 
 /// Public wrapper for the main.rs dispatcher.
 pub fn applicable_categories_public(runtime: &Runtime) -> Vec<String> {
-    applicable_categories(runtime)
+    applicable_category_tags(runtime)
+}
+
+/// Deterministic source/IDL handler-set disagreement for deployment gates.
+///
+/// Both name lists are snake_case: `source_only` holds Rust handler symbols,
+/// and `idl_only` holds IDL instruction names already normalized by
+/// [`crucible_brownfield::camel_to_snake`]. Callers comparing these against a
+/// name that came straight out of an IDL must normalize it first. See
+/// [`IdlSourceDrift::is_idl_only_path_segment`].
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct IdlSourceDrift {
+    pub source_only: Vec<String>,
+    pub idl_only: Vec<String>,
+}
+
+impl IdlSourceDrift {
+    /// Does a Ratchet finding path segment name an IDL-only instruction?
+    ///
+    /// Ratchet keys its `ix:<name>` path segments on the **raw** IDL
+    /// instruction name (`ratchet_anchor::normalize` clones `ix.name`
+    /// verbatim), which is camelCase for Anchor 0.29 and earlier, Codama, and
+    /// Shank IDLs. `idl_only` is snake_case. Comparing the two directly
+    /// silently matches nothing for every multi-word instruction, so the
+    /// segment is normalized here before the lookup.
+    pub(crate) fn is_idl_only_path_segment(&self, segment: &str) -> bool {
+        let Some(raw) = segment.strip_prefix("ix:") else {
+            return false;
+        };
+        let normalized = crucible_brownfield::camel_to_snake(raw);
+        self.idl_only.iter().any(|handler| handler == &normalized)
+    }
+}
+
+/// Compare the exact IDL selected by a deployment-gate caller with the
+/// handlers exposed by the project's source dispatcher.
+pub(crate) fn idl_source_drift(
+    project_root: &Path,
+    idl_path: &Path,
+    runtime: Runtime,
+) -> Result<IdlSourceDrift> {
+    if !project_root.exists() {
+        return Err(anyhow!(
+            "project root does not exist: {}",
+            project_root.display()
+        ));
+    }
+    let mut handlers = match runtime {
+        Runtime::Anchor | Runtime::Quasar | Runtime::QedgenCodegen => {
+            discover_anchor_handlers(project_root)?
+        }
+        _ => {
+            return Err(anyhow!(
+                "source/IDL deployment reconciliation is unsupported for runtime {:?}",
+                runtime
+            ))
+        }
+    };
+    if handlers.is_empty() {
+        return Err(anyhow!(
+            "no source handlers discovered under {}",
+            project_root.display()
+        ));
+    }
+    scope_workspace_handlers_to_idl(project_root, idl_path, &mut handlers)?;
+
+    let categories = applicable_category_tags(&runtime);
+    let outcome =
+        idl_overlay::apply_explicit(project_root, &runtime, &mut handlers, &categories, idl_path)?;
+    let mut drift = IdlSourceDrift {
+        source_only: outcome.source_only_handlers,
+        idl_only: outcome.idl_only_handlers,
+    };
+    drift.source_only.sort();
+    drift.source_only.dedup();
+    drift.idl_only.sort();
+    drift.idl_only.dedup();
+    Ok(drift)
+}
+
+/// An explicit workspace IDL represents one program, while source discovery
+/// intentionally aggregates every `programs/*` crate for ordinary probing.
+/// Deployment reconciliation must narrow that aggregate before comparing it.
+fn scope_workspace_handlers_to_idl(
+    project_root: &Path,
+    idl_path: &Path,
+    handlers: &mut Vec<BootstrapHandler>,
+) -> Result<()> {
+    if project_root.join("src/lib.rs").is_file() || !project_root.join("programs").is_dir() {
+        return Ok(());
+    }
+
+    let idl_text = std::fs::read_to_string(idl_path)?;
+    let idl: serde_json::Value = serde_json::from_str(&idl_text)?;
+    let idl_name = idl
+        .get("metadata")
+        .and_then(|metadata| metadata.get("name"))
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| idl.get("name").and_then(serde_json::Value::as_str))
+        .or_else(|| idl_path.file_stem().and_then(|stem| stem.to_str()))
+        .ok_or_else(|| anyhow!("cannot determine program name for {}", idl_path.display()))?
+        .replace('-', "_");
+
+    let mut matching_dirs = Vec::new();
+    for entry in std::fs::read_dir(project_root.join("programs"))?.flatten() {
+        let crate_root = entry.path();
+        if !crate_root.join("src/lib.rs").is_file() {
+            continue;
+        }
+        let fallback = entry.file_name().to_string_lossy().replace('-', "_");
+        let manifest = std::fs::read_to_string(crate_root.join("Cargo.toml")).unwrap_or_default();
+        let manifest: Option<toml::Value> = toml::from_str(&manifest).ok();
+        let crate_name = manifest
+            .as_ref()
+            .and_then(|value| value.get("lib"))
+            .and_then(|lib| lib.get("name"))
+            .and_then(toml::Value::as_str)
+            .or_else(|| {
+                manifest
+                    .as_ref()
+                    .and_then(|value| value.get("package"))
+                    .and_then(|package| package.get("name"))
+                    .and_then(toml::Value::as_str)
+            })
+            .map(|name| name.replace('-', "_"))
+            .unwrap_or(fallback);
+        if crate_name == idl_name {
+            matching_dirs.push(entry.file_name().to_string_lossy().to_string());
+        }
+    }
+
+    if matching_dirs.len() != 1 {
+        return Err(anyhow!(
+            "IDL program `{idl_name}` matched {} source programs under {}",
+            matching_dirs.len(),
+            project_root.join("programs").display()
+        ));
+    }
+    let selected = &matching_dirs[0];
+    handlers.retain(|handler| {
+        let mut components = Path::new(&handler.source_file).components();
+        components.next().and_then(|part| part.as_os_str().to_str()) == Some("programs")
+            && components.next().and_then(|part| part.as_os_str().to_str())
+                == Some(selected.as_str())
+    });
+    if handlers.is_empty() {
+        return Err(anyhow!(
+            "no source handlers discovered for IDL program `{idl_name}`"
+        ));
+    }
+    Ok(())
 }
 
 /// Runtime detection by filesystem heuristics. Order matters: a project
@@ -1579,60 +1759,60 @@ fn single_crate_handlers(crate_root: &Path, project_root: &Path) -> Result<Vec<B
 }
 
 /// Categories the auditor should investigate per runtime in spec-less mode.
-fn applicable_categories(runtime: &Runtime) -> Vec<String> {
+fn applicable_categories(runtime: &Runtime) -> Vec<Category> {
     let universal = [
-        "missing_signer",
-        "arbitrary_cpi",
-        "arithmetic_overflow_wrapping",
-        "lifecycle_one_shot_violation",
+        Category::MissingSigner,
+        Category::ArbitraryCpi,
+        Category::ArithmeticOverflowWrapping,
+        Category::LifecycleOneShotViolation,
     ];
-    let anchor_native = ["cpi_param_swap", "pda_canonical_bump"];
+    let anchor_native = [Category::CpiParamSwap, Category::PdaCanonicalBump];
     // QedgenCodegen: codegen mechanizes the "universal" categories from
     // the spec, so only handler-body-level numeric / lifecycle bugs and
     // the Quasar-specific drift / unanchored-field / bounty-intent shapes
     // apply.
     let quasar_handler_body = [
-        "arithmetic_overflow_wrapping",
-        "lifecycle_one_shot_violation",
+        Category::ArithmeticOverflowWrapping,
+        Category::LifecycleOneShotViolation,
     ];
     let quasar_specific = [
-        "spec_impl_drift_user_owned",
-        "generated_guard_bypass",
-        "stored_field_never_written",
-        "qed_hash_drift_or_forgery",
-        "field_chain_missing_root_anchor",
-        "init_config_field_unanchored",
-        "bounty_intent_drift",
+        Category::SpecImplDriftUserOwned,
+        Category::GeneratedGuardBypass,
+        Category::StoredFieldNeverWritten,
+        Category::QedHashDriftOrForgery,
+        Category::FieldChainMissingRootAnchor,
+        Category::InitConfigFieldUnanchored,
+        Category::BountyIntentDrift,
     ];
     // Multi-actor / quorum primitive family — walked as part of the
     // standard catalog on any program with a multi-party state shape.
     let multi_actor = [
-        "quorum_dup_inflation",
-        "quorum_set_dup_at_init",
-        "nonce_absent_action_replay",
-        "creator_admin_outside_quorum",
-        "signer_set_pinned_to_creator_pda_only",
+        Category::QuorumDupInflation,
+        Category::QuorumSetDupAtInit,
+        Category::NonceAbsentActionReplay,
+        Category::CreatorAdminOutsideQuorum,
+        Category::SignerSetPinnedToCreatorPdaOnly,
     ];
     // Permissionless-shape categories. Per-handler narrowing
     // (handler_intent classifier) filters these back out when the handler
     // is `authority_gated`.
     let permissionless_shapes = [
-        "permissionless_state_writer",
-        "permissionless_create_account_dos",
+        Category::PermissionlessStateWriter,
+        Category::PermissionlessCreateAccountDos,
     ];
     // Pinocchio surface — every Anchor-framework-discharged obligation
     // is now author-side. See references/probes/pinocchio/*.md for the
     // full catalog.
     let pinocchio_specific = [
-        "pinocchio_unchecked_account_load",
-        "pinocchio_unchecked_amount_arith",
-        "pinocchio_unchecked_lamport_arith",
-        "pinocchio_account_type_confusion",
-        "pinocchio_mutable_borrow_aliasing",
-        "pinocchio_position_without_type_tag",
-        "pinocchio_offset_overrun",
-        "pinocchio_missing_pda_verification",
-        "pinocchio_stale_safety_comment",
+        Category::PinocchioUncheckedAccountLoad,
+        Category::PinocchioUncheckedAmountArith,
+        Category::PinocchioUncheckedLamportArith,
+        Category::PinocchioAccountTypeConfusion,
+        Category::PinocchioMutableBorrowAliasing,
+        Category::PinocchioPositionWithoutTypeTag,
+        Category::PinocchioOffsetOverrun,
+        Category::PinocchioMissingPdaVerification,
+        Category::PinocchioStaleSafetyComment,
     ];
 
     match runtime {
@@ -1641,9 +1821,9 @@ fn applicable_categories(runtime: &Runtime) -> Vec<String> {
             .chain(anchor_native.iter())
             .chain(permissionless_shapes.iter())
             .chain(multi_actor.iter())
-            .map(|s| s.to_string())
+            .cloned()
             .collect(),
-        Runtime::Sbpf => universal.iter().map(|s| s.to_string()).collect(),
+        Runtime::Sbpf => universal.to_vec(),
         // Hand-written Quasar shares Anchor's full universal-categories
         // surface (the codegen-mechanization claim does NOT apply), plus
         // the Quasar-specific shapes that exist independent of codegen.
@@ -1653,22 +1833,29 @@ fn applicable_categories(runtime: &Runtime) -> Vec<String> {
             .chain(permissionless_shapes.iter())
             .chain(quasar_specific.iter())
             .chain(multi_actor.iter())
-            .map(|s| s.to_string())
+            .cloned()
             .collect(),
         Runtime::QedgenCodegen => quasar_handler_body
             .iter()
             .chain(quasar_specific.iter())
             .chain(multi_actor.iter())
-            .map(|s| s.to_string())
+            .cloned()
             .collect(),
         Runtime::Pinocchio => universal
             .iter()
             .chain(pinocchio_specific.iter())
             .chain(multi_actor.iter())
-            .map(|s| s.to_string())
+            .cloned()
             .collect(),
-        Runtime::Unknown => universal.iter().map(|s| s.to_string()).collect(),
+        Runtime::Unknown => universal.to_vec(),
     }
+}
+
+fn applicable_category_tags(runtime: &Runtime) -> Vec<String> {
+    applicable_categories(runtime)
+        .iter()
+        .map(|category| category.tag().to_string())
+        .collect()
 }
 
 /// Resolve a Shank handler's source body, run the intent classifier, and
@@ -2407,20 +2594,48 @@ solana-program = "1.18"
     }
 
     #[test]
+    fn applicable_categories_are_canonical_typed_identities() {
+        use std::collections::BTreeSet;
+
+        for runtime in [
+            Runtime::Anchor,
+            Runtime::Native,
+            Runtime::Sbpf,
+            Runtime::Quasar,
+            Runtime::QedgenCodegen,
+            Runtime::Pinocchio,
+            Runtime::Unknown,
+        ] {
+            let categories = applicable_categories(&runtime);
+            let tags: Vec<&str> = categories.iter().map(Category::tag).collect();
+            let unique: BTreeSet<&str> = tags.iter().copied().collect();
+            assert_eq!(
+                unique.len(),
+                tags.len(),
+                "{runtime:?} work list contains duplicate category identities: {tags:?}"
+            );
+        }
+
+        let pinocchio = applicable_categories(&Runtime::Pinocchio);
+        assert!(pinocchio.contains(&Category::PinocchioUncheckedAmountArith));
+        assert!(pinocchio.contains(&Category::PinocchioUncheckedLamportArith));
+    }
+
+    #[test]
     fn applicable_categories_for_pinocchio_includes_runtime_specific() {
         let cats = applicable_categories(&Runtime::Pinocchio);
         assert!(
-            cats.iter().any(|c| c == "pinocchio_unchecked_amount_arith"),
+            cats.contains(&Category::PinocchioUncheckedAmountArith),
             "Pinocchio applicable_categories missing unchecked_amount_arith: {:?}",
             cats
         );
         assert!(
-            cats.iter().any(|c| c == "pinocchio_stale_safety_comment"),
+            cats.contains(&Category::PinocchioStaleSafetyComment),
             "Pinocchio applicable_categories missing stale_safety_comment: {:?}",
             cats
         );
         // Universal categories should still be present.
-        assert!(cats.iter().any(|c| c == "missing_signer"));
+        assert!(cats.contains(&Category::MissingSigner));
     }
 
     #[test]
@@ -2429,13 +2644,12 @@ solana-program = "1.18"
         // categories are in the global list to begin with.
         let cats = applicable_categories(&Runtime::Native);
         assert!(
-            cats.iter().any(|c| c == "permissionless_state_writer"),
+            cats.contains(&Category::PermissionlessStateWriter),
             "Native applicable_categories must include permissionless_state_writer: {:?}",
             cats
         );
         assert!(
-            cats.iter()
-                .any(|c| c == "permissionless_create_account_dos"),
+            cats.contains(&Category::PermissionlessCreateAccountDos),
             "Native applicable_categories must include permissionless_create_account_dos: {:?}",
             cats
         );

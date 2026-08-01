@@ -157,7 +157,9 @@ Unauthorized, got Ok".
 
 - `Category::ArithmeticOverflowWrapping` — `+` / `-` / `*` without
   `checked_*` on a fund-flow path
-- `Category::PinocchioUncheckedArith` — same pattern, Pinocchio-side
+- `Category::PinocchioUncheckedAmountArith` /
+  `Category::PinocchioUncheckedLamportArith` — same pattern,
+  Pinocchio-side
 - `Category::UnboundedAmountParam` — handler param with no
   `requires <= MAX` clause
 - `Category::SilentSuccessArithmetic` — `saturating_sub` on a
