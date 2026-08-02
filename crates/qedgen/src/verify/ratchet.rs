@@ -567,18 +567,18 @@ mod tests {
         assert!(format!("{err:#}").contains("parsing"));
     }
 
-    // Catalog-shape guards for `--list-rules`: counts pinned at the v0.3.1
-    // catalog (6 P + 16 R); bump when the upstream catalog grows.
+    // Catalog-shape guards for `--list-rules`: counts pinned at the v0.4.0
+    // catalog (7 P + 20 R); bump when the upstream catalog grows.
     #[test]
     fn list_rules_preflight_covers_full_p_catalog() {
         let entries: Vec<_> = default_preflight_rules()
             .iter()
             .map(|r| (r.id(), r.name()))
             .collect();
-        assert_eq!(entries.len(), 6);
+        assert_eq!(entries.len(), 7);
         assert!(entries.iter().all(|(id, _)| id.starts_with('P')));
         let ids: Vec<&str> = entries.iter().map(|(id, _)| *id).collect();
-        for expected in &["P001", "P002", "P003", "P004", "P005", "P006"] {
+        for expected in &["P001", "P002", "P003", "P004", "P005", "P006", "P007"] {
             assert!(ids.contains(expected), "missing {expected} in catalog");
         }
     }
@@ -586,11 +586,13 @@ mod tests {
     #[test]
     fn list_rules_diff_covers_full_r_catalog() {
         let entries: Vec<_> = default_rules().iter().map(|r| (r.id(), r.name())).collect();
-        assert_eq!(entries.len(), 16);
+        assert_eq!(entries.len(), 20);
         assert!(entries.iter().all(|(id, _)| id.starts_with('R')));
         // Spot-check rule ids referenced by number in docs.
         let ids: Vec<&str> = entries.iter().map(|(id, _)| *id).collect();
-        for expected in &["R001", "R006", "R007", "R013", "R016"] {
+        for expected in &[
+            "R001", "R006", "R007", "R013", "R016", "R017", "R018", "R019", "R020",
+        ] {
             assert!(ids.contains(expected), "missing {expected} in catalog");
         }
     }
