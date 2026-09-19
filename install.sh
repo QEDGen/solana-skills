@@ -6,8 +6,19 @@ REPO="QEDGen/solana-skills"
 # Resolve the directory where this script lives (= skill root)
 SKILL_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# Derive version from Cargo.toml (single source of truth)
-VERSION="v$(grep '^version' "$SKILL_DIR/crates/qedgen/Cargo.toml" | head -1 | sed 's/.*"\(.*\)"/\1/')"
+# Source checkouts use Cargo.toml; portable packages carry a generated VERSION.
+if [ -f "$SKILL_DIR/crates/qedgen/Cargo.toml" ]; then
+    VERSION="v$(grep '^version' "$SKILL_DIR/crates/qedgen/Cargo.toml" | head -1 | sed 's/.*"\(.*\)"/\1/')"
+elif [ -f "$SKILL_DIR/VERSION" ]; then
+    VERSION="v$(tr -d '\r\n' < "$SKILL_DIR/VERSION")"
+else
+    echo "ERROR: Missing release version metadata." >&2
+    exit 1
+fi
+if ! printf '%s\n' "$VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$'; then
+    echo "ERROR: Invalid release version metadata." >&2
+    exit 1
+fi
 QEDGEN_BIN="$SKILL_DIR/bin/qedgen"
 
 # ── Detect platform ──────────────────────────────────────────────────────
@@ -103,6 +114,12 @@ download_binary() {
 
 # ── Build from source ────────────────────────────────────────────────────
 build_from_source() {
+    if [ ! -f "$SKILL_DIR/Cargo.toml" ] || [ ! -f "$SKILL_DIR/crates/qedgen/Cargo.toml" ]; then
+        echo "  ERROR: A verified release binary is unavailable for ${VERSION}." >&2
+        echo "  This portable skill has no source checkout; retry the release download" >&2
+        echo "  or build from https://github.com/${REPO} at tag ${VERSION}." >&2
+        return 1
+    fi
     echo "  Building from source..."
 
     if ! command -v cargo &> /dev/null; then

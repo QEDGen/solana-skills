@@ -1,0 +1,39 @@
+name: Skill distribution
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        skills: ['1.5.9', '1.7.0']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test portable inventory and installer
+        run: python3 -m unittest discover -s scripts/tests -p test_skill_distribution.py
+      - name: Install pinned skills CLI for compatibility tests
+        run: npm install --prefix "$RUNNER_TEMP/skills-cli" --ignore-scripts --no-audit --no-fund "skills@${{ matrix.skills }}"
+      - name: Test discovery, install, replacement, and migration
+        env:
+          SKILLS_VERSION: ${{ matrix.skills }}
+        run: |
+          migration_args=(--migration)
+          if [[ "$SKILLS_VERSION" == '1.5.9' ]]; then
+            migration_args+=(--expect-migration-blocked)
+          fi
+          python3 scripts/test-skills-cli.py \
+            --cli "$RUNNER_TEMP/skills-cli/node_modules/skills/bin/cli.mjs" \
+            "${migration_args[@]}"

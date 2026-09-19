@@ -39,7 +39,7 @@ Walk the filesystem (Read / Glob via the harness's tools; no new CLI needed per 
 
 When detected, recommend the cross-skill switch in your harness's idiom (Claude Code TUI: suggest `/qedgen-auditor`; Codex / Cursor / etc.: name the skill the user should invoke next). Do not programmatic-spawn the auditor — per `[[feedback_audit_as_subagent]]`, the auditor is a harness-native subagent that the user enters explicitly. Your job here ends at the **recommendation** and a one-line summary of what they'll get.
 
-The user re-enters `/qedgen` after the audit produces `.qed/findings/`; the audit-side handoff section in `skills/qedgen-auditor/SKILL.md` and the `references/finding_to_spec.md` mapping table drive the conversion from findings to spec constructs.
+The user re-enters `/qedgen` after the audit produces `.qed/findings/`; the auditor's installed `SKILL.md` and its `references/finding_to_spec.md` mapping table drive the conversion from findings to spec constructs. The portable QEDGen package also includes that mapping at `references/finding_to_spec.md`.
 
 ### Greenfield path stays unchanged
 
