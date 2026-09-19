@@ -107,3 +107,5 @@ these tests do not establish their scope. Until public distribution changes or
 the provider corrects the classification, existing installs and the listing still
 use the root package. Track the appeal/rescan separately in
 [#412](https://github.com/QEDGen/solana-skills/issues/412).
+
+CLI setup is explicit: the wrapper does not install. The installer verifies and stages a replacement before changing the existing binary; PATH links require `--link-dir`. See [installation and prerequisites](../references/installation.md) for source fallback and toolchain behavior.

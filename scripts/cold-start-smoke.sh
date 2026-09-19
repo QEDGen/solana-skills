@@ -12,8 +12,8 @@
 #                    asset (or source-builds) and lands the right version
 #   B match        — matching binary is kept, not re-downloaded
 #   C stale        — version-skewed binary is refreshed (#252 regression)
-#   D stranded     — stale binary + no download + no cargo: loud warning,
-#                    honest "NOT installed" banner, exit 0
+#   D stranded     — stale binary + no download + no cargo: failure,
+#                    preserves old binary, exits nonzero
 #   E quickstart   — the SKILL.md core loop driven with the INSTALLED
 #                    binary (journey tests cover the workspace build; this
 #                    covers what a user actually runs)
@@ -104,14 +104,12 @@ tree="$(make_tree stranded)"
 write_stale_stub "$tree"
 sed -i.bak 's/^version = .*/version = "99.99.99"/' "$tree/crates/qedgen/Cargo.toml"
 out="$(run_install "$tree" PATH=/usr/bin:/bin)" && rc=0 || rc=$?
-if [[ $rc -ne 0 ]]; then
-  fail "D stranded: expected exit 0 with warning, got exit $rc"
-elif ! grep -q "WARNING: could not refresh qedgen" <<<"$out"; then
-  fail "D stranded: loud stale warning missing"
-elif ! grep -q "NOT installed" <<<"$out"; then
-  fail "D stranded: banner still claims success"
+if [[ $rc -eq 0 ]]; then
+  fail "D stranded: expected nonzero exit on failed refresh"
+elif [[ "$(installed_version "$tree")" != "2.15.1" ]]; then
+  fail "D stranded: previous binary was not preserved"
 else
-  pass "D stranded keeps stale binary with loud warning + honest banner"
+  pass "D stranded fails explicitly and preserves the previous binary"
 fi
 
 # ── E: quickstart with the installed binary ─────────────────────────────

@@ -6,7 +6,7 @@
 
 A developer pointed you to this document to set up QEDGen and use it on their Solana program. Do this, in order:
 
-1. **Install.** Run `npx skills add qedgen/solana-skills`, then `qedgen --help` to confirm. If `qedgen` isn't found, the skill was cloned into your harness's skills directory but the binary hasn't been fetched yet — run `bash install.sh` from that directory: it downloads the platform binary and links it onto your `PATH` (it prints an `export PATH=…` line if your shell needs it, and is safe to re-run). No API keys are needed for the core loop.
+1. **Install.** Run `npx skills add qedgen/solana-skills`, then `qedgen --help` to confirm. If `qedgen` isn't found, the skill was cloned into your harness's skills directory but the binary hasn't been fetched yet — run `bash install.sh` from that directory: it downloads and verifies the platform binary into `bin/qedgen`. Use `tools/qedgen`, or explicitly request a link with `bash install.sh --link-dir "$HOME/.local/bin"`. No API keys are needed for the core loop.
 2. **Find out where the developer is, then act:**
    - **Brownfield** (an existing program, no spec) → *audit first.* Run `qedgen probe --program <path>` — it reports real bugs (each with a Kani/proptest/Mollusk reproducer), coverage gaps, and a ranked set of evidence-anchored invariant hypotheses about what the program appears to guarantee. Ask the developer to confirm each hypothesis (accept / reject / it's-a-bug), record the answers to `<audit-dir>/answers.json`, and run `qedgen ratify --audit-dir <dir>` to lower confirmed ones into an executable `.qedspec`. (`qedgen adapt --program` and `qedgen spec --idl` are deprecated TODO-shell scaffolds — this flow subsumes both.)
    - **Greenfield** (defining guarantees for new or evolving code) → write a `.qedspec`, then `qedgen check --spec …` → `qedgen codegen --spec … --all` → `qedgen verify --spec …`.
@@ -20,7 +20,7 @@ The rest of this document is the full reference — every CLI command, the proof
 npx skills add qedgen/solana-skills
 ```
 
-The installer sets up Rust, Lean/elan, the CLI binary, and a global Mathlib cache. No API keys are required for the default workflow (spec writing, validation, code generation).
+The installer sets up only the CLI binary. Install Rust, Lean/elan and Kani yourself when needed. Explicit `qedgen setup --mathlib` prepares the proof workspace and downloads Mathlib dependencies/cache using your installed Lean tools. No API keys are required for the default workflow (spec writing, validation, code generation).
 
 ## What It Does
 
@@ -378,8 +378,9 @@ A SIMD-0321-style slippage guard.
 
 ## Requirements
 
-- Rust toolchain (auto-installed if missing)
-- Lean 4 / elan (auto-installed if missing)
+- Rust toolchain — user-managed, needed for source builds and generated Rust tests
+- Lean 4 / elan — user-managed, needed for formal proofs
+- Kani — user-managed, needed for Kani verification
 - Git (QEDGen is git-native: spec changes and regeneration are safe to merge)
 - `MISTRAL_API_KEY` only when calling `fill-sorry` or `generate`
 - `ARISTOTLE_API_KEY` only when calling `aristotle`

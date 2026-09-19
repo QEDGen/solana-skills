@@ -4,43 +4,55 @@
 use anyhow::{bail, Result};
 use std::process::Command;
 
-/// Check that `lake` (Lean build tool) is available.
-/// Called before any command that needs to build Lean files.
+// Check presence without invoking version-manager shims: even --version can
+// download a toolchain. The requested build verifies that it actually works.
+fn executable_on_path(name: &str, path: Option<&std::ffi::OsStr>) -> bool {
+    let Some(path) = path else { return false };
+    std::env::split_paths(path).any(|dir| {
+        let candidate = dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+        let Ok(metadata) = candidate.metadata() else {
+            return false;
+        };
+        if !metadata.is_file() {
+            return false;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            metadata.permissions().mode() & 0o111 != 0
+        }
+        #[cfg(not(unix))]
+        {
+            true
+        }
+    })
+}
+
+/// Check for the Lean build tool without executing a toolchain manager.
 pub fn require_lean() -> Result<()> {
-    if Command::new("lake").arg("--version").output().is_ok() {
+    require_lean_with_path(std::env::var_os("PATH").as_deref())
+}
+
+fn require_lean_with_path(path: Option<&std::ffi::OsStr>) -> Result<()> {
+    if executable_on_path("lake", path) {
         return Ok(());
     }
-    if Command::new("lean").arg("--version").output().is_ok() {
-        bail!(
-            "Lean is installed but `lake` was not found.\n\
-             Try reinstalling via elan: https://github.com/leanprover/elan#installation"
-        );
-    }
     bail!(
-        "Lean toolchain not found. It is required for building proofs.\n\n\
-         Install elan (Lean version manager):\n\
-         \n\
-           curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh\n\
-         \n\
-         Then run:\n\
-         \n\
-           qedgen setup            # set up validation workspace\n\
-           qedgen setup --mathlib  # include Mathlib (adds 15-45 min)\n"
+        "Lean build tool (lake) not found on PATH. Install the required Lean toolchain yourself using https://lean-lang.org/install/ before running qedgen setup. Setup prepares the validation workspace and may download its dependencies; it does not install Lean."
     );
 }
 
-/// Check that `cargo-kani` is available.
-/// Called before any command that needs to run Kani harnesses.
+/// Check for Kani without executing a toolchain manager.
 pub fn require_kani() -> Result<()> {
-    if Command::new("cargo-kani").arg("--version").output().is_ok() {
+    require_kani_with_path(std::env::var_os("PATH").as_deref())
+}
+
+fn require_kani_with_path(path: Option<&std::ffi::OsStr>) -> Result<()> {
+    if executable_on_path("cargo-kani", path) {
         return Ok(());
     }
     bail!(
-        "Kani verifier not found. It is required for Kani proof harnesses.\n\n\
-         Install Kani:\n\
-         \n\
-           cargo install --locked kani-verifier\n\
-           cargo kani setup\n"
+        "Kani verifier not found on PATH. Install and set up Kani yourself using https://model-checking.github.io/kani/install-guide.html before requesting Kani verification."
     );
 }
 
@@ -124,6 +136,45 @@ pub fn require_z3_if_kani_harness_needs_it(harness: &std::path::Path) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn toolchain_availability_does_not_execute_shims() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("executed");
+        for name in ["lake", "cargo-kani"] {
+            let shim = dir.path().join(name);
+            std::fs::write(
+                &shim,
+                format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
+            )
+            .unwrap();
+            std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = Some(dir.path().as_os_str());
+        assert!(require_lean_with_path(path).is_ok());
+        assert!(require_kani_with_path(path).is_ok());
+        assert!(
+            !marker.exists(),
+            "availability checks must not execute toolchain shims"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn toolchain_availability_rejects_missing_or_nonexecutable_tools() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = Some(dir.path().as_os_str());
+        assert!(require_lean_with_path(path).is_err());
+        assert!(require_kani_with_path(path).is_err());
+        let lake = dir.path().join("lake");
+        std::fs::write(&lake, "not an executable").unwrap();
+        std::fs::set_permissions(&lake, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(require_lean_with_path(path).is_err());
+        assert!(require_lean_with_path(None).is_err());
+    }
 
     #[test]
     fn harness_without_z3_marker_is_not_flagged() {

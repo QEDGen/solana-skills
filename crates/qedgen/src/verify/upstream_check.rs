@@ -310,8 +310,7 @@ impl<'a> BinaryFetcher for SolanaCliFetcher<'a> {
         }
         cmd.arg(program_id).arg(tmp.path());
         let output = cmd.output().with_context(|| {
-            "running `solana program dump` (is the Solana CLI in PATH? install via \
-             `sh -c \"$(curl -sSfL https://release.anza.xyz/stable/install)\"`)"
+            "running `solana program dump` (is the Solana CLI in PATH? Install it yourself using https://docs.anza.xyz/cli/install)"
                 .to_string()
         })?;
         if !output.status.success() {

@@ -9,7 +9,7 @@ description: Find the bugs your tests miss. Define what your Solana program must
 
 Use this skill when the user wants to verify Solana program behavior, write or review a `.qedspec`, generate verification artifacts, onboard an existing Anchor program, or keep generated artifacts in sync.
 
-**Preflight (once):** if `qedgen --help` fails, the CLI binary isn't set up yet — run `bash install.sh` from this skill's directory. It downloads the platform binary and links it onto your `PATH` (safe to re-run). Everything below assumes `qedgen` resolves.
+**Preflight (once):** use this skill's `tools/qedgen --help`. If the binary is missing, explicitly run `bash install.sh` from the skill directory when installation is within the user's requested scope. This downloads and verifies the CLI into `bin/qedgen`; the wrapper never installs anything. Use `tools/qedgen` for commands below, or opt into a PATH link with `bash install.sh --link-dir "$HOME/.local/bin"`. See [installation and prerequisites](references/installation.md).
 
 Mission:
 - Read the source before writing the spec.

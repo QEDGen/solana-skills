@@ -67,7 +67,7 @@ jobs:
       # severity — info-level notes (e.g. intentional single-quoted grep
       # patterns) don't gate.
       - name: Shellcheck
-        run: shellcheck --severity=warning install.sh scripts/*.sh skills/qedgen-auditor/scripts/*.sh
+        run: shellcheck --severity=warning install.sh tools/qedgen scripts/*.sh skills/qedgen-auditor/scripts/*.sh
 
       - name: Check README drift
         run: bash scripts/check-readme-drift.sh

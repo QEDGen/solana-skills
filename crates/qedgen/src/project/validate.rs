@@ -53,8 +53,7 @@ pub async fn validate_completion(
     }
 }
 
-/// Set up the global validation workspace. Called by `qedgen setup` and
-/// by the install script to pre-fetch the Mathlib cache.
+/// Set up the global validation workspace for setup or proof-validation commands.
 pub async fn setup_workspace(workspace: Option<&Path>, mathlib: bool) -> Result<()> {
     let ws = match workspace {
         Some(ws) => ws.to_path_buf(),
