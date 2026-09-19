@@ -98,6 +98,20 @@ cp "$TEST_PAYLOAD" "$TEST_SKILL/target/release/qedgen"
         self.assertFalse((self.home / ".local").exists())
         self.assertFalse((self.home / ".cargo/bin/qedgen").exists())
 
+    def test_installed_binary_is_executable_for_every_user(self):
+        # The candidate comes from mktemp, which creates 0600. `chmod +x`
+        # alone would leave a 0700 CLI: unusable through a --link-dir in a
+        # shared directory, or by any other account reading the skill.
+        for args in ([], ["--from-source"]):
+            with self.subTest(args=args):
+                self.source_checkout()
+                result = self.run_install(*args)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                mode = (self.skill / "bin/qedgen").stat().st_mode & 0o777
+                self.assertEqual(mode, 0o755, oct(mode))
+                shutil.rmtree(self.skill / "bin")
+                shutil.rmtree(self.skill / "crates")
+
     def test_path_link_requires_explicit_directory(self):
         destination = self.home / "chosen bin"
         result = self.run_install("--link-dir", str(destination))

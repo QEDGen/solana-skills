@@ -95,7 +95,10 @@ verify_checksum() {
 # atomic. Never move an unverified or non-running candidate over a working CLI.
 activate_candidate() {
     local reported
-    chmod +x "$staged" || return 1
+    # mktemp creates 0600, so `chmod +x` alone would leave the installed CLI
+    # user-only-executable. A --link-dir target is often shared, and the skill
+    # directory itself may be read by another account.
+    chmod 755 "$staged" || return 1
     if ! reported="$("$staged" --version 2>/dev/null)" || [[ "$reported" != "qedgen $version" ]]; then
         echo "ERROR: Candidate is not runnable as qedgen $version; existing binary preserved." >&2
         return 1
