@@ -33,4 +33,8 @@ jobs:
       # Exit 2 fails on purpose. A check that silently stops checking is
       # worse than no check, because it still reports green.
       - name: Check the pinned Parallax revision still exists
+        # Authenticated API requests get 5000/hour instead of the 60/hour
+        # anonymous cap the runner's IP shares.
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: bash scripts/check-parallax-pin.sh
