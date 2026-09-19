@@ -31,7 +31,15 @@ npx skills add qedgen/solana-skills
 ```
 
 From the installed qedgen skill directory, run `bash install.sh`, then
-`tools/qedgen --help`. PATH linking is optional and explicit; see
+set the wrapper path for the commands below:
+
+```bash
+QEDGEN="${QEDGEN:-$HOME/.agents/skills/qedgen/tools/qedgen}"
+"$QEDGEN" --help
+```
+
+If the skill lives elsewhere, set `QEDGEN` to that installed
+`tools/qedgen` path. PATH linking is optional and explicit; see
 [installation and prerequisites](references/installation.md).
 
 > Works with Claude Code, Cursor, Windsurf, GitHub Copilot, and any agent supporting the [Agent Skills](https://agentskills.io) spec.
@@ -109,12 +117,12 @@ finding into a spec property that keeps them fixed.
 # invariants your program appears to enforce (evidence-anchored:
 # signer bindings, held bound checks, init constraints, CPI roles,
 # the status enum) and ranks them for confirmation:
-qedgen probe --program ./my_program --emit-spec-candidates \
+$QEDGEN probe --program ./my_program --emit-spec-candidates \
   --audit-dir .qed/audit/$(date +%F)                   # Anchor / Quasar / Pinocchio / native
 # Answer accept/reject/bug per hypothesis (the agent writes them to
 # .qed/audit/<ts>/answers.json), then apply the confirmed ones as
 # executable clauses — the result is guaranteed to parse and lint:
-qedgen ratify --audit-dir .qed/audit/$(date +%F) \
+$QEDGEN ratify --audit-dir .qed/audit/$(date +%F) \
   --out my_program.qedspec
 
 # Deprecated (functional in v2.x, removed in v3.0): the TODO-shell
@@ -127,14 +135,14 @@ qedgen ratify --audit-dir .qed/audit/$(date +%F) \
 
 ```bash
 # 1. Initialize the project — records the spec path in .qed/config.json
-qedgen init --name my_program --spec my_program.qedspec --target anchor
+$QEDGEN init --name my_program --spec my_program.qedspec --target anchor
 
 # 2. Validate and generate artifacts (no --spec needed from inside the project)
-qedgen check
-qedgen codegen --all
+$QEDGEN check
+$QEDGEN codegen --all
 
 # 3. Fill generated Rust handler TODOs, then run backend verification
-qedgen verify
+$QEDGEN verify
 ```
 
 ### Stuck? File feedback
@@ -142,7 +150,7 @@ qedgen verify
 ```bash
 # Bundles the most recent failure's context (stderr, env, spec excerpt)
 # into a GitHub issue. Local copy always saved to .qed/feedback/.
-qedgen feedback --note "what went wrong"
+$QEDGEN feedback --note "what went wrong"
 ```
 
 `.qed/config.json` pins the spec location so subsequent commands don't need
@@ -156,7 +164,7 @@ from the providers below before running `fill-sorry` or `aristotle`:
 
 ```bash
 # Lean + Mathlib (only needed for formal proofs)
-qedgen setup --mathlib
+$QEDGEN setup --mathlib
 
 # API keys (only needed for sorry-filling and deep proof search)
 export MISTRAL_API_KEY=your_key_here                    # sign up at https://console.mistral.ai (free tier available)
@@ -185,12 +193,12 @@ The front door for code→spec is the probe. Every spec-less run hypothesizes pr
 
 ```bash
 # Hypothesize + write the audit working set (skeleton, hypotheses.json, …)
-qedgen probe --program ./programs/my_program --emit-spec-candidates \
+$QEDGEN probe --program ./programs/my_program --emit-spec-candidates \
   --audit-dir .qed/audit/$(date +%F)
 
 # Confirm in conversation; the agent records {id → accept|reject|bug}
 # to .qed/audit/<ts>/answers.json, then:
-qedgen ratify --audit-dir .qed/audit/$(date +%F) --out my_program.qedspec
+$QEDGEN ratify --audit-dir .qed/audit/$(date +%F) --out my_program.qedspec
 ```
 
 Every result is labelled with its assurance level: a ratified clause is **checking**; a generated model proptest that passes is **model-tested**; only a source-bound backend (impl-Kani, Miri, Mollusk repros) earns **implementation-verified**. Answering **bug** on a hypothesis files a missing-enforcement finding instead of a clause — elicitation doubles as a bug-catcher.
@@ -203,16 +211,16 @@ Every result is labelled with its assurance level: a ratified clause is **checki
 # Pinocchio: enumerate `unsafe`-serde / arithmetic sites, parse
 # adjacent `// SAFETY:` comments, emit per-site Mollusk + Miri repro
 # prompts the auditor subagent expands into runnable tests.
-qedgen probe --program ./programs/my_pinocchio_program
+$QEDGEN probe --program ./programs/my_pinocchio_program
 
 # Run the generated Miri repros — UB / aliasing / overflow surface as
 # findings; Miri-fail / Mollusk-pass divergence is Critical.
-qedgen verify --miri
+$QEDGEN verify --miri
 
 # Lift findings into a ratifiable spec (works across runtimes):
-qedgen probe --program ./programs/my_program --emit-spec-candidates \
+$QEDGEN probe --program ./programs/my_program --emit-spec-candidates \
   --audit-dir .qed/audit/$(date +%F)
-qedgen ratify --audit-dir .qed/audit/$(date +%F) --out my_program.qedspec
+$QEDGEN ratify --audit-dir .qed/audit/$(date +%F) --out my_program.qedspec
 ```
 
 Native ships as preview — coverage is narrower than Anchor/Pinocchio because there are no framework conventions to anchor extractors on.
@@ -223,7 +231,7 @@ Once the spec exists, gate CI on it staying in sync with the program:
 # Errors if the spec declares a handler that's not in the program
 # (stale spec) or a `pub fn` that's not modelled in the spec
 # (uncovered handler). Pure read; no codegen, no writes.
-qedgen check --spec my_program.qedspec --anchor-project ./programs/my_program
+$QEDGEN check --spec my_program.qedspec --anchor-project ./programs/my_program
 ```
 
 ### Greenfield — Anchor, Quasar, or Pinocchio
@@ -238,16 +246,16 @@ with `.handler()` methods.
 
 ```bash
 # Anchor (default)
-qedgen init --name my_program --spec my_program.qedspec
-qedgen codegen --spec my_program.qedspec --all
+$QEDGEN init --name my_program --spec my_program.qedspec
+$QEDGEN codegen --spec my_program.qedspec --all
 
 # Quasar
-qedgen init --name my_program --spec my_program.qedspec --target quasar
-qedgen codegen --spec my_program.qedspec --target quasar --all
+$QEDGEN init --name my_program --spec my_program.qedspec --target quasar
+$QEDGEN codegen --spec my_program.qedspec --target quasar --all
 
 # Pinocchio
-qedgen init --name my_program --spec my_program.qedspec --target pinocchio
-qedgen codegen --spec my_program.qedspec --target pinocchio --all
+$QEDGEN init --name my_program --spec my_program.qedspec --target pinocchio
+$QEDGEN codegen --spec my_program.qedspec --target pinocchio --all
 ```
 
 Lean proofs, Kani harnesses, proptest harnesses, and CI workflows are
@@ -261,34 +269,34 @@ below.
 
 ```bash
 # Initialize a new verification project from a .qedspec
-qedgen init --name my_program
+$QEDGEN init --name my_program
 
 # Validate the spec (lint + coverage)
-qedgen check --spec my_program.qedspec
-qedgen check --spec my_program.qedspec --json           # machine-readable output
+$QEDGEN check --spec my_program.qedspec
+$QEDGEN check --spec my_program.qedspec --json           # machine-readable output
 
 # Generate all committed artifacts from .qedspec
-qedgen codegen --spec my_program.qedspec --all          # scaffolds Rust, Lean, Kani, tests, CI
+$QEDGEN codegen --spec my_program.qedspec --all          # scaffolds Rust, Lean, Kani, tests, CI
 
 # If Rust scaffolds were generated, the agent fills TODO business logic,
 # then runs cargo check / cargo test until the scaffold is compile-clean.
 
 # Or generate selectively
-qedgen codegen --spec my_program.qedspec                # Rust handler scaffold only (agent-filled)
-qedgen codegen --spec my_program.qedspec --lean         # + Lean proofs
-qedgen codegen --spec my_program.qedspec --kani         # + Kani harnesses (spec-model)
-qedgen codegen --spec my_program.qedspec --kani-impl    # + impl-targeted Kani (calls user's Anchor handler)
-qedgen codegen --spec my_program.qedspec --test         # + unit tests
-qedgen codegen --spec my_program.qedspec --proptest     # + proptest harnesses
-qedgen codegen --spec my_program.qedspec --target quasar --integration  # + Parallax/LiteSVM tests
+$QEDGEN codegen --spec my_program.qedspec                # Rust handler scaffold only (agent-filled)
+$QEDGEN codegen --spec my_program.qedspec --lean         # + Lean proofs
+$QEDGEN codegen --spec my_program.qedspec --kani         # + Kani harnesses (spec-model)
+$QEDGEN codegen --spec my_program.qedspec --kani-impl    # + impl-targeted Kani (calls user's Anchor handler)
+$QEDGEN codegen --spec my_program.qedspec --test         # + unit tests
+$QEDGEN codegen --spec my_program.qedspec --proptest     # + proptest harnesses
+$QEDGEN codegen --spec my_program.qedspec --target quasar --integration  # + Parallax/LiteSVM tests
 
 # Check with drift detection and verification report
-qedgen check --spec my_program.qedspec --coverage       # operation × property matrix
-qedgen check --spec my_program.qedspec --explain        # Markdown verification report
-qedgen check --spec my_program.qedspec --code ./programs --kani ./programs/tests/kani.rs  # drift detection
+$QEDGEN check --spec my_program.qedspec --coverage       # operation × property matrix
+$QEDGEN check --spec my_program.qedspec --explain        # Markdown verification report
+$QEDGEN check --spec my_program.qedspec --code ./programs --kani ./programs/tests/kani.rs  # drift detection
 
 # Repo maintenance gate: bundled examples match current codegen
-qedgen check --regen-drift
+$QEDGEN check --regen-drift
 ```
 
 The integration scaffold executes the compiled program in
@@ -322,10 +330,10 @@ pragma sbpf {
 
 ```bash
 # Transpile sBPF assembly to Lean 4
-qedgen asm2lean --input src/program.s --output formal_verification/Program.lean
+$QEDGEN asm2lean --input src/program.s --output formal_verification/Program.lean
 
 # Verify sBPF proofs (checks source hash, regenerates if stale)
-qedgen check --spec my_program.qedspec --asm src/program.s
+$QEDGEN check --spec my_program.qedspec --asm src/program.s
 ```
 
 ### CPI contracts — `interface` + `call`
@@ -355,11 +363,11 @@ handler exchange : State.Open -> State.Closed {
 
 ```bash
 # Scaffold a Tier-0 interface from an Anchor IDL (shape only — no ensures)
-qedgen interface --idl target/idl/jupiter.json --out interfaces/jupiter.qedspec
+$QEDGEN interface --idl target/idl/jupiter.json --out interfaces/jupiter.qedspec
 
 # Or vendor it into .qed/interfaces/<program>.qedspec (the canonical location
 # for tool-managed library specs — pointed at by `.qed/config.json`)
-qedgen interface --idl target/idl/jupiter.json --vendor
+$QEDGEN interface --idl target/idl/jupiter.json --vendor
 ```
 
 `qedgen check` emits `[shape_only_cpi]` for any `call` whose target lacks
@@ -370,7 +378,7 @@ for the full tier model.
 ### Generate proofs from a prompt
 
 ```bash
-qedgen generate \
+$QEDGEN generate \
   --prompt-file /tmp/analysis/property.prompt.txt \
   --output-dir /tmp/proof \
   --passes 4 \
@@ -381,13 +389,13 @@ qedgen generate \
 
 ```bash
 # Leanstral (fast, seconds)
-qedgen fill-sorry \
+$QEDGEN fill-sorry \
   --file formal_verification/Spec.lean \
   --passes 3 \
   --validate
 
 # Auto-escalate to Aristotle if sorry markers remain
-qedgen fill-sorry \
+$QEDGEN fill-sorry \
   --file formal_verification/Spec.lean \
   --passes 3 \
   --validate \
@@ -398,15 +406,15 @@ qedgen fill-sorry \
 
 ```bash
 # Submit and wait inline
-qedgen aristotle submit --project-dir formal_verification --wait
+$QEDGEN aristotle submit --project-dir formal_verification --wait
 
 # Or submit, detach, and poll later
-qedgen aristotle submit --project-dir formal_verification
-qedgen aristotle status <project-id> --wait --output-dir formal_verification
+$QEDGEN aristotle submit --project-dir formal_verification
+$QEDGEN aristotle status <project-id> --wait --output-dir formal_verification
 
 # List / cancel
-qedgen aristotle list
-qedgen aristotle cancel <project-id>
+$QEDGEN aristotle list
+$QEDGEN aristotle cancel <project-id>
 ```
 
 ### Upstream binary pinning
@@ -422,17 +430,17 @@ instead of a silent risk.
 # Compare every pinned upstream hash to the on-chain bytes (auto-on when
 # qed.lock declares any pinned binary_hash; pass --check-upstream
 # explicitly in scripts / CI for safety).
-qedgen verify --check-upstream
+$QEDGEN verify --check-upstream
 
 # Override the cluster (defaults to the one in ~/.config/solana/cli/config.yml)
-qedgen verify --check-upstream --rpc-url https://api.mainnet-beta.solana.com
+$QEDGEN verify --check-upstream --rpc-url https://api.mainnet-beta.solana.com
 
 # CI gate — refuse to reach the network. Pinned-but-no-fetch reports as Error.
-qedgen verify --check-upstream --offline
+$QEDGEN verify --check-upstream --offline
 
 # Offline development — suppress the upstream check even when a pin is
 # present. Mismatches demote to Info; verify exits zero. Do NOT use in CI.
-qedgen verify --check-upstream --upstream-stale-ok
+$QEDGEN verify --check-upstream --upstream-stale-ok
 ```
 
 `qedgen verify --check-upstream` treats a mismatched pin as a **CRIT**
@@ -444,10 +452,10 @@ CI.
 
 ```bash
 # Local CI — warn on a stale pin but stay green
-qedgen check --frozen
+$QEDGEN check --frozen
 
 # Release CI — fail on a stale pin
-qedgen check --frozen --strict
+$QEDGEN check --frozen --strict
 ```
 
 Requires the [Solana CLI](https://docs.solana.com/cli/install-solana-cli-tools)
@@ -462,8 +470,8 @@ silently false-positive CI.
 After verifying a function, stamp it with `#[qed(verified)]` to detect future changes — either to the function body *or* to its spec contract. `qedgen stamp` emits the attributes ready to paste, and it is gated: every `qedgen verify` run records its evidence to `.qed/verify-evidence.json`, and `stamp` refuses unless that record matches both the spec and program source being stamped and carries a passing **implementation-bound** backend (Miri or a `kani_impl` harness). Probe reproducers confirm findings rather than conformance, and checking or model-tested results are not eligible for `#[qed(verified)]`:
 
 ```bash
-qedgen verify --spec my_program.qedspec --program ./programs/my_program --kani --kani-path ./programs/my_program/src/kani_impl.rs
-qedgen stamp --program ./programs/my_program --spec my_program.qedspec
+$QEDGEN verify --spec my_program.qedspec --program ./programs/my_program --kani --kani-path ./programs/my_program/src/kani_impl.rs
+$QEDGEN stamp --program ./programs/my_program --spec my_program.qedspec
 ```
 
 ```rust
@@ -484,16 +492,16 @@ Both hashes are pure compile-time checks — the macro expands to the function u
 
 ```bash
 # Unified drift report — Rust handlers + Lean theorems vs spec
-qedgen reconcile --spec my_program.qedspec --json
+$QEDGEN reconcile --spec my_program.qedspec --json
 
 # Scan and stamp hashes on all #[qed(verified)] functions
-qedgen check --spec my_program.qedspec --drift programs/src/ --update-hashes
+$QEDGEN check --spec my_program.qedspec --drift programs/src/ --update-hashes
 
 # CI gate — exit 1 if any verified function has changed
-qedgen check --spec my_program.qedspec --drift programs/src/
+$QEDGEN check --spec my_program.qedspec --drift programs/src/
 
 # Transitive drift — also check if callees of verified functions changed
-qedgen check --spec my_program.qedspec --drift programs/src/ --deep
+$QEDGEN check --spec my_program.qedspec --drift programs/src/ --deep
 ```
 
 `qedgen reconcile` is the agent-friendly entry point: it combines Rust-side `spec_hash` mismatches with Lean-side orphan/missing theorem findings into one machine-readable report, ready for an LLM to consume and act on.
@@ -507,11 +515,11 @@ This is the **producer half** of that seam, scoped to the v1 soundness boundary:
 ```bash
 # Emit the name-level refinement descriptor (JSON) qedlift consumes.
 # Carries semantics only — account, mutated field name, constant delta.
-qedgen descriptor --spec vault.qedspec --handler deposit
+$QEDGEN descriptor --spec vault.qedspec --handler deposit
 
 # Chain it end to end: build the descriptor, shell out to a built qedlift,
 # and report a discharge verdict (sorry-free proof against the bytes).
-qedgen discharge --spec vault.qedspec --handler deposit \
+$QEDGEN discharge --spec vault.qedspec --handler deposit \
   --so target/deploy/vault.so --idl idl/vault.json \
   --qedlift path/to/qedlift
 ```
@@ -521,7 +529,7 @@ qedgen discharge --spec vault.qedspec --handler deposit \
 ### Consolidate proofs
 
 ```bash
-qedgen consolidate \
+$QEDGEN consolidate \
   --input-dir /tmp/proofs \
   --output-dir my_program/formal_verification
 ```
@@ -532,13 +540,13 @@ When `check`, `codegen`, or `verify` fails in a way you didn't expect — or you
 
 ```bash
 # Walk you through filing the last failure as an issue.
-qedgen feedback --note "lint flags MathOverflow but my spec already declares it"
+$QEDGEN feedback --note "lint flags MathOverflow but my spec already declares it"
 
 # Print the title/body to stdout without filing anything.
-qedgen feedback --dry-run
+$QEDGEN feedback --dry-run
 
 # Skip the interactive prompt (CI, scripts).
-qedgen feedback --yes
+$QEDGEN feedback --yes
 ```
 
 Submits via `gh issue create` if you're logged into GitHub CLI; otherwise prints a pre-filled URL. Override the target repo with `QEDGEN_FEEDBACK_REPO=owner/repo` (forks, internal mirrors). A local copy is always written to `.qed/feedback/<timestamp>.md` so nothing is lost if you skip the remote step.
@@ -546,9 +554,9 @@ Submits via `gh issue create` if you're logged into GitHub CLI; otherwise prints
 ### Generate CI workflow
 
 ```bash
-qedgen codegen --spec my_program.qedspec --ci                    # Lean-only verification workflow
-qedgen codegen --spec my_program.qedspec --ci --ci-asm src/program.s  # Add sBPF source hash check
-qedgen codegen --spec my_program.qedspec --ci --ci-ratchet target/idl/my_program.json  # + ratchet readiness lint on every build
+$QEDGEN codegen --spec my_program.qedspec --ci                    # Lean-only verification workflow
+$QEDGEN codegen --spec my_program.qedspec --ci --ci-asm src/program.s  # Add sBPF source hash check
+$QEDGEN codegen --spec my_program.qedspec --ci --ci-ratchet target/idl/my_program.json  # + ratchet readiness lint on every build
 ```
 
 ### Release gates
@@ -557,7 +565,7 @@ qedgen codegen --spec my_program.qedspec --ci --ci-ratchet target/idl/my_program
 bash scripts/check-version-consistency.sh
 bash scripts/check-readme-drift.sh
 bash scripts/check-lake-build.sh --strict
-qedgen check --regen-drift
+$QEDGEN check --regen-drift
 cargo audit --deny warnings \
     --ignore RUSTSEC-2024-0436 --ignore RUSTSEC-2024-0388 \
     --ignore RUSTSEC-2025-0141 --ignore RUSTSEC-2025-0161 \
@@ -599,15 +607,15 @@ manually for Lean/codegen changes and before a release.
 
 ```bash
 # Pre-deploy — lint one IDL for mainnet-readiness
-qedgen readiness --idl target/idl/my_program.json
-qedgen readiness --idl target/idl/my_program.json --json          # machine-readable
-qedgen readiness --idl target/idl/my_program.json --quasar        # Quasar IDL
+$QEDGEN readiness --idl target/idl/my_program.json
+$QEDGEN readiness --idl target/idl/my_program.json --json          # machine-readable
+$QEDGEN readiness --idl target/idl/my_program.json --quasar        # Quasar IDL
 
 # Post-deploy — diff old vs new and block breaking upgrades
-qedgen check-upgrade --old ratchet.lock --new target/idl/my_program.json
+$QEDGEN check-upgrade --old ratchet.lock --new target/idl/my_program.json
 
 # Acknowledge an intentional unsafe change
-qedgen check-upgrade --old ratchet.lock --new target/idl/my_program.json \
+$QEDGEN check-upgrade --old ratchet.lock --new target/idl/my_program.json \
   --unsafe allow-field-append --migrated-account EscrowState
 ```
 

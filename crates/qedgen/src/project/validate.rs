@@ -1,5 +1,5 @@
 use crate::api::BuildStatus;
-use anyhow::Result;
+use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::process::Command;
@@ -67,7 +67,7 @@ pub async fn setup_workspace(workspace: Option<&Path>, mathlib: bool) -> Result<
     eprintln!("  Project scaffold created.");
 
     eprintln!("  Running lake update...");
-    let _update = run_command("lake", &["update"], &ws, &[]).await;
+    run_required_command("lake", &["update"], &ws).await?;
 
     if mathlib {
         fetch_or_build_mathlib(&ws).await;
@@ -85,7 +85,7 @@ async fn ensure_workspace_ready(workspace: &Path, mathlib: bool) -> Result<()> {
         crate::project::setup_lean_project(workspace, mathlib)?;
 
         eprintln!("  Setting up validation workspace (first time)...");
-        let _update = run_command("lake", &["update"], workspace, &[]).await;
+        run_required_command("lake", &["update"], workspace).await?;
 
         if mathlib {
             fetch_or_build_mathlib(workspace).await;
@@ -149,6 +149,25 @@ async fn run_command(
     Ok((stdout, stderr, code))
 }
 
+/// Run a workspace preparation command and surface a non-zero exit status.
+/// Availability checks deliberately do not execute Lean shims; this is the
+/// point where the requested operation validates that the tool actually works.
+async fn run_required_command(cmd: &str, args: &[&str], cwd: &Path) -> Result<()> {
+    let (stdout, stderr, code) = run_command(cmd, args, cwd, &[]).await?;
+    if code != 0 {
+        let detail = if stderr.trim().is_empty() {
+            stdout.trim()
+        } else {
+            stderr.trim()
+        };
+        bail!(
+            "`{cmd} {}` failed with exit code {code}: {detail}",
+            args.join(" ")
+        );
+    }
+    Ok(())
+}
+
 /// Returns the path to ~/.qedgen/ — the global QEDGen home directory.
 /// Override with QEDGEN_HOME env var.
 pub fn qedgen_home() -> Result<PathBuf> {
@@ -180,5 +199,26 @@ pub fn shared_mathlib_path() -> Option<PathBuf> {
         Some(path)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn required_command_surfaces_nonzero_status() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let command = dir.path().join("failing-lake");
+        std::fs::write(&command, "#!/bin/sh\necho lake-failed >&2\nexit 7\n").unwrap();
+        std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let error = super::run_required_command(command.to_str().unwrap(), &[], dir.path())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("failed with exit code 7"), "{error}");
+        assert!(error.contains("lake-failed"), "{error}");
     }
 }
