@@ -4,6 +4,10 @@ This is a venue-specific optional adapter, not part of the portable audit
 workflow. Other skill.sh-compatible venues should ignore `hooks/` and use
 their own reasoning-budget controls when available.
 
+Normal skill installation does not package, install, or enable this hook and
+does not modify agent settings. Activation requires the manual steps below;
+removal is also manual.
+
 A Claude Code `UserPromptSubmit` hook that detects audit-trigger phrases and
 appends `ultrathink` to the prompt so Fable 5 / Opus 4.8 sessions allocate
 maximum thinking budget.
@@ -40,6 +44,13 @@ Trigger phrases:
 
 The hook is idempotent (no-op if `ultrathink` is already present) and silent
 on non-matching prompts (payload passes through unchanged).
+
+It receives the full hook JSON payload on standard input, inspects only
+`.prompt`, and emits JSON on standard output. The script does not open paths
+referenced by the repository or transcript, intentionally enumerate environment
+variables, or make network requests. Enabling it nevertheless exposes each
+submitted prompt to this local hook process, as required by Claude Code's
+`UserPromptSubmit` interface.
 
 ## Install
 
