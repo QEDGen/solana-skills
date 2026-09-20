@@ -30,6 +30,19 @@ Write what your Solana program must guarantee in a `.qedspec` file. QEDGen valid
 npx skills add qedgen/solana-skills
 ```
 
+Installing the CLI is a separate, explicit step. From the installed qedgen
+skill directory:
+
+```bash
+bash install.sh --link-dir "$HOME/.local/bin"   # drop --link-dir to skip the PATH link
+qedgen --help
+```
+
+`--link-dir` is what makes the bare `qedgen` in every example below resolve;
+make sure that directory is on your `PATH`. Without it the CLI installs only
+into the skill's own `bin/`, and you run it as `tools/qedgen` from the skill
+directory. See [installation and prerequisites](references/installation.md).
+
 > Works with Claude Code, Cursor, Windsurf, GitHub Copilot, and any agent supporting the [Agent Skills](https://agentskills.io) spec.
 
 **Or just point your agent here.** Paste this to your coding agent and it installs QEDGen and gets to work:
@@ -146,9 +159,9 @@ qedgen feedback --note "what went wrong"
 walk up from the current directory, find the nearest `.qed/`, and resolve.
 Explicit `--spec` still works when you want to point at something specific.
 
-Lean and Kani toolchains are installed automatically the first time
-they're needed. API keys are not — sign up at the providers below and
-export them yourself before running `fill-sorry` or `aristotle`:
+Install Lean and Kani yourself before requesting those backends; see
+[installation and prerequisites](references/installation.md). Obtain API keys
+from the providers below before running `fill-sorry` or `aristotle`:
 
 ```bash
 # Lean + Mathlib (only needed for formal proofs)
@@ -668,13 +681,12 @@ via Lean + client-side tests.)
 
 ## Requirements
 
-- Rust toolchain (auto-installed if missing)
+- Rust toolchain — install yourself for source builds and generated Rust tests; not needed to run the prebuilt CLI's core spec commands.
+- Lean 4 / elan — install yourself for `lake build` and formal proofs.
+- Kani — install and set up yourself for Kani verification.
 
-Lean toolchain installs automatically the first time it's needed; API
-keys must be obtained from the providers and exported by the user
-before running the corresponding commands:
-
-- Lean 4 / elan — for `lake build` and formal proofs (auto-installed)
+[Installation instructions](references/installation.md) describe explicit CLI setup.
+API keys must be obtained and exported by the user for the corresponding commands:
 - [Solana CLI](https://docs.solana.com/cli/install-solana-cli-tools) — only for `qedgen verify --check-upstream` (shells out to `solana program dump`). Install yourself.
 - `MISTRAL_API_KEY` — for `fill-sorry` and `generate`. Sign up at [console.mistral.ai](https://console.mistral.ai) (free tier available).
 - `ARISTOTLE_API_KEY` — for `aristotle` deep proof search. Sign up at [aristotle.harmonic.fun](https://aristotle.harmonic.fun).

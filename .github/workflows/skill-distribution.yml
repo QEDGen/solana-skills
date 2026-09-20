@@ -25,7 +25,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Test portable inventory and installer
-        run: python3 -m unittest discover -s scripts/tests -p test_skill_distribution.py
+        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'
       - name: Install pinned skills CLI for compatibility tests
         run: npm install --prefix "$RUNNER_TEMP/skills-cli" --ignore-scripts --no-audit --no-fund "skills@${{ matrix.skills }}"
       - name: Build QEDGen binary for portable smoke test

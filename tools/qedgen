@@ -1,12 +1,12 @@
 #!/bin/bash
-# Wrapper that ensures the qedgen binary is installed before running it.
-# SKILL.md should reference this script instead of the binary directly.
-
+# Resolve the packaged CLI without installing software as a side effect.
+set -euo pipefail
 SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 QEDGEN_BIN="$SKILL_DIR/bin/qedgen"
-
-if ! "$QEDGEN_BIN" --version &>/dev/null 2>&1; then
-    bash "$SKILL_DIR/install.sh" >&2
+if [[ ! -x "$QEDGEN_BIN" ]]; then
+    echo "QEDGen is not installed in this skill. Run explicitly:" >&2
+    printf '  bash %q\n' "$SKILL_DIR/install.sh" >&2
+    echo "Use --link-dir DIRECTORY only if you want a PATH link." >&2
+    exit 127
 fi
-
 exec "$QEDGEN_BIN" "$@"

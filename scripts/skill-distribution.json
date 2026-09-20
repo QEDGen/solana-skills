@@ -46,7 +46,8 @@
       "docs/limitations.md": "docs/limitations.md",
       "docs/design/qedsvm-discharge.md": "docs/design/qedsvm-discharge.md",
       "docs/design/spec-composition.md": "docs/design/spec-composition.md",
-      "references/finding_to_spec.md": "skills/qedgen-auditor/references/finding_to_spec.md"
+      "references/finding_to_spec.md": "skills/qedgen-auditor/references/finding_to_spec.md",
+      "references/installation.md": "references/installation.md"
     },
     "qedgen-auditor": {
       "SKILL.md": "skills/qedgen-auditor/SKILL.md",

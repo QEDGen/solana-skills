@@ -6,7 +6,7 @@
 
 A developer pointed you to this document to set up QEDGen and use it on their Solana program. Do this, in order:
 
-1. **Install.** Run `npx skills add qedgen/solana-skills`, then `qedgen --help` to confirm. If `qedgen` isn't found, the skill was cloned into your harness's skills directory but the binary hasn't been fetched yet — run `bash install.sh` from that directory: it downloads the platform binary and links it onto your `PATH` (it prints an `export PATH=…` line if your shell needs it, and is safe to re-run). No API keys are needed for the core loop.
+1. **Install.** Run `npx skills add qedgen/solana-skills`, then run `bash install.sh` from the installed skill directory. Set `QEDGEN` to that directory's `tools/qedgen` wrapper and run `"$QEDGEN" --help` to confirm. The wrapper never installs anything; explicitly request a PATH link with `bash install.sh --link-dir "$HOME/.local/bin"` if desired. No API keys are needed for the core loop.
 2. **Find out where the developer is, then act:**
    - **Brownfield** (an existing program, no spec) → *audit first.* Run `qedgen probe --program <path>` — it reports real bugs (each with a Kani/proptest/Mollusk reproducer), coverage gaps, and a ranked set of evidence-anchored invariant hypotheses about what the program appears to guarantee. Ask the developer to confirm each hypothesis (accept / reject / it's-a-bug), record the answers to `<audit-dir>/answers.json`, and run `qedgen ratify --audit-dir <dir>` to lower confirmed ones into an executable `.qedspec`. (`qedgen adapt --program` and `qedgen spec --idl` are deprecated TODO-shell scaffolds — this flow subsumes both.)
    - **Greenfield** (defining guarantees for new or evolving code) → write a `.qedspec`, then `qedgen check --spec …` → `qedgen codegen --spec … --all` → `qedgen verify --spec …`.
@@ -20,7 +20,7 @@ The rest of this document is the full reference — every CLI command, the proof
 npx skills add qedgen/solana-skills
 ```
 
-The installer sets up Rust, Lean/elan, the CLI binary, and a global Mathlib cache. No API keys are required for the default workflow (spec writing, validation, code generation).
+The installer sets up only the CLI binary. Install Rust, Lean/elan and Kani yourself when needed. Explicit `qedgen setup --mathlib` prepares the proof workspace and downloads Mathlib dependencies/cache using your installed Lean tools. No API keys are required for the default workflow (spec writing, validation, code generation).
 
 ## What It Does
 
@@ -45,22 +45,22 @@ The CLI is the interface between the agent and generated artifacts, not a user-f
 ### Validate a spec
 
 ```bash
-qedgen check --spec program.qedspec                     # lint + coverage
-qedgen check --spec program.qedspec --json              # machine-readable
-qedgen check --spec program.qedspec --explain           # Markdown report
-qedgen check --spec program.qedspec --drift src/        # drift detection
-qedgen check --spec program.qedspec --drift src/ --deep # transitive drift
+$QEDGEN check --spec program.qedspec                     # lint + coverage
+$QEDGEN check --spec program.qedspec --json              # machine-readable
+$QEDGEN check --spec program.qedspec --explain           # Markdown report
+$QEDGEN check --spec program.qedspec --drift src/        # drift detection
+$QEDGEN check --spec program.qedspec --drift src/ --deep # transitive drift
 ```
 
 ### Generate artifacts from a spec
 
 ```bash
-qedgen codegen --spec program.qedspec --all                 # everything
-qedgen codegen --spec program.qedspec --target pinocchio    # program skeleton (anchor | quasar | pinocchio)
-qedgen codegen --spec program.qedspec --lean                # Lean proofs only
-qedgen codegen --spec program.qedspec --kani                # Kani harnesses
-qedgen codegen --spec program.qedspec --kani-impl           # impl-targeted Kani: real Anchor handler vs symbolic accounts
-qedgen codegen --spec program.qedspec --proptest            # proptest harnesses
+$QEDGEN codegen --spec program.qedspec --all                 # everything
+$QEDGEN codegen --spec program.qedspec --target pinocchio    # program skeleton (anchor | quasar | pinocchio)
+$QEDGEN codegen --spec program.qedspec --lean                # Lean proofs only
+$QEDGEN codegen --spec program.qedspec --kani                # Kani harnesses
+$QEDGEN codegen --spec program.qedspec --kani-impl           # impl-targeted Kani: real Anchor handler vs symbolic accounts
+$QEDGEN codegen --spec program.qedspec --proptest            # proptest harnesses
 ```
 
 For handlers codegen can't fully mechanize, the agent fills the `todo!()` body directly in-session (no `--fill` verb needed). If it can't, the spec is under-specified — refine and regenerate.
@@ -68,35 +68,35 @@ For handlers codegen can't fully mechanize, the agent fills the `todo!()` body d
 ### Run the generated harnesses
 
 ```bash
-qedgen verify --spec program.qedspec                    # every backend on disk
-qedgen verify --spec program.qedspec --proptest         # cargo test --release
-qedgen verify --spec program.qedspec --kani             # cargo kani --tests
-qedgen verify --spec program.qedspec --lean             # lake build
-qedgen verify --spec program.qedspec --json             # machine-readable for CI
+$QEDGEN verify --spec program.qedspec                    # every backend on disk
+$QEDGEN verify --spec program.qedspec --proptest         # cargo test --release
+$QEDGEN verify --spec program.qedspec --kani             # cargo kani --tests
+$QEDGEN verify --spec program.qedspec --lean             # lake build
+$QEDGEN verify --spec program.qedspec --json             # machine-readable for CI
 ```
 
 ### Scaffold a new project
 
 ```bash
-qedgen init                                             # create .qed/ and starter .qedspec
+$QEDGEN init                                             # create .qed/ and starter .qedspec
 ```
 
 ### Drift and reconciliation
 
 ```bash
-qedgen reconcile --spec program.qedspec                 # unified drift report across Rust + Lean
+$QEDGEN reconcile --spec program.qedspec                 # unified drift report across Rust + Lean
 ```
 
 ### Brownfield: audit an existing program and elicit its spec (no spec required)
 
 ```bash
-qedgen probe --program ./src                            # bugs + coverage gaps + ranked invariant hypotheses (JSON for the auditor; summary on stderr)
-qedgen probe --fuzz 300 --root ./my-program             # Crucible coverage-guided fuzzing (protocol-invariant crash-finder, no spec required)
-qedgen interface --idl target/idl/dep.json              # generate a Tier-0 interface block for a CPI dependency
-qedgen probe --program ./src --emit-spec-candidates \
+$QEDGEN probe --program ./src                            # bugs + coverage gaps + ranked invariant hypotheses (JSON for the auditor; summary on stderr)
+$QEDGEN probe --fuzz 300 --root ./my-program             # Crucible coverage-guided fuzzing (protocol-invariant crash-finder, no spec required)
+$QEDGEN interface --idl target/idl/dep.json              # generate a Tier-0 interface block for a CPI dependency
+$QEDGEN probe --program ./src --emit-spec-candidates \
   --audit-dir .qed/audit/<id>                           # write the audit working set (skeleton, hypotheses.json, …)
 # answer each hypothesis (accept / reject / bug) → .qed/audit/<id>/answers.json, then:
-qedgen ratify --audit-dir .qed/audit/<id>               # lower confirmed hypotheses to executable clauses (parse+check gated)
+$QEDGEN ratify --audit-dir .qed/audit/<id>               # lower confirmed hypotheses to executable clauses (parse+check gated)
 ```
 
 `probe` powers the harness-native auditor subagent: it surfaces real vulnerabilities first (each paired with a Kani/proptest/Mollusk reproducer), spec-coverage gaps second, and hypothesizes evidence-anchored invariants (authorization, lifecycle/init-once, held arithmetic bounds, conservation pairs, pinned CPI transfers, unwired error variants, the status-enum state machine) for confirmation. Works on Anchor, native Rust, sBPF, and Pinocchio. Ratified clauses are labelled `checking`; passing generated model proptests are `model-tested`; only source-bound backends earn `implementation-verified`.
@@ -106,8 +106,8 @@ Deprecated (functional in v2.x with a warning; removed in v3.0): `qedgen adapt -
 ### Stamp verified handlers (post-verification drift guard)
 
 ```bash
-qedgen verify --spec program.qedspec --program ./my-anchor-program --kani --kani-path ./my-anchor-program/src/kani_impl.rs
-qedgen stamp --program ./my-anchor-program --spec program.qedspec
+$QEDGEN verify --spec program.qedspec --program ./my-anchor-program --kani --kani-path ./my-anchor-program/src/kani_impl.rs
+$QEDGEN stamp --program ./my-anchor-program --spec program.qedspec
 ```
 
 `stamp` (formerly `adapt --program --spec`) emits one `#[qed(verified, …)]` attribute per handler to paste above its `pub fn`; the proc macro recomputes the hashes at compile time and fails the build on drift. It refuses without recorded implementation-verified evidence — a passing Miri run or `kani_impl` harness whose spec and program-source hashes match. Mollusk probe reproducers confirm findings rather than conformance and cannot authorize a stamp.
@@ -115,14 +115,14 @@ qedgen stamp --program ./my-anchor-program --spec program.qedspec
 ### Mainnet-readiness (Anchor IDL lint + upgrade-safety diff)
 
 ```bash
-qedgen readiness --idl target/idl/program.json         # lint one IDL for upgrade-unsafe shapes before first deploy
-qedgen check-upgrade --old old.json --new new.json     # flag every upgrade-unsafe change between two IDLs
+$QEDGEN readiness --idl target/idl/program.json         # lint one IDL for upgrade-unsafe shapes before first deploy
+$QEDGEN check-upgrade --old old.json --new new.json     # flag every upgrade-unsafe change between two IDLs
 ```
 
 ### Fill sorry markers with Leanstral (fast, seconds)
 
 ```bash
-qedgen fill-sorry \
+$QEDGEN fill-sorry \
   --file formal_verification/Spec.lean \
   --passes 3 \
   --validate
@@ -134,11 +134,11 @@ Sends each `sorry` location to the Leanstral model with focused context. Require
 
 ```bash
 # Submit and wait inline
-qedgen aristotle submit --project-dir formal_verification --wait
+$QEDGEN aristotle submit --project-dir formal_verification --wait
 
 # Or submit, detach, and poll later
-qedgen aristotle submit --project-dir formal_verification
-qedgen aristotle status <project-id> --wait --output-dir formal_verification
+$QEDGEN aristotle submit --project-dir formal_verification
+$QEDGEN aristotle status <project-id> --wait --output-dir formal_verification
 ```
 
 Aristotle runs agentic proof search and returns the project with sorry markers filled. `status --wait` polls periodically and auto-downloads the result on completion. Requires `ARISTOTLE_API_KEY`.
@@ -146,7 +146,7 @@ Aristotle runs agentic proof search and returns the project with sorry markers f
 ### Transpile sBPF assembly to Lean
 
 ```bash
-qedgen asm2lean --input src/program.s --output formal_verification/Program.lean
+$QEDGEN asm2lean --input src/program.s --output formal_verification/Program.lean
 ```
 
 Generates a Lean module with `@[simp] def prog`, chunked `progAt` for large programs, `Int`-typed offsets, named constants, and auto-generated `ea_*`, `bridge_*`, and `insn_*` simp lemmas. Designed for the `wp_exec` one-shot tactic.
@@ -154,8 +154,8 @@ Generates a Lean module with `@[simp] def prog`, chunked `progAt` for large prog
 ### Discharge a spec effect against the compiled binary (qedgen ↔ qedsvm seam)
 
 ```bash
-qedgen descriptor --spec program.qedspec --handler increment   # emit the name-level refinement descriptor (JSON, stdout)
-qedgen discharge --spec program.qedspec --handler increment \
+$QEDGEN descriptor --spec program.qedspec --handler increment   # emit the name-level refinement descriptor (JSON, stdout)
+$QEDGEN discharge --spec program.qedspec --handler increment \
   --so target/deploy/program.so --qedlift <path-to-qedlift>    # prove the handler's effect against the compiled bytes
 ```
 
@@ -164,7 +164,7 @@ qedgen discharge --spec program.qedspec --handler increment \
 ### Consolidate proofs
 
 ```bash
-qedgen consolidate \
+$QEDGEN consolidate \
   --input-dir /tmp/proofs \
   --output-dir formal_verification
 ```
@@ -172,7 +172,7 @@ qedgen consolidate \
 ### Set up the global validation workspace
 
 ```bash
-qedgen setup
+$QEDGEN setup
 ```
 
 First-time Mathlib build takes 15-45 minutes. Subsequent builds reuse the cache.
@@ -180,7 +180,7 @@ First-time Mathlib build takes 15-45 minutes. Subsequent builds reuse the cache.
 ### Report a toolchain failure
 
 ```bash
-qedgen feedback                                         # file a GitHub issue with the last failure's context
+$QEDGEN feedback                                         # file a GitHub issue with the last failure's context
 ```
 
 Bundles the qedgen version, OS/arch, detected runtime, the last command's stderr, and the relevant `.qedspec` excerpt; previews the issue and asks for confirmation before filing.
@@ -226,10 +226,10 @@ Run `qedgen verify --spec program.qedspec`. Proptest runs `cargo test --release`
 
 ```bash
 # Fast: Leanstral (seconds)
-qedgen fill-sorry --file formal_verification/Spec.lean --validate
+$QEDGEN fill-sorry --file formal_verification/Spec.lean --validate
 
 # Deep: Aristotle (minutes to hours), when Leanstral fails after multiple passes
-qedgen aristotle submit --project-dir formal_verification --wait
+$QEDGEN aristotle submit --project-dir formal_verification --wait
 ```
 
 Always prefer spec refinement over proof shelling. A DSL feature that eliminates the proof obligation structurally is better than a new proof template.
@@ -378,8 +378,9 @@ A SIMD-0321-style slippage guard.
 
 ## Requirements
 
-- Rust toolchain (auto-installed if missing)
-- Lean 4 / elan (auto-installed if missing)
+- Rust toolchain — user-managed, needed for source builds and generated Rust tests
+- Lean 4 / elan — user-managed, needed for formal proofs
+- Kani — user-managed, needed for Kani verification
 - Git (QEDGen is git-native: spec changes and regeneration are safe to merge)
 - `MISTRAL_API_KEY` only when calling `fill-sorry` or `generate`
 - `ARISTOTLE_API_KEY` only when calling `aristotle`

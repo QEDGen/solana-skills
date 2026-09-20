@@ -1,6 +1,8 @@
 # CLI: project setup
 
-`init`, `setup`, `asm2lean` — starting a project and installing toolchains.
+`init`, `setup`, `asm2lean` — starting a project and preparing proof workspaces.
+
+Install [prerequisites](../installation.md) yourself first. `setup` runs Lean tools and may fetch workspace dependencies with `lake update`; `--mathlib` also downloads Mathlib/cache. A configured toolchain manager may fetch a selected toolchain when a build runs, so provision that version beforehand.
 
 Part of the [CLI Reference](../cli.md).
 

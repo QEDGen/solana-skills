@@ -27,7 +27,7 @@
     "check:auditor-domain-artifacts": "bash scripts/check-auditor-domain-artifacts.sh",
     "check:auditor-domain-corpus": "bash skills/qedgen-auditor-bench/fixtures/domain-corpus/validate.sh",
     "test:auditor-preflight": "bash scripts/test-auditor-preflight.sh",
-    "test:skill-distribution": "python3 -m unittest discover -s scripts/tests -p test_skill_distribution.py",
+    "test:skill-distribution": "python3 -m unittest discover -s scripts/tests -p 'test_*.py'",
     "test": "bash scripts/check-version-consistency.sh && bash scripts/check-auditor-skill.sh && bash scripts/check-auditor-domain-artifacts.sh && bash skills/qedgen-auditor-bench/fixtures/domain-corpus/validate.sh && bash scripts/test-auditor-preflight.sh && npm run test:skill-distribution && ./bin/qedgen --help"
   },
   "repository": {

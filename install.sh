@@ -1,239 +1,184 @@
 #!/bin/bash
-set -e
+# Explicit QEDGen installation. Availability checks belong in tools/qedgen.
+set -euo pipefail
 
 REPO="QEDGen/solana-skills"
-
-# Resolve the directory where this script lives (= skill root)
 SKILL_DIR="$(cd "$(dirname "$0")" && pwd)"
-
-# Source checkouts use Cargo.toml; portable packages carry a generated VERSION.
-if [ -f "$SKILL_DIR/crates/qedgen/Cargo.toml" ]; then
-    VERSION="v$(grep '^version' "$SKILL_DIR/crates/qedgen/Cargo.toml" | head -1 | sed 's/.*"\(.*\)"/\1/')"
-elif [ -f "$SKILL_DIR/VERSION" ]; then
-    VERSION="v$(tr -d '\r\n' < "$SKILL_DIR/VERSION")"
-else
-    echo "ERROR: Missing release version metadata." >&2
-    exit 1
-fi
-if ! printf '%s\n' "$VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$'; then
-    echo "ERROR: Invalid release version metadata." >&2
-    exit 1
-fi
 QEDGEN_BIN="$SKILL_DIR/bin/qedgen"
+LINK_DIR=""
+FROM_SOURCE=false
+staged=""
+checksums=""
 
-# ── Detect platform ──────────────────────────────────────────────────────
+usage() {
+    cat <<'USAGE'
+Usage: bash install.sh [--link-dir DIRECTORY] [--from-source]
+
+Install QEDGen into this skill's bin/ directory. Downloads a pinned release
+and verifies its checksum and version before replacing an existing binary.
+A source checkout can fall back to a locked Cargo build if the binary download
+is unavailable. Integrity failures never fall back to another install method.
+
+  --link-dir DIRECTORY  Also link qedgen into this explicitly chosen directory.
+                        Existing unrelated files or links are never replaced.
+  --from-source         Build from this source checkout without downloading a release.
+  -h, --help            Show this help without installing anything.
+
+No default PATH links, shell-profile changes, or toolchain installation.
+USAGE
+}
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+cleanup() {
+    if [[ -n "$staged" ]]; then rm -f -- "$staged"; fi
+    if [[ -n "$checksums" ]]; then rm -f -- "$checksums"; fi
+}
+trap cleanup EXIT
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --link-dir)
+            [[ $# -ge 2 && -n "$2" && "$2" != -* ]] || die "--link-dir requires a directory"
+            LINK_DIR="$2"
+            shift 2 ;;
+        --from-source) FROM_SOURCE=true; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) die "Unknown argument: $1 (see --help)" ;;
+    esac
+done
+
+# Cargo.toml remains authoritative in source checkouts. The package builder
+# generates VERSION for portable skills, which do not contain the source tree.
+if [[ -f "$SKILL_DIR/crates/qedgen/Cargo.toml" ]]; then
+    version="$(sed -nE 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' "$SKILL_DIR/crates/qedgen/Cargo.toml")"
+elif [[ -f "$SKILL_DIR/VERSION" ]]; then
+    version="$(tr -d '\r\n' < "$SKILL_DIR/VERSION")"
+else
+    die "Missing release version metadata."
+fi
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]] || die "Invalid release version metadata."
+VERSION="v$version"
+
+# Validate a requested link before any download/build, preserving user files.
+if [[ -n "$LINK_DIR" ]]; then
+    [[ "$LINK_DIR" = /* ]] || LINK_DIR="$PWD/$LINK_DIR"
+    link="$LINK_DIR/qedgen"
+    if [[ -e "$link" || -L "$link" ]]; then
+        [[ -L "$link" && "$(readlink "$link")" = "$QEDGEN_BIN" ]] || die "Refusing to replace existing $link"
+    fi
+fi
+
 detect_asset_name() {
     local os arch
     os="$(uname -s)"
     arch="$(uname -m)"
-
-    case "$os" in
-        Darwin) os="apple-darwin" ;;
-        Linux)  os="unknown-linux-gnu" ;;
-        *)      return 1 ;;
-    esac
-
-    case "$arch" in
-        arm64|aarch64) arch="aarch64" ;;
-        x86_64)        arch="x86_64" ;;
-        *)             return 1 ;;
-    esac
-
+    case "$os" in Darwin) os=apple-darwin ;; Linux) os=unknown-linux-gnu ;; *) return 1 ;; esac
+    case "$arch" in arm64|aarch64) arch=aarch64 ;; x86_64) ;; *) return 1 ;; esac
     echo "qedgen-${arch}-${os}"
 }
 
-# ── Verify SHA256 checksum ──────────────────────────────────────────────
 verify_checksum() {
-    local file="$1" expected="$2"
-    local actual
-
-    if command -v sha256sum &> /dev/null; then
-        actual=$(sha256sum "$file" | awk '{print $1}')
-    elif command -v shasum &> /dev/null; then
-        actual=$(shasum -a 256 "$file" | awk '{print $1}')
+    local file="$1" expected="$2" actual
+    [[ "$expected" =~ ^[0-9a-fA-F]{64}$ ]] || { echo "ERROR: Invalid SHA256 checksum file." >&2; return 1; }
+    if command -v sha256sum >/dev/null 2>&1; then
+        actual="$(sha256sum "$file" | awk '{print $1}')" || return 1
+    elif command -v shasum >/dev/null 2>&1; then
+        actual="$(shasum -a 256 "$file" | awk '{print $1}')" || return 1
     else
-        echo "  ERROR: No sha256sum or shasum found. Cannot verify binary integrity."
+        echo "ERROR: No SHA256 verifier available; refusing installation." >&2
         return 1
     fi
-
-    if [ "$actual" != "$expected" ]; then
-        echo "  ERROR: SHA256 checksum mismatch!"
-        echo "    Expected: $expected"
-        echo "    Actual:   $actual"
-        return 1
-    fi
-    return 0
+    [[ "$actual" = "$expected" ]] || { echo "ERROR: SHA256 checksum mismatch; existing binary preserved." >&2; return 1; }
 }
 
-# ── Download from GitHub release ─────────────────────────────────────────
+# A candidate always resides beside the destination, so the final rename is
+# atomic. Never move an unverified or non-running candidate over a working CLI.
+activate_candidate() {
+    local reported
+    # mktemp creates 0600, so `chmod +x` alone would leave the installed CLI
+    # user-only-executable. A --link-dir target is often shared, and the skill
+    # directory itself may be read by another account.
+    chmod 755 "$staged" || return 1
+    if ! reported="$("$staged" --version 2>/dev/null)" || [[ "$reported" != "qedgen $version" ]]; then
+        echo "ERROR: Candidate is not runnable as qedgen $version; existing binary preserved." >&2
+        return 1
+    fi
+    mv -f -- "$staged" "$QEDGEN_BIN" || return 1
+    staged=""
+}
+
+# Return 1 for an unavailable binary (source fallback permitted), 2 for an
+# integrity or validation failure (fail closed, never silently fall back).
 download_binary() {
-    local asset_name="$1"
-
-    # Use pinned version, not /latest/
-    local url="https://github.com/${REPO}/releases/download/${VERSION}/${asset_name}"
-    local checksum_url="https://github.com/${REPO}/releases/download/${VERSION}/${asset_name}.sha256"
-    echo "  Downloading ${VERSION} from ${url} ..."
-
-    mkdir -p "$SKILL_DIR/bin"
-
-    local tmp_bin
-    tmp_bin=$(mktemp)
-    if ! curl -fSL --retry 2 -o "$tmp_bin" "$url" 2>/dev/null; then
-        rm -f "$tmp_bin"
+    local asset="$1" expected
+    local base="https://github.com/${REPO}/releases/download/${VERSION}"
+    mkdir -p "$SKILL_DIR/bin" || return 2
+    staged="$(mktemp "$SKILL_DIR/bin/.qedgen.XXXXXX")" || return 2
+    echo "Downloading ${VERSION} from ${base}/${asset} ..."
+    if ! curl --proto '=https' --proto-redir '=https' -fSL --retry 2 -o "$staged" "$base/$asset"; then
         return 1
     fi
-
-    # Checksum verification is mandatory
-    local checksum_file
-    checksum_file=$(mktemp)
-    if ! curl -fSL --retry 2 -o "$checksum_file" "$checksum_url" 2>/dev/null; then
-        echo "  ERROR: Could not download checksum file. Refusing to install unverified binary."
-        rm -f "$tmp_bin" "$checksum_file"
-        return 1
+    checksums="$(mktemp "$SKILL_DIR/bin/.checksum.XXXXXX")" || return 2
+    if ! curl --proto '=https' --proto-redir '=https' -fSL --retry 2 -o "$checksums" "$base/$asset.sha256"; then
+        echo "ERROR: Checksum unavailable; refusing to install unverified binary." >&2
+        return 2
     fi
-
-    local expected
-    expected=$(awk '{print $1}' "$checksum_file")
-    rm -f "$checksum_file"
-
-    if ! verify_checksum "$tmp_bin" "$expected"; then
-        rm -f "$tmp_bin"
-        return 1
-    fi
-    echo "  Checksum verified."
-
-    mv "$tmp_bin" "$QEDGEN_BIN"
-    chmod +x "$QEDGEN_BIN"
-
-    if "$QEDGEN_BIN" --version &> /dev/null; then
-        return 0
-    fi
-    rm -f "$QEDGEN_BIN"
-    return 1
+    expected="$(awk '{print $1}' "$checksums")"
+    verify_checksum "$staged" "$expected" || return 2
+    echo "Checksum verified."
+    activate_candidate || return 2
 }
 
-# ── Build from source ────────────────────────────────────────────────────
 build_from_source() {
-    if [ ! -f "$SKILL_DIR/Cargo.toml" ] || [ ! -f "$SKILL_DIR/crates/qedgen/Cargo.toml" ]; then
-        echo "  ERROR: A verified release binary is unavailable for ${VERSION}." >&2
-        echo "  This portable skill has no source checkout; retry the release download" >&2
-        echo "  or build from https://github.com/${REPO} at tag ${VERSION}." >&2
-        return 1
-    fi
-    echo "  Building from source..."
-
-    if ! command -v cargo &> /dev/null; then
-        echo ""
-        echo "  ERROR: Rust toolchain not found."
-        echo "  Please install Rust first: https://rustup.rs"
-        echo "  Then re-run this install script."
-        exit 1
-    fi
-
-    cargo build --release --manifest-path "$SKILL_DIR/Cargo.toml"
+    [[ -f "$SKILL_DIR/Cargo.toml" && -f "$SKILL_DIR/crates/qedgen/Cargo.toml" ]] || die \
+        "Verified release unavailable. This portable skill has no source checkout; retry or build ${VERSION} from https://github.com/${REPO}."
+    command -v cargo >/dev/null 2>&1 || die "Rust is required for source builds. Install it yourself from https://rustup.rs and retry."
+    echo "Building ${VERSION} from source..."
+    cargo build --locked --release --manifest-path "$SKILL_DIR/Cargo.toml" --target-dir "$SKILL_DIR/target"
     mkdir -p "$SKILL_DIR/bin"
-    cp "$SKILL_DIR/target/release/qedgen" "$QEDGEN_BIN"
-    chmod +x "$QEDGEN_BIN"
+    cleanup
+    staged="$(mktemp "$SKILL_DIR/bin/.qedgen.XXXXXX")"
+    cp "$SKILL_DIR/target/release/qedgen" "$staged"
+    activate_candidate || die "Source build validation failed."
+    echo "qedgen binary built from source."
 }
 
-# ── Install qedgen binary ───────────────────────────────────────────────
-# The checkout's Cargo.toml is the source of truth for the expected
-# version. A pre-existing bin/qedgen is kept ONLY if it matches $VERSION:
-# a stale binary from an earlier install still runs, but fails on newer
-# specs with errors that look like spec bugs, not version skew.
-existing_version=""
-if [ -f "$QEDGEN_BIN" ] && [ -x "$QEDGEN_BIN" ]; then
-    existing_version="$("$QEDGEN_BIN" --version 2>/dev/null | awk '{print $2}')"
+existing=""
+if [[ -x "$QEDGEN_BIN" ]]; then
+    existing="$("$QEDGEN_BIN" --version 2>/dev/null || true)"
 fi
-
-if [ -n "$existing_version" ] && [ "v$existing_version" = "$VERSION" ]; then
-    echo "✓ Pre-built qedgen binary is current (${VERSION})"
+if [[ "$existing" = "qedgen $version" && "$FROM_SOURCE" = false ]]; then
+    echo "Pre-built qedgen binary is current (${VERSION})."
+elif [[ "$FROM_SOURCE" = true ]]; then
+    build_from_source
 else
-    if [ -n "$existing_version" ]; then
-        echo "Pre-built binary is v${existing_version}; this checkout expects ${VERSION} — refreshing."
+    asset="$(detect_asset_name)" || die "Unsupported platform; use --from-source in a source checkout."
+    if download_binary "$asset"; then
+        echo "Downloaded qedgen binary from release (${VERSION})."
     else
-        echo "Pre-built binary missing or not runnable."
-    fi
-
-    asset_name=$(detect_asset_name 2>/dev/null || true)
-    installed=false
-
-    if [ -n "$asset_name" ]; then
-        echo "  Trying GitHub release for $asset_name..."
-        if download_binary "$asset_name"; then
-            echo "✓ Downloaded qedgen binary from release (${VERSION})"
-            installed=true
-        fi
-    fi
-
-    if [ "$installed" = false ]; then
-        if command -v cargo &> /dev/null; then
-            echo "  Release binary unavailable, falling back to source compilation..."
-            build_from_source
-            echo "✓ qedgen binary built from source"
-        elif [ -n "$existing_version" ]; then
-            # No download, no toolchain: keep the stale binary rather than
-            # leave nothing, but say so loudly (never "✓ compatible").
-            STALE_KEPT=true
-            echo ""
-            echo "  WARNING: could not refresh qedgen — keeping STALE binary v${existing_version},"
-            echo "           but this skill checkout is ${VERSION}. Newer specs may fail with"
-            echo "           confusing parse/validation errors. Install Rust (https://rustup.rs)"
-            echo "           or restore network access, then re-run install.sh."
-            echo ""
-        else
-            # No binary at all — surfaces the rustup instructions and exits.
-            build_from_source
-        fi
+        result=$?
+        [[ "$result" -eq 1 ]] || die "Release validation failed; existing binary preserved."
+        echo "Release binary unavailable; trying this source checkout."
+        build_from_source
     fi
 fi
 
-# ── Put qedgen on PATH so `qedgen ...` works without the bin/ prefix ─────────
-# The skill clones to a harness-specific dir; symlink the binary into a
-# conventional PATH location so SKILL.md's bare `qedgen check` resolves.
-# Idempotent (ln -sf), and we warn with the exact export if the dir isn't
-# already on PATH.
-LINK_DIR="$HOME/.local/bin"
-mkdir -p "$LINK_DIR" 2>/dev/null || true
-if ln -sf "$QEDGEN_BIN" "$LINK_DIR/qedgen" 2>/dev/null; then
-    ON_PATH=false
-    case ":$PATH:" in *":$LINK_DIR:"*) ON_PATH=true ;; esac
-    # Rust/Solana devs almost always have ~/.cargo/bin on PATH too — link there
-    # as well so it resolves even if ~/.local/bin isn't wired up.
-    if [ -d "$HOME/.cargo/bin" ]; then
-        ln -sf "$QEDGEN_BIN" "$HOME/.cargo/bin/qedgen" 2>/dev/null || true
-        case ":$PATH:" in *":$HOME/.cargo/bin:"*) ON_PATH=true ;; esac
+if [[ -n "$LINK_DIR" ]]; then
+    mkdir -p "$LINK_DIR"
+    link="$LINK_DIR/qedgen"
+    # Recheck after installation and never clobber a concurrently created path.
+    if [[ -L "$link" && "$(readlink "$link")" = "$QEDGEN_BIN" ]]; then
+        :
+    elif [[ -e "$link" || -L "$link" ]]; then
+        die "Refusing to replace existing $link"
+    else
+        ln -s "$QEDGEN_BIN" "$link"
     fi
-    PATH_LINKED=true
-else
-    PATH_LINKED=false
+    echo "Linked qedgen into $LINK_DIR (add that directory to PATH if needed)."
 fi
 
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-if [ "${STALE_KEPT:-false}" = true ]; then
-    echo "  qedgen ${VERSION} NOT installed — stale v${existing_version} kept (see warning above)."
-else
-    echo "  qedgen ${VERSION} installed successfully!"
-fi
-echo ""
-if [ "${PATH_LINKED:-false}" = true ] && [ "${ON_PATH:-false}" = true ]; then
-    echo "  qedgen is on your PATH — run \`qedgen --help\` to confirm."
-elif [ "${PATH_LINKED:-false}" = true ]; then
-    echo "  Linked qedgen into $LINK_DIR."
-    echo "  Add it to PATH:  export PATH=\"$LINK_DIR:\$PATH\""
-else
-    echo "  Binary: $QEDGEN_BIN  (add its dir to PATH to call \`qedgen\` directly)"
-fi
-echo ""
-echo "  Next steps:"
-echo "    1. Write a .qedspec for your program (or let your agent generate one)"
-echo "    2. Run: qedgen check --spec my_program.qedspec"
-echo "    3. Run: qedgen codegen --spec my_program.qedspec --all"
-echo ""
-echo "  Lean proofs, Kani harnesses, and API keys (MISTRAL_API_KEY,"
-echo "  ARISTOTLE_API_KEY) are set up automatically when first needed."
-echo "  Run 'qedgen setup' to configure them manually."
-echo ""
-echo "  Workspace: ~/.qedgen/"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "qedgen ${VERSION} installed successfully!"
+echo "Binary: $QEDGEN_BIN"
+echo "Run: $SKILL_DIR/tools/qedgen --help"
+echo "Lean, Kani, Rust, and provider API keys are user-managed prerequisites."
+echo "Optional: qedgen setup [--mathlib] prepares the Lean validation workspace."
