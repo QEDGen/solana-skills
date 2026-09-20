@@ -52,33 +52,62 @@ fi
 
 echo "pinned: $pinned_rev ($repo_url)"
 
-# `gh` carries auth, so it dodges the 60/hour unauthenticated rate limit.
-# Both clients print the response body on an HTTP error and exit nonzero, so
-# capture body and status separately — concatenating a failed gh body with a
-# curl retry produces unparseable JSON.
+# Go through curl so the HTTP status is observable: only a 404 proves the
+# revision is gone. Every other failure is "unreachable" and must not gate a
+# release: a rate limit (403/429), a bad token (401), an outage (5xx), or no
+# network at all. Reading only the response body cannot tell those apart,
+# because a rate-limit body is JSON too, just without a "status" key. That is
+# how a 403 was read as "revision not found" and failed the release gate.
+#
+# A token lifts the 60/hour anonymous cap to 5000. `gh auth token` supplies
+# one in local dev; CI passes GH_TOKEN.
+# Prints the response body, then a final line holding the HTTP status
+# ("000" when the request never completed). `fetch` runs inside a command
+# substitution, so a global assignment would not survive the subshell.
+# Both values have to come back through stdout.
 fetch() {
-    local path="$1" body=""
+    local path="$1" token="" url
+    url="https://api.github.com/repos/$repo_url/$path"
     if command -v gh >/dev/null 2>&1; then
-        if body="$(gh api "repos/$repo_url/$path" 2>/dev/null)"; then
-            printf '%s' "$body"
-            return 0
-        fi
-        # gh reached GitHub and got a real error body (404 on a missing rev).
-        [[ -n "$body" ]] && { printf '%s' "$body"; return 0; }
+        token="$(gh auth token 2>/dev/null || true)"
     fi
-    curl -sS -H "Accept: application/vnd.github+json" \
-        "https://api.github.com/repos/$repo_url/$path" 2>/dev/null
+    [[ -n "$token" ]] || token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+
+    # `curl -sS` without `-f` exits 0 on an HTTP error, so the status line
+    # is written for 403 and 404 alike; `-w` still runs when the transfer
+    # itself fails, reporting "000".
+    if [[ -n "$token" ]]; then
+        curl -sS -w $'\n%{http_code}' \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "Authorization: Bearer $token" \
+            "$url" 2>/dev/null
+    else
+        curl -sS -w $'\n%{http_code}' \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "$url" 2>/dev/null
+    fi
 }
 
-comparison="$(fetch "compare/$pinned_rev...HEAD")"
-if [[ -z "$comparison" ]]; then
-    echo "upstream unreachable — skipping staleness report (not a failure)"
+response="$(fetch "compare/$pinned_rev...HEAD")"
+http_status="${response##*$'\n'}"
+comparison="${response%$'\n'*}"
+[[ "$http_status" =~ ^[0-9]{3}$ ]] || http_status=""
+
+if [[ "$http_status" == "404" ]]; then
+    echo "✗ pinned revision not found upstream — force-push, rebase, or deleted branch"
+    echo "  the git dependency will not resolve; pick a revision that exists"
+    exit 1
+fi
+
+if [[ "$http_status" != "200" || -z "$comparison" ]]; then
+    echo "upstream unreachable (HTTP ${http_status:-none}): skipping staleness report (not a failure)"
     exit 0
 fi
 
-# GitHub's ERROR bodies also carry a "status" key ("404"), so a missing
-# revision would otherwise read as status=404/ahead_by=0 and be reported as
-# "at upstream HEAD". Accept only the documented compare statuses.
+# A 200 whose body is not a comparison means an API change or a truncated
+# response. It is never proof that the revision is gone: 404 covers that.
 read -r status ahead subjects <<<"$(
     printf '%s' "$comparison" | python3 -c '
 import json, sys
@@ -86,11 +115,11 @@ VALID = {"identical", "ahead", "behind", "diverged"}
 try:
     data = json.load(sys.stdin)
 except Exception:
-    print("missing 0 ")
+    print("unreadable 0 ")
     sys.exit(0)
 status = data.get("status")
 if status not in VALID:
-    print("missing 0 ")
+    print("unreadable 0 ")
     sys.exit(0)
 commits = data.get("commits") or []
 subjects = "; ".join(
@@ -100,10 +129,9 @@ print(status, data.get("ahead_by", 0), subjects)
 '
 )"
 
-if [[ "$status" == "missing" ]]; then
-    echo "✗ pinned revision not found upstream — force-push, rebase, or deleted branch"
-    echo "  the git dependency will not resolve; pick a revision that exists"
-    exit 1
+if [[ "$status" == "unreadable" ]]; then
+    echo "upstream comparison unreadable: skipping staleness report (not a failure)"
+    exit 0
 fi
 
 if [[ "${ahead:-0}" -eq 0 ]]; then
