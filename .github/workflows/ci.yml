@@ -79,6 +79,11 @@ jobs:
       # bundled-example baseline (frozen check exit codes + summaries) and
       # the zero-sorry sweep. Expectation table lives in the script.
       - name: Release gate (example baseline + zero-sorry)
+        # The parallax pin check asks the GitHub API whether the pinned
+        # revision still exists. Anonymous requests share the runner's IP
+        # against a 60/hour cap; the token lifts that to 5000.
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           cargo build -p qedgen-solana-skills --bin qedgen
           QEDGEN_BIN=target/debug/qedgen bash scripts/release-gate.sh
@@ -208,10 +213,18 @@ jobs:
 
       # The journey shells out to the built CLI to regenerate the
       # fixture, so build it first.
+      #
+      # Serial (`--test-threads=1`): both tests invoke `cargo build-sbf`,
+      # which installs platform-tools into ~/.cache/solana on first use.
+      # Run in parallel against a cold cache, the two installs race to
+      # unpack the same directory and one loses ("Unable to rename" /
+      # "failed to create .../platform-tools"). A warm cache hid this for
+      # as long as the cache kept being restored; once it expired, the
+      # job failed on every run.
       - name: Runtime signer/init journey
         run: |
           cargo build -p qedgen-solana-skills --bin qedgen
-          cargo test -p qedgen-sandbox --test runtime_journey -- --ignored --nocapture
+          cargo test -p qedgen-sandbox --test runtime_journey -- --ignored --nocapture --test-threads=1
 
       # Lives here rather than in the gate job because it needs the Solana
       # platform tools: it builds an SBF program and RUNS the generated
