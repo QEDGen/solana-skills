@@ -1,5 +1,9 @@
 # Releasing QEDGen
 
+Portable distribution staging and its compatibility gate are documented in
+[skill-distribution.md](skill-distribution.md). Keep root `SKILL.md` in place
+until that gate is satisfied; package staging does not change public installs.
+
 Pre-release checklist. Run before cutting a new release or tag. (Moved out of `CLAUDE.md` so it isn't loaded into every session — it only matters at release time.)
 
 1. **Bump version** in `crates/qedgen/Cargo.toml`, `package.json`, AND `skills/qedgen-auditor/VERSION` — `install.sh` derives its version from Cargo.toml; the `check-version-consistency.sh` CI gate fails the build if the first two drift (v2.28.0 shipped with this exact mismatch; v2.28.1 hotfixed it), and `check-auditor-skill.sh` fails it if the skill VERSION drifts from package.json. After bumping the skill VERSION, sync the installed copy — `bash scripts/sync-auditor-skill.sh .claude/skills/qedgen-auditor` — or the auditor-skill gate fails on the installed-copy diff (#261: every release hit one avoidable failed gate run here). Then run `bash scripts/check-version-consistency.sh && bash scripts/check-auditor-skill.sh` to confirm.
