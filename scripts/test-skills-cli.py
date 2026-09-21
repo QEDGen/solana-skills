@@ -54,6 +54,19 @@ def main():
         run([sys.executable, ROOT / "scripts/package-skills.py", "--output", package])
         inventory = json.loads((package / "distribution.json").read_text())
 
+        # Exercise the repository's real public layout without copying ignored
+        # developer state such as a locally installed skills/qedgen/bin/qedgen.
+        source_under_test = scratch / "source"
+        tracked = run(
+            ["git", "-C", ROOT, "ls-files", "-z", "--", "package.json", "skills"]
+        )
+        for relative in filter(None, tracked.split("\0")):
+            source = ROOT / relative
+            destination = source_under_test / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+        assert not (source_under_test / "skills/qedgen/bin/qedgen").exists()
+
         def installed_files(skill):
             return {
                 path.relative_to(skill).as_posix()
@@ -85,7 +98,6 @@ def main():
 
         project = scratch / "project"
         project.mkdir()
-        source_under_test = ROOT
         listing = skills("add", source_under_test, "--list", cwd=project)
         for name in inventory["skills"]:
             assert name in listing, listing

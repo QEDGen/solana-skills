@@ -171,14 +171,20 @@ def sync_public_skills(root=ROOT):
         stage.mkdir()
         stage_package(stage, root)
         backup_root = Path(tempfile.mkdtemp(prefix=".qedgen-public-backup-", dir=public_root))
-        replaced = []
+        backed_up = []
+        rollback_failed = False
         try:
             for name in PUBLIC_SKILL_NAMES:
                 target = public_root / name
                 backup = backup_root / name
                 target.rename(backup)
+                backed_up.append(name)
+                if (
+                    os.environ.get("QEDGEN_PACKAGE_TESTING") == "1"
+                    and os.environ.get("QEDGEN_TEST_SYNC_FAIL_BEFORE_INSTALL") == name
+                ):
+                    raise ValueError(f"injected sync failure before installing {name}")
                 (stage / "skills" / name).rename(target)
-                replaced.append(name)
                 if (
                     os.environ.get("QEDGEN_PACKAGE_TESTING") == "1"
                     and os.environ.get("QEDGEN_TEST_SYNC_FAIL_AFTER") == name
@@ -190,17 +196,28 @@ def sync_public_skills(root=ROOT):
                 destination = public_root / "qedgen/bin"
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 legacy_bin.rename(destination)
-        except Exception:
-            for name in reversed(replaced):
-                target = public_root / name
-                if target.exists():
-                    shutil.rmtree(target)
-                backup = backup_root / name
-                if backup.exists():
-                    backup.rename(target)
+        except Exception as sync_error:
+            rollback_errors = []
+            for name in reversed(backed_up):
+                try:
+                    target = public_root / name
+                    if target.exists():
+                        shutil.rmtree(target)
+                    backup = backup_root / name
+                    if backup.exists():
+                        backup.rename(target)
+                except Exception as rollback_error:
+                    rollback_errors.append(f"{name}: {rollback_error}")
+            if rollback_errors:
+                rollback_failed = True
+                raise RuntimeError(
+                    f"sync failed ({sync_error}); rollback incomplete; backups retained "
+                    f"at {backup_root}: {'; '.join(rollback_errors)}"
+                ) from sync_error
             raise
         finally:
-            shutil.rmtree(backup_root, ignore_errors=True)
+            if not rollback_failed:
+                shutil.rmtree(backup_root, ignore_errors=True)
     print("Synchronized committed public skill inventory.")
 
 
