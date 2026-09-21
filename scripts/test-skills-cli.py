@@ -107,7 +107,9 @@ def main():
 
         if args.qedgen:
             skill = installed / "qedgen"
-            (skill / "bin").mkdir()
+            # A prior local install may leave the ignored runtime-state
+            # directory behind even after its executable is pruned.
+            (skill / "bin").mkdir(exist_ok=True)
             shutil.copy2(args.qedgen.resolve(), skill / "bin/qedgen")
             wrapper = skill / "tools/qedgen"
             run([wrapper, "--help"], project)
