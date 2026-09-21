@@ -20,7 +20,7 @@
     "rust",
     "smart-contracts"
   ],
-  "main": "SKILL.md",
+  "main": "skills/qedgen/SKILL.md",
   "scripts": {
     "check:versions": "bash scripts/check-version-consistency.sh",
     "check:auditor-skill": "bash scripts/check-auditor-skill.sh",
@@ -39,7 +39,7 @@
   "homepage": "https://github.com/qedgen/solana-skills#readme",
   "agentSkills": {
     "skills": [
-      "SKILL.md",
+      "skills/qedgen/SKILL.md",
       "skills/qedgen-auditor/SKILL.md",
       "skills/qedgen-auditor-bench/SKILL.md"
     ]

@@ -8,7 +8,7 @@ A `.qedspec` is the single source of truth. It can live in one file or span mult
 
 - [llms-full.txt](https://raw.githubusercontent.com/qedgen/solana-skills/main/docs/llms-full.txt): **Start here if you're an agent** — opens with a Quickstart (install + first action), then the full reference (every CLI command, the workflow, the Lean support-library API, proof patterns, and worked examples)
 - [README](https://raw.githubusercontent.com/qedgen/solana-skills/main/README.md): Installation, usage, CLI commands, and requirements
-- [SKILL.md](https://raw.githubusercontent.com/qedgen/solana-skills/main/SKILL.md): Spec-writing workflow, support library API (including sBPF), proof patterns, tactic rules, and error fixes
+- [SKILL.md](https://raw.githubusercontent.com/qedgen/solana-skills/main/skills/qedgen/SKILL.md): Spec-writing workflow, support library API (including sBPF), proof patterns, tactic rules, and error fixes
 - [CLAUDE.md](https://raw.githubusercontent.com/qedgen/solana-skills/main/CLAUDE.md): Build commands, architecture, crate structure, and development guide
 - [references/cli.md](https://raw.githubusercontent.com/qedgen/solana-skills/main/references/cli.md): Full CLI reference for every `qedgen` subcommand
 

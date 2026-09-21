@@ -1,12 +1,12 @@
 # Releasing QEDGen
 
 Portable distribution staging and its compatibility gate are documented in
-[skill-distribution.md](skill-distribution.md). Keep root `SKILL.md` in place
-until that gate is satisfied; package staging does not change public installs.
+[skill-distribution.md](skill-distribution.md). Runtime definitions live under
+`skills/`; the public install command and skill names remain stable.
 
 Pre-release checklist. Run before cutting a new release or tag. (Moved out of `CLAUDE.md` so it isn't loaded into every session — it only matters at release time.)
 
-1. **Bump version** in `crates/qedgen/Cargo.toml`, `package.json`, AND `skills/qedgen-auditor/VERSION` — `install.sh` derives its version from Cargo.toml; the `check-version-consistency.sh` CI gate fails the build if the first two drift (v2.28.0 shipped with this exact mismatch; v2.28.1 hotfixed it), and `check-auditor-skill.sh` fails it if the skill VERSION drifts from package.json. After bumping the skill VERSION, sync the installed copy — `bash scripts/sync-auditor-skill.sh .claude/skills/qedgen-auditor` — or the auditor-skill gate fails on the installed-copy diff (#261: every release hit one avoidable failed gate run here). Then run `bash scripts/check-version-consistency.sh && bash scripts/check-auditor-skill.sh` to confirm.
+1. **Bump version** in `crates/qedgen/Cargo.toml`, `package.json`, AND `skills/qedgen-auditor/VERSION` — `install.sh` derives its version from Cargo.toml; the `check-version-consistency.sh` CI gate fails the build if the first two drift (v2.28.0 shipped with this exact mismatch; v2.28.1 hotfixed it), and `check-auditor-skill.sh` fails it if the skill VERSION drifts from package.json. After bumping the skill VERSION, sync the installed copy — `bash scripts/sync-auditor-skill.sh .claude/skills/qedgen-auditor` — or the auditor-skill gate fails on the installed-copy diff (#261: every release hit one avoidable failed gate run here). Then run `bash scripts/check-version-consistency.sh && bash scripts/check-auditor-skill.sh` to confirm. Whenever an allowlisted canonical QEDGen file changes, run `python3 scripts/package-skills.py --sync` and then `python3 scripts/package-skills.py --check`; commit the regenerated `skills/qedgen/` files in the same change.
 
 1a. **Re-stamp the version-pinned generated artifacts** — codegen stamps `qedgen-macros = { …, tag = "v<version>" }` into every generated `Cargo.toml`, so a version bump drifts BOTH the codegen snapshots AND the committed bundled examples. After bumping, run (rebuild `bin/qedgen` first): `UPDATE_SNAPSHOTS=1 cargo test --test codegen_snapshot` (refresh the 6 codegen fixtures) AND `qedgen check --regen-drift --write` (re-stamp the 8 `examples/rust/*/**/Cargo.toml` pins). Skipping this fails the `Run tests` (codegen_snapshot) + `Check example codegen drift` CI steps — v2.31 hit both in sequence. Verify each diff is *only* the tag line, then `cargo test` / `qedgen check --regen-drift` should be clean.
 
@@ -56,7 +56,7 @@ Pre-release checklist. Run before cutting a new release or tag. (Moved out of `C
 
    The accepted advisories are `paste` and `derivative` (unmaintained Arkworks transitive dependencies), `bincode` and `libsecp256k1` (unmaintained Anza/Solana transitive dependencies), and `rand`'s custom-logger unsoundness (the triggering logger configuration is not used here). License allowlist + registry / git-source policy live in `deny.toml`.
 
-9. **Doc/code drift sweep** — README, SKILL.md, CLAUDE.md, `references/`, `docs/design/`, this file, `docs/prds/RELEASE-v<version>.md`, and module `//!` docstrings all have to match shipped reality. The `check-readme-drift.sh` script only covers top-level command coverage in README; everything else needs an explicit pass. Concretely:
+9. **Doc/code drift sweep** — README, `skills/qedgen/SKILL.md`, CLAUDE.md, `references/`, `docs/design/`, this file, `docs/prds/RELEASE-v<version>.md`, and module `//!` docstrings all have to match shipped reality. The `check-readme-drift.sh` script only covers top-level command coverage in README; everything else needs an explicit pass. Concretely:
    - Every `Subcommand` arm in `crates/qedgen/src/cli.rs` has a section on the matching `references/cli/<group>.md` page, with every flag in its `#[arg]` set documented, and the command appears in the index table in `references/cli.md`. To check a single command against reality, diff its page against `qedgen <command> --help` (both come from the same clap definitions).
    - No `references/`, README, SKILL.md, `.claude/rules/`, or `docs/prds/RELEASE-v<version>.md` page references symbols / files / flags that no longer exist (`grep` for the names of just-removed modules, types, fns, CLI flags).
    - No mention in user-facing docs of features the release doesn't ship (the RELEASE notes are the worst offender — bring the "What's in" list in line with the actual shipped commits).

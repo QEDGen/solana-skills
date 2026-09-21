@@ -6,6 +6,48 @@ The existing repository and skill names remain unchanged:
 npx skills add qedgen/solana-skills
 ```
 
+Fresh installations keep the same command and behavior. The repository now
+stores each runtime skill in its own directory so installing `qedgen` no longer
+copies development-only source, fixtures, examples, or benchmark corpora.
+
+## Upgrade an existing installation
+
+Skills CLI 1.7.0 and newer can follow the `qedgen` skill from its former root
+location to `skills/qedgen/` during an ordinary update. Use the same agent and
+installation scope as the existing installation.
+
+Skills CLI 1.5.9 treats the former root path as deleted during `skills update`.
+Upgrade the Skills CLI, or explicitly re-add the named skill from the same
+project and scope:
+
+```sh
+npx skills add qedgen/solana-skills --skill qedgen
+```
+
+If you invoke the Skills CLI directly, the tested non-interactive equivalent is
+`skills add qedgen/solana-skills --skill qedgen --agent <agent> --yes`.
+
+An update or re-add replaces the installed skill directory. That deliberately
+removes development-only files and also removes the locally installed
+`bin/qedgen`, which is installation state rather than bundled skill content.
+After replacement, enter the installed `qedgen` skill directory and run the
+installer again:
+
+```sh
+bash install.sh
+tools/qedgen --help
+```
+
+The wrapper does not search `PATH`, download a binary, or build from source.
+It only executes `bin/qedgen` inside the installed skill.
+
+The optional Claude Code auditor thinking-budget hook is no longer stored in
+or installed with `qedgen-auditor`. If an older installation enabled that hook,
+remove or disable the old settings entry before replacing the skill. To keep
+using it, install the source adapter into stable user-owned storage by following
+the [auditor hook adapter guide](https://github.com/QEDGen/solana-skills/blob/main/integrations/qedgen-auditor-hooks/README.md)
+from a source checkout. Ordinary skill installation never enables the hook.
+
 From the installed qedgen skill directory, explicitly install its CLI:
 
 ```sh

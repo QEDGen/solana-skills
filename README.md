@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://qedgen.dev">Website</a> &middot;
-  <a href="https://github.com/qedgen/solana-skills/blob/main/SKILL.md">Docs</a> &middot;
+  <a href="https://github.com/qedgen/solana-skills/blob/main/skills/qedgen/SKILL.md">Docs</a> &middot;
   <a href="https://github.com/qedgen/solana-skills/issues">Issues</a>
 </p>
 
@@ -41,7 +41,15 @@ qedgen --help
 `--link-dir` is what makes the bare `qedgen` in every example below resolve;
 make sure that directory is on your `PATH`. Without it the CLI installs only
 into the skill's own `bin/`, and you run it as `tools/qedgen` from the skill
-directory. See [installation and prerequisites](references/installation.md).
+directory. See [installation, upgrades, and prerequisites](skills/qedgen/references/installation.md).
+
+Already installed? Skills CLI 1.7.0 and newer migrates the skill's new runtime
+layout during an ordinary update. With Skills CLI 1.5.9, upgrade the client or
+explicitly re-add it with
+`npx skills add qedgen/solana-skills --skill qedgen`. Either replacement removes
+the locally installed QEDGen binary, so enter the installed `qedgen` skill
+directory and rerun `bash install.sh`. See the linked guide for exact migration
+steps and the optional auditor-hook change.
 
 > Works with Claude Code, Cursor, Windsurf, GitHub Copilot, and any agent supporting the [Agent Skills](https://agentskills.io) spec.
 
