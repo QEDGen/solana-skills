@@ -29,6 +29,129 @@ class DistributionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return self.output
 
+    def run_builder(self, *args, expected=0, env=None):
+        result = subprocess.run(
+            [sys.executable, str(BUILDER), *map(str, args)],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+        return result
+
+    @staticmethod
+    def tree_snapshot(root):
+        return {
+            path.relative_to(root).as_posix(): (
+                hashlib.sha256(path.read_bytes()).hexdigest(),
+                path.stat().st_mode & 0o111,
+            )
+            for path in root.rglob("*")
+            if path.is_file()
+        }
+
+    def test_committed_skill_trees_match_staged_inventory(self):
+        output = self.build()
+        for name in ("qedgen", "qedgen-auditor"):
+            expected = output / "skills" / name
+            actual = ROOT / "skills" / name
+            actual_snapshot = {
+                relative: details
+                for relative, details in self.tree_snapshot(actual).items()
+                if not (name == "qedgen" and Path(relative).parts[:1] == ("bin",))
+            }
+            self.assertEqual(actual_snapshot, self.tree_snapshot(expected))
+
+    def test_root_skill_definition_is_removed(self):
+        self.assertFalse((ROOT / "SKILL.md").exists())
+        self.assertTrue((ROOT / "skills/qedgen/SKILL.md").is_file())
+
+    def test_check_ignores_local_installed_binary(self):
+        local_bin = ROOT / "skills/qedgen/bin/qedgen"
+        local_bin.parent.mkdir(parents=True, exist_ok=True)
+        local_bin.write_text("local runtime state")
+        self.addCleanup(lambda: local_bin.unlink(missing_ok=True))
+        self.run_builder("--check")
+
+    def test_auditor_tree_excludes_optional_development_helpers(self):
+        auditor = ROOT / "skills/qedgen-auditor"
+        self.assertFalse((auditor / "hooks").exists())
+        self.assertFalse((auditor / "scripts/check-knowledge-bases.sh").exists())
+        self.assertFalse((auditor / "references/basis-corpus-registry.txt").exists())
+        self.assertFalse((auditor / "references/basis-legacy-allowlist.txt").exists())
+        self.assertTrue(
+            (ROOT / "integrations/qedgen-auditor-hooks/auditor-thinking-budget.sh").is_file()
+        )
+        self.assertTrue((ROOT / "scripts/check-auditor-knowledge-bases.sh").is_file())
+
+    def test_sync_rolls_back_both_public_trees_on_second_replacement_failure(self):
+        fixture = self.scratch / "sync-root"
+        (fixture / "scripts").mkdir(parents=True)
+        (fixture / "sources").mkdir()
+        (fixture / "crates/qedgen").mkdir(parents=True)
+        for name in ("qedgen", "qedgen-auditor"):
+            skill = fixture / "skills" / name
+            skill.mkdir(parents=True)
+            (skill / "VERSION").write_text("1.2.3\n")
+            (skill / "old-state").write_text(f"old {name}\n")
+            (fixture / "sources" / f"{name}.md").write_text(
+                f"---\nname: {name}\ndescription: fixture\n---\nFixture.\n"
+            )
+        (fixture / "package.json").write_text('{"version":"1.2.3"}\n')
+        (fixture / "crates/qedgen/Cargo.toml").write_text(
+            '[package]\nname = "fixture"\nversion = "1.2.3"\n'
+        )
+        manifest = {
+            "schema_version": 1,
+            "skills": {
+                name: {"SKILL.md": f"sources/{name}.md"}
+                for name in ("qedgen", "qedgen-auditor")
+            },
+        }
+        (fixture / "scripts/skill-distribution.json").write_text(json.dumps(manifest))
+        subprocess.run(["git", "init", "-q"], cwd=fixture, check=True)
+        subprocess.run(["git", "add", "."], cwd=fixture, check=True)
+        subprocess.run(
+            ["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+             "-c", "commit.gpgsign=false", "commit", "-qm", "fixture"],
+            cwd=fixture,
+            check=True,
+        )
+        before = {
+            name: self.tree_snapshot(fixture / "skills" / name)
+            for name in ("qedgen", "qedgen-auditor")
+        }
+        env = dict(
+            os.environ,
+            QEDGEN_PACKAGE_TESTING="1",
+            QEDGEN_TEST_SYNC_FAIL_AFTER="qedgen",
+        )
+        result = self.run_builder("--sync", "--root", fixture, expected=1, env=env)
+        self.assertIn("injected sync failure after qedgen", result.stderr)
+        after = {
+            name: self.tree_snapshot(fixture / "skills" / name)
+            for name in ("qedgen", "qedgen-auditor")
+        }
+        self.assertEqual(after, before)
+
+    def test_root_override_is_rejected_outside_package_tests(self):
+        result = self.run_builder("--check", "--root", ROOT, expected=1)
+        self.assertIn("--root is available only to package tests", result.stderr)
+
+    def test_relocated_knowledge_checker_defaults_and_rejects_missing_input(self):
+        checker = ROOT / "scripts/check-auditor-knowledge-bases.sh"
+        result = subprocess.run(["bash", str(checker)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        missing = self.scratch / "missing-registry.txt"
+        result = subprocess.run(
+            ["bash", str(checker), str(ROOT / "skills/qedgen-auditor"),
+             str(ROOT / "scripts/data/auditor-basis-legacy-allowlist.txt"), str(missing)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("missing knowledge-base input", result.stderr)
+
     def test_inventory_and_integrity(self):
         output = self.build()
         inventory = json.loads((output / "distribution.json").read_text())
@@ -44,7 +167,6 @@ class DistributionTests(unittest.TestCase):
         self.assertEqual((output / "skills/qedgen/VERSION").read_text().strip(),
                          json.loads((ROOT / "package.json").read_text())["version"])
         self.assertTrue(os.access(output / "skills/qedgen/tools/qedgen", os.X_OK))
-        self.assertTrue((ROOT / "SKILL.md").is_file(), "legacy discovery path must survive")
 
     def test_relative_markdown_links_are_self_contained(self):
         output = self.build()

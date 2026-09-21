@@ -300,10 +300,10 @@ cp -R "$repo_root/skills/qedgen-auditor-bench/fixtures/synthetic" \
   { echo "expected a positional output directory to validate" >&2; exit 1; }
 
 # --- knowledge bases: every catalog entry and primer signal is attributable ---
-knowledge_check="$repo_root/skills/qedgen-auditor/scripts/check-knowledge-bases.sh"
+knowledge_check="$repo_root/scripts/check-auditor-knowledge-bases.sh"
 catalog="$repo_root/skills/qedgen-auditor/references/category-catalog.md"
 primer="$repo_root/docs/security-primer.md"
-allowlist="$repo_root/skills/qedgen-auditor/references/basis-legacy-allowlist.txt"
+allowlist="$repo_root/scripts/data/auditor-basis-legacy-allowlist.txt"
 
 awk 'removed || !/^Basis:/ { print; next } { removed = 1 }' "$catalog" \
   > "$tmp/catalog-missing-basis.md"

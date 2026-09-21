@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$HOME/.claude/skills/qedgen-auditor/hooks/auditor-thinking-budget.sh"
+            "command": "$HOME/.local/share/qedgen-auditor-hooks/auditor-thinking-budget.sh"
           }
         ]
       }

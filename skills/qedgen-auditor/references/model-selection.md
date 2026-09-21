@@ -22,8 +22,11 @@ the exact model identifier and reasoning setting in every benchmark result.
 As of July 2026:
 
 - Default audit worker: Claude Fable 5 (`claude-fable-5`) with extended
-  thinking at the highest available budget. On Claude Code the bundled
-  `hooks/` adapter lifts the budget automatically on audit-trigger phrases.
+  thinking at the highest available budget. A separately obtained optional
+  Claude Code adapter can lift the budget on audit-trigger phrases, but normal
+  skill installation neither includes nor enables it. Its source and manual
+  setup guide live in the repository's
+  [optional auditor integration](https://github.com/QEDGen/solana-skills/tree/main/integrations/qedgen-auditor-hooks).
 - Fallback audit worker: Claude Opus 4.8 (`claude-opus-4-8`) with extended
   thinking when Fable 5 is unavailable.
 - Reconciliation judge: Claude Sonnet 5 (`claude-sonnet-5`) with structured

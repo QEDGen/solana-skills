@@ -16,8 +16,9 @@ setup required.
 The trust-surface, authority, lifecycle, and intent-drift passes require
 sustained reasoning across handlers and dependencies. When the venue exposes a
 reasoning-depth control, use its high-reasoning setting. The portable skill does
-not require a particular model or venue. Optional venue adapters may live under
-`hooks/`, but the audit workflow must remain complete without them.
+not require a particular model or venue. Optional venue adapters are separate
+integrations, not installed skill resources; the audit workflow must remain
+complete without them.
 
 ## When to use
 

@@ -2,7 +2,7 @@
   "schema_version": 1,
   "skills": {
     "qedgen": {
-      "SKILL.md": "SKILL.md",
+      "SKILL.md": "skills/qedgen/SKILL.md",
       "install.sh": "install.sh",
       "tools/qedgen": "tools/qedgen",
       "LICENSE": "LICENSE",
