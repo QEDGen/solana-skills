@@ -116,6 +116,32 @@ class DistributionTests(unittest.TestCase):
             before,
         )
 
+    def test_check_rejects_unexpected_runtime_bin_file(self):
+        fixture = self.make_sync_fixture("unexpected-bin-root")
+        env = dict(os.environ, QEDGEN_PACKAGE_TESTING="1")
+        self.run_builder("--sync", "--root", fixture, env=env)
+        extra = fixture / "skills/qedgen/bin/extra-state"
+        extra.parent.mkdir(parents=True, exist_ok=True)
+        extra.write_text("must not be retained")
+        result = self.run_builder("--check", "--root", fixture, expected=1, env=env)
+        self.assertIn("extra-state", result.stderr)
+
+    def test_sync_preserves_known_runtime_files_only(self):
+        fixture = self.make_sync_fixture("runtime-state-root")
+        env = dict(os.environ, QEDGEN_PACKAGE_TESTING="1")
+        self.run_builder("--sync", "--root", fixture, env=env)
+        binary = fixture / "skills/qedgen/bin/qedgen"
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        binary.write_text("local runtime state")
+        temporary = fixture / "skills/qedgen/bin/.qedgen.abc123"
+        temporary.write_text("interrupted installer state")
+        extra = fixture / "skills/qedgen/bin/extra-state"
+        extra.write_text("must not be retained")
+        self.run_builder("--sync", "--root", fixture, env=env)
+        self.assertEqual(binary.read_text(), "local runtime state")
+        self.assertEqual(temporary.read_text(), "interrupted installer state")
+        self.assertFalse(extra.exists())
+
     def test_auditor_tree_excludes_optional_development_helpers(self):
         auditor = ROOT / "skills/qedgen-auditor"
         self.assertFalse((auditor / "hooks").exists())

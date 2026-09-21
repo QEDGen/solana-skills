@@ -13,6 +13,8 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
 PUBLIC_SKILL_NAMES = ("qedgen", "qedgen-auditor")
+RUNTIME_BIN = PurePosixPath("bin/qedgen")
+RUNTIME_TEMP_RE = re.compile(r"^\.(?:qedgen|checksum)\.[A-Za-z0-9]+$")
 
 
 def relative_path(value):
@@ -20,6 +22,17 @@ def relative_path(value):
     if not value or path.is_absolute() or ".." in path.parts or "\\" in value:
         raise ValueError(f"unsafe manifest path: {value!r}")
     return path
+
+
+def is_runtime_state(relative):
+    relative = PurePosixPath(relative)
+    if relative == RUNTIME_BIN:
+        return True
+    return (
+        len(relative.parts) == 2
+        and relative.parts[0] == "bin"
+        and bool(RUNTIME_TEMP_RE.fullmatch(relative.parts[1]))
+    )
 
 
 def validate_links(skill):
@@ -41,7 +54,7 @@ def file_snapshot(root, ignore_runtime_bin=False):
         if not path.is_file():
             continue
         relative = path.relative_to(root)
-        if ignore_runtime_bin and relative.parts[:1] == ("bin",):
+        if ignore_runtime_bin and is_runtime_state(relative):
             continue
         result[relative.as_posix()] = (
             hashlib.sha256(path.read_bytes()).hexdigest(),
@@ -194,8 +207,11 @@ def sync_public_skills(root=ROOT):
             legacy_bin = backup_root / "qedgen/bin"
             if legacy_bin.exists():
                 destination = public_root / "qedgen/bin"
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                legacy_bin.rename(destination)
+                destination.mkdir(parents=True, exist_ok=True)
+                for path in legacy_bin.iterdir():
+                    relative = PurePosixPath("bin") / path.name
+                    if is_runtime_state(relative):
+                        path.rename(destination / path.name)
         except Exception as sync_error:
             rollback_errors = []
             for name in reversed(backed_up):
