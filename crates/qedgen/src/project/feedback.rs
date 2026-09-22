@@ -26,7 +26,6 @@ pub struct FeedbackContext {
     pub qedgen_version: &'static str,
     pub os: String,
     pub arch: String,
-    pub cwd: PathBuf,
     pub runtime: Option<String>,
     pub spec_path: Option<PathBuf>,
     pub spec_excerpt: Option<String>,
@@ -57,6 +56,7 @@ pub fn run(
     let resolved_title = title
         .map(str::to_string)
         .unwrap_or_else(|| default_title(&ctx));
+    let resolved_title = sanitize_title(&resolved_title);
     let body = render_markdown(&ctx);
 
     if dry_run {
@@ -70,7 +70,7 @@ pub fn run(
 
     preview(&resolved_title, &body);
 
-    if !yes && !confirm_remote_submit()? {
+    if !yes && !confirm_remote_submit(&saved)? {
         eprintln!(
             "Skipping remote submission. The local artifact at {} can be \
              attached to an issue manually.",
@@ -79,15 +79,17 @@ pub fn run(
         return Ok(());
     }
 
+    let (approved_title, approved_body) =
+        load_local_artifact(&saved).context("reload the reviewed feedback draft")?;
     let repo = resolve_repo();
-    match submit_via_gh(&repo, &resolved_title, &body) {
+    match submit_via_gh(&repo, &approved_title, &approved_body) {
         Ok(url) => {
             println!("Filed: {url}");
             Ok(())
         }
         Err(gh_err) => {
             eprintln!("gh CLI unavailable or failed: {gh_err}");
-            let url = build_url_fallback(&repo, &resolved_title, &body);
+            let url = build_url_fallback(&repo, &approved_title, &approved_body);
             println!("Pre-filled issue URL:\n{url}");
             if !no_open {
                 let _ = open_in_browser(&url);
@@ -105,7 +107,7 @@ pub fn capture_last_error(workdir: &Path, command: &str, error: &anyhow::Error) 
     fs::create_dir_all(&dir).ok();
 
     let now = chrono_like_timestamp();
-    let stderr = format!("{error:#}");
+    let stderr = redact_sensitive(&format!("{error:#}"));
 
     let log = dir.join("last-error.log");
     let body = format!(
@@ -128,19 +130,22 @@ pub fn capture_last_error(workdir: &Path, command: &str, error: &anyhow::Error) 
 
 fn collect(cwd: &Path, spec_path: Option<&Path>, note: Option<&str>) -> Result<FeedbackContext> {
     let runtime = detect_runtime_label(cwd);
-    let last_error = read_last_error(cwd);
+    let last_error = read_last_error(cwd).map(|mut error| {
+        error.stderr = redact_sensitive(&error.stderr);
+        error
+    });
     let (resolved_spec, excerpt) = resolve_spec_excerpt(cwd, spec_path, last_error.as_ref());
+    let excerpt = excerpt.map(|value| redact_sensitive(&value));
 
     Ok(FeedbackContext {
         qedgen_version: env!("CARGO_PKG_VERSION"),
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
-        cwd: cwd.to_path_buf(),
         runtime,
         spec_path: resolved_spec,
         spec_excerpt: excerpt,
         last_error,
-        user_note: note.map(str::to_string),
+        user_note: note.map(redact_sensitive),
     })
 }
 
@@ -293,7 +298,7 @@ fn render_markdown(ctx: &FeedbackContext) -> String {
         "- runtime: `{}`\n",
         ctx.runtime.as_deref().unwrap_or("not-detected")
     ));
-    out.push_str(&format!("- cwd: `{}`\n\n", ctx.cwd.display()));
+    out.push('\n');
 
     if let Some(err) = &ctx.last_error {
         out.push_str("## Last error\n\n");
@@ -310,8 +315,10 @@ fn render_markdown(ctx: &FeedbackContext) -> String {
         let path_label = ctx
             .spec_path
             .as_ref()
-            .map(|p| p.display().to_string())
+            .and_then(|p| p.file_name())
+            .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|| ".qedspec".to_string());
+        let path_label = sanitize_title(&path_label);
         out.push_str(&format!("## Spec excerpt (`{}`)\n\n", path_label));
         out.push_str("```\n");
         out.push_str(truncate(excerpt, 3000));
@@ -319,7 +326,7 @@ fn render_markdown(ctx: &FeedbackContext) -> String {
     }
 
     out.push_str("---\n");
-    out.push_str("_Filed via `qedgen feedback`. The spec excerpt above is the section nearest to the failure; full spec withheld by default. Add `--include-spec`-equivalent context here if helpful._\n");
+    out.push_str("_Filed via `qedgen feedback`. Known secret patterns are redacted heuristically; review the local draft before submitting. The spec excerpt above is the section nearest to the failure; the full spec is withheld by default._\n");
     out
 }
 
@@ -348,16 +355,57 @@ fn truncate(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
+fn sanitize_title(title: &str) -> String {
+    redact_sensitive(title)
+        .replace(['\r', '\n'], " ")
+        .trim()
+        .to_string()
+}
+
+fn redact_sensitive(input: &str) -> String {
+    let patterns = [
+        r"(?s)-----BEGIN [^-\n]+-----.*?(?:-----END [^-\n]+-----|$)",
+        r"\b(?:gh[pousr]_[A-Za-z0-9_]{10,}|github_pat_[A-Za-z0-9_]{10,})\b",
+        r"\b(?:sk|xox[baprs])-[A-Za-z0-9_-]{10,}\b",
+        r"\bAKIA[0-9A-Z]{16}\b",
+        r"(?i)\b[A-Za-z0-9_-]*(?:password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token|private[_-]?key)[A-Za-z0-9_-]*\s*[:=]\s*[^\s,;]+",
+        r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{12,}",
+    ];
+    patterns.iter().fold(input.to_string(), |value, pattern| {
+        regex::Regex::new(pattern)
+            .expect("feedback redaction pattern is valid")
+            .replace_all(&value, "[REDACTED]")
+            .into_owned()
+    })
+}
+
 fn save_local_artifact(cwd: &Path, title: &str, body: &str) -> Result<PathBuf> {
     let dir = cwd.join(".qed").join("feedback");
     fs::create_dir_all(&dir).context("create .qed/feedback")?;
     let stamp = chrono_like_timestamp().replace(':', "-");
     let path = dir.join(format!("{stamp}.md"));
     let mut f = fs::File::create(&path)?;
-    writeln!(f, "# {title}")?;
+    writeln!(f, "# {}", sanitize_title(title))?;
     writeln!(f)?;
-    f.write_all(body.as_bytes())?;
+    f.write_all(redact_sensitive(body).as_bytes())?;
     Ok(path)
+}
+
+fn load_local_artifact(path: &Path) -> Result<(String, String)> {
+    let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let (title_line, body) = text
+        .split_once("\n\n")
+        .ok_or_else(|| anyhow!("feedback draft is missing its title/body separator"))?;
+    let title = title_line
+        .strip_prefix("# ")
+        .ok_or_else(|| anyhow!("feedback draft must begin with '# <title>'"))?;
+    let title = sanitize_title(title);
+    let body = redact_sensitive(body);
+    let normalized = format!("# {title}\n\n{body}");
+    if normalized != text {
+        fs::write(path, normalized).with_context(|| format!("sanitize {}", path.display()))?;
+    }
+    Ok((title, body))
 }
 
 fn preview(title: &str, body: &str) {
@@ -365,16 +413,16 @@ fn preview(title: &str, body: &str) {
     eprintln!("------ Issue preview ------");
     eprintln!("Title: {title}");
     eprintln!();
-    eprintln!("{}", truncate(body, 2000));
-    if body.len() > 2000 {
-        eprintln!("...(truncated for preview; full body in local artifact)");
-    }
+    eprintln!("{}", body);
     eprintln!("---------------------------");
 }
 
-fn confirm_remote_submit() -> Result<bool> {
+fn confirm_remote_submit(draft: &Path) -> Result<bool> {
     use std::io::{stdin, BufRead, IsTerminal};
-    eprint!("File this as a public GitHub issue? [y/N] ");
+    eprint!(
+        "Review or edit {} then file this as a public GitHub issue? [y/N] ",
+        draft.display()
+    );
     std::io::stderr().flush().ok();
 
     // Non-interactive shells default to "no" — pipelines and CI should
@@ -503,7 +551,6 @@ mod tests {
             qedgen_version: "2.23.0",
             os: "macos".into(),
             arch: "aarch64".into(),
-            cwd: PathBuf::from("/tmp/proj"),
             runtime: Some("Anchor".into()),
             spec_path: None,
             spec_excerpt: None,
@@ -522,16 +569,34 @@ mod tests {
     }
 
     #[test]
+    fn render_markdown_omits_absolute_workstation_path() {
+        let ctx = FeedbackContext {
+            qedgen_version: "2.23.0",
+            os: "macos".into(),
+            arch: "aarch64".into(),
+            runtime: None,
+            spec_path: None,
+            spec_excerpt: None,
+            last_error: None,
+            user_note: Some("something failed".into()),
+        };
+        let body = render_markdown(&ctx);
+        assert!(!body.contains("/Users/alice/private-project"));
+    }
+
+    #[test]
     fn capture_last_error_writes_log_and_json() {
         let tmp = tempdir().unwrap();
-        let err = anyhow!("boom");
+        let err = anyhow!("boom; password=top-secret");
         capture_last_error(tmp.path(), "check", &err).unwrap();
         let log = fs::read_to_string(tmp.path().join(".qed").join("last-error.log")).unwrap();
         assert!(log.contains("command: qedgen check"));
         assert!(log.contains("boom"));
+        assert!(!log.contains("top-secret"));
         let json = fs::read_to_string(tmp.path().join(".qed").join("last-error.json")).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["command"], "check");
+        assert!(!json.contains("top-secret"));
     }
 
     #[test]
@@ -576,7 +641,6 @@ mod tests {
             qedgen_version: "2.23.0",
             os: "linux".into(),
             arch: "x86_64".into(),
-            cwd: PathBuf::from("."),
             runtime: None,
             spec_path: None,
             spec_excerpt: None,
@@ -590,5 +654,58 @@ mod tests {
         let title = default_title(&ctx);
         assert!(title.contains("codegen failed"));
         assert!(title.contains("2.23.0"));
+    }
+
+    #[test]
+    fn redact_sensitive_masks_tokens_keys_and_secret_assignments() {
+        let raw = "ghp_1234567890abcdef sk-live-1234567890 AKIA1234567890ABCDEF \
+                   password=top-secret api_key: abc123 AWS_SECRET_ACCESS_KEY=aws-secret \
+                   Bearer abcdefghijklmnop -----BEGIN PRIVATE KEY-----";
+        let redacted = redact_sensitive(raw);
+        assert!(!redacted.contains("ghp_1234567890abcdef"));
+        assert!(!redacted.contains("sk-live-1234567890"));
+        assert!(!redacted.contains("AKIA1234567890ABCDEF"));
+        assert!(!redacted.contains("top-secret"));
+        assert!(!redacted.contains("abc123"));
+        assert!(!redacted.contains("aws-secret"));
+        assert!(!redacted.contains("abcdefghijklmnop"));
+        assert!(!redacted.contains("BEGIN PRIVATE KEY"));
+        assert!(redacted.matches("[REDACTED]").count() >= 5);
+    }
+
+    #[test]
+    fn load_local_artifact_returns_the_edited_title_and_body() {
+        let tmp = tempdir().unwrap();
+        let path = save_local_artifact(tmp.path(), "Original title", "Original body").unwrap();
+        fs::write(&path, "# Edited title\n\nEdited body\n").unwrap();
+        let (title, body) = load_local_artifact(&path).unwrap();
+        assert_eq!(title, "Edited title");
+        assert_eq!(body, "Edited body\n");
+    }
+
+    #[test]
+    fn saved_artifact_is_redacted_before_persistence() {
+        let tmp = tempdir().unwrap();
+        let path = save_local_artifact(
+            tmp.path(),
+            "password=title-secret",
+            "stderr: api_key=body-secret",
+        )
+        .unwrap();
+        let text = fs::read_to_string(path).unwrap();
+        assert!(!text.contains("title-secret"));
+        assert!(!text.contains("body-secret"));
+    }
+
+    #[test]
+    fn edited_draft_drives_url_fallback_payload() {
+        let tmp = tempdir().unwrap();
+        let path = save_local_artifact(tmp.path(), "Original", "Original body").unwrap();
+        fs::write(&path, "# Edited\n\nEdited body").unwrap();
+        let (title, body) = load_local_artifact(&path).unwrap();
+        let url = build_url_fallback("owner/repo", &title, &body);
+        assert!(url.contains("Edited"));
+        assert!(url.contains("Edited%20body"));
+        assert!(!url.contains("Original%20body"));
     }
 }

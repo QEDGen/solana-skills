@@ -1291,11 +1291,12 @@ pub(crate) enum Commands {
     ///
     /// Bundles qedgen version, OS/arch, detected runtime, the most recent
     /// command's stderr (from `.qed/last-error.log`), and the relevant
-    /// `.qedspec` excerpt into a Markdown body. Writes a local copy to
-    /// `.qed/feedback/<timestamp>.md`, previews the issue, asks for
-    /// confirmation, then files via `gh issue create` (falling back to a
-    /// pre-filled GitHub URL if `gh` is unavailable). Override the target
-    /// repo with `QEDGEN_FEEDBACK_REPO=owner/repo`.
+    /// `.qedspec` excerpt into a heuristically redacted Markdown draft.
+    /// Writes a local copy to `.qed/feedback/<timestamp>.md`, previews the
+    /// complete draft, asks for confirmation, reloads the reviewed draft,
+    /// then files via `gh issue create` (falling back to a pre-filled GitHub
+    /// URL if `gh` is unavailable). Override the target repo with
+    /// `QEDGEN_FEEDBACK_REPO=owner/repo`.
     Feedback {
         /// Free-form description of what happened. Appears at the top of
         /// the issue body. Helpful but not required — defaults to a
