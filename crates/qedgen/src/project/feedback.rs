@@ -15,10 +15,11 @@ use std::process::Command;
 /// (forks, internal mirrors).
 const DEFAULT_FEEDBACK_REPO: &str = "QEDGen/solana-skills";
 
-/// Cap on the GitHub web-URL fallback: the actual limit is ~8 KB; margin
-/// covers title + query keys + percent expansion. Bodies past this truncate
-/// with a marker.
-const URL_BODY_BUDGET: usize = 6500;
+/// Cap on the complete GitHub web-URL fallback. Titles and bodies are
+/// percent-encoded within this budget so user-controlled input cannot make
+/// the fallback unusable.
+const URL_FALLBACK_BUDGET: usize = 8000;
+const URL_TITLE_BUDGET: usize = 1024;
 
 /// What the user typed plus what we found on disk. Plain data — rendering
 /// and submission are separate so `--dry-run` never touches the network.
@@ -26,7 +27,6 @@ pub struct FeedbackContext {
     pub qedgen_version: &'static str,
     pub os: String,
     pub arch: String,
-    pub cwd: PathBuf,
     pub runtime: Option<String>,
     pub spec_path: Option<PathBuf>,
     pub spec_excerpt: Option<String>,
@@ -57,6 +57,7 @@ pub fn run(
     let resolved_title = title
         .map(str::to_string)
         .unwrap_or_else(|| default_title(&ctx));
+    let resolved_title = sanitize_title(&resolved_title);
     let body = render_markdown(&ctx);
 
     if dry_run {
@@ -70,7 +71,7 @@ pub fn run(
 
     preview(&resolved_title, &body);
 
-    if !yes && !confirm_remote_submit()? {
+    if !yes && !confirm_remote_submit(&saved)? {
         eprintln!(
             "Skipping remote submission. The local artifact at {} can be \
              attached to an issue manually.",
@@ -79,15 +80,17 @@ pub fn run(
         return Ok(());
     }
 
+    let (approved_title, approved_body) =
+        load_local_artifact(&saved).context("reload the reviewed feedback draft")?;
     let repo = resolve_repo();
-    match submit_via_gh(&repo, &resolved_title, &body) {
+    match submit_via_gh(&repo, &approved_title, &approved_body) {
         Ok(url) => {
             println!("Filed: {url}");
             Ok(())
         }
         Err(gh_err) => {
             eprintln!("gh CLI unavailable or failed: {gh_err}");
-            let url = build_url_fallback(&repo, &resolved_title, &body);
+            let url = build_url_fallback(&repo, &approved_title, &approved_body)?;
             println!("Pre-filled issue URL:\n{url}");
             if !no_open {
                 let _ = open_in_browser(&url);
@@ -105,7 +108,7 @@ pub fn capture_last_error(workdir: &Path, command: &str, error: &anyhow::Error) 
     fs::create_dir_all(&dir).ok();
 
     let now = chrono_like_timestamp();
-    let stderr = format!("{error:#}");
+    let stderr = redact_sensitive(&format!("{error:#}"));
 
     let log = dir.join("last-error.log");
     let body = format!(
@@ -128,19 +131,21 @@ pub fn capture_last_error(workdir: &Path, command: &str, error: &anyhow::Error) 
 
 fn collect(cwd: &Path, spec_path: Option<&Path>, note: Option<&str>) -> Result<FeedbackContext> {
     let runtime = detect_runtime_label(cwd);
-    let last_error = read_last_error(cwd);
+    let last_error = read_last_error(cwd).map(|mut error| {
+        error.stderr = redact_sensitive(&error.stderr);
+        error
+    });
     let (resolved_spec, excerpt) = resolve_spec_excerpt(cwd, spec_path, last_error.as_ref());
 
     Ok(FeedbackContext {
         qedgen_version: env!("CARGO_PKG_VERSION"),
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
-        cwd: cwd.to_path_buf(),
         runtime,
         spec_path: resolved_spec,
         spec_excerpt: excerpt,
         last_error,
-        user_note: note.map(str::to_string),
+        user_note: note.map(redact_sensitive),
     })
 }
 
@@ -204,6 +209,9 @@ fn resolve_spec_excerpt(
         Ok(t) => t,
         Err(_) => return (Some(p), None),
     };
+    // Redact the complete document first so a line-window cannot drop a PEM
+    // header and expose the remaining key material.
+    let text = redact_sensitive(&text);
     let excerpt = excerpt_relevant(&text, last_error);
     (Some(p), Some(excerpt))
 }
@@ -293,7 +301,7 @@ fn render_markdown(ctx: &FeedbackContext) -> String {
         "- runtime: `{}`\n",
         ctx.runtime.as_deref().unwrap_or("not-detected")
     ));
-    out.push_str(&format!("- cwd: `{}`\n\n", ctx.cwd.display()));
+    out.push('\n');
 
     if let Some(err) = &ctx.last_error {
         out.push_str("## Last error\n\n");
@@ -310,8 +318,10 @@ fn render_markdown(ctx: &FeedbackContext) -> String {
         let path_label = ctx
             .spec_path
             .as_ref()
-            .map(|p| p.display().to_string())
+            .and_then(|p| p.file_name())
+            .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|| ".qedspec".to_string());
+        let path_label = sanitize_title(&path_label);
         out.push_str(&format!("## Spec excerpt (`{}`)\n\n", path_label));
         out.push_str("```\n");
         out.push_str(truncate(excerpt, 3000));
@@ -319,7 +329,7 @@ fn render_markdown(ctx: &FeedbackContext) -> String {
     }
 
     out.push_str("---\n");
-    out.push_str("_Filed via `qedgen feedback`. The spec excerpt above is the section nearest to the failure; full spec withheld by default. Add `--include-spec`-equivalent context here if helpful._\n");
+    out.push_str("_Filed via `qedgen feedback`. Known secret patterns are redacted heuristically; review the local draft before submitting. The spec excerpt above is the section nearest to the failure; the full spec is withheld by default._\n");
     out
 }
 
@@ -348,16 +358,61 @@ fn truncate(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
+fn sanitize_title(title: &str) -> String {
+    redact_sensitive(title)
+        .replace(['\r', '\n'], " ")
+        .trim()
+        .to_string()
+}
+
+fn redact_sensitive(input: &str) -> String {
+    let patterns = [
+        r"(?s)-----BEGIN [^-\n]+-----.*?(?:-----END [^-\n]+-----|$)",
+        r"\b(?:gh[pousr]_[A-Za-z0-9_]{10,}|github_pat_[A-Za-z0-9_]{10,})\b",
+        r"\b(?:sk|xox[baprs])-[A-Za-z0-9_-]{10,}\b",
+        r"\bAKIA[0-9A-Z]{16}\b",
+        r#"(?i)(?:["']?\b[A-Za-z0-9_-]*(?:password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token|private[_-]?key)[A-Za-z0-9_-]*\b["']?)\s*[:=]\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\[[^\]]*\]|[^,;\r\n]+)"#,
+        r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{12,}",
+    ];
+    patterns.iter().fold(input.to_string(), |value, pattern| {
+        let re = regex::Regex::new(pattern).expect("feedback redaction pattern is valid");
+        re.replace_all(&value, |caps: &regex::Captures<'_>| {
+            let newlines = caps[0].bytes().filter(|b| *b == b'\n').count();
+            format!("[REDACTED]{}", "\n".repeat(newlines))
+        })
+        .into_owned()
+    })
+}
+
 fn save_local_artifact(cwd: &Path, title: &str, body: &str) -> Result<PathBuf> {
     let dir = cwd.join(".qed").join("feedback");
     fs::create_dir_all(&dir).context("create .qed/feedback")?;
     let stamp = chrono_like_timestamp().replace(':', "-");
     let path = dir.join(format!("{stamp}.md"));
     let mut f = fs::File::create(&path)?;
-    writeln!(f, "# {title}")?;
+    writeln!(f, "# {}", sanitize_title(title))?;
     writeln!(f)?;
-    f.write_all(body.as_bytes())?;
+    f.write_all(redact_sensitive(body).as_bytes())?;
     Ok(path)
+}
+
+fn load_local_artifact(path: &Path) -> Result<(String, String)> {
+    let text = fs::read_to_string(path)
+        .with_context(|| format!("read {}", path.display()))?
+        .replace("\r\n", "\n");
+    let (title_line, body) = text
+        .split_once("\n\n")
+        .ok_or_else(|| anyhow!("feedback draft is missing its title/body separator"))?;
+    let title = title_line
+        .strip_prefix("# ")
+        .ok_or_else(|| anyhow!("feedback draft must begin with '# <title>'"))?;
+    let title = sanitize_title(title);
+    let body = redact_sensitive(body);
+    let normalized = format!("# {title}\n\n{body}");
+    if normalized != text {
+        fs::write(path, normalized).with_context(|| format!("sanitize {}", path.display()))?;
+    }
+    Ok((title, body))
 }
 
 fn preview(title: &str, body: &str) {
@@ -365,16 +420,16 @@ fn preview(title: &str, body: &str) {
     eprintln!("------ Issue preview ------");
     eprintln!("Title: {title}");
     eprintln!();
-    eprintln!("{}", truncate(body, 2000));
-    if body.len() > 2000 {
-        eprintln!("...(truncated for preview; full body in local artifact)");
-    }
+    eprintln!("{}", body);
     eprintln!("---------------------------");
 }
 
-fn confirm_remote_submit() -> Result<bool> {
+fn confirm_remote_submit(draft: &Path) -> Result<bool> {
     use std::io::{stdin, BufRead, IsTerminal};
-    eprint!("File this as a public GitHub issue? [y/N] ");
+    eprint!(
+        "Review or edit {} then file this as a public GitHub issue? [y/N] ",
+        draft.display()
+    );
     std::io::stderr().flush().ok();
 
     // Non-interactive shells default to "no" — pipelines and CI should
@@ -418,17 +473,54 @@ fn submit_via_gh(repo: &str, title: &str, body: &str) -> Result<String> {
     Ok(url)
 }
 
-fn build_url_fallback(repo: &str, title: &str, body: &str) -> String {
-    let truncated = truncate(body, URL_BODY_BUDGET);
-    let suffix = if body.len() > URL_BODY_BUDGET {
-        "\n\n_(body truncated for URL — see local .qed/feedback/ for full version)_"
-    } else {
-        ""
-    };
+fn build_url_fallback(repo: &str, title: &str, body: &str) -> Result<String> {
+    let prefix = format!("https://github.com/{repo}/issues/new?title=");
+    let body_key = "&body=";
+    let query_budget = URL_FALLBACK_BUDGET
+        .checked_sub(prefix.len() + body_key.len())
+        .filter(|remaining| *remaining > 0)
+        .ok_or_else(|| anyhow!("feedback repository is too long for the URL fallback"))?;
+
+    let title_budget = query_budget.min(URL_TITLE_BUDGET);
+    let title_encoded = percent_encode_with_budget(title, title_budget, "…");
+    let body_budget = query_budget - title_encoded.len();
+    let body_encoded = percent_encode_with_budget(
+        body,
+        body_budget,
+        "\n\n_(body truncated for URL — see local .qed/feedback/ for full version)_",
+    );
+    let url = format!("{prefix}{title_encoded}{body_key}{body_encoded}");
+    debug_assert!(url.len() <= URL_FALLBACK_BUDGET);
+    Ok(url)
+}
+
+fn percent_encode_with_budget(value: &str, budget: usize, suffix: &str) -> String {
+    let encoded = percent_encode(value);
+    if encoded.len() <= budget {
+        return encoded;
+    }
+
+    let encoded_suffix = percent_encode(suffix);
+    if encoded_suffix.len() > budget {
+        return String::new();
+    }
+
+    let mut boundaries: Vec<usize> = value.char_indices().map(|(i, _)| i).collect();
+    boundaries.push(value.len());
+    let mut lo = 0usize;
+    let mut hi = boundaries.len() - 1;
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        let end = boundaries[mid];
+        if percent_encode(&value[..end]).len() + encoded_suffix.len() <= budget {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
     format!(
-        "https://github.com/{repo}/issues/new?title={}&body={}",
-        percent_encode(title),
-        percent_encode(&format!("{truncated}{suffix}")),
+        "{}{encoded_suffix}",
+        percent_encode(&value[..boundaries[lo]])
     )
 }
 
@@ -503,7 +595,6 @@ mod tests {
             qedgen_version: "2.23.0",
             os: "macos".into(),
             arch: "aarch64".into(),
-            cwd: PathBuf::from("/tmp/proj"),
             runtime: Some("Anchor".into()),
             spec_path: None,
             spec_excerpt: None,
@@ -522,16 +613,34 @@ mod tests {
     }
 
     #[test]
+    fn render_markdown_omits_absolute_workstation_path() {
+        let ctx = FeedbackContext {
+            qedgen_version: "2.23.0",
+            os: "macos".into(),
+            arch: "aarch64".into(),
+            runtime: None,
+            spec_path: None,
+            spec_excerpt: None,
+            last_error: None,
+            user_note: Some("something failed".into()),
+        };
+        let body = render_markdown(&ctx);
+        assert!(!body.contains("/Users/alice/private-project"));
+    }
+
+    #[test]
     fn capture_last_error_writes_log_and_json() {
         let tmp = tempdir().unwrap();
-        let err = anyhow!("boom");
+        let err = anyhow!("boom; password=top-secret");
         capture_last_error(tmp.path(), "check", &err).unwrap();
         let log = fs::read_to_string(tmp.path().join(".qed").join("last-error.log")).unwrap();
         assert!(log.contains("command: qedgen check"));
         assert!(log.contains("boom"));
+        assert!(!log.contains("top-secret"));
         let json = fs::read_to_string(tmp.path().join(".qed").join("last-error.json")).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["command"], "check");
+        assert!(!json.contains("top-secret"));
     }
 
     #[test]
@@ -564,10 +673,30 @@ mod tests {
     #[test]
     fn url_fallback_encodes_and_caps() {
         let huge = "x".repeat(20_000);
-        let url = build_url_fallback("o/r", "T E", &huge);
+        let url = build_url_fallback("o/r", "T E", &huge).unwrap();
         assert!(url.starts_with("https://github.com/o/r/issues/new?title=T%20E&body="));
         assert!(url.contains("body%20truncated"));
-        assert!(url.len() < 12_000); // Encoded length stays bounded.
+        assert!(url.len() <= URL_FALLBACK_BUDGET);
+    }
+
+    #[test]
+    fn url_fallback_includes_title_and_repo_in_total_budget() {
+        let title = "title with spaces ".repeat(1_000);
+        let body = "body with spaces ".repeat(1_000);
+        let url = build_url_fallback("owner/repository", &title, &body).unwrap();
+        assert!(
+            url.len() <= URL_FALLBACK_BUDGET,
+            "url length was {}",
+            url.len()
+        );
+    }
+
+    #[test]
+    fn url_fallback_rejects_repo_that_exhausts_total_budget() {
+        let fixed_url_len = "https://github.com//issues/new?title=".len() + "&body=".len();
+        let repo = "r".repeat(URL_FALLBACK_BUDGET - fixed_url_len);
+        let err = build_url_fallback(&repo, "title", "body").unwrap_err();
+        assert!(err.to_string().contains("repository is too long"));
     }
 
     #[test]
@@ -576,7 +705,6 @@ mod tests {
             qedgen_version: "2.23.0",
             os: "linux".into(),
             arch: "x86_64".into(),
-            cwd: PathBuf::from("."),
             runtime: None,
             spec_path: None,
             spec_excerpt: None,
@@ -590,5 +718,110 @@ mod tests {
         let title = default_title(&ctx);
         assert!(title.contains("codegen failed"));
         assert!(title.contains("2.23.0"));
+    }
+
+    #[test]
+    fn redact_sensitive_masks_tokens_keys_and_secret_assignments() {
+        let raw = "ghp_1234567890abcdef sk-live-1234567890 AKIA1234567890ABCDEF \
+                   password=top-secret api_key: abc123 AWS_SECRET_ACCESS_KEY=aws-secret \
+                   Bearer abcdefghijklmnop -----BEGIN PRIVATE KEY-----";
+        let redacted = redact_sensitive(raw);
+        assert!(!redacted.contains("ghp_1234567890abcdef"));
+        assert!(!redacted.contains("sk-live-1234567890"));
+        assert!(!redacted.contains("AKIA1234567890ABCDEF"));
+        assert!(!redacted.contains("top-secret"));
+        assert!(!redacted.contains("abc123"));
+        assert!(!redacted.contains("aws-secret"));
+        assert!(!redacted.contains("abcdefghijklmnop"));
+        assert!(!redacted.contains("BEGIN PRIVATE KEY"));
+        assert!(redacted.matches("[REDACTED]").count() >= 4);
+    }
+
+    #[test]
+    fn redact_sensitive_masks_quoted_json_and_private_key_values() {
+        let raw = r#"{"password":"violet-cactus-987","api_key":"orchid-winter-876","private_key":["one","two"]}"#;
+        let redacted = redact_sensitive(raw);
+        assert!(!redacted.contains("violet-cactus-987"));
+        assert!(!redacted.contains("orchid-winter-876"));
+        assert!(!redacted.contains("one"));
+        assert!(!redacted.contains("two"));
+    }
+
+    #[test]
+    fn redact_sensitive_masks_quoted_values_with_spaces() {
+        let redacted = redact_sensitive(r#"password="violet cactus 987""#);
+        assert!(!redacted.contains("violet cactus 987"));
+    }
+
+    #[test]
+    fn redact_sensitive_masks_unquoted_values_through_record_boundary() {
+        let redacted = redact_sensitive(
+            "password = correct horse battery staple\nstatus = authentication failed",
+        );
+        assert!(!redacted.contains("horse battery staple"));
+        assert!(redacted.contains("status = authentication failed"));
+    }
+
+    #[test]
+    fn spec_excerpt_redacts_pem_before_selecting_line_window() {
+        let spec = "header\nline2\n-----BEGIN PRIVATE KEY-----\nsecret-material\n-----END PRIVATE KEY-----\nline6\nline7\nline8\nline9\nline10\nline11\nline12\nline13\nline14\nline15\nline16\nline17\nline18\nline19\nline20\n";
+        let sanitized = redact_sensitive(spec);
+        let excerpt = surrounding_lines(&sanitized, 4, 1);
+        assert!(!excerpt.contains("secret-material"));
+        assert!(!excerpt.contains("BEGIN PRIVATE KEY"));
+    }
+
+    #[test]
+    fn load_local_artifact_returns_the_edited_title_and_body() {
+        let tmp = tempdir().unwrap();
+        let path = save_local_artifact(tmp.path(), "Original title", "Original body").unwrap();
+        fs::write(&path, "# Edited title\n\nEdited body\n").unwrap();
+        let (title, body) = load_local_artifact(&path).unwrap();
+        assert_eq!(title, "Edited title");
+        assert_eq!(body, "Edited body\n");
+    }
+
+    #[test]
+    fn saved_artifact_is_redacted_before_persistence() {
+        let tmp = tempdir().unwrap();
+        let path = save_local_artifact(
+            tmp.path(),
+            "password=title-secret",
+            "stderr: api_key=body-secret",
+        )
+        .unwrap();
+        let text = fs::read_to_string(path).unwrap();
+        assert!(!text.contains("title-secret"));
+        assert!(!text.contains("body-secret"));
+    }
+
+    #[test]
+    fn edited_draft_drives_url_fallback_payload() {
+        let tmp = tempdir().unwrap();
+        let path = save_local_artifact(tmp.path(), "Original", "Original body").unwrap();
+        fs::write(&path, "# Edited\n\nEdited body").unwrap();
+        let (title, body) = load_local_artifact(&path).unwrap();
+        let url = build_url_fallback("owner/repo", &title, &body).unwrap();
+        assert!(url.contains("Edited"));
+        assert!(url.contains("Edited%20body"));
+        assert!(!url.contains("Original%20body"));
+    }
+
+    #[test]
+    fn load_local_artifact_accepts_crlf_markdown() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("draft.md");
+        fs::write(&path, "# Edited\r\n\r\nEdited body\r\n").unwrap();
+        let (title, body) = load_local_artifact(&path).unwrap();
+        assert_eq!(title, "Edited");
+        assert_eq!(body, "Edited body\n");
+    }
+
+    #[test]
+    fn url_fallback_budgets_encoded_unicode_body() {
+        let body = "😀,!?".repeat(2_000);
+        let url = build_url_fallback("o/r", "title", &body).unwrap();
+        assert!(url.len() <= 8_000, "url length was {}", url.len());
+        assert!(url.contains("body%20truncated"));
     }
 }
