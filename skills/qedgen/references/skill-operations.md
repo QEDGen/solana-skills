@@ -78,8 +78,9 @@ the `.qedspec` change. Do not silently delete proofs to make the report clean.
 When the user hits qedgen itself — not a missing handler body or a spec they
 can fix from the lint message — point them at `qedgen feedback`. It bundles
 the user note, last command's stderr, a relevant `.qedspec` excerpt, qedgen
-version, OS/arch, and detected runtime into a GitHub issue. Absolute
-workstation paths are omitted from the public body, and common secret patterns
+version, OS/arch, and detected runtime into a GitHub issue. Cwd metadata and
+absolute spec labels are omitted from the public body; paths inside attached
+notes, errors, or excerpts still require review. Common secret patterns
 are heuristically redacted before the draft is saved or submitted; this cannot
 detect every secret. It does not enumerate shell environment variables. Local
 copy is written to `.qed/feedback/<timestamp>.md`; the remote submit is gated
@@ -104,7 +105,7 @@ dependency, wrong handler signature). Don't suggest it more than once per sessio
 unless a new class of error appears.
 
 Always preview with `--dry-run` first if any input might be sensitive. The
-preview and local draft are complete, `--yes` skips confirmation, and editing
-the saved Markdown changes the exact payload that is submitted. Use the
-reviewed draft to decide whether to file; the URL fallback may truncate only
-its encoded copy and labels the truncation.
+preview is complete and does not write a draft. In an actual interactive run,
+the local draft is complete and can be edited while qedgen waits for approval;
+`--yes` skips confirmation. The reviewed draft is the exact payload submitted;
+the URL fallback may truncate only its encoded copy and labels the truncation.

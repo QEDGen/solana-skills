@@ -135,7 +135,6 @@ fn collect(cwd: &Path, spec_path: Option<&Path>, note: Option<&str>) -> Result<F
         error
     });
     let (resolved_spec, excerpt) = resolve_spec_excerpt(cwd, spec_path, last_error.as_ref());
-    let excerpt = excerpt.map(|value| redact_sensitive(&value));
 
     Ok(FeedbackContext {
         qedgen_version: env!("CARGO_PKG_VERSION"),
@@ -209,6 +208,9 @@ fn resolve_spec_excerpt(
         Ok(t) => t,
         Err(_) => return (Some(p), None),
     };
+    // Redact the complete document first so a line-window cannot drop a PEM
+    // header and expose the remaining key material.
+    let text = redact_sensitive(&text);
     let excerpt = excerpt_relevant(&text, last_error);
     (Some(p), Some(excerpt))
 }
@@ -368,14 +370,16 @@ fn redact_sensitive(input: &str) -> String {
         r"\b(?:gh[pousr]_[A-Za-z0-9_]{10,}|github_pat_[A-Za-z0-9_]{10,})\b",
         r"\b(?:sk|xox[baprs])-[A-Za-z0-9_-]{10,}\b",
         r"\bAKIA[0-9A-Z]{16}\b",
-        r"(?i)\b[A-Za-z0-9_-]*(?:password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token|private[_-]?key)[A-Za-z0-9_-]*\s*[:=]\s*[^\s,;]+",
+        r#"(?i)(?:["']?\b[A-Za-z0-9_-]*(?:password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token|private[_-]?key)[A-Za-z0-9_-]*\b["']?)\s*[:=]\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\[[^\]]*\]|[^\s,;]+)"#,
         r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{12,}",
     ];
     patterns.iter().fold(input.to_string(), |value, pattern| {
-        regex::Regex::new(pattern)
-            .expect("feedback redaction pattern is valid")
-            .replace_all(&value, "[REDACTED]")
-            .into_owned()
+        let re = regex::Regex::new(pattern).expect("feedback redaction pattern is valid");
+        re.replace_all(&value, |caps: &regex::Captures<'_>| {
+            let newlines = caps[0].bytes().filter(|b| *b == b'\n').count();
+            format!("[REDACTED]{}", "\n".repeat(newlines))
+        })
+        .into_owned()
     })
 }
 
@@ -392,7 +396,9 @@ fn save_local_artifact(cwd: &Path, title: &str, body: &str) -> Result<PathBuf> {
 }
 
 fn load_local_artifact(path: &Path) -> Result<(String, String)> {
-    let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let text = fs::read_to_string(path)
+        .with_context(|| format!("read {}", path.display()))?
+        .replace("\r\n", "\n");
     let (title_line, body) = text
         .split_once("\n\n")
         .ok_or_else(|| anyhow!("feedback draft is missing its title/body separator"))?;
@@ -467,17 +473,28 @@ fn submit_via_gh(repo: &str, title: &str, body: &str) -> Result<String> {
 }
 
 fn build_url_fallback(repo: &str, title: &str, body: &str) -> String {
-    let truncated = truncate(body, URL_BODY_BUDGET);
-    let suffix = if body.len() > URL_BODY_BUDGET {
-        "\n\n_(body truncated for URL — see local .qed/feedback/ for full version)_"
+    let title_encoded = percent_encode(title);
+    let suffix = "\n\n_(body truncated for URL — see local .qed/feedback/ for full version)_";
+    let encoded_body = percent_encode(body);
+    let body_encoded = if encoded_body.len() <= URL_BODY_BUDGET {
+        encoded_body
     } else {
-        ""
+        let mut boundaries: Vec<usize> = body.char_indices().map(|(i, _)| i).collect();
+        boundaries.push(body.len());
+        let mut lo = 0usize;
+        let mut hi = boundaries.len() - 1;
+        while lo < hi {
+            let mid = (lo + hi + 1) / 2;
+            let end = boundaries[mid];
+            if percent_encode(&format!("{}{}", &body[..end], suffix)).len() <= URL_BODY_BUDGET {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        percent_encode(&format!("{}{}", &body[..boundaries[lo]], suffix))
     };
-    format!(
-        "https://github.com/{repo}/issues/new?title={}&body={}",
-        percent_encode(title),
-        percent_encode(&format!("{truncated}{suffix}")),
-    )
+    format!("https://github.com/{repo}/issues/new?title={title_encoded}&body={body_encoded}",)
 }
 
 fn open_in_browser(url: &str) -> Result<()> {
@@ -674,6 +691,31 @@ mod tests {
     }
 
     #[test]
+    fn redact_sensitive_masks_quoted_json_and_private_key_values() {
+        let raw = r#"{"password":"violet-cactus-987","api_key":"orchid-winter-876","private_key":["one","two"]}"#;
+        let redacted = redact_sensitive(raw);
+        assert!(!redacted.contains("violet-cactus-987"));
+        assert!(!redacted.contains("orchid-winter-876"));
+        assert!(!redacted.contains("one"));
+        assert!(!redacted.contains("two"));
+    }
+
+    #[test]
+    fn redact_sensitive_masks_quoted_values_with_spaces() {
+        let redacted = redact_sensitive(r#"password="violet cactus 987""#);
+        assert!(!redacted.contains("violet cactus 987"));
+    }
+
+    #[test]
+    fn spec_excerpt_redacts_pem_before_selecting_line_window() {
+        let spec = "header\nline2\n-----BEGIN PRIVATE KEY-----\nsecret-material\n-----END PRIVATE KEY-----\nline6\nline7\nline8\nline9\nline10\nline11\nline12\nline13\nline14\nline15\nline16\nline17\nline18\nline19\nline20\n";
+        let sanitized = redact_sensitive(spec);
+        let excerpt = surrounding_lines(&sanitized, 4, 1);
+        assert!(!excerpt.contains("secret-material"));
+        assert!(!excerpt.contains("BEGIN PRIVATE KEY"));
+    }
+
+    #[test]
     fn load_local_artifact_returns_the_edited_title_and_body() {
         let tmp = tempdir().unwrap();
         let path = save_local_artifact(tmp.path(), "Original title", "Original body").unwrap();
@@ -707,5 +749,23 @@ mod tests {
         assert!(url.contains("Edited"));
         assert!(url.contains("Edited%20body"));
         assert!(!url.contains("Original%20body"));
+    }
+
+    #[test]
+    fn load_local_artifact_accepts_crlf_markdown() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("draft.md");
+        fs::write(&path, "# Edited\r\n\r\nEdited body\r\n").unwrap();
+        let (title, body) = load_local_artifact(&path).unwrap();
+        assert_eq!(title, "Edited");
+        assert_eq!(body, "Edited body\n");
+    }
+
+    #[test]
+    fn url_fallback_budgets_encoded_unicode_body() {
+        let body = "😀,!?".repeat(2_000);
+        let url = build_url_fallback("o/r", "title", &body);
+        assert!(url.len() <= 8_000, "url length was {}", url.len());
+        assert!(url.contains("body%20truncated"));
     }
 }
