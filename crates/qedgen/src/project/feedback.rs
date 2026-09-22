@@ -478,6 +478,7 @@ fn build_url_fallback(repo: &str, title: &str, body: &str) -> Result<String> {
     let body_key = "&body=";
     let query_budget = URL_FALLBACK_BUDGET
         .checked_sub(prefix.len() + body_key.len())
+        .filter(|remaining| *remaining > 0)
         .ok_or_else(|| anyhow!("feedback repository is too long for the URL fallback"))?;
 
     let title_budget = query_budget.min(URL_TITLE_BUDGET);
@@ -692,7 +693,8 @@ mod tests {
 
     #[test]
     fn url_fallback_rejects_repo_that_exhausts_total_budget() {
-        let repo = "r".repeat(URL_FALLBACK_BUDGET);
+        let fixed_url_len = "https://github.com//issues/new?title=".len() + "&body=".len();
+        let repo = "r".repeat(URL_FALLBACK_BUDGET - fixed_url_len);
         let err = build_url_fallback(&repo, "title", "body").unwrap_err();
         assert!(err.to_string().contains("repository is too long"));
     }
