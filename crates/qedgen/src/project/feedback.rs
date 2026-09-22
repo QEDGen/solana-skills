@@ -15,10 +15,11 @@ use std::process::Command;
 /// (forks, internal mirrors).
 const DEFAULT_FEEDBACK_REPO: &str = "QEDGen/solana-skills";
 
-/// Cap on the GitHub web-URL fallback: the actual limit is ~8 KB; margin
-/// covers title + query keys + percent expansion. Bodies past this truncate
-/// with a marker.
-const URL_BODY_BUDGET: usize = 6500;
+/// Cap on the complete GitHub web-URL fallback. Titles and bodies are
+/// percent-encoded within this budget so user-controlled input cannot make
+/// the fallback unusable.
+const URL_FALLBACK_BUDGET: usize = 8000;
+const URL_TITLE_BUDGET: usize = 1024;
 
 /// What the user typed plus what we found on disk. Plain data — rendering
 /// and submission are separate so `--dry-run` never touches the network.
@@ -89,7 +90,7 @@ pub fn run(
         }
         Err(gh_err) => {
             eprintln!("gh CLI unavailable or failed: {gh_err}");
-            let url = build_url_fallback(&repo, &approved_title, &approved_body);
+            let url = build_url_fallback(&repo, &approved_title, &approved_body)?;
             println!("Pre-filled issue URL:\n{url}");
             if !no_open {
                 let _ = open_in_browser(&url);
@@ -370,7 +371,7 @@ fn redact_sensitive(input: &str) -> String {
         r"\b(?:gh[pousr]_[A-Za-z0-9_]{10,}|github_pat_[A-Za-z0-9_]{10,})\b",
         r"\b(?:sk|xox[baprs])-[A-Za-z0-9_-]{10,}\b",
         r"\bAKIA[0-9A-Z]{16}\b",
-        r#"(?i)(?:["']?\b[A-Za-z0-9_-]*(?:password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token|private[_-]?key)[A-Za-z0-9_-]*\b["']?)\s*[:=]\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\[[^\]]*\]|[^\s,;]+)"#,
+        r#"(?i)(?:["']?\b[A-Za-z0-9_-]*(?:password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token|private[_-]?key)[A-Za-z0-9_-]*\b["']?)\s*[:=]\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\[[^\]]*\]|[^,;\r\n]+)"#,
         r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{12,}",
     ];
     patterns.iter().fold(input.to_string(), |value, pattern| {
@@ -472,29 +473,54 @@ fn submit_via_gh(repo: &str, title: &str, body: &str) -> Result<String> {
     Ok(url)
 }
 
-fn build_url_fallback(repo: &str, title: &str, body: &str) -> String {
-    let title_encoded = percent_encode(title);
-    let suffix = "\n\n_(body truncated for URL — see local .qed/feedback/ for full version)_";
-    let encoded_body = percent_encode(body);
-    let body_encoded = if encoded_body.len() <= URL_BODY_BUDGET {
-        encoded_body
-    } else {
-        let mut boundaries: Vec<usize> = body.char_indices().map(|(i, _)| i).collect();
-        boundaries.push(body.len());
-        let mut lo = 0usize;
-        let mut hi = boundaries.len() - 1;
-        while lo < hi {
-            let mid = (lo + hi + 1) / 2;
-            let end = boundaries[mid];
-            if percent_encode(&format!("{}{}", &body[..end], suffix)).len() <= URL_BODY_BUDGET {
-                lo = mid;
-            } else {
-                hi = mid - 1;
-            }
+fn build_url_fallback(repo: &str, title: &str, body: &str) -> Result<String> {
+    let prefix = format!("https://github.com/{repo}/issues/new?title=");
+    let body_key = "&body=";
+    let query_budget = URL_FALLBACK_BUDGET
+        .checked_sub(prefix.len() + body_key.len())
+        .ok_or_else(|| anyhow!("feedback repository is too long for the URL fallback"))?;
+
+    let title_budget = query_budget.min(URL_TITLE_BUDGET);
+    let title_encoded = percent_encode_with_budget(title, title_budget, "…");
+    let body_budget = query_budget - title_encoded.len();
+    let body_encoded = percent_encode_with_budget(
+        body,
+        body_budget,
+        "\n\n_(body truncated for URL — see local .qed/feedback/ for full version)_",
+    );
+    let url = format!("{prefix}{title_encoded}{body_key}{body_encoded}");
+    debug_assert!(url.len() <= URL_FALLBACK_BUDGET);
+    Ok(url)
+}
+
+fn percent_encode_with_budget(value: &str, budget: usize, suffix: &str) -> String {
+    let encoded = percent_encode(value);
+    if encoded.len() <= budget {
+        return encoded;
+    }
+
+    let encoded_suffix = percent_encode(suffix);
+    if encoded_suffix.len() > budget {
+        return String::new();
+    }
+
+    let mut boundaries: Vec<usize> = value.char_indices().map(|(i, _)| i).collect();
+    boundaries.push(value.len());
+    let mut lo = 0usize;
+    let mut hi = boundaries.len() - 1;
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        let end = boundaries[mid];
+        if percent_encode(&value[..end]).len() + encoded_suffix.len() <= budget {
+            lo = mid;
+        } else {
+            hi = mid - 1;
         }
-        percent_encode(&format!("{}{}", &body[..boundaries[lo]], suffix))
-    };
-    format!("https://github.com/{repo}/issues/new?title={title_encoded}&body={body_encoded}",)
+    }
+    format!(
+        "{}{encoded_suffix}",
+        percent_encode(&value[..boundaries[lo]])
+    )
 }
 
 fn open_in_browser(url: &str) -> Result<()> {
@@ -646,10 +672,29 @@ mod tests {
     #[test]
     fn url_fallback_encodes_and_caps() {
         let huge = "x".repeat(20_000);
-        let url = build_url_fallback("o/r", "T E", &huge);
+        let url = build_url_fallback("o/r", "T E", &huge).unwrap();
         assert!(url.starts_with("https://github.com/o/r/issues/new?title=T%20E&body="));
         assert!(url.contains("body%20truncated"));
-        assert!(url.len() < 12_000); // Encoded length stays bounded.
+        assert!(url.len() <= URL_FALLBACK_BUDGET);
+    }
+
+    #[test]
+    fn url_fallback_includes_title_and_repo_in_total_budget() {
+        let title = "title with spaces ".repeat(1_000);
+        let body = "body with spaces ".repeat(1_000);
+        let url = build_url_fallback("owner/repository", &title, &body).unwrap();
+        assert!(
+            url.len() <= URL_FALLBACK_BUDGET,
+            "url length was {}",
+            url.len()
+        );
+    }
+
+    #[test]
+    fn url_fallback_rejects_repo_that_exhausts_total_budget() {
+        let repo = "r".repeat(URL_FALLBACK_BUDGET);
+        let err = build_url_fallback(&repo, "title", "body").unwrap_err();
+        assert!(err.to_string().contains("repository is too long"));
     }
 
     #[test]
@@ -687,7 +732,7 @@ mod tests {
         assert!(!redacted.contains("aws-secret"));
         assert!(!redacted.contains("abcdefghijklmnop"));
         assert!(!redacted.contains("BEGIN PRIVATE KEY"));
-        assert!(redacted.matches("[REDACTED]").count() >= 5);
+        assert!(redacted.matches("[REDACTED]").count() >= 4);
     }
 
     #[test]
@@ -704,6 +749,15 @@ mod tests {
     fn redact_sensitive_masks_quoted_values_with_spaces() {
         let redacted = redact_sensitive(r#"password="violet cactus 987""#);
         assert!(!redacted.contains("violet cactus 987"));
+    }
+
+    #[test]
+    fn redact_sensitive_masks_unquoted_values_through_record_boundary() {
+        let redacted = redact_sensitive(
+            "password = correct horse battery staple\nstatus = authentication failed",
+        );
+        assert!(!redacted.contains("horse battery staple"));
+        assert!(redacted.contains("status = authentication failed"));
     }
 
     #[test]
@@ -745,7 +799,7 @@ mod tests {
         let path = save_local_artifact(tmp.path(), "Original", "Original body").unwrap();
         fs::write(&path, "# Edited\n\nEdited body").unwrap();
         let (title, body) = load_local_artifact(&path).unwrap();
-        let url = build_url_fallback("owner/repo", &title, &body);
+        let url = build_url_fallback("owner/repo", &title, &body).unwrap();
         assert!(url.contains("Edited"));
         assert!(url.contains("Edited%20body"));
         assert!(!url.contains("Original%20body"));
@@ -764,7 +818,7 @@ mod tests {
     #[test]
     fn url_fallback_budgets_encoded_unicode_body() {
         let body = "😀,!?".repeat(2_000);
-        let url = build_url_fallback("o/r", "title", &body);
+        let url = build_url_fallback("o/r", "title", &body).unwrap();
         assert!(url.len() <= 8_000, "url length was {}", url.len());
         assert!(url.contains("body%20truncated"));
     }
