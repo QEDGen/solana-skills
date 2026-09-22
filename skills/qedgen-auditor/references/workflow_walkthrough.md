@@ -17,8 +17,8 @@ shape; only the `qedgen probe` flag (`--program` vs `--bootstrap
 User invokes `/qedgen-auditor` on a Pinocchio program at
 `programs/fee-vault/` — single crate, 4 handlers (`initialize`,
 `deposit`, `withdraw`, `update_fee_rate`), no committed `.qedspec`,
-~600 LOC. Assume the thinking-budget hook has fired and the agent is
-operating with extended thinking.
+~600 LOC. Assume the user selected extended thinking, either directly through
+the venue or through a separately configured optional adapter.
 
 ---
 

@@ -34,7 +34,7 @@ SURFACES=(
     "docs/framework-support.md"
     "docs/RELEASING.md"
     "README.md"
-    "SKILL.md"
+    "skills/qedgen/SKILL.md"
     "crates/qedgen/src/cli.rs"
     "crates/qedgen/src/obligations/mod.rs"
     "crates/qedgen/src/obligations/inventory.rs"

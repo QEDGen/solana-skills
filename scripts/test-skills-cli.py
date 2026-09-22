@@ -53,32 +53,75 @@ def main():
         package = scratch / "package"
         run([sys.executable, ROOT / "scripts/package-skills.py", "--output", package])
         inventory = json.loads((package / "distribution.json").read_text())
+
+        # Exercise the repository's real public layout without copying ignored
+        # developer state such as a locally installed skills/qedgen/bin/qedgen.
+        source_under_test = scratch / "source"
+        tracked = run(
+            ["git", "-C", ROOT, "ls-files", "-z", "--", "package.json", "skills"]
+        )
+        for relative in filter(None, tracked.split("\0")):
+            source = ROOT / relative
+            destination = source_under_test / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+        assert not (source_under_test / "skills/qedgen/bin/qedgen").exists()
+
+        def installed_files(skill):
+            return {
+                path.relative_to(skill).as_posix()
+                for path in skill.rglob("*")
+                if path.is_file()
+            }
+
+        def assert_exact_inventory(installed_root, name):
+            prefix = f"skills/{name}/"
+            expected = {
+                path.removeprefix(prefix)
+                for path in inventory["files"]
+                if path.startswith(prefix)
+            }
+            actual = installed_files(installed_root / name)
+            assert actual == expected, (name, actual ^ expected)
+
+        def assert_reinstall_required(wrapper, cwd):
+            result = subprocess.run(
+                [str(wrapper), "--version"],
+                cwd=cwd,
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=120,
+            )
+            assert result.returncode == 127, result
+            assert "bash" in result.stderr and "install.sh" in result.stderr, result.stderr
+
         project = scratch / "project"
         project.mkdir()
-        listing = skills("add", package, "--list", cwd=project)
+        listing = skills("add", source_under_test, "--list", cwd=project)
         for name in inventory["skills"]:
             assert name in listing, listing
-        assert "qedgen-auditor-bench" not in listing, listing
-        skills("add", package, "--skill", "qedgen", "qedgen-auditor",
+        assert "qedgen-auditor-bench" in listing, listing
+        skills("add", source_under_test, "--skill", "qedgen", "qedgen-auditor",
                "--agent", "codex", "--yes", cwd=project)
         installed = project / ".agents/skills"
         for name in inventory["skills"]:
-            prefix = f"skills/{name}/"
-            expected = {p.removeprefix(prefix) for p in inventory["files"] if p.startswith(prefix)}
-            actual = {p.relative_to(installed / name).as_posix()
-                      for p in (installed / name).rglob("*") if p.is_file()}
-            assert actual == expected, (name, actual ^ expected)
+            assert_exact_inventory(installed, name)
+        assert not (installed / "qedgen-auditor-bench").exists()
         # Re-add is also the documented refresh route for older CLI releases.
         stale = installed / "qedgen/crates/old-fixture"
         stale.parent.mkdir()
         stale.write_text("legacy copied development content")
-        skills("add", package, "--skill", "qedgen", "--agent", "codex", "--yes", cwd=project)
+        skills("add", source_under_test, "--skill", "qedgen", "--agent", "codex", "--yes", cwd=project)
         assert not stale.exists(), "reinstall left stale development content"
+        assert_exact_inventory(installed, "qedgen")
         print(f"PASS skills {version}: discovery, independent installs, exact inventory, replacement cleanup")
 
         if args.qedgen:
             skill = installed / "qedgen"
-            (skill / "bin").mkdir()
+            # A prior local install may leave the ignored runtime-state
+            # directory behind even after its executable is pruned.
+            (skill / "bin").mkdir(exist_ok=True)
             shutil.copy2(args.qedgen.resolve(), skill / "bin/qedgen")
             wrapper = skill / "tools/qedgen"
             run([wrapper, "--help"], project)
@@ -112,6 +155,14 @@ def main():
             skills("add", source, "--skill", "qedgen", "--agent", "codex", "--yes", cwd=migration)
             lock = json.loads((migration / "skills-lock.json").read_text())
             assert lock["skills"]["qedgen"]["skillPath"] == "SKILL.md", lock
+            installed_skill = migration / ".agents/skills/qedgen"
+            stale = installed_skill / "crates/old-fixture"
+            stale.parent.mkdir(parents=True)
+            stale.write_text("legacy development content")
+            legacy_binary = installed_skill / "bin/qedgen"
+            legacy_binary.parent.mkdir(parents=True)
+            legacy_binary.write_text("legacy local binary")
+            legacy_binary.chmod(0o755)
             (remote / "SKILL.md").unlink()
             shutil.copytree(package / "skills", remote / "skills")
             run(["git", "add", "-A"], remote)
@@ -127,11 +178,21 @@ def main():
             if args.expect_migration_blocked:
                 assert lock["skills"]["qedgen"]["skillPath"] == "SKILL.md", update_output
                 assert "deleted upstream" in update_output, update_output
-                print(f"PASS skills {version}: reproduced legacy migration blocker; keep published root SKILL.md")
+                skills("add", source, "--skill", "qedgen", "--agent", "codex", "--yes", cwd=migration)
+                lock = json.loads((migration / "skills-lock.json").read_text())
+                assert lock["skills"]["qedgen"]["skillPath"] == "skills/qedgen/SKILL.md", lock
+                assert not stale.exists(), "explicit re-add left legacy development content"
+                assert not legacy_binary.exists(), "explicit re-add left the old local binary"
+                assert_exact_inventory(migration / ".agents/skills", "qedgen")
+                assert_reinstall_required(installed_skill / "tools/qedgen", migration)
+                print(f"PASS skills {version}: reproduced legacy blocker; explicit re-add migrated exact inventory")
                 return
             assert lock["skills"]["qedgen"]["skillPath"] == "skills/qedgen/SKILL.md", update_output
-            assert (migration / ".agents/skills/qedgen/VERSION").is_file(), update_output
-            print(f"PASS skills {version}: root-to-subdirectory project update (local Git transport)")
+            assert not stale.exists(), "update left legacy development content"
+            assert not legacy_binary.exists(), "update left the old local binary"
+            assert_exact_inventory(migration / ".agents/skills", "qedgen")
+            assert_reinstall_required(installed_skill / "tools/qedgen", migration)
+            print(f"PASS skills {version}: root-to-subdirectory update migrated exact inventory")
 
 
 if __name__ == "__main__":

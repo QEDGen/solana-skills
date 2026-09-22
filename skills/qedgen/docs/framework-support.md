@@ -1,0 +1,263 @@
+# Framework support matrix
+
+What each pipeline surface supports per framework/target, verified against the
+code gates (not aspirations). Update this table when a per-target gate changes;
+each row names the module that owns the gate so claims stay checkable.
+
+Five *distinct* framework notions exist — they are not one enum:
+
+| Notion | Where | Values |
+|---|---|---|
+| Greenfield `Target` | `cli.rs` | anchor, quasar, pinocchio |
+| Probe `--runtime` override | `cli.rs` (`RuntimeOverride`) | + native, sbpf |
+| Brownfield audit `Runtime` | `probe/mod.rs` | + qedgen-codegen, unknown |
+| Adapter `ProgramFramework` | `adapt/program_model.rs` | anchor, pinocchio, native |
+| Ratchet `Framework` | `verify/ratchet.rs` | anchor, quasar |
+
+sBPF assembly is selected by `pragma sbpf` in the spec, not by a `Target`.
+
+## The matrix
+
+✅ full · ⚠️ partial (noted) · ❌ none · n/a not meaningful
+
+| Surface (owning module) | Anchor | Quasar | Pinocchio | Native | sBPF asm |
+|---|---|---|---|---|---|
+| IDL → spec scaffold (`spec/idl.rs` + `idl2spec`) — *deprecated* | ✅ pre-0.30 + 0.30 | ❌ | ✅ Codama IR (#197) | ❌ | ❌ |
+| IDL → Tier-0 interface (`interface_gen`) | ✅ | ❌ | ✅ Codama IR (#197) | ❌ | ❌ |
+| IDL → brownfield fuzz (`probe/crucible_brownfield`) | ✅ 0.30 | ✅ | ⚠️ needs on-disk Codama/0.30 IDL | ❌ deferred | ❌ parked |
+| Brownfield adapt → spec skeleton (`adapt/`) — *deprecated* | ✅ args + accounts + errors | ❌ no adapter | ⚠️ handlers-only skeleton | ⚠️ loose (no conventions) | ❌ |
+| Greenfield Rust scaffold (`codegen_mir`) | ✅ | ⚠️ generic CPI → `todo!()` | ⚠️ generic CPI → `todo!()`; imported mirrors error | n/a | n/a |
+| Scaffold compiles (`verify --scaffold`, #364) | ✅ gated (`generated_artifact_gate`) | ✅ gated (`generated_artifact_gate`, #372) | ⚠️ compiles, ungated ⁷ | n/a | n/a |
+| Regen-drift over the program crate (`check --regen-drift`) | ✅ | ✅ | ✅ (#367) | n/a | n/a |
+| Kani spec-model (`kani_mir`) | ✅ ¹ ⁴ | ✅ ¹ ⁴ | ✅ ¹ ⁴ | n/a | skip by design |
+| impl-Kani (`kani_impl`) | ✅ greenfield + state-struct (#162) + Context (#169) | ⚠️ greenfield shape only | ⚠️ own `#[repr(C)]` shape; some ix-data field types TODO | ❌ | ❌ |
+| proptest (`proptest_gen_mir`) | ✅ ⁵ | ✅ ⁵ | ✅ ⁵ | n/a | skip by design |
+| Parallax/LiteSVM integration tests (`integration_test`) | ⚠️ scaffold emitted + compile-gated ⁶ (#366) | ⚠️ scaffold emitted + compile-gated ⁶ | ❌ no instruction builder ⁶ | ❌ | ❌ |
+| Lean (`lean_gen_mir`) | ✅ ² ³ | ✅ ² ³ | ✅ ² ³ | n/a | ✅ dedicated sBPF path |
+| Probe: runtime-agnostic scanners (`run_helpers`) | ✅ (#196) | ✅ (#196) | ✅ | ✅ (#196) | ❌ bootstrap only |
+| Probe: IDL-enrichment overlay (`probe/idl_overlay`) | ✅ enrich + narrow (#235); unbuilt → `derivable_idl` (#238) | ✅ enrich + narrow (#235); unbuilt → `derivable_idl` (#238) | ✅ enrich + handler fill | ⚠️ enrich only (declarative flags) | ❌ |
+| Probe: runtime-specific findings (`probe/`) | ❌ agent-layer (SKILL.md) | ❌ agent-layer | ✅ richest (`pinocchio_probe`) | ⚠️ Shank dispatcher discovery only | ❌ |
+| Miri divergence repros (`verify/miri_verify`) | ❌ | ❌ | ✅ | ❌ | n/a |
+| Ratchet / readiness (`verify/ratchet`) | ✅ | ✅ | ❌ no ratchet crate | ❌ | ❌ |
+
+¹ `pragma state_repr = adt` (#326): single-account specs with defaultable
+variant payloads verify over the ADT state space — the flat carrier gains a
+`state_repr_valid` invariant (assumed at every symbolic init, preserved by
+transition canonicalization), so Kani cannot construct cross-variant field
+combinations. Multi-account ADT and non-defaultable payload types stay on the
+unconstrained flat model, reported as `unsupported(kani_adt_state_repr)` in
+the obligation manifest.
+
+² Account-pubkey authorization clauses (#328): flat-state shapes bind the
+referenced account addresses and imported state fields in a generated
+`structure ActionCtx`, keep the clause in the transition guard, and emit
+the abort theorem with a mechanical proof. The ADT and indexed lanes, and
+reads deeper than one projection, keep the clause out of the model and
+report `unsupported(lean_handler_account_pubkey)` in the obligation
+manifest.
+
+³ Indexed shapes (`Map[N]` fields, #336): `Spec.lean` carries a
+machine-owned `def <name>_stmt : Prop` for every obligation (preservation,
+aborts, ensures, covers, liveness, environments); proof bodies stay in the
+user-owned `Proofs.lean`, typed `theorem <name> : <name>_stmt` so
+a restated obligation no longer type-checks. `qedgen check` nudges any
+theorem that restates its obligation instead of typing against the
+`_stmt` (#349, informational). The obligation manifest records each
+statement as emitted — the old blanket
+`lean_indexed_shape_proofs_external` status is gone.
+
+⁴ Multi-account file-level features (#324): covers, liveness, and
+environment obligations lower once over a generated `mod product` whose
+components delegate every transition to the per-account modules — no
+second copy of the semantics, no per-account duplication of a trace.
+Shapes that do not resolve to modeled components (trace ops needing a
+symbolic account env, record/sum-typed params, endpoint states declared
+by more than one lifecycle, cross-account or ghost-reading environment
+properties) stay `unsupported(kani_multi_account_file_level)` in the
+obligation manifest.
+
+⁵ Multi-account product state, proptest lane (#331): spec-global ghosts
+become one field of the generated `ProductState`, updated atomically by
+delegating transition wrappers; ghost-reading properties run in the
+init-seeded product sequence harness, and cross-account or
+multi-component property pairs get product preservation tests. A ghost
+read or written by a per-account transition (guard, let, effect, or
+branch scrutinee) is not liftable — that spec keeps per-account ghost
+copies and its ghost obligations stay
+`unsupported(proptest_multi_account_ghost)` in the manifest.
+
+⁶ Parallax integration scaffold. World setup, execution, outcomes, account
+fixtures, and checks are Parallax, which does not care which framework
+produced the `.so`. Only the instruction builder is framework-bound, so
+opening the lane to Anchor (#366) was an adapter rather than a second
+scaffold:
+
+- **Quasar** builds instructions from the generated `program::client`
+  module.
+- **Anchor** has no generated client, so the scaffold spells out the ABI:
+  `sha256("global:<handler>")[..8]`, the declared account metas in order,
+  then Borsh-encoded arguments. `codegen/anchor_ix.rs` holds that encoding,
+  shared with the reproducer lane so the discriminator rule has one
+  definition.
+- **Pinocchio** has neither: it dispatches on a leading discriminant byte,
+  which is a different builder rather than this one with a flag. `codegen
+  --integration --target pinocchio` skips with a note.
+
+Two things differ between the two supported targets beyond the builder, and
+both are silent-wrong-answer shaped rather than compile errors:
+
+- **The error code.** Anchor's `#[error_code]` emits `From<E> for u32` that
+  adds `ERROR_CODE_OFFSET` (6000), so `Outcome::error(Err::X)` is already
+  the on-chain code. Quasar's emits no such impl, and its conversion is
+  `ProgramError::Custom(e as u32)` over qedgen's explicit discriminants, so
+  the scaffold emits `Err::X as u32` there.
+- **The address type.** Anchor's `declare_id!` yields a
+  `solana_pubkey::Pubkey`; Parallax speaks `solana_address::Address`. Same
+  32 bytes, no `From` between them, so both scaffolds route through a
+  generated `program_id()` helper instead of naming `program::ID`.
+Assertions are the spec's: `Outcome::success()` on happy paths and
+`Outcome::error(<Prog>Error::<Code> as u32)` on forged-signer tests when the
+spec declares `Unauthorized` or `InvalidLifecycle` (otherwise the scaffold
+degrades to a marked weak assertion rather than naming a variant
+`codegen_mir` may not have synthesized). The `as u32` is required, not
+stylistic: Parallax accepts anything `Into<u32>`, and Quasar's
+`#[error_code]` emits `From<E> for ProgramError` and `TryFrom<u32> for E`
+but never `From<E> for u32`. No compute-unit assertion is emitted: a
+committed transaction always spends CU, so a `cu > 0` check cannot fail, and
+the scaffold points at a measured budget instead.
+
+The `state_account` fixture builds account BYTES rather than a struct value
+(#383). Quasar's `#[account]` replaces the annotated struct with a
+`repr(transparent)` view over `AccountView` and moves the declared fields
+into a hidden zero-copy companion, so there is no struct to construct and
+nothing meaningful to serialize. The bytes are the type's own
+`DISCRIMINATOR` followed by every field in declaration order — including the
+synthesized `bump` / `status` tail — little-endian, no padding, which is
+what the alignment-1 assertion inside `#[account]` guarantees.
+
+`parallax-svm` is pinned to a git revision (it is not published to
+crates.io), and `crates/qedgen/tests/parallax_integration_gate.rs` compiles
+the generated scaffold against that pin in CI. Since #383 both halves of
+that gate are generated: it runs `codegen --target quasar` for the program
+crate as well, so the Quasar client boundary is covered rather than mirrored
+by a hand-written stub. The stub had invented two APIs that the real macros
+do not provide, and each fiction hid a defect that shipped.
+
+That gate went red without any qedgen change, and the mechanism is worth
+knowing because it will recur. `litesvm` 0.15 requires `wincode ^0.5.5`, so
+the whole graph must stay on wincode 0.5. Several small solana crates crossed
+to `wincode` 0.6 in a MINOR bump (`solana-rent` 4.3.0 → 4.4.0,
+`solana-signature` 3.4.1 → 3.5.0, `solana-epoch-schedule` 3.2.0 → 3.3.0,
+`solana-fee-calculator` 3.2.2 → 3.3.0), and every parent asks for them with a
+caret, so a fresh resolve took the crossing version and put two incompatible
+`wincode` majors in one graph.
+
+It does not surface as a version error. Both wincodes build; the derive on
+`solana-transaction` then targets 0.5's `SchemaRead` while `solana-signature`
+implements 0.6's, and rustc reports an unsatisfied trait bound deep inside a
+dependency. `verify --scaffold` classifies that as `Unresolved`, not a codegen
+defect (#364), which is the intended reading.
+
+Fixed by pinning those four in `parallax_dev_dependencies`, alongside the
+pins that were already there for the same reason. That list is not a stable
+set — it is "every crate that has ever crossed the boundary". When the gate
+fails this way again, find the new one with
+`cargo tree -i wincode@0.6.0 --depth 1` and pin its last 0.5 version. Moving
+past the boundary wholesale needs Parallax on `wincode` 0.6 first.
+
+Note the pin-liveness script (#371) checks that the pinned revision EXISTS,
+not that it builds, so it stayed green through all of this.
+
+Until #372, a generated Quasar program did not compile at all. `quasar-lang`
+is `#![no_std]` and its addresses are `solana_address::Address`, while
+`map_type_quasar` shared Anchor's `Pubkey` mapping — a type quasar-lang does
+not define. Every Quasar program in this repo carried it, including the three
+bundled examples, and `codegen --target quasar` on the multisig spec failed
+with 13 errors. Fixed by giving Quasar its own arm in `primitive_map`; the
+prelude already re-exports `Address`, so no import change was needed.
+
+That it survived is the more useful part. The snapshot suites compare
+generated TEXT, which was stable and wrong identically every run, and the
+#294 artifact gate regenerated all three examples as **Anchor** even though
+all three ship as Quasar crates — so the gate that existed to catch
+non-compiling output had never compiled the code the repo actually ships.
+The gate now runs both targets (`gate_quasar_example`).
+
+(An earlier revision of this note claimed `quasar-lang` "resolves from no
+registry". That was asserted from the `0.0.0` version string without checking
+crates.io, and it is wrong. The dependency resolves; the emitted code does
+not typecheck against it.)
+
+## Codegen ownership contract: CPIs, PDA creation, and events
+
+“Complete” means codegen emits the whole operation required by the spec. If
+account resolution fails, a handler is unsupported, or signer seeds would have
+to be guessed, the scaffold emits a reasoned agent-fill site and a `todo!()`.
+It never emits a plausible unsigned CPI for a PDA authority.
+
+| Operation | Anchor | Quasar | Pinocchio |
+|---|---|---|---|
+| Lifecycle-created state PDA (`Uninitialized`/`Empty` → active) | ✅ account macro owns `init`, payer, space, seeds, bump | ✅ account macro owns `init`, payer, seeds, bump | ⚠️ agent fill: complete signed System allocation/assignment |
+| `transfers { ... }` sugar | ⚠️ agent fill: CPI accounts + authority | ⚠️ agent fill: CPI accounts + authority | ⚠️ agent fill: CPI accounts + authority |
+| Direct canonical SPL Token `call`, transaction signer authority | ✅ transfer, mint, burn, initialize, close | ⚠️ transfer, mint, burn, close; initialize is agent fill | ✅ transfer, mint, burn, initialize, close |
+| Direct System transfer, transaction signer authority | ✅ | ✅ | ✅ |
+| Direct System create/assign, non-PDA signer | ✅ generic invocation | ⚠️ agent fill | ⚠️ agent fill |
+| Generic interface `call`, transaction signer authority | ✅ discriminator + args + account metas | ⚠️ agent fill | ⚠️ agent fill |
+| Any direct `call` whose signer slot binds a program PDA | ✅ builder shapes (SPL Token, System transfer) sign via `new_with_signer` when seeds are the account's declared `pda [...]`; ⚠️ agent fill otherwise (generic invoke, unassemblable seeds) | ⚠️ agent fill: complete CPI with signer seeds | ⚠️ agent fill: complete CPI with signer seeds |
+| Events | ⚠️ agent fill: payload binding + framework emission | ⚠️ agent fill: payload binding + framework emission | ⚠️ agent fill: payload binding + framework emission |
+
+The executable boundary lives in `codegen_shared::cpi::CpiPlan`:
+`Complete(code)` and `AgentFill(reason)` are the only outcomes. The PDA-signer
+check is a post-condition on the emitted artifact: a call whose signer slots
+bind caller PDAs is `Complete` only if the emitted code signs for them
+(`new_with_signer` / `invoke_signed`), so an ordinary unsigned `invoke` can
+never ship for a PDA-authorized call. Pinocchio likewise turns lifecycle PDA
+creation, transfer sugar, events, and unsupported calls into a hard handler
+`todo!()` rather than returning `Ok(())` after a breadcrumb.
+
+The two *deprecated* rows (`qedgen spec --idl`, `qedgen adapt --program`)
+remain functional in v2.x with a runtime warning and are removed in v3.0.
+The brownfield front door is spec elicitation: `qedgen probe --program <c>
+--emit-spec-candidates --audit-dir .qed/audit/<ts>` (writes the same spec
+skeleton as a byproduct plus `hypotheses.json`) → decisions recorded to
+`<audit-dir>/answers.json` → `qedgen ratify --audit-dir <dir>`. The IDL now
+enters as a probe evidence source (signer flags, `has_one` relations, status
+enums) via the IDL-enrichment overlay row.
+
+## Reading the Pinocchio column
+
+Pinocchio is a first-class *audit* target (richest probe path, Miri repros,
+Codama-gated fuzz) and a full *greenfield* target, and — since #197 — its
+Codama IDL enters the same front doors as Anchor's (`qedgen interface --idl`,
+the probe IDL-enrichment overlay, and the deprecated `qedgen spec --idl`).
+Remaining real gaps:
+
+- **Brownfield spec depth** — the deprecated `pinocchio_to_spec` skeleton
+  infers handlers only; probe elicitation (probe → answers → ratify) is the
+  current path, and the IDL overlay is the richer evidence source when an
+  IDL exists.
+- **Generic CPI mechanization** in the greenfield scaffold (SPL/System are
+  mechanized; anything else is a `todo!()` breadcrumb).
+- **impl-Kani ix-data field types** — the `#[repr(C)]` profile covers the
+  common numeric shapes; exotic field types leave bytes symbolic with a TODO.
+- **No ratchet** — mainnet-readiness gating is Anchor/Quasar only.
+
+## Reading the Quasar column
+
+Quasar is greenfield + ratchet + fuzz. It never had a (now-deprecated)
+brownfield adapter and has only the greenfield impl-Kani shape — a
+pre-existing Quasar program is audited and spec-elicited through the probe
+(agnostic scanners + IDL overlay + probe → answers → ratify) but not
+state-struct harnessed.
+
+## sBPF assembly
+
+Verified through the Lean path exclusively (`asm2lean`, `qedsvm`); every
+Rust-shaped artifact (Kani, proptest, Crucible, scaffold) is skipped by
+design — generated Rust harnesses are meaningless for assembly
+(`feedback_sbpf_no_kani_proptest`). Client-side tests own runtime checks.
+
+⁷ A generated Pinocchio scaffold typechecks against `pinocchio` 0.8 /
+`pinocchio-pubkey` 0.3 / `zeropod` 0.1 — checked by hand with `verify
+--scaffold`, not asserted from the code. No gate compiles one, so nothing
+keeps it that way; `generated_artifact_gate` covers Anchor and Quasar.

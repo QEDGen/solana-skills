@@ -6,9 +6,10 @@ The repository and published installation command remain unchanged:
 npx skills add qedgen/solana-skills
 ```
 
-This is packaging groundwork for [#407](https://github.com/QEDGen/solana-skills/issues/407).
-It does not move root `SKILL.md`, publish an artifact, or change existing users'
-install/update paths. No new repository is needed for the builder.
+The public command, repository, and skill names did not change when the runtime
+definitions moved under `skills/`. Fresh installs continue to discover
+`qedgen`, `qedgen-auditor`, and the development benchmark skill. Installing a
+runtime skill now copies only that skill's allowlisted runtime files.
 
 ## Build and inspect
 
@@ -90,22 +91,44 @@ The QEDGen smoke validates and generates artifacts; it does not claim generated
 programs or proofs compile or pass verification. CI runs package tests and both
 CLI cases, installing pinned CLI dependencies with lifecycle scripts disabled.
 
-## Rollout gate
+## Existing-install migration
 
-Preserve the root entry point while compatibility with older users is required.
-Do not commit another discoverable definition with the same `qedgen` name: it
-would make discovery ambiguous and still leave the root copying the repository.
-The builder refuses to stage inside the checkout for the same reason.
+Skills CLI 1.7.0 follows the skill name across the root-to-subdirectory move
+during an ordinary project update. Skills CLI 1.5.9 does not: upgrade the client
+or explicitly re-add `qedgen` from the same repository, agent, and installation
+scope. The tested recovery command is:
 
-A future rollout can publish portable artifacts or move the definition only after
-a supported-client/migration policy is agreed and relevant project/global update
-paths are verified. Preserve repository identity and skill names. An explicit
-re-add by name is a tested replacement route, but requiring it is still disruption.
+```sh
+npx skills add qedgen/solana-skills --skill qedgen
+```
+
+Replacement prunes the old development content and local binary. Rerun
+`bash install.sh` from the installed `qedgen` directory afterward. The wrapper
+does not search `PATH`, download, or build. The exact user procedure is in
+[installation and prerequisites](../references/installation.md).
+
+The optional Claude Code auditor hook moved out of the installed auditor skill
+to `integrations/qedgen-auditor-hooks/`. It is never packaged or automatically
+enabled. Users who previously enabled the old hook should remove that settings
+entry or manually relocate the adapter into stable user-owned storage before
+replacing the skill.
 
 Hosted providers may scan a selected skill directory or the entire repository;
-these tests do not establish their scope. Until public distribution changes or
-the provider corrects the classification, existing installs and the listing still
-use the root package. Track the appeal/rescan separately in
+the local CLI tests do not establish their scope or force a production listing
+rescan. Track provider classification and rescanning separately in
 [#412](https://github.com/QEDGen/solana-skills/issues/412).
 
-CLI setup is explicit: the wrapper does not install. The installer verifies and stages a replacement before changing the existing binary; PATH links require `--link-dir`. See [installation and prerequisites](../references/installation.md) for source fallback and toolchain behavior.
+## Source synchronization
+
+`references/`, `templates/`, `install.sh`, `tools/qedgen`, and other allowlisted
+root files remain canonical development sources. After changing one, regenerate
+and verify the committed runtime copy:
+
+```sh
+python3 scripts/package-skills.py --sync
+python3 scripts/package-skills.py --check
+```
+
+The check fails on content, executable-bit, inventory, version, or link drift.
+CLI setup remains explicit: the installer verifies and stages a replacement
+before changing the existing binary, and PATH links require `--link-dir`.

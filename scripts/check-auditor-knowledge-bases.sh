@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd -P)"
-catalog="${QEDGEN_CATEGORY_CATALOG:-$repo_root/skills/qedgen-auditor/references/category-catalog.md}"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+repo_root="$(cd "$script_dir/.." && pwd -P)"
+skill_root="${1:-$repo_root/skills/qedgen-auditor}"
+catalog="${QEDGEN_CATEGORY_CATALOG:-$skill_root/references/category-catalog.md}"
 primer="${QEDGEN_SECURITY_PRIMER:-$repo_root/docs/security-primer.md}"
-allowlist="${QEDGEN_BASIS_ALLOWLIST:-$repo_root/skills/qedgen-auditor/references/basis-legacy-allowlist.txt}"
-corpus_registry="${QEDGEN_BASIS_CORPUS_REGISTRY:-$repo_root/skills/qedgen-auditor/references/basis-corpus-registry.txt}"
+allowlist="${2:-${QEDGEN_BASIS_ALLOWLIST:-$script_dir/data/auditor-basis-legacy-allowlist.txt}}"
+corpus_registry="${3:-${QEDGEN_BASIS_CORPUS_REGISTRY:-$script_dir/data/auditor-basis-corpus-registry.txt}}"
 
 fail=0
 uncovered=()
@@ -13,7 +15,7 @@ prose_only=()
 
 if [[ ! -f "$catalog" || ! -f "$primer" || ! -f "$allowlist" ||
       ! -f "$corpus_registry" ]]; then
-  echo "knowledge-base input missing: catalog=$catalog primer=$primer allowlist=$allowlist corpus_registry=$corpus_registry" >&2
+  echo "missing knowledge-base input: catalog=$catalog primer=$primer allowlist=$allowlist corpus_registry=$corpus_registry" >&2
   exit 1
 fi
 

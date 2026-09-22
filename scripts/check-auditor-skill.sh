@@ -3,6 +3,9 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 skill_root="$repo_root/skills/qedgen-auditor"
+knowledge_check="$repo_root/scripts/check-auditor-knowledge-bases.sh"
+basis_allowlist="$repo_root/scripts/data/auditor-basis-legacy-allowlist.txt"
+basis_registry="$repo_root/scripts/data/auditor-basis-corpus-registry.txt"
 bench_root="${QEDGEN_AUDITOR_BENCH_ROOT:-$repo_root/skills/qedgen-auditor-bench}"
 bench_skill="$bench_root/SKILL.md"
 installed_root="${QEDGEN_AUDITOR_INSTALLED_ROOT:-}"
@@ -139,9 +142,9 @@ if ! "$repo_root/scripts/check-category-catalog.sh" >/dev/null; then
 fi
 
 for required in \
-  "$skill_root/scripts/check-knowledge-bases.sh" \
-  "$skill_root/references/basis-legacy-allowlist.txt" \
-  "$skill_root/references/basis-corpus-registry.txt"; do
+  "$knowledge_check" \
+  "$basis_allowlist" \
+  "$basis_registry"; do
   if [[ ! -f "$required" ]]; then
     echo "auditor knowledge-base gate is missing: $required" >&2
     fail=1
@@ -150,8 +153,8 @@ done
 
 # stdout is suppressed like every other sub-gate above; the script's coverage
 # warnings go to stderr and are meant to stay visible.
-if [[ -x "$skill_root/scripts/check-knowledge-bases.sh" ]] &&
-   ! "$skill_root/scripts/check-knowledge-bases.sh" >/dev/null; then
+if [[ -x "$knowledge_check" ]] &&
+   ! "$knowledge_check" >/dev/null; then
   echo "auditor knowledge-base validation failed" >&2
   fail=1
 fi

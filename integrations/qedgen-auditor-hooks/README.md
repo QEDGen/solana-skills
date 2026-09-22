@@ -1,7 +1,7 @@
 # qedgen-auditor — optional Claude Code thinking-budget adapter
 
 This is a venue-specific optional adapter, not part of the portable audit
-workflow. Other skill.sh-compatible venues should ignore `hooks/` and use
+workflow. Other skills.sh-compatible venues should ignore this adapter and use
 their own reasoning-budget controls when available.
 
 Normal skill installation does not package, install, or enable this hook and
@@ -14,11 +14,11 @@ maximum thinking budget.
 
 ## Why
 
-The auditor's §3c trust-surface walk and authority-side intent-drift sweep
-require sustained multi-step reasoning across a program's dependency graph and
-its documented invariants. On default thinking budgets, the catalog collapses
-to surface-level pattern matching and misses exactly the cross-cutting
-findings that justify the skill (project_auditor_best_models.md).
+The auditor's trust-surface walk and authority-side intent-drift sweep require
+sustained multi-step reasoning across a program's dependency graph and its
+documented invariants. On default thinking budgets, the catalog can collapse to
+surface-level pattern matching and miss the cross-cutting findings that justify
+the skill.
 
 The thinking budget is decided at prompt-submit time, *before* the model
 chooses to invoke the skill — so no inside-the-skill mechanism (SKILL.md text,
@@ -54,13 +54,16 @@ submitted prompt to this local hook process, as required by Claude Code's
 
 ## Install
 
-Two manual steps.
+Three manual steps from a source checkout. Keep the adapter outside the skill
+installation directory so a skill update cannot delete it.
 
-1. **Make the hook executable.** Adjust the path for your skill install
-   location:
+1. **Copy the hook into stable user-owned storage and make it executable:**
 
    ```sh
-   chmod +x ~/.claude/skills/qedgen-auditor/hooks/auditor-thinking-budget.sh
+   mkdir -p "$HOME/.local/share/qedgen-auditor-hooks"
+   cp integrations/qedgen-auditor-hooks/auditor-thinking-budget.sh \
+     "$HOME/.local/share/qedgen-auditor-hooks/"
+   chmod 700 "$HOME/.local/share/qedgen-auditor-hooks/auditor-thinking-budget.sh"
    ```
 
 2. **Merge `settings.snippet.json` into `~/.claude/settings.json` under
@@ -69,7 +72,7 @@ Two manual steps.
    inner hook entry (the `{ "type": "command", "command": "..." }`) into the
    existing `hooks` array.
 
-   The snippet uses `$HOME/.claude/skills/qedgen-auditor/...` — replace
+   The snippet uses `$HOME/.local/share/qedgen-auditor-hooks/...` — replace
    `$HOME` with the absolute path if your `settings.json` doesn't expand
    environment variables (most setups do).
 
@@ -82,7 +85,7 @@ appended to the `prompt` field:
 
 ```sh
 echo '{"prompt":"please run /qedgen-auditor on this repo"}' \
-  | ~/.claude/skills/qedgen-auditor/hooks/auditor-thinking-budget.sh
+  | ~/.local/share/qedgen-auditor-hooks/auditor-thinking-budget.sh
 ```
 
 Expected output: the same JSON with `prompt` ending in `\n\nultrathink`.
@@ -91,7 +94,7 @@ A non-trigger prompt should pass through unchanged:
 
 ```sh
 echo '{"prompt":"what time is it"}' \
-  | ~/.claude/skills/qedgen-auditor/hooks/auditor-thinking-budget.sh
+  | ~/.local/share/qedgen-auditor-hooks/auditor-thinking-budget.sh
 ```
 
 Inside Claude Code, invoke `/qedgen-auditor` on any program and confirm the
@@ -102,4 +105,4 @@ executable bit.
 ## Uninstall
 
 Remove the hook entry from `~/.claude/settings.json` and (optionally) delete
-this directory.
+`~/.local/share/qedgen-auditor-hooks/`.

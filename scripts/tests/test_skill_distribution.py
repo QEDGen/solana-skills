@@ -29,6 +29,193 @@ class DistributionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return self.output
 
+    def run_builder(self, *args, expected=0, env=None):
+        result = subprocess.run(
+            [sys.executable, str(BUILDER), *map(str, args)],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+        return result
+
+    def make_sync_fixture(self, name="sync-root"):
+        fixture = self.scratch / name
+        (fixture / "scripts").mkdir(parents=True)
+        (fixture / "sources").mkdir()
+        (fixture / "crates/qedgen").mkdir(parents=True)
+        for skill_name in ("qedgen", "qedgen-auditor"):
+            skill = fixture / "skills" / skill_name
+            skill.mkdir(parents=True)
+            (skill / "VERSION").write_text("1.2.3\n")
+            (skill / "old-state").write_text(f"old {skill_name}\n")
+            (fixture / "sources" / f"{skill_name}.md").write_text(
+                f"---\nname: {skill_name}\ndescription: fixture\n---\nFixture.\n"
+            )
+        (fixture / "package.json").write_text('{"version":"1.2.3"}\n')
+        (fixture / "crates/qedgen/Cargo.toml").write_text(
+            '[package]\nname = "fixture"\nversion = "1.2.3"\n'
+        )
+        manifest = {
+            "schema_version": 1,
+            "skills": {
+                skill_name: {"SKILL.md": f"sources/{skill_name}.md"}
+                for skill_name in ("qedgen", "qedgen-auditor")
+            },
+        }
+        (fixture / "scripts/skill-distribution.json").write_text(json.dumps(manifest))
+        subprocess.run(["git", "init", "-q"], cwd=fixture, check=True)
+        subprocess.run(["git", "add", "."], cwd=fixture, check=True)
+        subprocess.run(
+            ["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+             "-c", "commit.gpgsign=false", "commit", "-qm", "fixture"],
+            cwd=fixture,
+            check=True,
+        )
+        return fixture
+
+    @staticmethod
+    def tree_snapshot(root):
+        return {
+            path.relative_to(root).as_posix(): (
+                hashlib.sha256(path.read_bytes()).hexdigest(),
+                path.stat().st_mode & 0o111,
+            )
+            for path in root.rglob("*")
+            if path.is_file()
+        }
+
+    def test_committed_skill_trees_match_staged_inventory(self):
+        output = self.build()
+        for name in ("qedgen", "qedgen-auditor"):
+            expected = output / "skills" / name
+            actual = ROOT / "skills" / name
+            actual_snapshot = {
+                relative: details
+                for relative, details in self.tree_snapshot(actual).items()
+                if not (name == "qedgen" and Path(relative).parts[:1] == ("bin",))
+            }
+            self.assertEqual(actual_snapshot, self.tree_snapshot(expected))
+
+    def test_root_skill_definition_is_removed(self):
+        self.assertFalse((ROOT / "SKILL.md").exists())
+        self.assertTrue((ROOT / "skills/qedgen/SKILL.md").is_file())
+
+    def test_check_ignores_local_installed_binary(self):
+        fixture = self.make_sync_fixture("local-bin-root")
+        env = dict(os.environ, QEDGEN_PACKAGE_TESTING="1")
+        self.run_builder("--sync", "--root", fixture, env=env)
+        local_bin = fixture / "skills/qedgen/bin/qedgen"
+        local_bin.parent.mkdir(parents=True, exist_ok=True)
+        local_bin.write_text("local runtime state")
+        local_bin.chmod(0o751)
+        before = (local_bin.read_bytes(), local_bin.stat().st_mode & 0o777)
+        self.run_builder("--check", "--root", fixture, env=env)
+        self.assertEqual(
+            (local_bin.read_bytes(), local_bin.stat().st_mode & 0o777),
+            before,
+        )
+
+    def test_check_rejects_unexpected_runtime_bin_file(self):
+        fixture = self.make_sync_fixture("unexpected-bin-root")
+        env = dict(os.environ, QEDGEN_PACKAGE_TESTING="1")
+        self.run_builder("--sync", "--root", fixture, env=env)
+        extra = fixture / "skills/qedgen/bin/extra-state"
+        extra.parent.mkdir(parents=True, exist_ok=True)
+        extra.write_text("must not be retained")
+        result = self.run_builder("--check", "--root", fixture, expected=1, env=env)
+        self.assertIn("extra-state", result.stderr)
+
+    def test_sync_preserves_known_runtime_files_only(self):
+        fixture = self.make_sync_fixture("runtime-state-root")
+        env = dict(os.environ, QEDGEN_PACKAGE_TESTING="1")
+        self.run_builder("--sync", "--root", fixture, env=env)
+        binary = fixture / "skills/qedgen/bin/qedgen"
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        binary.write_text("local runtime state")
+        temporary = fixture / "skills/qedgen/bin/.qedgen.abc123"
+        temporary.write_text("interrupted installer state")
+        extra = fixture / "skills/qedgen/bin/extra-state"
+        extra.write_text("must not be retained")
+        self.run_builder("--sync", "--root", fixture, env=env)
+        self.assertEqual(binary.read_text(), "local runtime state")
+        self.assertEqual(temporary.read_text(), "interrupted installer state")
+        self.assertFalse(extra.exists())
+
+    def test_auditor_tree_excludes_optional_development_helpers(self):
+        auditor = ROOT / "skills/qedgen-auditor"
+        self.assertFalse((auditor / "hooks").exists())
+        self.assertFalse((auditor / "scripts/check-knowledge-bases.sh").exists())
+        self.assertFalse((auditor / "references/basis-corpus-registry.txt").exists())
+        self.assertFalse((auditor / "references/basis-legacy-allowlist.txt").exists())
+        self.assertTrue(
+            (ROOT / "integrations/qedgen-auditor-hooks/auditor-thinking-budget.sh").is_file()
+        )
+        self.assertTrue((ROOT / "scripts/check-auditor-knowledge-bases.sh").is_file())
+
+    def test_sync_rolls_back_both_public_trees_on_second_replacement_failure(self):
+        fixture = self.make_sync_fixture()
+        before = {
+            name: self.tree_snapshot(fixture / "skills" / name)
+            for name in ("qedgen", "qedgen-auditor")
+        }
+        env = dict(
+            os.environ,
+            QEDGEN_PACKAGE_TESTING="1",
+            QEDGEN_TEST_SYNC_FAIL_AFTER="qedgen",
+        )
+        result = self.run_builder("--sync", "--root", fixture, expected=1, env=env)
+        self.assertIn("injected sync failure after qedgen", result.stderr)
+        after = {
+            name: self.tree_snapshot(fixture / "skills" / name)
+            for name in ("qedgen", "qedgen-auditor")
+        }
+        self.assertEqual(after, before)
+
+    def test_sync_restores_backup_when_install_rename_fails(self):
+        for failed_name in ("qedgen", "qedgen-auditor"):
+            with self.subTest(failed_name=failed_name):
+                fixture = self.make_sync_fixture(f"rename-failure-{failed_name}")
+                before = {
+                    name: self.tree_snapshot(fixture / "skills" / name)
+                    for name in ("qedgen", "qedgen-auditor")
+                }
+                env = dict(
+                    os.environ,
+                    QEDGEN_PACKAGE_TESTING="1",
+                    QEDGEN_TEST_SYNC_FAIL_BEFORE_INSTALL=failed_name,
+                )
+                result = self.run_builder(
+                    "--sync", "--root", fixture, expected=1, env=env
+                )
+                self.assertIn(
+                    f"injected sync failure before installing {failed_name}",
+                    result.stderr,
+                )
+                after = {
+                    name: self.tree_snapshot(fixture / "skills" / name)
+                    for name in ("qedgen", "qedgen-auditor")
+                }
+                self.assertEqual(after, before)
+
+    def test_root_override_is_rejected_outside_package_tests(self):
+        result = self.run_builder("--check", "--root", ROOT, expected=1)
+        self.assertIn("--root is available only to package tests", result.stderr)
+
+    def test_relocated_knowledge_checker_defaults_and_rejects_missing_input(self):
+        checker = ROOT / "scripts/check-auditor-knowledge-bases.sh"
+        result = subprocess.run(["bash", str(checker)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        missing = self.scratch / "missing-registry.txt"
+        result = subprocess.run(
+            ["bash", str(checker), str(ROOT / "skills/qedgen-auditor"),
+             str(ROOT / "scripts/data/auditor-basis-legacy-allowlist.txt"), str(missing)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("missing knowledge-base input", result.stderr)
+
     def test_inventory_and_integrity(self):
         output = self.build()
         inventory = json.loads((output / "distribution.json").read_text())
@@ -44,7 +231,6 @@ class DistributionTests(unittest.TestCase):
         self.assertEqual((output / "skills/qedgen/VERSION").read_text().strip(),
                          json.loads((ROOT / "package.json").read_text())["version"])
         self.assertTrue(os.access(output / "skills/qedgen/tools/qedgen", os.X_OK))
-        self.assertTrue((ROOT / "SKILL.md").is_file(), "legacy discovery path must survive")
 
     def test_relative_markdown_links_are_self_contained(self):
         output = self.build()

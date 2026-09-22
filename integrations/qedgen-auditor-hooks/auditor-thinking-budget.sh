@@ -3,7 +3,7 @@
 #
 # Reads a Claude Code UserPromptSubmit hook JSON payload on stdin, detects
 # audit-trigger phrases in the prompt, and appends "ultrathink" to the prompt
-# so Opus 4.6 / 4.7 sessions allocate maximum thinking budget. The auditor's
+# so supported Claude sessions request an extended thinking budget. The auditor's
 # §3c trust-surface walk and authority-side intent-drift sweep collapse to
 # surface-level pattern matching without sustained reasoning.
 #
