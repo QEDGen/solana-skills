@@ -24,11 +24,11 @@
 extern crate alloc;
 
 use core::mem::ManuallyDrop;
-use pinocchio::account_info::AccountInfo;
+use pinocchio::account_info::{AccountInfo, MAX_PERMITTED_DATA_INCREASE};
 
-/// Layout-mirror of `pinocchio::account_info::Account` (pinocchio 0.8.x).
-/// Drift causes immediate UB on first field access; the size assertion
-/// catches the common add/remove-field form.
+/// Layout mirror of private `pinocchio::account_info::Account` in Pinocchio
+/// 0.8.4. Generated manifests pin that exact version because construction of
+/// `AccountInfo` below depends on this otherwise-private representation.
 #[repr(C)]
 struct AccountLayout {
     borrow_state: u8,
@@ -41,14 +41,41 @@ struct AccountLayout {
     lamports: u64,
     data_len: u64,
 }
-const _: () = assert!(core::mem::size_of::<AccountLayout>() == 88);
 
-/// 88-byte header followed contiguously by the account's data region.
+const _: () = {
+    assert!(core::mem::size_of::<AccountLayout>() == 88);
+    assert!(core::mem::align_of::<AccountLayout>() == 8);
+    assert!(core::mem::offset_of!(AccountLayout, borrow_state) == 0);
+    assert!(core::mem::offset_of!(AccountLayout, is_signer) == 1);
+    assert!(core::mem::offset_of!(AccountLayout, is_writable) == 2);
+    assert!(core::mem::offset_of!(AccountLayout, executable) == 3);
+    assert!(core::mem::offset_of!(AccountLayout, original_data_len) == 4);
+    assert!(core::mem::offset_of!(AccountLayout, key) == 8);
+    assert!(core::mem::offset_of!(AccountLayout, owner) == 40);
+    assert!(core::mem::offset_of!(AccountLayout, lamports) == 72);
+    assert!(core::mem::offset_of!(AccountLayout, data_len) == 80);
+    assert!(core::mem::size_of::<AccountInfo>() == core::mem::size_of::<*mut u8>());
+    assert!(core::mem::align_of::<AccountInfo>() == core::mem::align_of::<*mut u8>());
+};
+
+/// Header and data are followed by the growth region that Pinocchio's safe
+/// `AccountInfo::realloc` API may expose. The real runtime provides the same
+/// `MAX_PERMITTED_DATA_INCREASE` bytes after every serialized account.
 #[repr(C, align(8))]
 struct StackAccount<const DATA_LEN: usize> {
     hdr: AccountLayout,
     data: [u8; DATA_LEN],
+    realloc_padding: [u8; MAX_PERMITTED_DATA_INCREASE],
 }
+
+const _: () = {
+    assert!(core::mem::align_of::<StackAccount<0>>() == 8);
+    assert!(core::mem::offset_of!(StackAccount<0>, hdr) == 0);
+    assert!(core::mem::offset_of!(StackAccount<0>, data) == 88);
+    assert!(core::mem::offset_of!(StackAccount<0>, realloc_padding) == 88);
+    assert!(core::mem::offset_of!(StackAccount<165>, data) == 88);
+    assert!(core::mem::offset_of!(StackAccount<165>, realloc_padding) == 253);
+};
 
 // SPL Token `TokenAccount` data-region offsets (pinocchio-token 0.3.0).
 const TOKEN_MINT_OFF: usize = 0;
@@ -66,9 +93,9 @@ const SPL_TOKEN_PROGRAM_ID: [u8; 32] = [
     0x1c, 0xb4, 0x85, 0xed, 0x5f, 0x5b, 0x37, 0x91, 0x3a, 0x8c, 0xf5, 0x85, 0x7e, 0xff, 0x00, 0xa9,
 ];
 const STATE_INITIALIZED: u8 = 1;
-/// Pinocchio tracks borrow availability with set bits. At instruction entry,
-/// all lamport/data mutable and immutable borrow slots are available.
-const BORROW_STATE_CLEAR: u8 = 0xff;
+/// Pinocchio 0.8.x clears the runtime's `0xff` non-duplicate marker before it
+/// exposes an `AccountInfo`. Zero means neither data nor lamports are borrowed.
+const BORROW_STATE_CLEAR: u8 = 0;
 
 /// Build a stack-resident SPL Token account. `amount` is the field a
 /// harness wires up as `kani::any()`.
@@ -93,6 +120,7 @@ fn build_token_account(
             data_len: TOKEN_DATA_LEN as u64,
         },
         data: [0u8; TOKEN_DATA_LEN],
+        realloc_padding: [0u8; MAX_PERMITTED_DATA_INCREASE],
     };
     write_fixed_32(&mut acct.data, TOKEN_MINT_OFF, mint_in_data);
     write_fixed_32(&mut acct.data, TOKEN_OWNER_OFF, owner_in_data);
@@ -122,6 +150,7 @@ fn build_mint_account(
             data_len: MINT_DATA_LEN as u64,
         },
         data: [0u8; MINT_DATA_LEN],
+        realloc_padding: [0u8; MAX_PERMITTED_DATA_INCREASE],
     };
     acct.data[MINT_DECIMALS_OFF] = decimals;
     acct.data[MINT_STATE_OFF] = STATE_INITIALIZED;
@@ -144,6 +173,7 @@ fn build_minimal_account(key: [u8; 32], is_signer: bool, is_writable: bool) -> S
             data_len: 0,
         },
         data: [],
+        realloc_padding: [0u8; MAX_PERMITTED_DATA_INCREASE],
     }
 }
 
@@ -169,17 +199,21 @@ fn build_data_account<const DATA_LEN: usize>(
             data_len: DATA_LEN as u64,
         },
         data,
+        realloc_padding: [0u8; MAX_PERMITTED_DATA_INCREASE],
     }
 }
 
 /// Transmute a `*mut StackAccount<N>::hdr` to `AccountInfo`.
 ///
-/// SAFETY: `AccountInfo` is `#[repr(C)] struct { raw: *mut Account }` —
-/// a single-field pointer wrapper. `StackAccount<N>::hdr` mirrors
-/// `Account`'s layout (asserted above). The caller must keep `stack`
-/// alive for the lifetime of the returned `AccountInfo`.
+/// SAFETY: In the pinned Pinocchio 0.8.4 source, `AccountInfo` is a
+/// `#[repr(C)]` single-field wrapper around `*mut Account`. The compile-time
+/// assertions above cover the wrapper representation and every private
+/// `Account` field offset. The pointer is derived from the complete
+/// `StackAccount`, rather than a reference to `hdr`, so its provenance covers
+/// the contiguous data and realloc region. The caller must keep `stack` alive
+/// and must not access it directly while an `AccountInfo` borrow guard is live.
 unsafe fn account_info_from_stack<const N: usize>(stack: &mut StackAccount<N>) -> AccountInfo {
-    let hdr_ptr: *mut AccountLayout = &mut stack.hdr;
+    let hdr_ptr = (stack as *mut StackAccount<N>).cast::<AccountLayout>();
     core::mem::transmute::<*mut AccountLayout, AccountInfo>(hdr_ptr)
 }
 

@@ -298,11 +298,14 @@ fn render_cargo_toml(
             // pinocchio (entrypoint + AccountInfo), pinocchio-pubkey
             // (declare_id!), zeropod (zero-copy state); pinocchio-token
             // only for Token CPIs.
-            out.push_str("pinocchio = \"0.8\"\n");
-            out.push_str("pinocchio-pubkey = \"0.3\"\n");
+            // The Kani scaffold mirrors Pinocchio's private Account layout.
+            // Keep this dependency family on the audited Pinocchio 0.8 line.
+            out.push_str("pinocchio = \"=0.8.4\"\n");
+            out.push_str("pinocchio-pubkey = \"=0.2.4\"\n");
             out.push_str("zeropod = \"0.1\"\n");
             if needs_spl {
-                out.push_str("pinocchio-token = \"0.3\"\n");
+                // Token/mint harness builders depend on 0.3.0 field offsets.
+                out.push_str("pinocchio-token = \"=0.3.0\"\n");
             }
         }
     }
@@ -2079,6 +2082,26 @@ handler poke : State.Active -> State.Active {{
                 target
             );
         }
+    }
+
+    #[test]
+    fn pinocchio_cargo_toml_pins_the_private_layout_contract() {
+        let (mir, parsed) = lower_fixture("examples/rust/escrow/escrow.qedspec");
+        let fp = crate::fingerprint::compute_fingerprint(&parsed);
+        let toml = render_cargo_toml(&mir, &fp, Target::Pinocchio);
+
+        assert!(
+            toml.contains("pinocchio = \"=0.8.4\""),
+            "AccountInfo construction depends on the audited 0.8.4 private layout:\n{toml}"
+        );
+        assert!(
+            toml.contains("pinocchio-pubkey = \"=0.2.4\""),
+            "declare_id! must resolve against the same audited Pinocchio line:\n{toml}"
+        );
+        assert!(
+            toml.contains("pinocchio-token = \"=0.3.0\""),
+            "token data offsets depend on the audited 0.3.0 layout:\n{toml}"
+        );
     }
 
     #[test]

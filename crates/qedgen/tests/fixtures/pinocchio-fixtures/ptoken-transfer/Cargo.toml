@@ -14,8 +14,8 @@ publish = false
 # mixing 0.6 and 0.8 produces "multiple different versions of crate
 # `pinocchio`" errors at the type boundary (TokenAccount::from_account_info
 # expects pinocchio 0.8's AccountInfo, not 0.6's).
-pinocchio = "0.8"
-pinocchio-token = "0.3"
+pinocchio = "=0.8.4"
+pinocchio-token = "=0.3.0"
 
 # Self-contained workspace — keeps `cargo build` / `cargo kani` from
 # associating this fixture with the parent Cargo.toml at the repo root
