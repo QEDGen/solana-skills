@@ -33,6 +33,39 @@ fn run_capture(command: &mut Command) -> String {
     )
 }
 
+fn assert_single_audited_pinocchio(manifest_path: &Path) {
+    let output = Command::new("cargo")
+        .arg("metadata")
+        .arg("--format-version")
+        .arg("1")
+        .arg("--locked")
+        .arg("--manifest-path")
+        .arg(manifest_path)
+        .output()
+        .expect("failed to spawn cargo metadata");
+    assert!(
+        output.status.success(),
+        "cargo metadata failed with status {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("cargo metadata JSON");
+    let versions: Vec<&str> = metadata["packages"]
+        .as_array()
+        .expect("metadata packages")
+        .iter()
+        .filter(|package| package["name"] == "pinocchio")
+        .map(|package| package["version"].as_str().expect("package version"))
+        .collect();
+    assert_eq!(
+        versions,
+        ["0.8.4"],
+        "generated crates must resolve only the Pinocchio version whose AccountInfo layout was audited"
+    );
+}
+
 // The Anchor scaffold/proptest smokes moved to
 // `tests/generated_artifact_gate.rs` (#294): the gate covers all bundled
 // Anchor examples and raises the floor from "scaffold compiles" to "every
@@ -76,10 +109,12 @@ fn smoke_pinocchio_scaffold(fixture: &str, spec_file: &str) {
     // `qedgen-macros` git dep to the in-repo path dep before compiling.
     redirect_macros_to_path(&output_dir.join("Cargo.toml"));
 
+    let manifest_path = output_dir.join("Cargo.toml");
     run(Command::new("cargo")
         .arg("build")
         .arg("--manifest-path")
-        .arg(output_dir.join("Cargo.toml")));
+        .arg(&manifest_path));
+    assert_single_audited_pinocchio(&manifest_path);
 }
 
 /// Generate a Pinocchio program and its impl-targeted Kani proof, then run

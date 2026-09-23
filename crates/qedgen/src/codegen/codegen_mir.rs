@@ -299,9 +299,9 @@ fn render_cargo_toml(
             // (declare_id!), zeropod (zero-copy state); pinocchio-token
             // only for Token CPIs.
             // The Kani scaffold mirrors Pinocchio's private Account layout.
-            // Keep this exact pin in sync with the audited template contract.
+            // Keep this dependency family on the audited Pinocchio 0.8 line.
             out.push_str("pinocchio = \"=0.8.4\"\n");
-            out.push_str("pinocchio-pubkey = \"0.3\"\n");
+            out.push_str("pinocchio-pubkey = \"=0.2.4\"\n");
             out.push_str("zeropod = \"0.1\"\n");
             if needs_spl {
                 // Token/mint harness builders depend on 0.3.0 field offsets.
@@ -2093,6 +2093,10 @@ handler poke : State.Active -> State.Active {{
         assert!(
             toml.contains("pinocchio = \"=0.8.4\""),
             "AccountInfo construction depends on the audited 0.8.4 private layout:\n{toml}"
+        );
+        assert!(
+            toml.contains("pinocchio-pubkey = \"=0.2.4\""),
+            "declare_id! must resolve against the same audited Pinocchio line:\n{toml}"
         );
         assert!(
             toml.contains("pinocchio-token = \"=0.3.0\""),

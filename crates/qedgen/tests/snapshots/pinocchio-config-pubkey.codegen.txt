@@ -15,7 +15,7 @@ debug = []
 
 [dependencies]
 pinocchio = "=0.8.4"
-pinocchio-pubkey = "0.3"
+pinocchio-pubkey = "=0.2.4"
 zeropod = "0.1"
 qedgen-macros = { git = "https://github.com/qedgen/solana-skills", tag = "v2.49.0" }
 

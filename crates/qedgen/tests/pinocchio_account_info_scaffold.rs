@@ -19,6 +19,22 @@ fn stack_account_supports_pinocchios_checked_borrow_contract() {
     assert_eq!(account.data_len(), 3);
 
     {
+        let lamports = account
+            .try_borrow_lamports()
+            .expect("a fresh scaffold account must allow a checked lamports borrow");
+        assert_eq!(*lamports, 99);
+        assert!(account.try_borrow_mut_lamports().is_err());
+    }
+
+    {
+        let mut lamports = account
+            .try_borrow_mut_lamports()
+            .expect("dropping the shared borrow must restore lamports availability");
+        *lamports = 101;
+    }
+    assert_eq!(account.lamports(), 101);
+
+    {
         let data = account
             .try_borrow_data()
             .expect("a fresh scaffold account must allow a checked data borrow");

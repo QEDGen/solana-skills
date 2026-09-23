@@ -8,9 +8,12 @@ scaffold therefore uses one narrowly scoped unsafe representation conversion.
 
 ## Version and consumers
 
-Generated Pinocchio crates pin `pinocchio = "=0.8.4"`. Crates that emit SPL
-Token layouts also pin `pinocchio-token = "=0.3.0"`. These exact versions are
-part of the scaffold's safety contract, not merely reproducibility choices.
+Generated Pinocchio crates pin `pinocchio = "=0.8.4"` and
+`pinocchio-pubkey = "=0.2.4"`. The latter depends on Pinocchio 0.8; its 0.3
+line depends on Pinocchio 0.9 and must not enter this dependency graph. Crates
+that emit SPL Token layouts also pin `pinocchio-token = "=0.3.0"`. These exact
+versions are part of the scaffold's safety contract, not merely reproducibility
+choices.
 
 The shared source is
 `crates/qedgen/templates/kani-impl-pinocchio-scaffold.rs`. It is included by
@@ -67,6 +70,8 @@ instead of accessing memory unchecked.
 
 The integration test
 `crates/qedgen/tests/pinocchio_account_info_scaffold.rs` includes the shipping
-template itself and validates real Pinocchio accessors and borrow tracking,
-real `pinocchio-token` token/mint parsing, zero-length data, mutation, and both
-the exact permitted realloc boundary and its one-byte-over rejection.
+template itself and validates real Pinocchio accessors and both data/lamports
+borrow trackers, real `pinocchio-token` token/mint parsing, zero-length data,
+mutation, and both the exact permitted realloc boundary and its one-byte-over
+rejection. Generated compile smokes inspect Cargo metadata and reject any
+resolved Pinocchio version other than 0.8.4.
