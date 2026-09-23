@@ -43,3 +43,10 @@ ratchet-anchor = { package = "solana-ratchet-anchor", version = "0.4.0", default
 # `ratchet-quasar` covers Quasar IDLs end-to-end. Not RPC-bearing —
 # the loader reads JSON straight off disk, no fetch path to gate.
 ratchet-quasar = { package = "solana-ratchet-quasar", version = "0.4.0" }
+
+[dev-dependencies]
+# The Pinocchio Kani scaffold mirrors private runtime layout. Pin exact
+# versions here so its integration tests exercise the same contract emitted
+# into generated crates.
+pinocchio = "=0.8.4"
+pinocchio-token = "=0.3.0"

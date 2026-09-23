@@ -186,7 +186,7 @@ fn assert_green_harness_contract(
     );
     for snippet in required_postcondition_snippets {
         assert!(
-            harness_body.contains(snippet),
+            compact_body.contains(&compact_rust(snippet)),
             "{harness} is missing required concrete post-state assertion `{snippet}`:\n{harness_body}"
         );
     }

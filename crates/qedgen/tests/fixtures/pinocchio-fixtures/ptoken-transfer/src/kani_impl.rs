@@ -21,8 +21,8 @@
 //! `AccountInfo` is `#[repr(C)] struct AccountInfo { raw: *mut
 //! Account }` — a single-field pointer wrapper — so the transmute
 //! reinterprets one raw pointer as another, provided the pointee
-//! layout matches. Layout is asserted at compile time via
-//! `const _: () = assert!(core::mem::size_of::<...>() == 88);`.
+//! layout matches. Size, alignment, and field offsets are asserted at compile
+//! time, and each allocation includes Pinocchio's permitted realloc region.
 //!
 //! This drops the symbolic surface dramatically: no leaked buffer, no
 //! deserialize loop, just per-account stack storage with concrete
@@ -33,7 +33,7 @@
 extern crate alloc;
 
 use core::mem::ManuallyDrop;
-use pinocchio::account_info::AccountInfo;
+use pinocchio::account_info::{AccountInfo, MAX_PERMITTED_DATA_INCREASE};
 
 use crate::transfer::process_transfer;
 
@@ -56,16 +56,32 @@ struct AccountLayout {
     data_len: u64,
 }
 
-const _: () = assert!(core::mem::size_of::<AccountLayout>() == 88);
+const _: () = {
+    assert!(core::mem::size_of::<AccountLayout>() == 88);
+    assert!(core::mem::align_of::<AccountLayout>() == 8);
+    assert!(core::mem::offset_of!(AccountLayout, borrow_state) == 0);
+    assert!(core::mem::offset_of!(AccountLayout, is_signer) == 1);
+    assert!(core::mem::offset_of!(AccountLayout, is_writable) == 2);
+    assert!(core::mem::offset_of!(AccountLayout, executable) == 3);
+    assert!(core::mem::offset_of!(AccountLayout, original_data_len) == 4);
+    assert!(core::mem::offset_of!(AccountLayout, key) == 8);
+    assert!(core::mem::offset_of!(AccountLayout, owner) == 40);
+    assert!(core::mem::offset_of!(AccountLayout, lamports) == 72);
+    assert!(core::mem::offset_of!(AccountLayout, data_len) == 80);
+    assert!(core::mem::size_of::<AccountInfo>() == core::mem::size_of::<*mut u8>());
+    assert!(core::mem::align_of::<AccountInfo>() == core::mem::align_of::<*mut u8>());
+};
 
 /// One stack-allocated account: 88-byte header followed by its data
-/// region. `#[repr(C)]` keeps the layout contiguous so
+/// region and Pinocchio's permitted realloc growth area. `#[repr(C)]` keeps
+/// the layout contiguous so
 /// `borrow_*_data_unchecked` (which reads past the header at runtime)
 /// sees the data we wrote.
 #[repr(C, align(8))]
 struct StackAccount<const DATA_LEN: usize> {
     hdr: AccountLayout,
     data: [u8; DATA_LEN],
+    realloc_padding: [u8; MAX_PERMITTED_DATA_INCREASE],
 }
 
 /// `TokenAccount` layout offsets inside the account's data region
@@ -87,9 +103,9 @@ const SPL_TOKEN_PROGRAM_ID: [u8; 32] = [
 /// `AccountState::Initialized = 1`.
 const STATE_INITIALIZED: u8 = 1;
 
-/// Pinocchio tracks borrow availability with set bits. At instruction entry,
-/// all lamport/data mutable and immutable borrow slots are available.
-const BORROW_STATE_CLEAR: u8 = 0xff;
+/// Pinocchio clears the runtime's `0xff` non-duplicate marker before exposing
+/// `AccountInfo`; zero means neither data nor lamports are borrowed.
+const BORROW_STATE_CLEAR: u8 = 0;
 
 /// Build a stack-resident token account. `key` and `owner_in_data`
 /// are concrete; `amount` is the per-test parameter (symbolic via
@@ -114,6 +130,7 @@ fn build_token_account(
             data_len: TOKEN_DATA_LEN as u64,
         },
         data: [0u8; TOKEN_DATA_LEN],
+        realloc_padding: [0u8; MAX_PERMITTED_DATA_INCREASE],
     };
     acct.data[TOKEN_OWNER_OFF..TOKEN_OWNER_OFF + 32].copy_from_slice(&owner_in_data);
     acct.data[TOKEN_AMOUNT_OFF..TOKEN_AMOUNT_OFF + 8].copy_from_slice(&amount.to_le_bytes());
@@ -137,6 +154,7 @@ fn build_minimal_account(key: [u8; 32], is_signer: bool) -> StackAccount<0> {
             data_len: 0,
         },
         data: [],
+        realloc_padding: [0u8; MAX_PERMITTED_DATA_INCREASE],
     }
 }
 
@@ -150,7 +168,7 @@ fn build_minimal_account(key: [u8; 32], is_signer: bool) -> StackAccount<0> {
 /// keeps `stack` alive for the lifetime of the returned
 /// `AccountInfo`, no use-after-free occurs.
 unsafe fn account_info_from_stack<const N: usize>(stack: &mut StackAccount<N>) -> AccountInfo {
-    let hdr_ptr: *mut AccountLayout = &mut stack.hdr;
+    let hdr_ptr = (stack as *mut StackAccount<N>).cast::<AccountLayout>();
     core::mem::transmute::<*mut AccountLayout, AccountInfo>(hdr_ptr)
 }
 
