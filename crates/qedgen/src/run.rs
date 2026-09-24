@@ -1302,8 +1302,11 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
 
             // sBPF verification (--asm)
             if let Some(ref asm_path) = asm {
-                let spec_sbpf_version =
-                    asm2lean::SbpfVersion::from_spec(&check::parse_spec_file(&spec)?);
+                // Same lock/cache policy as every other parse here, so
+                // `--frozen` never rewrites qed.lock.
+                let spec_sbpf_version = asm2lean::SbpfVersion::from_spec(
+                    &check::parse_spec_file_with_opts(&spec, lock_mode, cache_opts)?,
+                );
                 sbpf_verify::verify(asm_path, &proofs, spec_sbpf_version)?;
             }
 
