@@ -1198,6 +1198,7 @@ pub(crate) mod evidence;
 pub(crate) mod miri_verify;
 pub(crate) mod ratchet;
 pub(crate) mod regen_drift;
+pub(crate) mod sbpf_elf;
 pub(crate) mod sbpf_verify;
 pub(crate) mod scaffold;
 pub(crate) mod upstream_check;

@@ -24,6 +24,12 @@ collisions, writable accounts with no signer.
 # Standard preflight
 $QEDGEN readiness --idl target/idl/my_program.json
 
+# Also check that the built program is sBPF v3
+$QEDGEN readiness --idl target/idl/my_program.json --so target/deploy/my_program.so
+
+# A program without an IDL (Pinocchio, native, sBPF assembly)
+$QEDGEN readiness --so target/deploy/my_program.so
+
 # JSON for CI
 $QEDGEN readiness --idl target/idl/my_program.json --json
 
@@ -33,9 +39,12 @@ $QEDGEN readiness --list-rules
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
-| `--idl` | Path | required | Anchor IDL JSON (typically `target/idl/<program>.json`) |
+| `--idl` | Path | required (unless `--so` or `--list-rules`) | Anchor IDL JSON (typically `target/idl/<program>.json`) |
+| `--so` | Path | - | Built program. Reports `QED002` when it is older than sBPF v3 (see below) |
+| `--root` | Path | - | Project root for source-vs-IDL reconciliation. Needs `--idl` |
+| `--unsafe` | String | - | Acknowledge an unsafe finding (repeatable), for example `--unsafe allow-pre-v3-sbpf` |
 | `--quasar` | bool | auto | Treat `--idl` as a Quasar-emitted IDL rather than an Anchor IDL. Auto-detected when a `Quasar.toml` (and no shadowing `Anchor.toml`) lives in the current working directory; pass explicitly to force Quasar mode from elsewhere. |
-| `--list-rules` | bool | false | Print the catalog of P-rules applied and exit |
+| `--list-rules` | bool | false | Print the catalog of P-rules and QED rules applied and exit |
 | `--json` | bool | false | Machine-readable output |
 
 ### `check-upgrade`
@@ -56,6 +65,10 @@ $QEDGEN check-upgrade --old old.json --new new.json \
 $QEDGEN check-upgrade --old old.json --new new.json \
   --migrated-account TreasuryV2 --realloc-account UserConfig
 
+# Also check that the new build is sBPF v3
+$QEDGEN check-upgrade --old old.json --new new.json \
+  --new-so target/deploy/my_program.so
+
 # Print the rule catalog and exit
 $QEDGEN check-upgrade --list-rules
 ```
@@ -67,9 +80,33 @@ $QEDGEN check-upgrade --list-rules
 | `--unsafe` | String | - | Acknowledge a specific finding so it reports as Additive (repeatable). Pass `--list-rules` to see the full flag catalog. |
 | `--migrated-account` | String | - | Declare an account as having a migration in source; demotes R003/R004 findings for that account to Additive (repeatable) |
 | `--realloc-account` | String | - | Declare an account as having `realloc = ...` in source; demotes R005 for that account to Additive (repeatable) |
+| `--new-so` | Path | - | Built program the upgrade would ship. Reports `QED002` when it is older than sBPF v3 (see below) |
 | `--quasar` | bool | auto | Treat both IDLs as Quasar-emitted rather than Anchor. Auto-detected from `Quasar.toml`; the flag forces Quasar mode when running from elsewhere. Mixed-framework diffs (Anchor old vs Quasar new) are out of scope. |
-| `--list-rules` | bool | false | Print the catalog of R-rules applied and exit |
+| `--list-rules` | bool | false | Print the catalog of R-rules and QED rules applied and exit |
 | `--json` | bool | false | Machine-readable output |
+
+### `QED002`: program older than sBPF v3
+
+SIMD-0500 (planned for Agave 4.4) rejects deploys, upgrades, and
+finalizations of programs older than sBPF v3. Programs already deployed keep
+running, but they cannot be upgraded unless the new build is v3.
+`readiness --so` and `check-upgrade --new-so` read the ELF header of the built
+program. When `e_flags` is below 3, they report `QED002`
+(`sbpf-version-below-v3`) as unsafe (exit `2`). A newer version passes. A
+missing file, a non-ELF file, a truncated file, or an ELF for another machine
+is an error (exit `3`), never a pass. The reader checks the ELF header and
+that the tables and segments it points to fit in the file.
+
+Rebuild with `cargo build-sbf --arch v3` (cargo-build-sbf 4.2.0+,
+platform-tools v1.56+) or `sbpf build -a v3`. For a V0 program that is
+deployed and will never be upgraded, acknowledge the `readiness` finding with
+`--unsafe allow-pre-v3-sbpf`. It then reports as additive. `check-upgrade
+--new-so` offers no acknowledgement: its candidate is the upgrade, and the
+cluster rejects it.
+
+Rebuilding a program as v3 changes its binary. Callers that pin it with
+`upstream { binary_hash }` see pin drift, which `verify --check-upstream`
+reports. Update the pin after the v3 upgrade is deployed.
 
 ## Discharge (experimental — the qedgen ↔ qedsvm seam)
 

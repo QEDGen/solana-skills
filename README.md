@@ -619,6 +619,7 @@ manually for Lean/codegen changes and before a release.
 qedgen readiness --idl target/idl/my_program.json
 qedgen readiness --idl target/idl/my_program.json --json          # machine-readable
 qedgen readiness --idl target/idl/my_program.json --quasar        # Quasar IDL
+qedgen readiness --so target/deploy/my_program.so                 # QED002: build older than sBPF v3
 
 # Post-deploy — diff old vs new and block breaking upgrades
 qedgen check-upgrade --old ratchet.lock --new target/idl/my_program.json
@@ -627,6 +628,8 @@ qedgen check-upgrade --old ratchet.lock --new target/idl/my_program.json
 qedgen check-upgrade --old ratchet.lock --new target/idl/my_program.json \
   --unsafe allow-field-append --migrated-account EscrowState
 ```
+
+`--so` (and `--new-so` on `check-upgrade`) reads the built program's ELF header. A program older than sBPF v3 is reported as `QED002`, because SIMD-0500 (planned for Agave 4.4) rejects deploys and upgrades of such programs. It works without an IDL, so Pinocchio, native, and sBPF assembly programs can use it too.
 
 Exit codes mirror ratchet's CLI conventions: `0 = additive/safe`, `1 = breaking`, `2 = unsafe`. Internally qedgen embeds [ratchet](https://github.com/saicharanpogul/ratchet) as a library, so the rule catalog stays in sync with upstream — run `qedgen readiness --list-rules` (P-rules) or `qedgen check-upgrade --list-rules` (R-rules) to see the full set. Pair with `--json` for a machine-readable dump. A worked Quasar IDL pair (v1 → v2) lives at [`crates/qedgen/tests/fixtures/quasar-readiness/`](crates/qedgen/tests/fixtures/quasar-readiness/).
 
