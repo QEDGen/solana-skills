@@ -48,11 +48,10 @@ make_tree() { # <name> -> path on stdout
 
 run_install() { # <tree> [extra env as K=V...]
   local tree="$1"
-  local caller_cargo_home="${CARGO_HOME:-$HOME/.cargo}"
   local caller_rustup_home="${RUSTUP_HOME:-$HOME/.rustup}"
   shift
-  mkdir -p "$scratch/home"
-  env HOME="$scratch/home" CARGO_HOME="$caller_cargo_home" \
+  mkdir -p "$scratch/home" "$scratch/cargo-home"
+  env HOME="$scratch/home" CARGO_HOME="$scratch/cargo-home" \
     RUSTUP_HOME="$caller_rustup_home" "$@" "$tree/install.sh" 2>&1
 }
 
