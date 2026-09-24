@@ -211,6 +211,7 @@ pub fn init(
     asm_source: Option<&Path>,
     mathlib: bool,
     program: bool,
+    sbpf_version: Option<crate::asm2lean::SbpfVersion>,
 ) -> Result<()> {
     ensure!(!name.is_empty(), "project name must not be empty");
     ensure!(
@@ -254,7 +255,10 @@ pub fn init(
     let asm_module = if let Some(asm_path) = asm_source {
         let module_name = "Program".to_string();
         let output_file = output_dir.join("Program.lean");
-        crate::asm2lean::asm2lean(asm_path, &output_file, Some(&module_name))?;
+        let existing = std::fs::read_to_string(&output_file).ok();
+        let version =
+            crate::asm2lean::resolve_sbpf_version(None, sbpf_version, existing.as_deref());
+        crate::asm2lean::asm2lean(asm_path, &output_file, Some(&module_name), version)?;
         eprintln!("Generated {}", output_file.display());
         Some(module_name)
     } else {
@@ -553,7 +557,7 @@ mod tests {
         // from inside `formal_verification/` → `output_dir` resolves to
         // `formal_verification/formal_verification/`.
         let nested = existing_fv.join("formal_verification");
-        let err = init("demo", &nested, None, false, false).unwrap_err();
+        let err = init("demo", &nested, None, false, false, None).unwrap_err();
         let msg = format!("{}", err);
         assert!(
             msg.contains("refusing to scaffold"),

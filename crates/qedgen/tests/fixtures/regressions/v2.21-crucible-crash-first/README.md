@@ -61,7 +61,7 @@ cd /tmp/buggy_anchor
 
 # 2. Build the program .so. No Anchor workspace needed — the committed
 #    idl.json supplies the schema the harness macro consumes.
-cargo build-sbf            # → target/deploy/buggy_anchor.so
+cargo build-sbf --arch v3  # → target/deploy/buggy_anchor.so (sBPF v3)
 
 # 3. Fuzz (needs `crucible` on PATH). qedgen emits the brownfield harness,
 #    discovers the committed idl.json (auto-filling the `accounts::*`

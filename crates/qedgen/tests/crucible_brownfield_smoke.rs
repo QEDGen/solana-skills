@@ -687,9 +687,7 @@ fn live_domain_boundary_protocol_misses_and_domain_finds() {
     let program = tmp.path().join("domain_boundary");
     copy_dir_recursive(&domain_boundary_fixture(), &program);
 
-    let build = Command::new("cargo")
-        .arg("build-sbf")
-        .current_dir(&program)
+    let build = common::sbf::build_sbf_v3(&program)
         .output()
         .expect("spawn cargo build-sbf");
     assert!(
@@ -697,6 +695,7 @@ fn live_domain_boundary_protocol_misses_and_domain_finds() {
         "SBF build failed:\n{}",
         String::from_utf8_lossy(&build.stderr)
     );
+    common::sbf::assert_deploy_dir_v3(&program.join("target/deploy"));
 
     // Protocol mode: brownfield, no spec. Default harness → .qed/fuzz/<prog>.
     let protocol = Command::new(qedgen_bin())

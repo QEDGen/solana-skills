@@ -87,11 +87,8 @@ fn parallax_reproducers_confirm_bugs_and_drop_guarded_handlers() {
         .join("\n");
     std::fs::write(&manifest_path, patched).expect("write manifest");
 
-    run_ok(
-        Command::new("cargo")
-            .arg("build-sbf")
-            .current_dir(tmp.path().join("program")),
-    );
+    run_ok(&mut common::sbf::build_sbf_v3(&tmp.path().join("program")));
+    common::sbf::assert_deploy_dir_v3(&tmp.path().join("program/target/deploy"));
 
     let json = run_capture_ok(
         Command::new(qedgen_bin())

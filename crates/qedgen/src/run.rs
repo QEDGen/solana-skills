@@ -1063,8 +1063,11 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             input,
             output,
             namespace,
+            sbpf_version,
         } => {
-            asm2lean::asm2lean(&input, &output, namespace.as_deref())?;
+            let existing = std::fs::read_to_string(&output).ok();
+            let version = asm2lean::resolve_sbpf_version(sbpf_version, None, existing.as_deref());
+            asm2lean::asm2lean(&input, &output, namespace.as_deref(), version)?;
         }
 
         Commands::Setup { workspace, mathlib } => {
@@ -1105,12 +1108,17 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             });
             init::init_qed_dir(&program_root, &name, spec_rel.as_deref())?;
 
+            let spec_sbpf_version = spec
+                .as_deref()
+                .and_then(|p| check::parse_spec_file(p).ok())
+                .and_then(|parsed| asm2lean::SbpfVersion::from_spec(&parsed));
             init::init(
                 &name,
                 &output_dir,
                 asm.as_deref(),
                 mathlib,
                 scaffold_target.is_some(),
+                spec_sbpf_version,
             )?;
 
             if let (Some(target), Some(qedspec_path)) = (scaffold_target, spec.as_ref()) {
@@ -1290,7 +1298,10 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
 
             // sBPF verification (--asm)
             if let Some(ref asm_path) = asm {
-                sbpf_verify::verify(asm_path, &proofs)?;
+                let spec_sbpf_version = check::parse_spec_file(&spec)
+                    .ok()
+                    .and_then(|parsed| asm2lean::SbpfVersion::from_spec(&parsed));
+                sbpf_verify::verify(asm_path, &proofs, spec_sbpf_version)?;
             }
 
             // Drift detection (--drift)

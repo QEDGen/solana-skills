@@ -31,7 +31,7 @@ $QEDGEN asm2lean --input src/program.s --output formal_verification/ProgramProg.
 
 This generates:
 - `abbrev` definitions for all `.equ` constants (offsets as `Int`, values as `Nat`)
-- `RODATA_<sym>` / `RODATA_<sym>_LEN` / `RODATA_<sym>_BYTES` for each `.rodata` symbol (`.ascii`/`.asciz`/`.byte`/`.short`/`.word`/`.quad`), laid out at `BYTECODE_START` + .text size (lddw = 2 slots). Reference these by NAME in proofs — the numeral approximates the deployed VA (ELF header/section offsets are invisible to a source lift); exact fidelity is the binary lane's job
+- `RODATA_<sym>` / `RODATA_<sym>_LEN` / `RODATA_<sym>_BYTES` for each `.rodata` symbol (`.ascii`/`.asciz`/`.byte`/`.short`/`.word`/`.quad`), laid out by sBPF version. **v3** (the default, and the only deployable format once SIMD-0500 is active): `.rodata` is its own segment at VM address 0, and the assembler packs symbols from offset 0, so each address is exact. **v0**: `BYTECODE_START` + .text size (lddw = 2 slots), which only approximates the deployed VA (ELF header/section offsets are invisible to a source lift). Declare the version with `pragma sbpf_version = v3` (or `v0`) in the spec; the generated header records it (`-- sbpf-version: v3`). Reference these symbols by NAME in proofs either way
 - `@[simp] def prog : Program` with named constants and index comments
 - For large programs (>64 instructions): `def progAt : Nat -> Option Insn` — chunked function-based lookup for O(1) simp performance
 - `@[simp] theorem ea_NAME` — effectiveAddr lemmas for each offset symbol

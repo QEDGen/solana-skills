@@ -40,6 +40,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
 
+// Shared v3 build helper (#423); single source with the qedgen gates.
+#[path = "../../qedgen/tests/common/sbf.rs"]
+mod sbf;
+
 /// Must match the `declare_id!` the journey stamps into the generated
 /// program: an Anchor `seeds` constraint validates against the running
 /// program's own id, so the two cannot diverge.
@@ -170,11 +174,7 @@ fn build_fixture_program() -> PathBuf {
         .join("\n");
     std::fs::write(&manifest_path, patched).expect("write manifest");
 
-    run_ok(
-        Command::new("cargo")
-            .arg("build-sbf")
-            .current_dir(dir.join("programs")),
-    );
+    run_ok(&mut sbf::build_sbf_v3(&dir.join("programs")));
 
     let deploy = dir.join("programs/target/deploy");
     assert!(
@@ -182,6 +182,7 @@ fn build_fixture_program() -> PathBuf {
         "cargo build-sbf produced no runtimevault.so in {}",
         deploy.display()
     );
+    sbf::assert_sbpf_v3(&deploy.join("runtimevault.so"));
 
     // Keep the build alive past the TempDir guard.
     let kept = std::env::temp_dir().join("qedgen-runtime-journey-deploy");

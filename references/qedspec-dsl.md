@@ -1242,7 +1242,16 @@ Scalar codegen directives that tune *how* a spec lowers, without a body:
 ```fsharp
 pragma checked_overflow_error = MathOverflow   // error returned on a checked-add overflow
 pragma state_repr = adt                        // inductive multi-variant State (see below)
+pragma sbpf_version = v3                       // sBPF bytecode version for `pragma sbpf` specs (v3 | v0)
 ```
+
+**`pragma sbpf_version = v3 | v0`**: the sBPF version an assembly program is
+built for. It only applies to specs with a `pragma sbpf { ... }` block. It sets
+where `asm2lean` lays out `.rodata`: at VM address 0 for `v3`, after the
+bytecode at `0x100000000` for `v0`. Without it, a new module uses `v3` and an
+existing module keeps its recorded version (V0 if none). `check` reports an
+unknown value (`sbpf_version_invalid`) and the pragma on a non-sBPF spec
+(`sbpf_version_without_sbpf`).
 
 **`pragma state_repr = adt`** — opt a multi-variant `type State | A | B of { … } | C`
 into the inductive representation: Lean lowers it to a real `inductive State` (with

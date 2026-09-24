@@ -8,6 +8,7 @@
 spec Slippage
 
 pragma sbpf {}
+pragma sbpf_version = v3
 
 type Error
   | SlippageExceeded = 1 "Token balance below minimum threshold"

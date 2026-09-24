@@ -161,6 +161,9 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     // referencing undeclared Error variants would also fail cargo build.
     warnings.extend(check_unknown_error_variant(spec));
 
+    // #422 — `pragma sbpf_version` must be v0/v3 and only on sBPF specs.
+    warnings.extend(check_sbpf_version(spec));
+
     // #368 — no `program_id` means `declare_id!` gets the System Program's
     // address. Valid base58, so nothing downstream rejects it on shape.
     warnings.extend(check_missing_program_id(spec));

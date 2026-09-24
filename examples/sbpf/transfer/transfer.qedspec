@@ -9,6 +9,7 @@
 spec Transfer
 
 pragma sbpf {}
+pragma sbpf_version = v3
 
 type Error
   | InvalidAccountCount           = 1 "Invalid number of accounts"
