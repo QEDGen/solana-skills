@@ -2,11 +2,12 @@
 //
 // SIMD-0500 (planned for Agave 4.4) rejects deploys and upgrades of programs
 // older than sBPF v3. The version is the ELF `e_flags` field. The reader
-// checks only the fixed ELF64 header and the bounds of what it points to (the
-// program-header table, each segment, the section-header table), so no ELF
-// parsing dependency is needed. A bare or truncated header is not a pass.
+// reads only the fixed ELF64 header and the program-header table, and checks
+// that the tables and every segment fit in the file. No ELF parsing
+// dependency is needed, and a bare or truncated header is not a pass.
 
 use anyhow::{bail, Context, Result};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 /// First sBPF version SIMD-0500 still accepts for deploys and upgrades.
@@ -21,16 +22,54 @@ const EM_SBPF: u16 = 263;
 
 /// Read the sBPF version (`e_flags`) of the program at `path`. A missing
 /// file, a non-ELF file, a truncated file, or an ELF for another machine is
-/// an error, never a version.
+/// an error, never a version. Reads only the ELF header and the
+/// program-header table, never the segment contents.
 pub fn read_sbpf_version(path: &Path) -> Result<u32> {
-    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    sbpf_version(&bytes).with_context(|| format!("reading {}", path.display()))
+    let mut file =
+        std::fs::File::open(path).with_context(|| format!("reading {}", path.display()))?;
+    sbpf_version(&mut file).with_context(|| format!("reading {}", path.display()))
 }
 
-fn sbpf_version(elf: &[u8]) -> Result<u32> {
-    if elf.len() < ELF64_HEADER_LEN {
+fn sbpf_version(file: &mut std::fs::File) -> Result<u32> {
+    let len = file.metadata()?.len();
+    let mut elf = [0u8; ELF64_HEADER_LEN];
+    if len < ELF64_HEADER_LEN as u64 {
         bail!("too short to be an ELF program ({ELF64_HEADER_LEN}-byte header)");
     }
+    file.read_exact(&mut elf)?;
+    let version = check_header(&elf)?;
+
+    let in_file = |what: &str, offset: u64, size: u64| -> Result<()> {
+        match offset.checked_add(size) {
+            Some(end) if end <= len => Ok(()),
+            _ => bail!("ELF is truncated: its {what} ends past the file end ({len} bytes)"),
+        }
+    };
+
+    let (phoff, phentsize, phnum) = (u64_at(&elf, 32), u16_at(&elf, 54), u16_at(&elf, 56));
+    if phnum == 0 {
+        bail!("ELF has no program headers, so it is not a loadable program");
+    }
+    if phentsize < ELF64_PHDR_LEN {
+        bail!("ELF program header entries are {phentsize} bytes, expected {ELF64_PHDR_LEN}");
+    }
+    // At most 65535 * 65535 bytes by the u16 fields, and in the file.
+    in_file("program header table", phoff, phentsize * phnum)?;
+    let mut table = vec![0u8; (phentsize * phnum) as usize];
+    file.seek(SeekFrom::Start(phoff))?;
+    file.read_exact(&mut table)?;
+    for i in 0..phnum {
+        let at = (i * phentsize) as usize;
+        in_file("segment", u64_at(&table, at + 8), u64_at(&table, at + 32))?;
+    }
+    let (shoff, shentsize, shnum) = (u64_at(&elf, 40), u16_at(&elf, 58), u16_at(&elf, 60));
+    in_file("section header table", shoff, shentsize * shnum)?;
+
+    Ok(version)
+}
+
+/// Check the fixed ELF64 header and return its `e_flags`.
+fn check_header(elf: &[u8; ELF64_HEADER_LEN]) -> Result<u32> {
     if &elf[..4] != b"\x7fELF" {
         bail!("not an ELF file (bad magic)");
     }
@@ -41,31 +80,6 @@ fn sbpf_version(elf: &[u8]) -> Result<u32> {
     if machine != EM_BPF && machine != EM_SBPF {
         bail!("ELF machine {machine} is not sBPF (expected {EM_BPF} or {EM_SBPF})");
     }
-
-    let len = elf.len() as u64;
-    let in_file = |what: &str, offset: u64, size: u64| -> Result<()> {
-        match offset.checked_add(size) {
-            Some(end) if end <= len => Ok(()),
-            _ => bail!("ELF is truncated: its {what} ends past the file end ({len} bytes)"),
-        }
-    };
-
-    let (phoff, phentsize, phnum) = (u64_at(elf, 32), u16_at(elf, 54), u16_at(elf, 56));
-    if phnum == 0 {
-        bail!("ELF has no program headers, so it is not a loadable program");
-    }
-    if phentsize < ELF64_PHDR_LEN {
-        bail!("ELF program header entries are {phentsize} bytes, expected {ELF64_PHDR_LEN}");
-    }
-    in_file("program header table", phoff, phentsize * phnum)?;
-    for i in 0..phnum {
-        // In bounds: the whole table was checked above.
-        let at = (phoff + i * phentsize) as usize;
-        in_file("segment", u64_at(elf, at + 8), u64_at(elf, at + 32))?;
-    }
-    let (shoff, shentsize, shnum) = (u64_at(elf, 40), u16_at(elf, 58), u16_at(elf, 60));
-    in_file("section header table", shoff, shentsize * shnum)?;
-
     Ok(u32::from_le_bytes([elf[48], elf[49], elf[50], elf[51]]))
 }
 
@@ -121,7 +135,7 @@ mod tests {
         header[4] = ELFCLASS64;
         header[5] = ELFDATA2LSB;
         header[18..20].copy_from_slice(&62u16.to_le_bytes()); // x86-64
-        let err = sbpf_version(&header).unwrap_err();
+        let err = check_header(&header).unwrap_err();
         assert!(format!("{err:#}").contains("not sBPF"), "{err:#}");
     }
 
