@@ -327,5 +327,5 @@ fn check_upgrade_new_so_flags_pre_v3_candidate() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|f| f["rule_id"] == "QED002" && f["allow_flag"] == "allow-pre-v3-sbpf"));
+        .any(|f| f["rule_id"] == "QED002" && f["allow_flag"].is_null()));
 }

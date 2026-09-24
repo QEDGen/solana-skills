@@ -107,7 +107,7 @@ pub fn run_readiness(opts: &ReadinessOpts) -> Result<Report> {
         }
     };
     if let Some(so) = &opts.so {
-        apply_sbpf_version(&mut report, so, &opts.unsafes)?;
+        apply_sbpf_version(&mut report, so, Acknowledge::Allowed(&opts.unsafes))?;
     }
     Ok(report)
 }
@@ -135,23 +135,38 @@ pub fn run_check_upgrade(opts: &CheckUpgradeOpts) -> Result<Report> {
         apply_source_drift(&mut report, root, &opts.new, opts.framework, &opts.unsafes)?;
     }
     if let Some(so) = &opts.new_so {
-        apply_sbpf_version(&mut report, so, &opts.unsafes)?;
+        // The candidate IS the upgrade, and SIMD-0500 rejects it. There is
+        // nothing to acknowledge.
+        apply_sbpf_version(&mut report, so, Acknowledge::Never)?;
     }
     Ok(report)
 }
 
-/// `--unsafe` value that acknowledges a pre-v3 program, for example a V0
-/// program that is already deployed and will never be upgraded.
+/// `readiness --unsafe` value that acknowledges a pre-v3 program, for
+/// example a V0 program that is already deployed and will never be upgraded.
+/// `check-upgrade` does not accept it: its candidate is the upgrade.
 pub const ALLOW_PRE_V3_SBPF: &str = "allow-pre-v3-sbpf";
+
+/// Whether a QED002 finding may be acknowledged.
+enum Acknowledge<'a> {
+    /// `readiness`: the program may stay deployed as it is.
+    Allowed(&'a [String]),
+    /// `check-upgrade`: the cluster rejects the upgrade whatever the flags say.
+    Never,
+}
 
 /// QED002: SIMD-0500 (planned for Agave 4.4) rejects deploys and upgrades of
 /// programs older than sBPF v3. A version newer than v3 passes.
-fn apply_sbpf_version(report: &mut Report, so: &Path, acknowledged: &[String]) -> Result<()> {
+fn apply_sbpf_version(report: &mut Report, so: &Path, ack: Acknowledge<'_>) -> Result<()> {
     let version = crate::sbpf_elf::read_sbpf_version(so)?;
     if version >= crate::sbpf_elf::SBPF_V3 {
         return Ok(());
     }
-    let severity = if acknowledged.iter().any(|flag| flag == ALLOW_PRE_V3_SBPF) {
+    let acknowledged = match ack {
+        Acknowledge::Allowed(flags) => flags.iter().any(|flag| flag == ALLOW_PRE_V3_SBPF),
+        Acknowledge::Never => false,
+    };
+    let severity = if acknowledged {
         Severity::Additive
     } else {
         Severity::Unsafe
@@ -160,19 +175,20 @@ fn apply_sbpf_version(report: &mut Report, so: &Path, acknowledged: &[String]) -
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| so.display().to_string());
-    report.push(
-        Finding::new(severity, "QED002", "sbpf-version-below-v3")
-            .at([format!("so:{name}")])
-            .message(format!(
-                "program is sBPF v{version} (ELF e_flags = {version}), not v3: once SIMD-0500 \
+    let finding = Finding::new(severity, "QED002", "sbpf-version-below-v3")
+        .at([format!("so:{name}")])
+        .message(format!(
+            "program is sBPF v{version} (ELF e_flags = {version}), not v3: once SIMD-0500 \
                  is active, the cluster rejects deploying or upgrading it"
-            ))
-            .suggestion(
-                "Rebuild with `cargo build-sbf --arch v3` (cargo-build-sbf 4.2.0+, \
+        ))
+        .suggestion(
+            "Rebuild with `cargo build-sbf --arch v3` (cargo-build-sbf 4.2.0+, \
                  platform-tools v1.56+) or `sbpf build -a v3`.",
-            )
-            .allow_flag(ALLOW_PRE_V3_SBPF),
-    );
+        );
+    report.push(match ack {
+        Acknowledge::Allowed(_) => finding.allow_flag(ALLOW_PRE_V3_SBPF),
+        Acknowledge::Never => finding,
+    });
     Ok(())
 }
 
@@ -319,6 +335,24 @@ struct RuleEntry {
     description: &'static str,
 }
 
+/// QEDGen's own rules, which run beside ratchet's and appear in both
+/// catalogs. Each one fires only when its input flag is given.
+const QED_RULES: &[RuleEntry] = &[
+    RuleEntry {
+        id: "QED001",
+        name: "source-handler-missing-from-idl",
+        description: "With --root: a source handler the IDL does not declare \
+                      (acknowledge with allow-source-only-<handler>).",
+    },
+    RuleEntry {
+        id: "QED002",
+        name: "sbpf-version-below-v3",
+        description: "With readiness --so or check-upgrade --new-so: a built program \
+                      older than sBPF v3, which SIMD-0500 blocks from deploys and upgrades \
+                      (readiness only: acknowledge with allow-pre-v3-sbpf).",
+    },
+];
+
 /// Print the embedded preflight (P-rule) catalog; `--json` emits a
 /// machine-parseable payload on stdout.
 pub fn print_rules_preflight(json: bool) -> Result<()> {
@@ -348,13 +382,14 @@ pub fn print_rules_diff(json: bool) -> Result<()> {
 }
 
 fn render_rule_catalog(header: &str, entries: &[RuleEntry], json: bool) -> Result<()> {
+    let all: Vec<&RuleEntry> = entries.iter().chain(QED_RULES).collect();
     if json {
-        let s = serde_json::to_string_pretty(entries).context("serializing rule catalog")?;
+        let s = serde_json::to_string_pretty(&all).context("serializing rule catalog")?;
         println!("{}", s);
         return Ok(());
     }
-    eprintln!("qedgen {} — {} rule(s):", header, entries.len());
-    for entry in entries {
+    eprintln!("qedgen {} + QED rules — {} rule(s):", header, all.len());
+    for entry in all {
         eprintln!("  {}  {:<40}  {}", entry.id, entry.name, entry.description);
     }
     Ok(())
@@ -880,5 +915,32 @@ mod tests {
         assert_eq!(exit_code(&v0), 2);
         let v3 = run("counter-v3.so");
         assert!(v3.findings.is_empty(), "{:?}", v3.findings);
+    }
+
+    /// The candidate of `check-upgrade` is the upgrade itself. SIMD-0500
+    /// rejects it, so the readiness acknowledgement must not pass it.
+    #[test]
+    fn check_upgrade_pre_v3_candidate_cannot_be_acknowledged() {
+        let tmp = TempDir::new().unwrap();
+        let idl = write(tmp.path(), "t.json", BARE_V1_IDL);
+        let report = run_check_upgrade(&CheckUpgradeOpts {
+            old: idl.clone(),
+            new: idl,
+            unsafes: vec![ALLOW_PRE_V3_SBPF.to_string()],
+            migrated_accounts: vec![],
+            realloc_accounts: vec![],
+            framework: Framework::Anchor,
+            root: None,
+            new_so: Some(sbpf_fixture("counter-v0.so")),
+        })
+        .unwrap();
+        let finding = report
+            .findings
+            .iter()
+            .find(|f| f.rule_id == "QED002")
+            .expect("QED002");
+        assert_eq!(finding.severity, Severity::Unsafe);
+        assert!(finding.allow_flag.is_none(), "no acknowledgement offered");
+        assert_eq!(exit_code(&report), 2);
     }
 }
