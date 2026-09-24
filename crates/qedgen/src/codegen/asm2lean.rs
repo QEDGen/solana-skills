@@ -801,6 +801,86 @@ fn emit_insn(
 }
 
 /// Compute the SHA-256 hash of a source string.
+/// sBPF bytecode version the assembly is built for. It decides where
+/// `.rodata` lives, which the source cannot show.
+///
+/// - `V0`: `.rodata` shares the program region at `0x100000000` with the
+///   bytecode. The deployed address also includes ELF header and section
+///   offsets that a source lift cannot see, so `asm2lean` only approximates it.
+/// - `V3`: `.rodata` is its own segment at VM address 0 (SIMD-0189). The
+///   assembler packs symbols from offset 0, so a symbol's address is exactly
+///   its offset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SbpfVersion {
+    V0,
+    V3,
+}
+
+impl SbpfVersion {
+    /// The default for new programs: v3 is the only deployable format once
+    /// SIMD-0500 is active.
+    pub const DEFAULT: SbpfVersion = SbpfVersion::V3;
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SbpfVersion::V0 => "v0",
+            SbpfVersion::V3 => "v3",
+        }
+    }
+
+    /// Parse `v0` / `v3` (also `0` / `3`), as written in `--sbpf-version` or
+    /// `pragma sbpf_version = v3`.
+    pub fn parse(s: &str) -> Option<SbpfVersion> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "v0" | "0" => Some(SbpfVersion::V0),
+            "v3" | "3" => Some(SbpfVersion::V3),
+            _ => None,
+        }
+    }
+
+    /// The version a `.qedspec` declares with `pragma sbpf_version = ...`.
+    /// An invalid value is `None` here; the `sbpf_version_invalid` lint
+    /// reports it.
+    pub fn from_spec(spec: &crate::check::ParsedSpec) -> Option<SbpfVersion> {
+        spec.pragma_value("sbpf_version")
+            .and_then(SbpfVersion::parse)
+    }
+
+    /// Base VM address of the first `.rodata` byte, given the `.text` size in
+    /// binary slots (`lddw` occupies 2).
+    fn rodata_base(self, text_slots: usize) -> u64 {
+        match self {
+            SbpfVersion::V0 => 0x1_0000_0000u64 + (text_slots as u64) * 8,
+            SbpfVersion::V3 => 0,
+        }
+    }
+}
+
+const VERSION_HEADER: &str = "-- sbpf-version: ";
+
+/// The sBPF version recorded in a generated Lean file. `None` for files
+/// generated before the version was recorded; those used the V0 layout.
+pub fn extract_sbpf_version(lean_content: &str) -> Option<SbpfVersion> {
+    lean_content
+        .lines()
+        .find_map(|l| l.strip_prefix(VERSION_HEADER))
+        .and_then(SbpfVersion::parse)
+}
+
+/// Pick the version for a (re)generation. An explicit choice (CLI flag or spec
+/// pragma, in that order) wins. Otherwise keep the version of the file being
+/// replaced, treating a file with no recorded version as V0 so regeneration
+/// never moves its addresses silently. A new file gets the default.
+pub fn resolve_sbpf_version(
+    flag: Option<SbpfVersion>,
+    spec: Option<SbpfVersion>,
+    existing_output: Option<&str>,
+) -> SbpfVersion {
+    flag.or(spec)
+        .or_else(|| existing_output.map(|c| extract_sbpf_version(c).unwrap_or(SbpfVersion::V0)))
+        .unwrap_or(SbpfVersion::DEFAULT)
+}
+
 pub fn source_hash(source: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(source.as_bytes());
@@ -817,18 +897,24 @@ pub fn extract_source_hash(lean_content: &str) -> Option<String> {
     None
 }
 
-pub fn generate(source: &str, namespace: &str, input_filename: &str) -> Result<String> {
+pub fn generate(
+    source: &str,
+    namespace: &str,
+    input_filename: &str,
+    version: SbpfVersion,
+) -> Result<String> {
     let prog = parse(source)?;
     let equates_map: HashMap<String, i64> = prog.equates.iter().cloned().collect();
-    // .rodata layout: the program region base (BYTECODE_START = 0x100000000,
-    // where the loader's R_BPF_64_Relative patching lands sub-region
-    // addresses) + the .text size in binary slots (lddw occupies 2).
+    // .rodata layout depends on the sBPF version (see `SbpfVersion`). V0: the
+    // program region base (BYTECODE_START = 0x100000000, where the loader's
+    // R_BPF_64_Relative patching lands sub-region addresses) + the .text size
+    // in binary slots (lddw occupies 2). V3: VM address 0.
     let text_slots: usize = prog
         .instructions
         .iter()
         .map(|i| if i.mnemonic == "lddw" { 2 } else { 1 })
         .sum();
-    let rodata_base: u64 = 0x1_0000_0000u64 + (text_slots as u64) * 8;
+    let rodata_base = version.rodata_base(text_slots);
     let rodata_names: HashMap<String, String> = prog
         .rodata
         .iter()
@@ -853,7 +939,8 @@ pub fn generate(source: &str, namespace: &str, input_filename: &str) -> Result<S
         "-- DO NOT EDIT — regenerate with: qedgen asm2lean --input {}",
         input_filename
     )?;
-    writeln!(out, "-- source-hash: sha256:{}\n", hash)?;
+    writeln!(out, "-- source-hash: sha256:{}", hash)?;
+    writeln!(out, "{}{}\n", VERSION_HEADER, version.label())?;
     writeln!(out, "import SVM.SBPF\n")?;
     writeln!(out, "namespace {}\n", namespace)?;
     writeln!(out, "open SVM.SBPF\n")?;
@@ -879,27 +966,45 @@ pub fn generate(source: &str, namespace: &str, input_filename: &str) -> Result<S
 
     if !prog.rodata.is_empty() {
         writeln!(out, "/-! ## .rodata symbols\n")?;
-        writeln!(
-            out,
-            "Laid out in the program region: `BYTECODE_START` (0x100000000) + .text size"
-        )?;
-        writeln!(
-            out,
-            "({} binary slots × 8 bytes; `lddw` occupies 2 slots). Deployed VAs additionally",
-            text_slots
-        )?;
-        writeln!(
-            out,
-            "include ELF header/section offsets a source-level lift cannot see, so proofs"
-        )?;
-        writeln!(
-            out,
-            "MUST reference these symbols by name — a corrected base only shifts the"
-        )?;
-        writeln!(
-            out,
-            "numerals. Fidelity to the deployed binary is the binary lane's job (qedlift). -/\n"
-        )?;
+        match version {
+            SbpfVersion::V3 => {
+                writeln!(
+                    out,
+                    "sBPF v3: `.rodata` is its own segment at VM address 0 (SIMD-0189). The"
+                )?;
+                writeln!(
+                    out,
+                    "assembler packs symbols from offset 0, so each address below is exact."
+                )?;
+                writeln!(
+                    out,
+                    "Proofs should still reference these symbols by name. -/\n"
+                )?;
+            }
+            SbpfVersion::V0 => {
+                writeln!(
+                    out,
+                    "sBPF v0: laid out in the program region: `BYTECODE_START` (0x100000000) + .text size"
+                )?;
+                writeln!(
+                    out,
+                    "({} binary slots × 8 bytes; `lddw` occupies 2 slots). Deployed VAs additionally",
+                    text_slots
+                )?;
+                writeln!(
+                    out,
+                    "include ELF header/section offsets a source-level lift cannot see, so proofs"
+                )?;
+                writeln!(
+                    out,
+                    "MUST reference these symbols by name — a corrected base only shifts the"
+                )?;
+                writeln!(
+                    out,
+                    "numerals. Fidelity to the deployed binary is the binary lane's job (qedlift). -/\n"
+                )?;
+            }
+        }
         for sym in &prog.rodata {
             let name = &rodata_names[&sym.name];
             let printable =
@@ -1120,7 +1225,12 @@ pub fn generate(source: &str, namespace: &str, input_filename: &str) -> Result<S
 }
 
 /// Entry point called from main.rs
-pub fn asm2lean(input: &Path, output: &Path, namespace: Option<&str>) -> Result<()> {
+pub fn asm2lean(
+    input: &Path,
+    output: &Path,
+    namespace: Option<&str>,
+    version: SbpfVersion,
+) -> Result<()> {
     let source =
         std::fs::read_to_string(input).with_context(|| format!("reading {}", input.display()))?;
 
@@ -1137,7 +1247,7 @@ pub fn asm2lean(input: &Path, output: &Path, namespace: Option<&str>) -> Result<
     });
 
     let prog = parse(&source)?;
-    let lean_code = generate(&source, &ns, &input_filename)?;
+    let lean_code = generate(&source, &ns, &input_filename, version)?;
 
     crate::codegen_shared::write_generated_file(output, &lean_code)?;
 
@@ -1147,11 +1257,12 @@ pub fn asm2lean(input: &Path, output: &Path, namespace: Option<&str>) -> Result<
         format!(", {} rodata symbols", prog.rodata.len())
     };
     eprintln!(
-        "✓ Generated {} ({} instructions, {} constants{})",
+        "✓ Generated {} ({} instructions, {} constants{}, sBPF {})",
         output.display(),
         prog.instructions.len(),
         prog.equates.len(),
         rodata_note,
+        version.label(),
     );
 
     Ok(())
@@ -1183,9 +1294,9 @@ entrypoint:
     }
 
     #[test]
-    fn rodata_address_is_program_region_after_text() {
+    fn v0_rodata_address_is_program_region_after_text() {
         // 2 lddw (2 slots each) + call + exit = 6 slots × 8 = 0x30
-        let lean = generate(RODATA_SRC, "T", "t.s").unwrap();
+        let lean = generate(RODATA_SRC, "T", "t.s", SbpfVersion::V0).unwrap();
         assert!(
             lean.contains("abbrev RODATA_e : Nat := 0x100000030"),
             "{}",
@@ -1200,7 +1311,7 @@ entrypoint:
 
     #[test]
     fn rodata_symbol_resolves_in_lddw_with_bridge() {
-        let lean = generate(RODATA_SRC, "T", "t.s").unwrap();
+        let lean = generate(RODATA_SRC, "T", "t.s", SbpfVersion::V3).unwrap();
         assert!(lean.contains(".lddw .r1 RODATA_e"), "{}", lean);
         assert!(!lean.contains("undefined: e"), "{}", lean);
         assert!(lean.contains("theorem bridge_RODATA_e : toU64 (↑RODATA_e : Int) = RODATA_e"));
@@ -1280,8 +1391,79 @@ entrypoint:
     #[test]
     fn no_rodata_emits_no_section() {
         let src = "entrypoint:\n    exit\n";
-        let lean = generate(src, "T", "t.s").unwrap();
+        let lean = generate(src, "T", "t.s", SbpfVersion::V3).unwrap();
         assert!(!lean.contains(".rodata symbols"));
         assert!(!lean.contains("RODATA_"));
+    }
+
+    /// v3 addresses match what the Blueshift `sbpf` assembler (0.3.1,
+    /// `sbpf build -a v3`) puts in the `lddw` immediates for the same source:
+    /// `lddw r1, 0x0` / `r2, 0x3` / `r3, 0x5` / `r4, 0xd`. Symbols are packed
+    /// from address 0 with no padding.
+    #[test]
+    fn v3_rodata_addresses_match_the_assembler() {
+        let src = r#"
+.globl entrypoint
+entrypoint:
+    lddw r1, a
+    lddw r2, b
+    lddw r3, c
+    lddw r4, d
+    exit
+.rodata
+    a: .ascii "abc"
+    b: .byte 1, 2
+    c: .quad 7
+    d: .ascii "xy"
+"#;
+        let lean = generate(src, "T", "t.s", SbpfVersion::V3).unwrap();
+        for (name, addr) in [("a", "0x0"), ("b", "0x3"), ("c", "0x5"), ("d", "0xd")] {
+            let line = format!("abbrev RODATA_{name} : Nat := {addr}");
+            assert!(lean.contains(&line), "missing `{line}`:\n{lean}");
+        }
+        assert!(lean.contains("sBPF v3"), "{lean}");
+    }
+
+    /// The same source moves only the `.rodata` numerals between versions.
+    #[test]
+    fn slippage_rodata_differs_only_by_version() {
+        let v0 = generate(RODATA_SRC, "T", "t.s", SbpfVersion::V0).unwrap();
+        let v3 = generate(RODATA_SRC, "T", "t.s", SbpfVersion::V3).unwrap();
+        assert!(v0.contains("abbrev RODATA_e : Nat := 0x100000030"));
+        assert!(v3.contains("abbrev RODATA_e : Nat := 0x0"));
+        assert!(v0.contains(".lddw .r1 RODATA_e") && v3.contains(".lddw .r1 RODATA_e"));
+    }
+
+    #[test]
+    fn generated_header_records_the_version() {
+        for v in [SbpfVersion::V0, SbpfVersion::V3] {
+            let lean = generate(RODATA_SRC, "T", "t.s", v).unwrap();
+            assert_eq!(extract_sbpf_version(&lean), Some(v));
+        }
+        // Files generated before the header existed carry no version.
+        assert_eq!(extract_sbpf_version("-- source-hash: sha256:abc\n"), None);
+    }
+
+    #[test]
+    fn parses_version_spellings() {
+        assert_eq!(SbpfVersion::parse("v3"), Some(SbpfVersion::V3));
+        assert_eq!(SbpfVersion::parse("3"), Some(SbpfVersion::V3));
+        assert_eq!(SbpfVersion::parse("V0"), Some(SbpfVersion::V0));
+        assert_eq!(SbpfVersion::parse("v2"), None);
+    }
+
+    /// Flag beats spec beats the existing file; a legacy file (no recorded
+    /// version) keeps V0 so regeneration never moves its addresses silently;
+    /// a new file gets v3.
+    #[test]
+    fn version_resolution_order() {
+        use SbpfVersion::{V0, V3};
+        let legacy = "-- source-hash: sha256:abc\n";
+        let v3_file = "-- sbpf-version: v3\n";
+        assert_eq!(resolve_sbpf_version(Some(V0), Some(V3), Some(v3_file)), V0);
+        assert_eq!(resolve_sbpf_version(None, Some(V3), Some(legacy)), V3);
+        assert_eq!(resolve_sbpf_version(None, None, Some(legacy)), V0);
+        assert_eq!(resolve_sbpf_version(None, None, Some(v3_file)), V3);
+        assert_eq!(resolve_sbpf_version(None, None, None), V3);
     }
 }

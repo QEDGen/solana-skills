@@ -5,7 +5,8 @@
 // AGENT: fill instruction builder data and assertions marked with todo!().
 //
 // Prerequisites:
-//   1. Build your program: cargo build-sbf (or cargo build --target bpfel-unknown-none)
+//   1. Build your program as sBPF v3: cargo build-sbf --arch v3
+//      (needs cargo-build-sbf 4.2.0+ and platform-tools v1.56+)
 //   2. Run tests: cargo test --features client
 //
 // Dev-dependencies (upserted into Cargo.toml by qedgen):

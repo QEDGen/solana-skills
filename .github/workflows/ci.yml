@@ -187,9 +187,12 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # Pinned, not `stable`: the gates build with `--arch v3`, which needs
+      # cargo-build-sbf 4.2.0+ and platform-tools v1.56+ (#423). `stable`
+      # can lag behind that (it was 4.1.0 when v3 landed).
       - name: Install Solana CLI (provides cargo-build-sbf)
         run: |
-          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
+          sh -c "$(curl -sSfL https://release.anza.xyz/v4.3.0/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
 
       # ~/.cache/solana holds the platform-tools bundle cargo-build-sbf

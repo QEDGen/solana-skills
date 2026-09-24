@@ -49,7 +49,7 @@ workspace:
 ```bash
 cp -r crates/qedgen/tests/fixtures/regressions/v2.22-pinocchio-brownfield-fuzz/buggy_pinocchio /tmp/
 cd /tmp/buggy_pinocchio
-cargo-build-sbf
+cargo build-sbf --arch v3
 ```
 
 Then `cd .qed/fuzz/buggy_pinocchio && cargo build --features invariant_test`

@@ -64,3 +64,4 @@ $QEDGEN asm2lean --input src/program.s --output formal_verification/Prog.lean
 | `--input` | Path | required | sBPF assembly source file |
 | `--output` | Path | required | Output Lean 4 file |
 | `--namespace` | String | derived from filename | Lean namespace |
+| `--sbpf-version` | `v0` \| `v3` | version recorded in an existing `--output` (V0 if none recorded), else `v3` | sBPF version the assembly is built for. Sets where `.rodata` lives: `v3` at VM address 0 (exact), `v0` after the bytecode at `0x100000000` (approximate). `init --asm` and `verify --asm` read it from the spec's `pragma sbpf_version` |

@@ -141,3 +141,47 @@ fn sbpf_modern_syntax_suppresses_rust_scaffold() {
         "expected a skip note on stderr, got:\n{stderr}"
     );
 }
+
+/// #431 review: with `--asm`, the spec's `pragma sbpf_version` picks the
+/// `.rodata` layout. A spec that fails to parse must stop `init`, not fall
+/// back to the default layout and write a `Program.lean` that may disagree
+/// with the spec.
+#[test]
+fn init_asm_rejects_unparseable_spec() {
+    ensure_qedgen_built();
+    let tmp = tempfile::tempdir().expect("create tempdir");
+    common::git_init(tmp.path());
+    let spec = tmp.path().join("broken.qedspec");
+    fs::write(
+        &spec,
+        "spec Broken\npragma sbpf_version = v0\nhandler {{{\n",
+    )
+    .expect("write spec");
+    let asm = repo_root().join("examples/sbpf/counter/src/counter.s");
+
+    let out = Command::new(qedgen_bin())
+        .args(["init", "--name", "broken", "--spec"])
+        .arg(&spec)
+        .arg("--asm")
+        .arg(&asm)
+        .current_dir(tmp.path())
+        .output()
+        .expect("spawn qedgen init");
+    assert!(
+        !out.status.success(),
+        "init --asm must fail on an unparseable spec:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        !tmp.path()
+            .join("formal_verification/Broken/Program.lean")
+            .exists()
+            && !tmp.path().join("formal_verification/Program.lean").exists(),
+        "no Program.lean may be written from an unparseable spec"
+    );
+    assert!(
+        !tmp.path().join(".qed/config.json").exists(),
+        "a failed init must not leave a half-initialized project behind"
+    );
+}

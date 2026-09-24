@@ -11,6 +11,7 @@
 spec Tree
 
 pragma sbpf {}
+pragma sbpf_version = v3
 
 const HEADER_SIZE = 24
 const NODE_SIZE   = 29

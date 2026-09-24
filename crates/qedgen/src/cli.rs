@@ -599,6 +599,12 @@ pub(crate) enum Commands {
         /// Lean namespace (default: derived from output filename)
         #[arg(long)]
         namespace: Option<String>,
+
+        /// sBPF version the assembly is built for: `v0` or `v3`. It sets
+        /// where `.rodata` lives. Default: the version recorded in an
+        /// existing `--output` file (V0 if it records none), else `v3`.
+        #[arg(long, value_parser = parse_sbpf_version)]
+        sbpf_version: Option<crate::asm2lean::SbpfVersion>,
     },
 
     /// Set up the global validation workspace
@@ -1403,6 +1409,11 @@ pub(crate) enum AristotleCommands {
         #[arg(long)]
         status: Option<String>,
     },
+}
+
+fn parse_sbpf_version(s: &str) -> Result<crate::asm2lean::SbpfVersion, String> {
+    crate::asm2lean::SbpfVersion::parse(s)
+        .ok_or_else(|| format!("expected `v0` or `v3`, got `{s}`"))
 }
 
 #[cfg(test)]

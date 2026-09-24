@@ -304,7 +304,7 @@ fn discover_deployed_program(project_root: &Path) -> Result<DeployedProgram, Con
     match deployed.len() {
         1 => Ok(deployed.remove(0)),
         0 if saw_anchor => Err(ConstructFailure::BuildError(
-            "no matching compiled program found — build the Anchor crate (`cargo build-sbf`) \
+            "no matching compiled program found — build the Anchor crate (`cargo build-sbf --arch v3`) \
              so its `declare_id!` and same-crate `.so` can be used together"
                 .to_string(),
         )),

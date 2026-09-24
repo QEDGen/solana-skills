@@ -101,6 +101,47 @@ pub(super) fn check_error_declared_as_record(spec: &ParsedSpec) -> Vec<Completen
     warnings
 }
 
+/// `pragma sbpf_version = <v0|v3>` sets where `asm2lean` lays out `.rodata`
+/// (#422). An unknown value would silently fall back to another layout. On a
+/// spec without `pragma sbpf { ... }` the pragma still sets the `--asm`
+/// layout, but the spec is probably missing its sBPF block.
+pub(super) fn check_sbpf_version(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+    let mut warnings = Vec::new();
+    for (key, value) in &spec.pragma_assignments {
+        if key != "sbpf_version" {
+            continue;
+        }
+        if crate::asm2lean::SbpfVersion::parse(value).is_none() {
+            warnings.push(
+                warn(
+                    "sbpf_version_invalid",
+                    Severity::Error,
+                    1,
+                    format!("`pragma sbpf_version = {value}` is not a supported sBPF version."),
+                )
+                .subject(value.clone())
+                .fix("Use `pragma sbpf_version = v3` (the deployable standard) or `v0`."),
+            );
+        } else if !spec.is_assembly_target() {
+            warnings.push(
+                warn(
+                    "sbpf_version_without_sbpf",
+                    Severity::Warning,
+                    2,
+                    format!(
+                        "`pragma sbpf_version = {value}` is on a spec with no \
+                         `pragma sbpf {{ ... }}` block. `init --asm` and `check --asm` \
+                         still use it for the `.rodata` layout."
+                    ),
+                )
+                .subject(value.clone())
+                .fix("Add `pragma sbpf { ... }` if this is an assembly program. Otherwise remove the pragma."),
+            );
+        }
+    }
+    warnings
+}
+
 /// `unknown_error_variant`: a USER-WRITTEN error name that is absent from
 /// `type Error | …`. Covers three sites, all of which lower to
 /// `<ProgramName>Error::X` in generated Rust: a `requires … else X` clause,
@@ -1504,6 +1545,27 @@ handler good_set : State.Active -> State.Active {
             .expect("expected unknown_error_variant warning for pragma");
         assert!(hit.message.contains("checked_overflow_error"));
         assert!(hit.message.contains("MintOverflow"));
+    }
+
+    #[test]
+    fn sbpf_version_pragma_is_validated() {
+        let rules = |src: &str| -> Vec<String> {
+            let spec = crate::chumsky_adapter::parse_str(src).expect("spec parses");
+            check_sbpf_version(&spec)
+                .into_iter()
+                .map(|w| w.rule.to_string())
+                .collect()
+        };
+        assert!(rules("spec S\npragma sbpf {}\npragma sbpf_version = v3\n").is_empty());
+        assert!(rules("spec S\npragma sbpf {}\npragma sbpf_version = v0\n").is_empty());
+        assert_eq!(
+            rules("spec S\npragma sbpf {}\npragma sbpf_version = v2\n"),
+            vec!["sbpf_version_invalid"]
+        );
+        assert_eq!(
+            rules("spec S\npragma sbpf_version = v3\n"),
+            vec!["sbpf_version_without_sbpf"]
+        );
     }
 
     #[test]

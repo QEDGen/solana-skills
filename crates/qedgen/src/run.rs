@@ -1063,8 +1063,11 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             input,
             output,
             namespace,
+            sbpf_version,
         } => {
-            asm2lean::asm2lean(&input, &output, namespace.as_deref())?;
+            let existing = std::fs::read_to_string(&output).ok();
+            let version = asm2lean::resolve_sbpf_version(sbpf_version, None, existing.as_deref());
+            asm2lean::asm2lean(&input, &output, namespace.as_deref(), version)?;
         }
 
         Commands::Setup { workspace, mathlib } => {
@@ -1091,6 +1094,14 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 );
             }
 
+            // With `--asm`, the spec's `pragma sbpf_version` picks the
+            // `.rodata` layout, so a spec that fails to parse is an error:
+            // falling back to the default could contradict the spec.
+            let spec_sbpf_version = match (asm.as_ref(), spec.as_deref()) {
+                (Some(_), Some(p)) => asm2lean::SbpfVersion::from_spec(&check::parse_spec_file(p)?),
+                _ => None,
+            };
+
             // .qed/ lives at the program root — see init::resolve_program_root.
             let cwd = std::env::current_dir()?;
             let program_root = init::resolve_program_root(spec.as_deref(), &output_dir, &cwd);
@@ -1111,6 +1122,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 asm.as_deref(),
                 mathlib,
                 scaffold_target.is_some(),
+                spec_sbpf_version,
             )?;
 
             if let (Some(target), Some(qedspec_path)) = (scaffold_target, spec.as_ref()) {
@@ -1290,7 +1302,12 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
 
             // sBPF verification (--asm)
             if let Some(ref asm_path) = asm {
-                sbpf_verify::verify(asm_path, &proofs)?;
+                // Same lock/cache policy as every other parse here, so
+                // `--frozen` never rewrites qed.lock.
+                let spec_sbpf_version = asm2lean::SbpfVersion::from_spec(
+                    &check::parse_spec_file_with_opts(&spec, lock_mode, cache_opts)?,
+                );
+                sbpf_verify::verify(asm_path, &proofs, spec_sbpf_version)?;
             }
 
             // Drift detection (--drift)

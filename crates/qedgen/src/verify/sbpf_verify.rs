@@ -2,10 +2,20 @@ use anyhow::{bail, Context, Result};
 use std::path::Path;
 use std::process::Command;
 
-/// Verify an sBPF project: check source hash, regenerate if stale, run lake build.
+/// Verify an sBPF project: check source hash and sBPF version, regenerate if
+/// stale, run lake build.
+///
+/// `spec_version` is the spec's `pragma sbpf_version`, if any. When set and it
+/// differs from the version recorded in the generated module, the module is
+/// regenerated even if the source is unchanged, because `.rodata` addresses
+/// depend on the version.
 ///
 /// Returns Ok(()) if proofs are valid, Err if stale/broken.
-pub fn verify(asm_source: &Path, proofs_dir: &Path) -> Result<()> {
+pub fn verify(
+    asm_source: &Path,
+    proofs_dir: &Path,
+    spec_version: Option<crate::asm2lean::SbpfVersion>,
+) -> Result<()> {
     let source = std::fs::read_to_string(asm_source)
         .with_context(|| format!("reading {}", asm_source.display()))?;
 
@@ -17,7 +27,7 @@ pub fn verify(asm_source: &Path, proofs_dir: &Path) -> Result<()> {
 
     let embedded_hash = crate::asm2lean::extract_source_hash(&generated_content);
 
-    let stale = match &embedded_hash {
+    let hash_stale = match &embedded_hash {
         Some(h) => h != &current_hash,
         None => {
             eprintln!(
@@ -28,9 +38,27 @@ pub fn verify(asm_source: &Path, proofs_dir: &Path) -> Result<()> {
         }
     };
 
-    if stale {
+    let recorded_version = crate::asm2lean::extract_sbpf_version(&generated_content);
+    let version =
+        crate::asm2lean::resolve_sbpf_version(None, spec_version, Some(&generated_content));
+    let version_stale = recorded_version != Some(version);
+    if recorded_version.is_none() && spec_version.is_none() {
         eprintln!(
-            "Source hash mismatch — regenerating {} from {}",
+            "Warning: {} records no sBPF version; keeping the V0 .rodata layout. Declare \
+             `pragma sbpf_version = v3` (or `v0`) in the spec to make it explicit.",
+            generated_file.display()
+        );
+    }
+
+    if hash_stale || version_stale {
+        let why = match (hash_stale, version_stale) {
+            (true, true) => format!("source hash and sBPF version ({}) changed", version.label()),
+            (true, false) => "source hash mismatch".to_string(),
+            (false, _) => format!("sBPF version is now {}", version.label()),
+        };
+        eprintln!(
+            "{} — regenerating {} from {}",
+            why,
             generated_file.display(),
             asm_source.display()
         );
@@ -38,9 +66,13 @@ pub fn verify(asm_source: &Path, proofs_dir: &Path) -> Result<()> {
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "Program".to_string());
-        crate::asm2lean::asm2lean(asm_source, &generated_file, Some(&namespace))?;
+        crate::asm2lean::asm2lean(asm_source, &generated_file, Some(&namespace), version)?;
     } else {
-        eprintln!("Source hash matches (sha256:{}...)", &current_hash[..12]);
+        eprintln!(
+            "Source hash matches (sha256:{}...), sBPF {}",
+            &current_hash[..12],
+            version.label()
+        );
     }
 
     eprintln!("Running lake build in {}", proofs_dir.display());

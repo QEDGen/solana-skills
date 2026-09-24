@@ -377,7 +377,8 @@ pub fn render(spec: &ParsedSpec, hash: &str, target: Target) -> Result<String> {
     out.push_str("// AGENT: fill instruction builder data and assertions marked with todo!().\n");
     out.push_str("//\n");
     out.push_str("// Prerequisites:\n");
-    out.push_str("//   1. Build your program: cargo build-sbf (or cargo build --target bpfel-unknown-none)\n");
+    out.push_str("//   1. Build your program as sBPF v3: cargo build-sbf --arch v3\n");
+    out.push_str("//      (needs cargo-build-sbf 4.2.0+ and platform-tools v1.56+)\n");
     out.push_str("//   2. Run tests: cargo test --features client\n");
     out.push_str("//\n");
     // Rendered from `parallax_dev_dependencies()` rather than repeated as

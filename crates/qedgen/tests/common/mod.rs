@@ -12,6 +12,8 @@
 //! behavior to the snapshot suites.
 #![allow(dead_code)] // each test binary uses a subset of these helpers
 
+pub mod sbf;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
