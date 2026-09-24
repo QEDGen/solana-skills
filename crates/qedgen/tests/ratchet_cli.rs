@@ -251,3 +251,81 @@ fn readiness_workspace_scopes_source_handlers_to_selected_idl() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+fn sbpf_fixture(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/sbpf-elf")
+        .join(name)
+}
+
+/// #426: `readiness --so` alone (no IDL) reports a pre-v3 program as unsafe
+/// and passes a v3 one.
+#[test]
+fn readiness_so_without_idl_checks_sbpf_version() {
+    let v0 = sbpf_fixture("counter-v0.so");
+    let out = qedgen(&["readiness", "--so", v0.to_str().unwrap(), "--json"]);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON report");
+    assert!(
+        report["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["rule_id"] == "QED002"),
+        "missing QED002: {report:#}"
+    );
+
+    let v3 = sbpf_fixture("counter-v3.so");
+    let out = qedgen(&["readiness", "--so", v3.to_str().unwrap()]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A missing or non-ELF `--so` is a configuration error (exit 3), not a pass.
+#[test]
+fn readiness_bad_so_is_a_qedgen_configuration_error() {
+    let readme = sbpf_fixture("README.md");
+    for so in [readme, sbpf_fixture("missing.so")] {
+        let out = qedgen(&["readiness", "--so", so.to_str().unwrap()]);
+        assert_eq!(
+            out.status.code(),
+            Some(3),
+            "{}: {}",
+            so.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+#[test]
+fn check_upgrade_new_so_flags_pre_v3_candidate() {
+    let root = fixture_root();
+    let idl = root.join("target/idl/vault.json");
+    let v0 = sbpf_fixture("counter-v0.so");
+    let out = qedgen(&[
+        "check-upgrade",
+        "--old",
+        idl.to_str().unwrap(),
+        "--new",
+        idl.to_str().unwrap(),
+        "--new-so",
+        v0.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(out.status.code(), Some(2));
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON report");
+    assert!(report["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|f| f["rule_id"] == "QED002" && f["allow_flag"] == "allow-pre-v3-sbpf"));
+}

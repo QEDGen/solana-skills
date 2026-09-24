@@ -41,6 +41,8 @@ target/
 !crates/qedgen/tests/fixtures/probe-corpus/specless/anchor-idl/target/
 !crates/qedgen/tests/fixtures/probe-corpus/specless/anchor-idl/target/idl/
 !crates/qedgen/tests/fixtures/probe-corpus/specless/anchor-idl/target/idl/vault.json
+# sBPF ELF version fixtures for `readiness --so` (#426).
+!crates/qedgen/tests/fixtures/sbpf-elf/*.so
 test-ledger/
 # Cargo.lock is tracked for binaries but not for libraries
 package-lock.json

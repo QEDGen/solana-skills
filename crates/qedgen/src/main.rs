@@ -46,8 +46,8 @@ pub(crate) use spec::{
     ast, chumsky_adapter, chumsky_parser, idl, idl2spec, import_resolver, quantifier, spec_hash,
 };
 pub(crate) use verify::{
-    drift, miri_verify, ratchet, regen_drift, sbpf_verify, upstream_check, verify_counterexample,
-    verify_kani_parse, verify_probe_repros, verify_proptest_parse,
+    drift, miri_verify, ratchet, regen_drift, sbpf_elf, sbpf_verify, upstream_check,
+    verify_counterexample, verify_kani_parse, verify_probe_repros, verify_proptest_parse,
 };
 
 use anyhow::Result;

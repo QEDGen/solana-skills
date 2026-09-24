@@ -940,14 +940,22 @@ pub(crate) enum Commands {
     /// no `_reserved` trailing padding, unpinned discriminators, name
     /// collisions, writable accounts with no signer. Complements
     /// `qedgen check` / `qedgen verify` (which prove semantics) by
-    /// proving the on-chain shape is safe to evolve.
+    /// proving the on-chain shape is safe to evolve. With `--so`, also
+    /// reports QED002 when the built program is older than sBPF v3.
     ///
     /// Exit codes: 0 = additive/safe, 1 = breaking, 2 = unsafe.
     Readiness {
         /// Path to the IDL JSON (typically target/idl/<program>.json
-        /// from `anchor build` or `quasar build`).
-        #[arg(long, required_unless_present = "list_rules")]
+        /// from `anchor build` or `quasar build`). Optional when `--so` is
+        /// given, for programs without an IDL.
+        #[arg(long, required_unless_present_any = ["list_rules", "so"])]
         idl: Option<PathBuf>,
+
+        /// Built program (`target/deploy/<program>.so`). Reports QED002 when
+        /// its ELF header is older than sBPF v3, which SIMD-0500 blocks from
+        /// deploys and upgrades.
+        #[arg(long)]
+        so: Option<PathBuf>,
 
         /// Print the catalog of P-rules applied by `readiness` and exit.
         /// Replaces the pre-embed `ratchet list-rules` step: users who
@@ -967,7 +975,7 @@ pub(crate) enum Commands {
         /// Optional project root for source-vs-IDL reconciliation. When set,
         /// source-only handlers are unsafe deployment findings and findings
         /// attached only to stale IDL instructions are demoted.
-        #[arg(long)]
+        #[arg(long, requires = "idl")]
         root: Option<PathBuf>,
 
         /// Acknowledge an intentional unsafe finding (repeatable). Use the
@@ -1024,6 +1032,12 @@ pub(crate) enum Commands {
         /// Applied to the `--new` IDL only.
         #[arg(long)]
         root: Option<PathBuf>,
+
+        /// Candidate built program (the `.so` the upgrade would ship).
+        /// Reports QED002 when its ELF header is older than sBPF v3, which
+        /// SIMD-0500 blocks from upgrades.
+        #[arg(long)]
+        new_so: Option<PathBuf>,
 
         /// Treat both IDLs as Quasar-emitted rather than Anchor.
         /// Auto-detected from `Quasar.toml`; the flag forces Quasar

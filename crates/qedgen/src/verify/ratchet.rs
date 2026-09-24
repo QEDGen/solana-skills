@@ -50,7 +50,11 @@ impl Framework {
 
 /// Options accepted by the `qedgen readiness` subcommand.
 pub struct ReadinessOpts {
-    pub idl: PathBuf,
+    /// IDL for the P-rule preflight. Optional when `so` is set, so a program
+    /// without an IDL (Pinocchio, native, sBPF assembly) can still be checked.
+    pub idl: Option<PathBuf>,
+    /// Built program; its ELF header must say sBPF v3 (#426).
+    pub so: Option<PathBuf>,
     pub framework: Framework,
     pub root: Option<PathBuf>,
     /// `--unsafe <flag>` acknowledgements from Ratchet or QEDGen findings.
@@ -71,19 +75,39 @@ pub struct CheckUpgradeOpts {
     pub framework: Framework,
     /// Optional candidate-project source root for source/IDL reconciliation.
     pub root: Option<PathBuf>,
+    /// Candidate built program; its ELF header must say sBPF v3 (#426).
+    pub new_so: Option<PathBuf>,
 }
 
-/// Run the preflight rule set against a single IDL.
+/// Run the preflight rule set against a single IDL, plus the sBPF version
+/// rule when a built program is given.
 pub fn run_readiness(opts: &ReadinessOpts) -> Result<Report> {
-    let surface = load_surface(&opts.idl, opts.framework)?;
-    let mut ctx = CheckContext::new();
-    for flag in &opts.unsafes {
-        ctx = ctx.with_allow(flag);
-    }
-    let rules = default_preflight_rules();
-    let mut report = preflight(&surface, &ctx, &rules);
-    if let Some(root) = &opts.root {
-        apply_source_drift(&mut report, root, &opts.idl, opts.framework, &opts.unsafes)?;
+    let mut report = match &opts.idl {
+        Some(idl) => {
+            let surface = load_surface(idl, opts.framework)?;
+            let mut ctx = CheckContext::new();
+            for flag in &opts.unsafes {
+                ctx = ctx.with_allow(flag);
+            }
+            let rules = default_preflight_rules();
+            let mut report = preflight(&surface, &ctx, &rules);
+            if let Some(root) = &opts.root {
+                apply_source_drift(&mut report, root, idl, opts.framework, &opts.unsafes)?;
+            }
+            report
+        }
+        None => {
+            if opts.root.is_some() {
+                anyhow::bail!("`--root` reconciles source against an IDL; pass `--idl` too");
+            }
+            if opts.so.is_none() {
+                anyhow::bail!("readiness needs `--idl`, `--so`, or both");
+            }
+            Report::new()
+        }
+    };
+    if let Some(so) = &opts.so {
+        apply_sbpf_version(&mut report, so, &opts.unsafes)?;
     }
     Ok(report)
 }
@@ -110,7 +134,46 @@ pub fn run_check_upgrade(opts: &CheckUpgradeOpts) -> Result<Report> {
     if let Some(root) = &opts.root {
         apply_source_drift(&mut report, root, &opts.new, opts.framework, &opts.unsafes)?;
     }
+    if let Some(so) = &opts.new_so {
+        apply_sbpf_version(&mut report, so, &opts.unsafes)?;
+    }
     Ok(report)
+}
+
+/// `--unsafe` value that acknowledges a pre-v3 program, for example a V0
+/// program that is already deployed and will never be upgraded.
+pub const ALLOW_PRE_V3_SBPF: &str = "allow-pre-v3-sbpf";
+
+/// QED002: SIMD-0500 (planned for Agave 4.4) rejects deploys and upgrades of
+/// programs older than sBPF v3. A version newer than v3 passes.
+fn apply_sbpf_version(report: &mut Report, so: &Path, acknowledged: &[String]) -> Result<()> {
+    let version = crate::sbpf_elf::read_sbpf_version(so)?;
+    if version >= crate::sbpf_elf::SBPF_V3 {
+        return Ok(());
+    }
+    let severity = if acknowledged.iter().any(|flag| flag == ALLOW_PRE_V3_SBPF) {
+        Severity::Additive
+    } else {
+        Severity::Unsafe
+    };
+    let name = so
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| so.display().to_string());
+    report.push(
+        Finding::new(severity, "QED002", "sbpf-version-below-v3")
+            .at([format!("so:{name}")])
+            .message(format!(
+                "program is sBPF v{version} (ELF e_flags = {version}), not v3: once SIMD-0500 \
+                 is active, the cluster rejects deploying or upgrading it"
+            ))
+            .suggestion(
+                "Rebuild with `cargo build-sbf --arch v3` (cargo-build-sbf 4.2.0+, \
+                 platform-tools v1.56+) or `sbpf build -a v3`.",
+            )
+            .allow_flag(ALLOW_PRE_V3_SBPF),
+    );
+    Ok(())
 }
 
 fn apply_source_drift(
@@ -358,7 +421,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let idl = write(tmp.path(), "vault.json", CAMEL_CASE_IDL);
         let report = run_readiness(&ReadinessOpts {
-            idl,
+            idl: Some(idl),
+            so: None,
             framework: Framework::Anchor,
             root: Some(anchor_idl_drift_fixture()),
             unsafes: vec![],
@@ -395,7 +459,8 @@ mod tests {
         let root = anchor_idl_drift_fixture();
         let idl = root.join("target/idl/vault.json");
         let report = run_readiness(&ReadinessOpts {
-            idl,
+            idl: Some(idl),
+            so: None,
             framework: Framework::Anchor,
             root: Some(root),
             unsafes: vec![],
@@ -428,7 +493,8 @@ mod tests {
         let root = anchor_idl_drift_fixture();
         let idl = root.join("target/idl/vault.json");
         let report = run_readiness(&ReadinessOpts {
-            idl,
+            idl: Some(idl),
+            so: None,
             framework: Framework::Anchor,
             root: None,
             unsafes: vec![],
@@ -454,7 +520,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let idl = write(tmp.path(), "t.json", BARE_V1_IDL);
         let report = run_readiness(&ReadinessOpts {
-            idl,
+            idl: Some(idl),
+            so: None,
             framework: Framework::Anchor,
             root: None,
             unsafes: vec![],
@@ -473,7 +540,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let idl = write(tmp.path(), "t.json", BARE_V1_IDL);
         let report = run_readiness(&ReadinessOpts {
-            idl,
+            idl: Some(idl),
+            so: None,
             framework: Framework::Anchor,
             root: None,
             unsafes: vec![],
@@ -496,6 +564,7 @@ mod tests {
             realloc_accounts: vec![],
             framework: Framework::Anchor,
             root: None,
+            new_so: None,
         })
         .unwrap();
         assert!(report.findings.is_empty());
@@ -535,6 +604,7 @@ mod tests {
             realloc_accounts: vec![],
             framework: Framework::Anchor,
             root: None,
+            new_so: None,
         })
         .unwrap();
         assert!(report.findings.iter().any(|f| f.rule_id == "R007"));
@@ -544,7 +614,8 @@ mod tests {
     #[test]
     fn missing_idl_is_surfaced_as_io_error() {
         let err = run_readiness(&ReadinessOpts {
-            idl: PathBuf::from("/does/not/exist.json"),
+            idl: Some(PathBuf::from("/does/not/exist.json")),
+            so: None,
             framework: Framework::Anchor,
             root: None,
             unsafes: vec![],
@@ -558,7 +629,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let idl = write(tmp.path(), "t.json", "not json");
         let err = run_readiness(&ReadinessOpts {
-            idl,
+            idl: Some(idl),
+            so: None,
             framework: Framework::Anchor,
             root: None,
             unsafes: vec![],
@@ -627,7 +699,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let idl = write(tmp.path(), "t.json", QUASAR_BARE_V1_IDL);
         let report = run_readiness(&ReadinessOpts {
-            idl,
+            idl: Some(idl),
+            so: None,
             framework: Framework::Quasar,
             root: None,
             unsafes: vec![],
@@ -661,6 +734,7 @@ mod tests {
             realloc_accounts: vec![],
             framework: Framework::Quasar,
             root: None,
+            new_so: None,
         })
         .unwrap();
         assert!(
@@ -683,12 +757,128 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let idl = write(tmp.path(), "t.json", BARE_V1_IDL);
         let err = run_readiness(&ReadinessOpts {
-            idl,
+            idl: Some(idl),
+            so: None,
             framework: Framework::Quasar,
             root: None,
             unsafes: vec![],
         })
         .unwrap_err();
         assert!(format!("{err:#}").contains("parsing"));
+    }
+
+    // --- sBPF version (QED002, #426) -------------------------------------
+
+    fn sbpf_fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/sbpf-elf")
+            .join(name)
+    }
+
+    fn readiness_so(so: PathBuf, unsafes: Vec<String>) -> Result<Report> {
+        run_readiness(&ReadinessOpts {
+            idl: None,
+            so: Some(so),
+            framework: Framework::Anchor,
+            root: None,
+            unsafes,
+        })
+    }
+
+    #[test]
+    fn readiness_flags_v0_program_as_unsafe() {
+        let report = readiness_so(sbpf_fixture("counter-v0.so"), vec![]).unwrap();
+        let finding = report
+            .findings
+            .iter()
+            .find(|f| f.rule_id == "QED002")
+            .expect("V0 program must fire QED002");
+        assert_eq!(finding.severity, Severity::Unsafe);
+        assert_eq!(finding.path, ["so:counter-v0.so"]);
+        assert!(finding.message.contains("SIMD-0500"), "{}", finding.message);
+        assert_eq!(exit_code(&report), 2);
+    }
+
+    #[test]
+    fn readiness_passes_v3_program() {
+        let report = readiness_so(sbpf_fixture("counter-v3.so"), vec![]).unwrap();
+        assert!(report.findings.is_empty(), "{:?}", report.findings);
+        assert_eq!(exit_code(&report), 0);
+    }
+
+    #[test]
+    fn readiness_pre_v3_can_be_acknowledged() {
+        let report = readiness_so(
+            sbpf_fixture("counter-v0.so"),
+            vec![ALLOW_PRE_V3_SBPF.to_string()],
+        )
+        .unwrap();
+        assert!(report
+            .findings
+            .iter()
+            .any(|f| f.rule_id == "QED002" && f.severity == Severity::Additive));
+        assert_eq!(exit_code(&report), 0);
+    }
+
+    #[test]
+    fn readiness_non_elf_so_is_an_error_not_a_pass() {
+        let tmp = TempDir::new().unwrap();
+        let not_elf = write(tmp.path(), "p.so", "not an elf file at all");
+        assert!(readiness_so(not_elf, vec![]).is_err());
+        assert!(readiness_so(tmp.path().join("missing.so"), vec![]).is_err());
+    }
+
+    #[test]
+    fn readiness_combines_idl_rules_and_sbpf_version() {
+        let tmp = TempDir::new().unwrap();
+        let idl = write(tmp.path(), "t.json", BARE_V1_IDL);
+        let report = run_readiness(&ReadinessOpts {
+            idl: Some(idl),
+            so: Some(sbpf_fixture("counter-v0.so")),
+            framework: Framework::Anchor,
+            root: None,
+            unsafes: vec![],
+        })
+        .unwrap();
+        let ids: Vec<&str> = report.findings.iter().map(|f| f.rule_id.as_str()).collect();
+        assert!(ids.contains(&"P001") && ids.contains(&"QED002"), "{ids:?}");
+    }
+
+    #[test]
+    fn readiness_root_without_idl_is_an_error() {
+        let err = run_readiness(&ReadinessOpts {
+            idl: None,
+            so: Some(sbpf_fixture("counter-v3.so")),
+            framework: Framework::Anchor,
+            root: Some(anchor_idl_drift_fixture()),
+            unsafes: vec![],
+        })
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("--idl"), "{err:#}");
+    }
+
+    #[test]
+    fn check_upgrade_flags_pre_v3_candidate_binary() {
+        let tmp = TempDir::new().unwrap();
+        let old = write(tmp.path(), "old.json", BARE_V1_IDL);
+        let new = write(tmp.path(), "new.json", BARE_V1_IDL);
+        let run = |so: &str| {
+            run_check_upgrade(&CheckUpgradeOpts {
+                old: old.clone(),
+                new: new.clone(),
+                unsafes: vec![],
+                migrated_accounts: vec![],
+                realloc_accounts: vec![],
+                framework: Framework::Anchor,
+                root: None,
+                new_so: Some(sbpf_fixture(so)),
+            })
+            .unwrap()
+        };
+        let v0 = run("counter-v0.so");
+        assert!(v0.findings.iter().any(|f| f.rule_id == "QED002"));
+        assert_eq!(exit_code(&v0), 2);
+        let v3 = run("counter-v3.so");
+        assert!(v3.findings.is_empty(), "{:?}", v3.findings);
     }
 }

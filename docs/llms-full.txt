@@ -116,6 +116,7 @@ $QEDGEN stamp --program ./my-anchor-program --spec program.qedspec
 
 ```bash
 $QEDGEN readiness --idl target/idl/program.json         # lint one IDL for upgrade-unsafe shapes before first deploy
+$QEDGEN readiness --so target/deploy/program.so         # QED002: flag a build older than sBPF v3 (SIMD-0500)
 $QEDGEN check-upgrade --old old.json --new new.json     # flag every upgrade-unsafe change between two IDLs
 ```
 

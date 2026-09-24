@@ -1874,6 +1874,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
         // JSON) exit 3 so CI can tell breakage from misconfiguration.
         Commands::Readiness {
             idl,
+            so,
             list_rules,
             quasar,
             root,
@@ -1884,12 +1885,11 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 ratchet::print_rules_preflight(json)?;
                 return Ok(());
             }
-            // clap's `required_unless_present = "list_rules"` guarantees
-            // `idl` is Some here — unwrap is safe in shape.
-            let idl = idl.expect("--idl is required unless --list-rules");
+            // clap requires `--idl` unless `--list-rules` or `--so` is given.
             let framework = resolve_framework(quasar, json);
             let report = match ratchet::run_readiness(&ratchet::ReadinessOpts {
                 idl,
+                so,
                 framework,
                 root,
                 unsafes,
@@ -1922,6 +1922,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             realloc_accounts,
             list_rules,
             root,
+            new_so,
             quasar,
             json,
         } => {
@@ -1940,6 +1941,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 realloc_accounts,
                 framework,
                 root,
+                new_so,
             }) {
                 Ok(r) => r,
                 Err(e) => {
