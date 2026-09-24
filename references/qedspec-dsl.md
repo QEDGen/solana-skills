@@ -1246,12 +1246,13 @@ pragma sbpf_version = v3                       // sBPF bytecode version for `pra
 ```
 
 **`pragma sbpf_version = v3 | v0`**: the sBPF version an assembly program is
-built for. It only applies to specs with a `pragma sbpf { ... }` block. It sets
-where `asm2lean` lays out `.rodata`: at VM address 0 for `v3`, after the
-bytecode at `0x100000000` for `v0`. Without it, a new module uses `v3` and an
-existing module keeps its recorded version (V0 if none). `check` reports an
-unknown value (`sbpf_version_invalid`) and the pragma on a non-sBPF spec
-(`sbpf_version_without_sbpf`).
+built for. It sets where `init --asm` and `check --asm` lay out `.rodata`: at
+VM address 0 for `v3`, after the bytecode at `0x100000000` for `v0`. The
+standalone `asm2lean` command does not read the spec; pass `--sbpf-version`
+there. Without a version, a new module uses `v3` and an existing module keeps
+its recorded version (V0 if none). `check` reports an unknown value
+(`sbpf_version_invalid`) and the pragma on a spec with no `pragma sbpf { ... }`
+block (`sbpf_version_without_sbpf`).
 
 **`pragma state_repr = adt`** — opt a multi-variant `type State | A | B of { … } | C`
 into the inductive representation: Lean lowers it to a real `inductive State` (with

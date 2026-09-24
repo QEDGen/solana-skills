@@ -1094,6 +1094,14 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 );
             }
 
+            // With `--asm`, the spec's `pragma sbpf_version` picks the
+            // `.rodata` layout, so a spec that fails to parse is an error:
+            // falling back to the default could contradict the spec.
+            let spec_sbpf_version = match (asm.as_ref(), spec.as_deref()) {
+                (Some(_), Some(p)) => asm2lean::SbpfVersion::from_spec(&check::parse_spec_file(p)?),
+                _ => None,
+            };
+
             // .qed/ lives at the program root — see init::resolve_program_root.
             let cwd = std::env::current_dir()?;
             let program_root = init::resolve_program_root(spec.as_deref(), &output_dir, &cwd);
@@ -1108,10 +1116,6 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             });
             init::init_qed_dir(&program_root, &name, spec_rel.as_deref())?;
 
-            let spec_sbpf_version = spec
-                .as_deref()
-                .and_then(|p| check::parse_spec_file(p).ok())
-                .and_then(|parsed| asm2lean::SbpfVersion::from_spec(&parsed));
             init::init(
                 &name,
                 &output_dir,
@@ -1298,9 +1302,8 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
 
             // sBPF verification (--asm)
             if let Some(ref asm_path) = asm {
-                let spec_sbpf_version = check::parse_spec_file(&spec)
-                    .ok()
-                    .and_then(|parsed| asm2lean::SbpfVersion::from_spec(&parsed));
+                let spec_sbpf_version =
+                    asm2lean::SbpfVersion::from_spec(&check::parse_spec_file(&spec)?);
                 sbpf_verify::verify(asm_path, &proofs, spec_sbpf_version)?;
             }
 

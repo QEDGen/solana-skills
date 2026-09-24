@@ -102,8 +102,9 @@ pub(super) fn check_error_declared_as_record(spec: &ParsedSpec) -> Vec<Completen
 }
 
 /// `pragma sbpf_version = <v0|v3>` sets where `asm2lean` lays out `.rodata`
-/// (#422). An unknown value would silently fall back to another layout, and
-/// the pragma means nothing outside an sBPF assembly spec.
+/// (#422). An unknown value would silently fall back to another layout. On a
+/// spec without `pragma sbpf { ... }` the pragma still sets the `--asm`
+/// layout, but the spec is probably missing its sBPF block.
 pub(super) fn check_sbpf_version(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
     for (key, value) in &spec.pragma_assignments {
@@ -128,12 +129,13 @@ pub(super) fn check_sbpf_version(spec: &ParsedSpec) -> Vec<CompletenessWarning> 
                     Severity::Warning,
                     2,
                     format!(
-                        "`pragma sbpf_version = {value}` has no effect: this spec has no \
-                         `pragma sbpf {{ ... }}` block, so it is not an sBPF assembly spec."
+                        "`pragma sbpf_version = {value}` is on a spec with no \
+                         `pragma sbpf {{ ... }}` block. `init --asm` and `check --asm` \
+                         still use it for the `.rodata` layout."
                     ),
                 )
                 .subject(value.clone())
-                .fix("Remove the pragma, or add `pragma sbpf { ... }` if this is an assembly program."),
+                .fix("Add `pragma sbpf { ... }` if this is an assembly program. Otherwise remove the pragma."),
             );
         }
     }
