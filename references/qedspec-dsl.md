@@ -1252,7 +1252,8 @@ standalone `asm2lean` command does not read the spec; pass `--sbpf-version`
 there. Without a version, a new module uses `v3` and an existing module keeps
 its recorded version (v3 if none is recorded). `v0` still works but is
 deprecated: SIMD-0500 blocks deploying or upgrading V0 programs, and qedgen
-v3.0 removes it. `check` reports `v0` (`sbpf_version_v0_deprecated`), an
+v3.0 removes it. `check` reports `v0` as info, so it never fails the run
+(`sbpf_version_v0_deprecated`), an
 unknown value (`sbpf_version_invalid`), and the pragma on a spec with no
 `pragma sbpf { ... }` block (`sbpf_version_without_sbpf`).
 

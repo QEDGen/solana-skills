@@ -765,7 +765,6 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 // `cargo build-sbf` writes to the WORKSPACE target dir, so
                 // the resolver walks up from the program crate (#342).
                 let deploy_so = run_helpers::resolve_deploy_so(&project_root_for_idl, &prog);
-                crate::sbpf_elf::warn_if_pre_v3(&deploy_so, "probe --fuzz");
                 if generate_harness {
                     std::fs::create_dir_all(&harness_parent)?;
                     crucible_gen::generate_with_account_overlay(
@@ -836,6 +835,11 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                     );
                     println!("{}", serde_json::to_string_pretty(&output)?);
                     return Ok(());
+                }
+                // Check the program the harness really loads: a reused
+                // harness keeps the path it was generated with.
+                if let Some(so) = crucible_gen::harness_program_so(&harness) {
+                    crate::sbpf_elf::warn_if_pre_v3(&so, "probe --fuzz");
                 }
                 let mut ctx = crucible_probe::FuzzProbeContext::new(
                     &spec_path_for_ctx,
