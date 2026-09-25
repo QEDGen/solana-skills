@@ -1015,9 +1015,21 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             spec,
             handler,
             account,
+            idl,
+            account_data_lengths,
+            account_index,
         } => {
             let parsed = check::parse_spec_file(&spec)?;
-            let descriptor = descriptor::build_descriptor(&parsed, &handler, account)?;
+            let idl_json = idl.as_deref().map(descriptor::load_idl).transpose()?;
+            let layout = descriptor::InputLayoutFlags {
+                account_data_lengths,
+                account_index,
+            };
+            let descriptor = descriptor::build_descriptor(
+                &parsed,
+                &handler,
+                &descriptor::DescriptorInputs::new(account, idl_json.as_ref(), &layout),
+            )?;
             println!("{}", serde_json::to_string_pretty(&descriptor)?);
         }
 
@@ -1033,8 +1045,14 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             transition,
             lean_project,
             json,
+            account_data_lengths,
+            account_index,
         } => {
             let parsed = check::parse_spec_file(&spec)?;
+            let layout = descriptor::InputLayoutFlags {
+                account_data_lengths,
+                account_index,
+            };
             let request = descriptor::DischargeRequest {
                 handler: &handler,
                 account,
@@ -1045,6 +1063,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 out_dir: out_dir.as_deref(),
                 lean_project: lean_project.as_deref(),
                 json,
+                layout,
             };
             if transition {
                 descriptor::run_discharge_transition(&parsed, &request)?;

@@ -510,7 +510,7 @@ pub(crate) enum Commands {
         #[arg(long)]
         spec: PathBuf,
 
-        /// Handler to inspect (must have a single-field `+= <int literal>` effect)
+        /// Handler to inspect (must have a single-field `+= <int literal | parameter>` effect)
         #[arg(long)]
         handler: String,
 
@@ -519,6 +519,25 @@ pub(crate) enum Commands {
         /// resolve the field offsets from the IDL.
         #[arg(long)]
         account: Option<String>,
+
+        /// Codama IDL. For a parameter delta it resolves the IDL instruction
+        /// and argument names (qedsvm matches them exactly) and the account
+        /// index.
+        #[arg(long)]
+        idl: Option<PathBuf>,
+
+        /// Data length of every non-duplicate account the instruction
+        /// receives, in order (comma-separated, e.g. `41,0`). Required for a
+        /// parameter delta (`+= amount`): qedsvm uses it to find the
+        /// serialized instruction data (descriptor schema v3). It is an
+        /// explicit assumption and is printed in the descriptor.
+        #[arg(long, value_delimiter = ',')]
+        account_data_lengths: Option<Vec<u64>>,
+
+        /// Index of the tracked account among those accounts. Default:
+        /// resolved from the IDL instruction's account list by `--account`.
+        #[arg(long)]
+        account_index: Option<usize>,
     },
 
     /// Run the full spec -> byte-level proof chain for one handler: build the
@@ -588,6 +607,19 @@ pub(crate) enum Commands {
         /// Print a machine-readable JSON report (same verdict as the human report)
         #[arg(long)]
         json: bool,
+
+        /// Data length of every non-duplicate account the instruction
+        /// receives, in order (comma-separated, e.g. `41,0`). Required for a
+        /// parameter delta (`+= amount`): qedsvm uses it to find the
+        /// serialized instruction data (descriptor schema v3). It is an
+        /// explicit assumption and is printed in the descriptor.
+        #[arg(long, value_delimiter = ',')]
+        account_data_lengths: Option<Vec<u64>>,
+
+        /// Index of the tracked account among those accounts. Default:
+        /// resolved from the IDL instruction's account list by `--account`.
+        #[arg(long)]
+        account_index: Option<usize>,
     },
 
     /// Consolidate multiple proof projects into a single Lean project

@@ -525,7 +525,7 @@ qedgen check --spec my_program.qedspec --drift programs/src/ --deep
 
 The bundled CPI-callee `ensures` and the sBPF refinement bridge are *axiomatized against a `binary_hash` pin* today — qedgen names the bytes, but doesn't yet prove they honor the contract. The discharge seam closes that gap by handing a name-level obligation to qedsvm's `qedlift`, which proves it against the decoded program bytes (offsets resolved from the IDL on the qedsvm side). See [`docs/design/qedsvm-discharge.md`](docs/design/qedsvm-discharge.md).
 
-This is the **producer half** of that seam, scoped to the v1 soundness boundary: a single-field constant increment (`<field> += <int literal>`). Parameter deltas, non-`+=` ops, and multi-effect handlers are rejected.
+This is the **producer half** of that seam. It covers a single-field increment: a constant (`<field> += <int literal>`, descriptor schema v1) or a parameter (`<field> += amount`, schema v3). A parameter delta also needs the input layout (`--account-data-lengths`, plus `--idl` or `--account-index`), which qedsvm uses to bind the parameter to its serialized instruction-data address. Non-`+=` ops and multi-effect handlers are rejected.
 
 ```bash
 # Emit the name-level refinement descriptor (JSON) qedlift consumes.

@@ -66,13 +66,15 @@ fn spec(dir: &Path, name: &str, effect: &str) -> PathBuf {
     path
 }
 
-/// Run `qedgen discharge --json` and return (exit ok, verdict, reason).
+/// Run `qedgen discharge --json` and return (exit ok, verdict, reason). `extra` is appended
+/// to the command line (the input-layout flags).
 fn discharge(
     env: &Env,
     spec: &Path,
     handler: &str,
     so: &str,
     lean: bool,
+    extra: &[&str],
 ) -> (bool, String, Option<String>) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_qedgen"));
     cmd.arg("discharge")
@@ -88,6 +90,7 @@ fn discharge(
     if lean {
         cmd.arg("--lean-project").arg(&env.qedsvm);
     }
+    cmd.args(extra);
     let out = cmd.output().expect("spawn qedgen discharge");
     let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
         panic!(
@@ -112,22 +115,68 @@ fn discharge_verdicts_match_qedlift_and_lean() {
     let wrong_delta = spec(dir, "wrong_delta.qedspec", "total += 2");
 
     // Valid descriptor + bytecode + passing Lean build.
-    let (ok, verdict, _) = discharge(&env, &valid, "increment", "vault.so", true);
+    let (ok, verdict, _) = discharge(&env, &valid, "increment", "vault.so", true, &[]);
     assert!(ok && verdict == "verified", "valid discharge: {verdict}");
 
     // Same run with no Lean check: generated, not verified, still exit 0.
-    let (ok, verdict, _) = discharge(&env, &valid, "increment", "vault.so", false);
+    let (ok, verdict, _) = discharge(&env, &valid, "increment", "vault.so", false, &[]);
     assert!(ok && verdict == "emitted", "no Lean project: {verdict}");
 
     // The obligation conflicts with the bytes.
-    let (ok, verdict, reason) = discharge(&env, &wrong_delta, "increment", "vault.so", true);
+    let (ok, verdict, reason) = discharge(&env, &wrong_delta, "increment", "vault.so", true, &[]);
     assert!(!ok && verdict == "rejected", "wrong delta: {verdict}");
     assert_eq!(reason.as_deref(), Some("mutation_mismatch"));
 
-    // A legacy (schema v2) parameter descriptor is unsupported, never verified.
-    let (ok, verdict, reason) = discharge(&env, &valid, "deposit", "vault_deposit.so", true);
-    assert!(!ok && verdict == "unsupported", "legacy param: {verdict}");
-    assert_eq!(reason.as_deref(), Some("missing_parameter_binding"));
+    // A parameter delta with the right schema v3 input layout binds `amount` to its
+    // serialized instruction-data address and verifies (#404).
+    let layout = ["--account-data-lengths", "41"];
+    let (ok, verdict, _) = discharge(&env, &valid, "deposit", "vault_deposit.so", true, &layout);
+    assert!(ok && verdict == "verified", "v3 deposit: {verdict}");
+
+    // A wrong account length moves the instruction-data address, so qedlift rejects the
+    // binding instead of proving a statement about the wrong bytes.
+    let wrong_len = ["--account-data-lengths", "40"];
+    let (ok, verdict, reason) = discharge(
+        &env,
+        &valid,
+        "deposit",
+        "vault_deposit.so",
+        true,
+        &wrong_len,
+    );
+    assert!(
+        !ok && verdict == "rejected",
+        "wrong length: {verdict} ({reason:?})"
+    );
+}
+
+/// A wrong account index fails inside qedgen, before qedlift runs: the IDL instruction takes
+/// one account, so index 1 cannot name it.
+#[test]
+#[ignore = "needs a built qedsvm checkout and qedlift (see module docs)"]
+fn wrong_account_index_fails_before_qedlift() {
+    let env = env();
+    let valid = spec(env.work.path(), "valid.qedspec", "total += 1");
+    let out = Command::new(env!("CARGO_BIN_EXE_qedgen"))
+        .arg("discharge")
+        .arg("--spec")
+        .arg(&valid)
+        .args(["--handler", "deposit", "--account", "vault"])
+        .arg("--so")
+        .arg(env.work.path().join("vault_deposit.so"))
+        .arg("--idl")
+        .arg(env.work.path().join("vault.codama.json"))
+        .arg("--qedlift")
+        .arg(&env.qedlift)
+        .args(["--account-data-lengths", "41", "--account-index", "1"])
+        .output()
+        .expect("spawn qedgen discharge");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("outside --account-data-lengths"),
+        "{stderr}"
+    );
 }
 
 /// `--transition` on qedsvm's `guarded_counter` (#405): a success path and a rejection path

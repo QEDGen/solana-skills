@@ -415,6 +415,8 @@ Current pins and coverage (verify before acting):
   deltas. Still literal-only on the consumer side.
 - **qedgen producer** (`crates/qedgen/src/descriptor.rs::build_descriptor:29`):
   `add_const` (schema v1) plus **`add_param` (schema v2)** for parameter deltas
+  (superseded 2026-09 by schema v3 with an explicit `input_layout`, #404; qedsvm
+  returns `unsupported` for a v2 parameter descriptor)
   — landed via PR #127 (`c53b56d` + rustfmt `4e7fa64`), single-field, validated
   against the handler's declared params. This is **ahead of the qedsvm
   consumer**: qedlift `--descriptor` does not yet consume schema v2 (§16).
