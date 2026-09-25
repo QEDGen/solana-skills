@@ -408,8 +408,11 @@ pub(crate) fn module_stems(modules: &[PathBuf]) -> BTreeSet<String> {
 
 /// Publish this run's modules into `generated` as one set.
 ///
-/// 1. Copy every module into a staging dir inside `generated`. If any copy fails, the staging
-///    dir is removed and nothing is published.
+/// Publishing a bundle holds an exclusive lock (`<bundle>.qedgen-lock`), so a second run that
+/// publishes the same bundle at the same time fails clearly instead of interleaving.
+///
+/// 1. Copy every module into this run's own staging dir inside `generated`. If any copy
+///    fails, the staging dir is removed and nothing is published.
 /// 2. Move each staged file into place (a rename on the same filesystem).
 /// 3. Delete the modules the previous run of this bundle listed in its manifest
 ///    (`<bundle>.qedgen-modules`) and this run no longer has, then write the new manifest.
@@ -421,10 +424,14 @@ pub(crate) fn publish_modules(
 ) -> Result<Vec<PathBuf>> {
     std::fs::create_dir_all(generated)
         .with_context(|| format!("creating {}", generated.display()))?;
-    let staging = generated.join(format!(".qedgen-staging-{bundle}"));
-    let _ = std::fs::remove_dir_all(&staging);
-    std::fs::create_dir_all(&staging).with_context(|| format!("creating {}", staging.display()))?;
-    let staged: Result<Vec<(PathBuf, String)>> = modules
+    let _lock = PublishLock::acquire(&generated.join(format!("{bundle}.qedgen-lock")))?;
+    // A unique staging dir per run, on the same filesystem so the moves below are renames.
+    // It is removed when `staging_dir` drops, on success or error.
+    let staging_dir = tempfile::Builder::new()
+        .prefix(&format!(".qedgen-staging-{bundle}-"))
+        .tempdir_in(generated)
+        .with_context(|| format!("creating a staging dir in {}", generated.display()))?;
+    let staged: Vec<(PathBuf, String)> = modules
         .iter()
         .map(|src| {
             let name = src
@@ -432,19 +439,12 @@ pub(crate) fn publish_modules(
                 .and_then(|n| n.to_str())
                 .ok_or_else(|| anyhow::anyhow!("module path has no file name: {}", src.display()))?
                 .to_string();
-            let dst = staging.join(&name);
+            let dst = staging_dir.path().join(&name);
             std::fs::copy(src, &dst)
                 .with_context(|| format!("copying {} -> {}", src.display(), dst.display()))?;
             Ok((dst, name))
         })
-        .collect();
-    let staged = match staged {
-        Ok(staged) => staged,
-        Err(e) => {
-            let _ = std::fs::remove_dir_all(&staging);
-            return Err(e);
-        }
-    };
+        .collect::<Result<_>>()?;
 
     let manifest = generated.join(format!("{bundle}.qedgen-modules"));
     let previous: BTreeSet<String> = std::fs::read_to_string(&manifest)
@@ -457,7 +457,7 @@ pub(crate) fn publish_modules(
             .with_context(|| format!("moving {} -> {}", staged_path.display(), dst.display()))?;
         published.push(dst);
     }
-    let _ = std::fs::remove_dir_all(&staging);
+    drop(staging_dir);
 
     let current: BTreeSet<String> = staged.into_iter().map(|(_, n)| n).collect();
     for old in previous.difference(&current) {
@@ -470,6 +470,33 @@ pub(crate) fn publish_modules(
     std::fs::write(&manifest, listing.join("\n") + "\n")
         .with_context(|| format!("writing {}", manifest.display()))?;
     Ok(published)
+}
+
+/// An exclusive lock file, removed on drop. A crash can leave it behind; the error names it.
+struct PublishLock(PathBuf);
+
+impl PublishLock {
+    fn acquire(path: &Path) -> Result<Self> {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            Ok(_) => Ok(PublishLock(path.to_path_buf())),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => bail!(
+                "another discharge is publishing this bundle ({} exists); retry when it \
+                 finishes, or delete the file if no discharge is running",
+                path.display()
+            ),
+            Err(e) => Err(e).with_context(|| format!("creating {}", path.display())),
+        }
+    }
+}
+
+impl Drop for PublishLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 /// Run the Lean check on `modules`, or say why it did not run.
@@ -878,7 +905,40 @@ mod tests {
             generated.join("VaultIncrementRefinement.lean").exists(),
             "a proof qedgen did not record is untouched"
         );
-        assert!(!generated.join(".qedgen-staging-PTransition").exists());
+        assert!(
+            no_leftovers(&generated),
+            "no staging dir or lock left behind"
+        );
+    }
+
+    /// No staging dir or lock file is left in `generated`.
+    fn no_leftovers(generated: &Path) -> bool {
+        std::fs::read_dir(generated)
+            .map(|rd| {
+                rd.flatten().all(|e| {
+                    let n = e.file_name().to_string_lossy().to_string();
+                    !n.starts_with(".qedgen-staging-") && !n.ends_with(".qedgen-lock")
+                })
+            })
+            .unwrap_or(true)
+    }
+
+    /// A second publish of the same bundle while one holds the lock fails clearly, and the
+    /// lock is released afterwards.
+    #[test]
+    fn concurrent_publish_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let generated = tmp.path().join("Generated");
+        std::fs::create_dir_all(&generated).unwrap();
+        let module = tmp.path().join("PSuccessLifted.lean");
+        std::fs::write(&module, "x").unwrap();
+        let held = PublishLock::acquire(&generated.join("PTransition.qedgen-lock")).unwrap();
+        let err = publish_modules(&generated, "PTransition", std::slice::from_ref(&module))
+            .expect_err("lock is held");
+        assert!(err.to_string().contains("another discharge"), "{err}");
+        drop(held);
+        publish_modules(&generated, "PTransition", &[module]).expect("lock released");
+        assert!(no_leftovers(&generated));
     }
 
     /// A failed copy publishes nothing: no new module lands in `Generated/`.
@@ -894,7 +954,7 @@ mod tests {
             !generated.join("PSuccessLifted.lean").exists(),
             "nothing published"
         );
-        assert!(!generated.join(".qedgen-staging-PTransition").exists());
+        assert!(no_leftovers(&generated));
     }
 
     #[test]

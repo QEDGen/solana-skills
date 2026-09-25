@@ -211,4 +211,6 @@ $QEDGEN discharge --spec guarded.qedspec --handler credit \
   into `<out-dir>/Generated/` only when the verdict passes, as one set: they are
   staged first, so a failed copy publishes nothing. A manifest
   (`<Bundle>.qedgen-modules`) records the set, so a path dropped on a rerun is
-  removed. Proofs qedgen did not record are never touched.
+  removed. Proofs qedgen did not record are never touched. Publishing holds a
+  lock (`<Bundle>.qedgen-lock`), so two runs that publish the same bundle at once
+  cannot interleave; the second one fails and says so.
