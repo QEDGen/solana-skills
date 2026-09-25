@@ -533,13 +533,13 @@ This is the **producer half** of that seam, scoped to the v1 soundness boundary:
 qedgen descriptor --spec vault.qedspec --handler deposit
 
 # Chain it end to end: build the descriptor, shell out to a built qedlift,
-# and report a discharge verdict (sorry-free proof against the bytes).
+# type-check the emitted proof with Lean, and report a verdict.
 qedgen discharge --spec vault.qedspec --handler deposit \
   --so target/deploy/vault.so --idl idl/vault.json \
-  --qedlift path/to/qedlift
+  --qedlift path/to/qedlift --lean-project formal_verification
 ```
 
-`--account` overrides the descriptor's account (default: the spec's first account type, else the program name) — use the IDL account name so qedlift can resolve offsets. No meaning crosses the boundary: `discharge` reads only qedlift's exit status and whether it emitted a sorry-free proof.
+`--account` overrides the descriptor's account (default: the spec's first account type, else the program name) — use the IDL account name so qedlift can resolve offsets. `discharge` reads qedlift's structured `refinement outcome`, then runs Lean on the emitted modules. It reports `verified` only when Lean accepts them. Without a Lake project it reports `emitted`, which means the proof was generated but not checked. Pass `--json` for a machine-readable report.
 
 ### Consolidate proofs
 

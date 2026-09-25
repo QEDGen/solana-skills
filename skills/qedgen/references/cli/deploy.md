@@ -134,15 +134,26 @@ $QEDGEN descriptor --spec vault.qedspec --handler increment
 
 ### `discharge`
 The one-command driver over the seam: build the descriptor from the `.qedspec`,
-then discharge it against the compiled `.so` via a built `qedlift`. Reports
-whether the handler's effect is proven against the bytes. No meaning crosses the
-boundary — `discharge` reads only qedlift's exit status and whether it emitted a
-sorry-free proof.
+discharge it against the compiled `.so` via a built `qedlift`, then type-check the
+emitted modules with Lean. `discharge` reads qedlift's structured
+`refinement outcome` line (older qedlift builds fall back to the exit status and
+the emitted files). It never reads files left in `--out-dir` by an earlier run.
+
+| Verdict | Meaning | Exit |
+|---|---|---|
+| `verified` | qedlift emitted the refinement and Lean accepted it | 0 |
+| `emitted` | qedlift emitted the refinement, but no Lean check ran (no Lake project) | 0 |
+| `rejected` | The obligation conflicts with the bytes or layout (typed `reason`) | 1 |
+| `unsupported` | qedlift cannot bind the obligation (typed `reason`) | 1 |
+| `model_only` | qedlift lifted the program but did not act on the descriptor | 1 |
+| `failed` | qedlift failed, or Lean rejected the modules or found `sorry` | 1 |
+
+CI that needs a proof should gate on `"verdict": "verified"` in the `--json` report.
 
 ```bash
 $QEDGEN discharge --spec vault.qedspec --handler increment \
   --so vault.so --idl vault.codama.json --qedlift /path/to/qedlift \
-  --out-dir formal_verification/discharge
+  --out-dir formal_verification/discharge --lean-project formal_verification
 ```
 
 | Flag | Type | Default | Description |
@@ -152,10 +163,12 @@ $QEDGEN discharge --spec vault.qedspec --handler increment \
 | `--account` | String | first account type / program name | Account name — use the IDL account name so qedlift resolves offsets |
 | `--so` | Path | required | Compiled program to discharge against |
 | `--idl` | Path | required | Codama IDL (`.json`) supplying the account shape (offsets) |
-| `--qedlift` | Path | required | Built qedsvm `qedlift` binary (built with `--features qedrecover`) |
+| `--qedlift` | Path | required | Built qedsvm `qedlift` binary (`cargo build -p qedlift --bin qedlift` in qedsvm's `qedsvm-rs/`) |
 | `--module` | String | `<Account><Handler>` | Lean module name for the emitted proof |
-| `--out-dir` | Path | temp dir (artifacts discarded) | Persist `<Module>TracedLifted.lean` + `<Module>Refinement.lean` into this directory |
+| `--out-dir` | Path | temp dir (artifacts discarded) | Persist `<Module>TracedLifted.lean` + `<Module>Refinement.lean` into this directory. Written only when the verdict is `verified` or `emitted` |
 | `--transition` | flag | off | Whole-transition mode (qedsvm v0.9.0, #40): lift **every** path from discovered `<stem>_<path>.pcs` traces beside the `.so`; emits per-path `*_transition_path` / `*_transition_fault` corollaries + the one bundle theorem (`<StemPascal>Transition.lean`) covering success and abort paths. Requires `--out-dir` and ≥ 2 traces |
+| `--lean-project` | Path | nearest Lake project at or above `--out-dir` | Lake project used to type-check the emitted modules. It must `require qedsvm` and be built. With neither this nor a Lake project above `--out-dir`, no Lean check runs and the verdict is at most `emitted`. Not yet supported with `--transition` (#405) |
+| `--json` | bool | false | Machine-readable report. Same verdict as the human report. Not yet supported with `--transition` (#405) |
 
 Whole-transition example:
 

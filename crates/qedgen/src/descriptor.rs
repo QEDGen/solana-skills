@@ -15,6 +15,12 @@ use anyhow::{anyhow, bail, Context, Result};
 
 use crate::check::ParsedSpec;
 
+mod lean_check;
+mod outcome;
+
+use lean_check::{check_modules, find_lake_project, LeanResult};
+use outcome::{classify_lift, parse_outcome, DischargeReport, LeanCheck, LiftVerdict, Verdict};
+
 /// Descriptor schema versions, kept in lockstep with qedsvm's `DESCRIPTOR_SCHEMA_MAX`.
 /// A constant delta (`add_const`) is v1; a parameter delta (`add_param`) is v2.
 ///
@@ -128,8 +134,9 @@ pub(crate) fn build_descriptor(
 // ════════════════════════════════════════════════════════════════
 // Discharge driver: spec -> descriptor -> qedlift -> verdict (the one-command chain).
 //
-// qedgen shells out to qedsvm's `qedlift` binary; no meaning crosses the boundary (qedgen
-// parses none of qedlift's internals, only its exit status and whether it emitted a proof).
+// qedgen shells out to qedsvm's `qedlift` binary. It reads qedlift's structured
+// `refinement outcome` line, its exit status, and the emitted modules, then runs Lean on those
+// modules before it reports `verified` (#406). It parses none of qedlift's internals.
 // ════════════════════════════════════════════════════════════════
 
 /// Assemble the `qedlift --descriptor ...` invocation. Factored out so the argument wiring is
@@ -200,25 +207,34 @@ fn pascal(s: &str) -> String {
     out
 }
 
-/// Build the descriptor for `handler`, then discharge it against `so` via `qedlift`. Prints a
-/// verdict (proven against the bytes / not discharged) and returns an error on failure.
+/// Inputs for [`run_discharge`] beyond the parsed spec.
+pub(crate) struct DischargeRequest<'a> {
+    pub handler: &'a str,
+    pub account: Option<String>,
+    pub so: &'a Path,
+    pub idl: Option<&'a Path>,
+    pub qedlift: &'a Path,
+    /// Lean module name (default `<Account><Handler>`).
+    pub module: Option<String>,
+    /// Persist the proof modules here when the verdict passes (A2a). `None` keeps the
+    /// verdict-only behaviour.
+    pub out_dir: Option<&'a Path>,
+    /// Lake project for the Lean check. Default: the nearest Lake project at or above
+    /// `out_dir`. With neither, no Lean check runs and the verdict is at most `emitted`.
+    pub lean_project: Option<&'a Path>,
+    /// Print the JSON report instead of the human report.
+    pub json: bool,
+}
+
+/// Build the descriptor for the handler, discharge it against the `.so` via `qedlift`, and
+/// run Lean on the emitted modules (#406). Prints one report (human or JSON) and returns an
+/// error unless the verdict is `verified` or `emitted`.
 ///
-/// `out_dir`: when `Some`, the discharged artifacts (`<Module>TracedLifted.lean` +
-/// `<Module>Refinement.lean`) are persisted there instead of being discarded with the temp
-/// workdir — so the byte-level proof lives in the project (A2a). When `None`, the legacy
-/// verdict-only behaviour is preserved.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn run_discharge(
-    parsed: &ParsedSpec,
-    handler: &str,
-    account: Option<String>,
-    so: &Path,
-    idl: Option<&Path>,
-    qedlift: &Path,
-    module: Option<String>,
-    out_dir: Option<&Path>,
-) -> Result<()> {
-    let descriptor = build_descriptor(parsed, handler, account)?;
+/// qedlift writes into a fresh temp dir, so files left in `out_dir` by an earlier run never
+/// count as this run's proof. Artifacts are copied into `out_dir` only when the verdict passes.
+pub(crate) fn run_discharge(parsed: &ParsedSpec, req: &DischargeRequest) -> Result<()> {
+    let handler = req.handler;
+    let descriptor = build_descriptor(parsed, handler, req.account.clone())?;
     let mutated = descriptor["mutated"].as_str().unwrap_or("?");
     // Constant (`add_const`) or parameter (`add_param`) credit, for the printed obligation.
     let delta_str = descriptor["op"]["add_const"]
@@ -231,99 +247,154 @@ pub(crate) fn run_discharge(
         })
         .unwrap_or_else(|| "?".to_string());
     let account_name = descriptor["account"].as_str().unwrap_or("?").to_string();
-    let module = module.unwrap_or_else(|| format!("{}{}", pascal(&account_name), pascal(handler)));
+    let module = req
+        .module
+        .clone()
+        .unwrap_or_else(|| format!("{}{}", pascal(&account_name), pascal(handler)));
 
     let work = tempfile::tempdir().context("create temp workdir for discharge")?;
     let desc_path = work.path().join("descriptor.json");
     std::fs::write(&desc_path, serde_json::to_string_pretty(&descriptor)?)
         .context("write temp descriptor")?;
-    let out = work.path().join(format!("{}TracedLifted.lean", module));
+    let lifted = work.path().join(format!("{}TracedLifted.lean", module));
     let refinement = work.path().join(format!("{}Refinement.lean", module));
 
-    println!("=== qedgen discharge ===");
-    println!("  spec handler : {}", handler);
-    println!(
-        "  obligation   : {}.{} += {}",
-        account_name, mutated, delta_str
-    );
-    println!("  program      : {}", so.display());
-    println!("  qedlift      : {}", qedlift.display());
-
-    let output = qedlift_command(qedlift, &desc_path, so, idl, &module, &out)
+    let output = qedlift_command(req.qedlift, &desc_path, req.so, req.idl, &module, &lifted)
         .output()
         .map_err(|e| {
             anyhow!(
                 "could not run qedlift at {}: {} (build it with `cargo build \
-                 --features qedrecover --bin qedlift` in the qedsvm repo)",
-                qedlift.display(),
+                 -p qedlift --bin qedlift` in qedsvm-rs/)",
+                req.qedlift.display(),
                 e
             )
         })?;
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    if output.status.success() && refinement.exists() {
+    let artifacts_present = lifted.is_file() && refinement.is_file();
+    let mut lift = match parse_outcome(&stderr) {
+        Ok(outcome) => classify_lift(output.status.success(), outcome.as_ref(), artifacts_present),
+        Err(e) => LiftVerdict::with(Verdict::Failed, "malformed_outcome", format!("{e:#}")),
+    };
+    if lift.verdict == Verdict::Failed && lift.reason.as_deref() != Some("malformed_outcome") {
+        // qedlift's own diagnostics explain a crash or a missing refinement.
+        let detail = stderr_tail(&stderr);
+        if !detail.is_empty() {
+            let base = lift.message.take().unwrap_or_default();
+            lift.message = Some(format!("{base}\n{detail}"));
+        }
+    }
+    if lift.verdict == Verdict::Emitted {
+        // Cheap guard for when no Lean check runs; Lean also reports `sorry`.
         let proof = std::fs::read_to_string(&refinement).unwrap_or_default();
-        // sanity: a discharged proof is sorry-free.
         if proof.contains("sorry") {
-            bail!(
-                "qedlift emitted a refinement containing `sorry` for `{}`",
-                handler
+            lift = LiftVerdict::with(
+                Verdict::Failed,
+                "sorry_in_refinement",
+                format!("qedlift emitted a refinement containing `sorry` for `{handler}`"),
             );
         }
-        println!(
-            "  ✔ DISCHARGED : `{}` is proven against the bytes (offsets resolved from the IDL).",
-            handler
-        );
-        println!(
-            "    qedlift emitted a sorry-free AsmRefinesFieldUpdate refinement + a \
-             qedsvm_discharge'd `ensures`."
-        );
-        // A2a: persist the proof into the project instead of discarding it with the temp
-        // workdir, so a later `lake build` type-checks it (and A2b can consume it from the
-        // bridge). Without --out-dir, keep the legacy verdict-only behaviour.
-        match out_dir {
-            Some(dest) => {
-                let (lifted_dst, refinement_dst) =
-                    persist_discharge_artifacts(dest, &out, &refinement)?;
-                println!("    persisted    : {}", refinement_dst.display());
-                println!("                   {}", lifted_dst.display());
-                println!(
-                    "    wire it in   : `import {}Refinement` (add both modules to your lake lib",
-                    module
-                );
-                println!(
-                    "                   roots; the project must `require qedsvm` — lean_solana \
-                     projects already do)."
-                );
+    }
+
+    let mut report = DischargeReport::new(
+        handler,
+        format!("{}.{} += {}", account_name, mutated, delta_str),
+        req.so.display().to_string(),
+        req.qedlift.display().to_string(),
+        lift,
+    );
+
+    if report.verdict == Verdict::Emitted {
+        report.lean_check = match lean_project_for(req)? {
+            None => LeanCheck::NotRun {
+                why: "no Lake project; pass --lean-project, or put --out-dir inside a Lake \
+                      project that requires qedsvm"
+                    .to_string(),
+            },
+            Some(project) => {
+                let shown = project.display().to_string();
+                match check_modules(&project, &[lifted.clone(), refinement.clone()]) {
+                    Ok(LeanResult::Passed) => {
+                        report.verdict = Verdict::Verified;
+                        LeanCheck::Passed { project: shown }
+                    }
+                    Ok(LeanResult::Failed(output)) => {
+                        report.verdict = Verdict::Failed;
+                        report.reason = Some("lean_check_failed".to_string());
+                        LeanCheck::Failed {
+                            project: shown,
+                            output,
+                        }
+                    }
+                    Err(e) => {
+                        report.verdict = Verdict::Failed;
+                        report.reason = Some("lean_check_failed".to_string());
+                        LeanCheck::Failed {
+                            project: shown,
+                            output: format!("{e:#}"),
+                        }
+                    }
+                }
             }
-            None => {
-                println!(
-                    "    Type-check it with `lake build` in the qedsvm project (the emitted module"
-                );
-                println!(
-                    "    is identical in shape to the committed, lake-green Generated proofs)."
-                );
-                println!(
-                    "    Pass `--out-dir <project>` to persist it into the project instead of a \
-                     temp dir."
-                );
-            }
+        };
+    }
+
+    if report.verdict.passes() {
+        if let Some(dest) = req.out_dir {
+            let (lifted_dst, refinement_dst) =
+                persist_discharge_artifacts(dest, &lifted, &refinement)?;
+            report.artifacts = vec![
+                refinement_dst.display().to_string(),
+                lifted_dst.display().to_string(),
+            ];
         }
+    }
+
+    if req.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print!("{}", report.render_human());
+        if report.verdict.passes() && !report.artifacts.is_empty() {
+            println!(
+                "    wire it in   : `import Generated.{}Refinement` (add both modules to your \
+                 lake lib",
+                module
+            );
+            println!(
+                "                   roots; the project must `require qedsvm`; lean_solana \
+                 projects already do)."
+            );
+        }
+    }
+
+    if report.verdict.passes() {
         Ok(())
-    } else if output.status.success() {
-        bail!(
-            "NOT DISCHARGED: qedlift ran but emitted no refinement for `{}` (the bytes likely \
-             do not realise the claimed obligation).\n{}",
-            handler,
-            stderr_tail(&stderr)
-        )
     } else {
         bail!(
-            "qedlift failed ({}):\n{}",
-            output.status,
-            stderr_tail(&stderr)
+            "discharge verdict for `{}`: {}",
+            handler,
+            report.verdict.label()
         )
     }
+}
+
+/// The Lake project for the Lean check: `--lean-project`, else the nearest Lake project at or
+/// above `--out-dir`.
+fn lean_project_for(req: &DischargeRequest) -> Result<Option<PathBuf>> {
+    if let Some(p) = req.lean_project {
+        return Ok(Some(p.to_path_buf()));
+    }
+    let Some(out_dir) = req.out_dir else {
+        return Ok(None);
+    };
+    let abs = if out_dir.is_absolute() {
+        out_dir.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .context("reading the current directory")?
+            .join(out_dir)
+    };
+    Ok(find_lake_project(&abs))
 }
 
 /// Whole-transition discharge (qedsvm #40, v0.9.0): build the descriptor, then drive
@@ -374,7 +445,7 @@ pub(crate) fn run_discharge_transition(
         .map_err(|e| {
             anyhow!(
                 "could not run qedlift at {}: {} (build it with `cargo build \
-                 --features qedrecover --bin qedlift` in the qedsvm repo)",
+                 -p qedlift --bin qedlift` in qedsvm-rs/)",
                 qedlift.display(),
                 e
             )
@@ -651,17 +722,7 @@ mod tests {
         let out = tmp.path().join("project");
 
         let parsed = parse("tests/fixtures/descriptor/counter.qedspec");
-        run_discharge(
-            &parsed,
-            "increment",
-            Some("Counter".to_string()),
-            &so,
-            None,
-            &fake,
-            None,
-            Some(&out),
-        )
-        .expect("discharge persists");
+        run_discharge(&parsed, &request(&so, &fake, Some(&out), None)).expect("discharge persists");
 
         // Module defaults to `<Account><Handler>` = CounterIncrement.
         assert!(
@@ -672,6 +733,107 @@ mod tests {
             out.join("CounterIncrementTracedLifted.lean").exists(),
             "lifted module persisted into out-dir",
         );
+    }
+
+    fn request<'a>(
+        so: &'a Path,
+        qedlift: &'a Path,
+        out_dir: Option<&'a Path>,
+        lean_project: Option<&'a Path>,
+    ) -> DischargeRequest<'a> {
+        DischargeRequest {
+            handler: "increment",
+            account: Some("Counter".to_string()),
+            so,
+            idl: None,
+            qedlift,
+            module: None,
+            out_dir,
+            lean_project,
+            json: false,
+        }
+    }
+
+    /// Write an executable fake qedlift and a dummy `.so` into `dir`.
+    #[cfg(unix)]
+    fn fake_qedlift(dir: &Path, script: &str) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let fake = dir.join("fake-qedlift.sh");
+        std::fs::write(&fake, script).unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let so = dir.join("counter.so");
+        std::fs::write(&so, b"\x7fELF").unwrap();
+        (fake, so)
+    }
+
+    /// A structured `rejected` or `unsupported` outcome fails the command, keeps the typed
+    /// reason in the error path, and persists nothing.
+    #[cfg(unix)]
+    #[test]
+    fn rejected_and_unsupported_outcomes_fail_without_persisting() {
+        for (status, reason) in [
+            ("rejected", "mutation_mismatch"),
+            ("unsupported", "missing_parameter_binding"),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let script = format!(
+                "#!/bin/sh\necho 'refinement outcome: {{\"status\":\"{status}\",\"reason\":\"{reason}\",\"message\":\"m\"}}' >&2\nexit 1\n"
+            );
+            let (fake, so) = fake_qedlift(tmp.path(), &script);
+            let out = tmp.path().join("project");
+            let parsed = parse("tests/fixtures/descriptor/counter.qedspec");
+            let err = run_discharge(&parsed, &request(&so, &fake, Some(&out), None))
+                .expect_err("non-emitted outcome must fail");
+            assert!(err.to_string().contains(status), "{status}: {err}");
+            assert!(!out.exists(), "{status}: nothing persisted");
+        }
+    }
+
+    /// A proof left in `--out-dir` by an earlier run cannot make a failed run pass: qedlift
+    /// writes to a fresh temp dir, and the old file is neither read nor replaced.
+    #[cfg(unix)]
+    #[test]
+    fn stale_out_dir_artifacts_cannot_pass_a_failed_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (fake, so) = fake_qedlift(tmp.path(), "#!/bin/sh\necho boom >&2\nexit 3\n");
+        let out = tmp.path().join("project");
+        std::fs::create_dir_all(&out).unwrap();
+        let stale = out.join("CounterIncrementRefinement.lean");
+        std::fs::write(&stale, "theorem old : True := trivial\n").unwrap();
+        std::fs::write(
+            out.join("CounterIncrementTracedLifted.lean"),
+            "theorem old_lift : True := trivial\n",
+        )
+        .unwrap();
+
+        let parsed = parse("tests/fixtures/descriptor/counter.qedspec");
+        let err = run_discharge(&parsed, &request(&so, &fake, Some(&out), None))
+            .expect_err("failed qedlift must fail even with stale proofs present");
+        assert!(err.to_string().contains("failed"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(&stale).unwrap(),
+            "theorem old : True := trivial\n",
+            "stale proof untouched"
+        );
+    }
+
+    /// An emitted refinement whose Lean check cannot pass is `failed`, never `verified`, and is
+    /// not persisted. A directory with no lakefile stands in for a broken Lean project.
+    #[cfg(unix)]
+    #[test]
+    fn failed_lean_check_is_not_verified() {
+        let tmp = tempfile::tempdir().unwrap();
+        let script = "#!/bin/sh\nout=\"\"; mod=\"\"\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    --output) out=\"$2\"; shift 2 ;;\n    --module) mod=\"$2\"; shift 2 ;;\n    *) shift ;;\n  esac\ndone\ndir=$(dirname \"$out\")\nprintf 'theorem lifted : True := trivial\\n' > \"$out\"\nprintf 'theorem refines_asm : True := trivial\\n' > \"$dir/${mod}Refinement.lean\"\necho 'refinement outcome: {\"status\":\"emitted\"}' >&2\n";
+        let (fake, so) = fake_qedlift(tmp.path(), script);
+        let not_lake = tmp.path().join("not-a-lake-project");
+        std::fs::create_dir_all(&not_lake).unwrap();
+        let out = tmp.path().join("project");
+
+        let parsed = parse("tests/fixtures/descriptor/counter.qedspec");
+        let err = run_discharge(&parsed, &request(&so, &fake, Some(&out), Some(&not_lake)))
+            .expect_err("a failed Lean check must fail the discharge");
+        assert!(err.to_string().contains("failed"), "{err}");
+        assert!(!out.exists(), "nothing persisted on a failed Lean check");
     }
 
     /// Transition-command wiring: `--transition` + `--output-dir` (no

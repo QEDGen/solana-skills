@@ -522,10 +522,13 @@ pub(crate) enum Commands {
     },
 
     /// Run the full spec -> byte-level proof chain for one handler: build the
-    /// name-level descriptor from the `.qedspec`, then discharge it against the
-    /// compiled `.so` via qedsvm's `qedlift`. Reports whether the handler's
-    /// effect is proven against the bytes. This is the one-command driver over
-    /// the qedgen <-> qedsvm seam (`descriptor` + qedlift `--descriptor`).
+    /// name-level descriptor from the `.qedspec`, discharge it against the
+    /// compiled `.so` via qedsvm's `qedlift`, then type-check the emitted
+    /// modules with Lean. Verdicts: `verified` (Lean accepted the proof),
+    /// `emitted` (generated, no Lean check ran), `rejected`, `unsupported`,
+    /// `model_only`, `failed`. Exits non-zero unless `verified` or `emitted`.
+    /// This is the one-command driver over the qedgen <-> qedsvm seam
+    /// (`descriptor` + qedlift `--descriptor`).
     Discharge {
         /// Path to the `.qedspec`
         #[arg(long)]
@@ -548,8 +551,8 @@ pub(crate) enum Commands {
         #[arg(long)]
         idl: Option<PathBuf>,
 
-        /// Path to a built qedsvm `qedlift` binary (built with
-        /// `--features qedrecover`)
+        /// Path to a built qedsvm `qedlift` binary (`cargo build -p qedlift
+        /// --bin qedlift` in qedsvm's `qedsvm-rs/`)
         #[arg(long)]
         qedlift: PathBuf,
 
@@ -572,6 +575,17 @@ pub(crate) enum Commands {
         /// >= 2 traces beside the binary.
         #[arg(long)]
         transition: bool,
+
+        /// Lake project used to type-check the emitted modules (it must
+        /// `require qedsvm` and be built). Default: the nearest Lake project at
+        /// or above `--out-dir`. With neither, no Lean check runs and the
+        /// verdict is at most `emitted`.
+        #[arg(long)]
+        lean_project: Option<PathBuf>,
+
+        /// Print a machine-readable JSON report (same verdict as the human report)
+        #[arg(long)]
+        json: bool,
     },
 
     /// Consolidate multiple proof projects into a single Lean project
