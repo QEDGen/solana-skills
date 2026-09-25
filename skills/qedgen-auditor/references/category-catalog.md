@@ -1346,15 +1346,22 @@ Applies to V0 programs too: on a cluster with SIMD-0460 active, V0 has no
 stack frame gaps either. Check the cluster's active features before rejecting
 it for a V0 program.
 
-How to confirm: build with `--arch v3` and drive the length past the
-buffer's frame. Compare with a V0 build run with SIMD-0460 off: V0 faults,
-v3 continues with corrupted callee state.
+How to confirm: reproduce on the build and features the target actually
+runs. For a v3 build, the feature state does not matter. For a deployed V0
+program, match the cluster: SIMD-0460 on means no frame gaps, so the overrun
+corrupts silently; SIMD-0460 off means the overrun faults, which is not this
+class. Drive the length past the end of the buffer's frame. As a control, the
+same V0 build with SIMD-0460 off should fault.
 
-Reproducer shape: LiteSVM or Mollusk on the v3 build. Pick a length that
-crosses the frame boundary (the fixture uses 4160 bytes into a 64-byte buffer)
-and assert that a value the callee computes or checks afterwards is wrong.
-Returning a corrupted value, or skipping a check because a local flipped, is
-the evidence. A fault is not.
+Reproducer shape: LiteSVM or Mollusk, with the target's build (`--arch v3`, or
+the deployed V0 `.so`) and the target cluster's feature set. Mollusk turns on
+every feature by default, so SIMD-0460 is on unless you turn it off; the
+fixture's gate (`crates/qedgen-sandbox/tests/sbpf_v3_runtime.rs`) shows how to
+turn it off and rebuild the program cache. Pick a length that crosses the
+frame boundary (the fixture uses 4160 bytes into a 64-byte buffer) and assert
+that a value the callee computes or checks afterwards is wrong. Returning a
+corrupted value, or skipping a check because a local flipped, is the evidence.
+A fault is not.
 
 ### `sbpf_v3_unresolved_syscall` — LOW (build-time on current toolchains)
 Basis: fixture:crates/qedgen/tests/fixtures/sbpf-v3-runtime/extern_syscall
