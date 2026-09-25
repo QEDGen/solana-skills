@@ -204,8 +204,11 @@ fn parameter_descriptor(
         bail!("--account-data-lengths is empty; list one length per account");
     }
 
-    let (ix_name, arg_name, idl_index) = match inputs.idl {
+    let (account, ix_name, arg_name, idl_index) = match inputs.idl {
         Some(idl) => {
+            // qedsvm resolves field offsets by the IDL account-type name, so emit its exact
+            // spelling (`vault_account` in the spec, `vaultAccount` in Codama).
+            let account = idl_account_type(idl, account)?;
             let ix = idl_instruction(idl, handler)?;
             let ix_name = ix["name"].as_str().unwrap_or(handler).to_string();
             let arg_name = idl_u64_argument(ix, &ix_name, param)?;
@@ -222,21 +225,32 @@ fn parameter_descriptor(
                 accounts
                     .iter()
                     .enumerate()
-                    .filter(|(_, a)| a["name"].as_str().is_some_and(|n| same_name(n, account)))
+                    .filter(|(_, a)| a["name"].as_str().is_some_and(|n| same_name(n, &account)))
                     .map(|(i, _)| i),
             );
-            (ix_name, arg_name, idl_index)
+            (account, ix_name, arg_name, idl_index)
         }
         None => {
             eprintln!(
                 "note: no --idl; the descriptor uses the spec names `{handler}` / `{param}`, and \
                  qedsvm matches them exactly against the IDL"
             );
-            (handler.to_string(), param.to_string(), Err(0))
+            (
+                account.to_string(),
+                handler.to_string(),
+                param.to_string(),
+                Err(0),
+            )
         }
     };
 
     let index = match (inputs.account_index, idl_index) {
+        // An explicit index must not contradict the IDL: the descriptor would name one
+        // account and lay out another.
+        (Some(i), Ok(from_idl)) if i != from_idl => bail!(
+            "--account-index {i} contradicts the IDL, where `{account}` is instruction account \
+             {from_idl}"
+        ),
         (Some(i), _) => i,
         (None, Ok(i)) => i,
         (None, Err(count)) => bail!(
@@ -288,6 +302,37 @@ fn unique_match<T>(mut it: impl Iterator<Item = T>) -> std::result::Result<T, us
         (Some(one), None) => Ok(one),
         (None, _) => Err(0),
         (Some(_), Some(_)) => Err(2 + it.count()),
+    }
+}
+
+/// The IDL spelling of the account type that matches `account`.
+fn idl_account_type(idl: &serde_json::Value, account: &str) -> Result<String> {
+    let program = idl.get("program").unwrap_or(idl);
+    let names: Vec<&str> = program["accounts"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|t| t["name"].as_str()).collect())
+        .unwrap_or_default();
+    let matches: Vec<&str> = names
+        .iter()
+        .copied()
+        .filter(|n| same_name(n, account))
+        .collect();
+    match matches.as_slice() {
+        [one] => Ok(one.to_string()),
+        [] => bail!(
+            "no IDL account type matches `{account}` (IDL accounts: {}); qedsvm resolves the \
+             field offsets from it",
+            if names.is_empty() {
+                "none".to_string()
+            } else {
+                names.join(", ")
+            }
+        ),
+        many => bail!(
+            "{} IDL account types match `{account}`: {}",
+            many.len(),
+            many.join(", ")
+        ),
     }
 }
 
@@ -1051,32 +1096,73 @@ mod tests {
         let idl = |arg_ty: &str, extra_ix: bool| {
             let mut ixs = vec![serde_json::json!({
                 "name": "depositFunds",
-                "accounts": [{ "name": "owner" }, { "name": "vault" }],
+                "accounts": [{ "name": "owner" }, { "name": "vaultAccount" }],
                 "arguments": [{ "name": "minAmount", "type": serde_json::from_str::<serde_json::Value>(arg_ty).unwrap() }]
             })];
             if extra_ix {
                 ixs.push(serde_json::json!({ "name": "deposit_funds", "arguments": [] }));
             }
-            serde_json::json!({ "program": { "instructions": ixs } })
+            serde_json::json!({
+                "program": { "accounts": [{ "name": "vaultAccount" }], "instructions": ixs }
+            })
         };
         let u64_le = r#"{"kind":"numberTypeNode","format":"u64","endian":"le"}"#;
+        // The spec spells the account `vault_account`; Codama spells it `vaultAccount`.
+        let inputs = |idl, lengths, index| DescriptorInputs {
+            account: Some("vault_account".to_string()),
+            ..param_inputs(idl, lengths, index)
+        };
 
         let ok = idl(u64_le, false);
         let d = build_descriptor(
             &parsed,
             "deposit_funds",
-            &param_inputs(Some(&ok), Some(vec![0, 41]), None),
+            &inputs(Some(&ok), Some(vec![0, 41]), None),
         )
         .expect("camelCase IDL resolves");
+        assert_eq!(
+            d["account"], "vaultAccount",
+            "account uses the IDL spelling"
+        );
         assert_eq!(d["handler"], "depositFunds");
         assert_eq!(d["op"]["add_param"], "minAmount");
         assert_eq!(d["input_layout"]["account_index"], 1);
+
+        // An explicit index that agrees with the IDL is fine; one that contradicts it is not.
+        build_descriptor(
+            &parsed,
+            "deposit_funds",
+            &inputs(Some(&ok), Some(vec![0, 41]), Some(1)),
+        )
+        .expect("agreeing index");
+        let err = build_descriptor(
+            &parsed,
+            "deposit_funds",
+            &inputs(Some(&ok), Some(vec![0, 41]), Some(0)),
+        )
+        .expect_err("conflicting index");
+        assert!(err.to_string().contains("contradicts the IDL"), "{err}");
+
+        // No IDL account type with that name: qedsvm could not resolve the offsets.
+        let err = build_descriptor(
+            &parsed,
+            "deposit_funds",
+            &DescriptorInputs {
+                account: Some("treasury".to_string()),
+                ..param_inputs(Some(&ok), Some(vec![0, 41]), Some(1))
+            },
+        )
+        .expect_err("unknown account type");
+        assert!(
+            err.to_string().contains("no IDL account type matches"),
+            "{err}"
+        );
 
         let ambiguous = idl(u64_le, true);
         let err = build_descriptor(
             &parsed,
             "deposit_funds",
-            &param_inputs(Some(&ambiguous), Some(vec![0, 41]), None),
+            &inputs(Some(&ambiguous), Some(vec![0, 41]), None),
         )
         .expect_err("two instructions match");
         assert!(
@@ -1091,7 +1177,7 @@ mod tests {
         let err = build_descriptor(
             &parsed,
             "deposit_funds",
-            &param_inputs(Some(&u32_arg), Some(vec![0, 41]), None),
+            &inputs(Some(&u32_arg), Some(vec![0, 41]), None),
         )
         .expect_err("non-u64 argument");
         assert!(err.to_string().contains("not a little-endian u64"), "{err}");

@@ -138,9 +138,11 @@ tracked account. qedsvm uses it to find the serialized instruction data and
 checks that the bytecode reads the argument from there. The layout is an
 explicit assumption. qedgen never infers it, and it is printed in the
 descriptor (`input_layout`). With `--idl`, qedgen also resolves the IDL
-instruction and argument names (Codama names are usually camelCase, and qedsvm
-matches them exactly) and the account index, and it checks that the argument is
-a little-endian `u64` and that the lengths match the instruction's accounts.
+account type, instruction, and argument names (Codama names are usually
+camelCase, and qedsvm matches them exactly) and the account index. It checks
+that the argument is a little-endian `u64`, that the lengths match the
+instruction's accounts, and that an explicit `--account-index` agrees with the
+IDL.
 Missing or ambiguous layout information fails before qedlift runs.
 
 | Flag | Type | Default | Description |

@@ -150,8 +150,8 @@ fn discharge_verdicts_match_qedlift_and_lean() {
     );
 }
 
-/// A wrong account index fails inside qedgen, before qedlift runs: the IDL instruction takes
-/// one account, so index 1 cannot name it.
+/// A wrong account index fails inside qedgen, before qedlift runs: the IDL puts the tracked
+/// account at index 0, so an explicit index 1 contradicts it.
 #[test]
 #[ignore = "needs a built qedsvm checkout and qedlift (see module docs)"]
 fn wrong_account_index_fails_before_qedlift() {
@@ -173,10 +173,7 @@ fn wrong_account_index_fails_before_qedlift() {
         .expect("spawn qedgen discharge");
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("outside --account-data-lengths"),
-        "{stderr}"
-    );
+    assert!(stderr.contains("contradicts the IDL"), "{stderr}");
 }
 
 /// `--transition` on qedsvm's `guarded_counter` (#405): a success path and a rejection path

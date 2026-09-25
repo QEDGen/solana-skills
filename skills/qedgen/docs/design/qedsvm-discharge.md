@@ -415,11 +415,11 @@ Current pins and coverage (verify before acting):
   deltas. Still literal-only on the consumer side.
 - **qedgen producer** (`crates/qedgen/src/descriptor.rs::build_descriptor:29`):
   `add_const` (schema v1) plus **`add_param` (schema v2)** for parameter deltas
-  (superseded 2026-09 by schema v3 with an explicit `input_layout`, #404; qedsvm
-  returns `unsupported` for a v2 parameter descriptor)
   — landed via PR #127 (`c53b56d` + rustfmt `4e7fa64`), single-field, validated
-  against the handler's declared params. This is **ahead of the qedsvm
-  consumer**: qedlift `--descriptor` does not yet consume schema v2 (§16).
+  against the handler's declared params. **Superseded 2026-09 (#404):** a
+  parameter delta is now schema v3 with an explicit `input_layout`, matching
+  qedsvm's v3 consumer (see §16). qedsvm returns `unsupported` for a v2
+  parameter descriptor.
 - **qedsvm coverage tiers** (qedsvm `docs/COVERAGE.md`): SPL Transfer/MintTo/Burn,
   counter increment, vault constant field update = *Mechanical* (success path,
   single selected arm). "Path merge / whole-program arm coverage =
@@ -510,21 +510,21 @@ report (A4) must say "verified on the success path," not "verified."
 ## §16 — The schema-version contract (producer ahead of consumer)
 
 The descriptor is versioned and fail-closed (`schema_version` ↔ qedsvm's
-`DESCRIPTOR_SCHEMA_MAX`). Current state is a deliberate producer-lead:
+`DESCRIPTOR_SCHEMA_MAX`). Current state (2026-09):
 
 | Shape | Producer (qedgen) | Consumer (qedsvm qedlift) |
 |---|---|---|
 | `add_const` single-field (v1) | ✅ shipped | ✅ qedsvm#46 |
-| `add_param` single-field (v2) | ✅ #127 (`c53b56d`) | ❌ not yet — **matched ask** |
-| multi-field (v3, transfer) | ❌ §15 gate 3 | ❌ §15 gate 1 |
+| `add_param` single-field (v2) | superseded by v3 | parsed, but `unsupported / missing_parameter_binding` |
+| `add_param` + `input_layout` (v3) | ✅ #404 | ✅ qedsvm `main` (`DESCRIPTOR_SCHEMA_MAX = 3`); not in v0.12.0 |
+| multi-field (transfer) | ❌ §15 gate 3 | ❌ §15 gate 1 |
 
-**Action:** the v2 producer needs a matched qedsvm consumer (`--descriptor`
-learns `add_param` + `DESCRIPTOR_SCHEMA_MAX` → 2) before Slice A can discharge a
-`+= amount` handler. Until then the v2 producer emits a descriptor qedlift will
-reject — correct fail-closed behavior, but it means **Slice A's first green
-discharge must use a `+= k` (v1) op** unless the qedsvm v2 consumer lands first.
-File the qedsvm "consume `add_param` / bump schema to v2" issue alongside
-qedsvm#40.
+qedsvm used schema v3 for the parameter binding (`handler` + `input_layout`), so
+the multi-field shape this section once called "v3" will need a later version.
+
+**Action:** ship the v3 producer (#404) in the same qedgen release that bumps
+the qedsvm pin to the first release with `DESCRIPTOR_SCHEMA_MAX = 3`. Before that
+release, a qedlift at v0.12.0 refuses a v3 descriptor.
 
 ## §17 — Shared prerequisite: bump the qedsvm pin ✅ done (PR #129)
 
@@ -538,9 +538,9 @@ surface; toolchain unchanged at `v4.30.0`).
 ## §18 — Sequencing (impl)
 
 1. ✅ **Pin bump** v0.4.0 → v0.6.0 (§17, PR #129) — prerequisite for everything.
-2. **qedsvm v2 consumer** (consume `add_param`, bump `DESCRIPTOR_SCHEMA_MAX`) —
-   unblocks the already-shipped v2 producer; small, matched to #127. Still open;
-   until it lands, Slice A's first discharge uses a `+= k` (v1) op.
+2. ✅ **qedsvm parameter consumer**: landed on qedsvm `main` as schema v3 with an
+   `input_layout` (not yet released). The qedgen producer moved to v3 in #404;
+   ship both together (§16).
 3. **Slice A** (§14): ✅ A1 ELF cache (PR #130) → A2 wire-into-project → A3 gate
    → A4 report. First honest byte-level discharge. Starting with a `+= k` op
    while step 2 is pending.

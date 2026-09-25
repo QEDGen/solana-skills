@@ -529,13 +529,18 @@ This is the **producer half** of that seam. It covers a single-field increment: 
 
 ```bash
 # Emit the name-level refinement descriptor (JSON) qedlift consumes.
-# Carries semantics only — account, mutated field name, constant delta.
-qedgen descriptor --spec vault.qedspec --handler deposit
+# Constant delta (`total += 1`): account, mutated field name, constant.
+qedgen descriptor --spec vault.qedspec --handler increment
+
+# Parameter delta (`total += amount`): also needs the input layout, the data
+# length of every account the instruction receives (here one 41-byte account).
+qedgen descriptor --spec vault.qedspec --handler deposit \
+  --idl idl/vault.json --account-data-lengths 41
 
 # Chain it end to end: build the descriptor, shell out to a built qedlift,
 # type-check the emitted proof with Lean, and report a verdict.
 qedgen discharge --spec vault.qedspec --handler deposit \
-  --so target/deploy/vault.so --idl idl/vault.json \
+  --so target/deploy/vault.so --idl idl/vault.json --account-data-lengths 41 \
   --qedlift path/to/qedlift --lean-project formal_verification
 ```
 
