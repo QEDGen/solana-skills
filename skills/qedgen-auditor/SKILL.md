@@ -185,7 +185,11 @@ remain absent for the instruction to create.
 Read only the relevant detailed references:
 
 - [category catalog](references/category-catalog.md): per-category
-  predicates, runtime-specific patterns, and the composition cookbook.
+  predicates, runtime-specific patterns, and the composition cookbook. For
+  every Rust program, walk `sbpf_v3_stack_overrun_no_fault`: V0 also loses its
+  stack frame gaps once SIMD-0460 is active. When the program is or will be
+  built as sBPF v3 (every upgrade once SIMD-0500 is active), also walk the
+  other `sbpf_v3_*` entries.
 - [manual review passes](references/manual-review-passes.md): the detailed
   investigation workflow when the compact steps here need expansion.
 - [report and grading](references/report-and-grading.md): classification
@@ -194,8 +198,9 @@ Read only the relevant detailed references:
   surface, and the reproducer-only contract.
 - [known non-findings](references/known-non-findings.md): always before filing
   a reentrancy, closed-account-discriminator, float-determinism, token
-  self-transfer, instruction-introspection, partial-state-commitment, or
-  unchecked-CPI-return finding.
+  self-transfer, instruction-introspection, partial-state-commitment,
+  unchecked-CPI-return, unresolved-syscall, or sBPF v3 finding on a V0
+  program.
 - [trust-surface primitives](references/trust_surface_primitives.md): only when
   a small dependency supplies a security-critical primitive.
 - [data-structure dependency invariants](references/data_structure_dep_invariants.md):

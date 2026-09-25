@@ -2352,6 +2352,7 @@ dependencies = [
 name = "qedgen-sandbox"
 version = "0.1.0"
 dependencies = [
+ "agave-feature-set",
  "mollusk-svm",
  "mollusk-svm-programs-token",
  "qedgen-hash-core",

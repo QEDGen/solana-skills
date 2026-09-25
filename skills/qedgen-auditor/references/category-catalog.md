@@ -1295,6 +1295,103 @@ secondary(); } }` where `primary_effect` is load-bearing and
   documented as a *partial* reduction but is implemented identically to
   the full-cancel variant.
 
+### `sbpf_v3_low_address_read` — HIGH when a fault was the only guard
+Basis: fixture:crates/qedgen/tests/fixtures/sbpf-v3-runtime/low_address
+Spec-less, Rust programs built for sBPF v3. V0 maps nothing at VM address 0,
+so a read through a null or near-null pointer faults and the transaction
+fails. v3 maps `.rodata` at address 0, so the same read returns program bytes
+and execution continues. Code that was safe on V0 only because the fault
+stopped it is unsafe on v3.
+
+Detection cue: a raw pointer read (`read`, `read_unaligned`, `*ptr`,
+`from_raw_parts`) whose address comes from account data, instruction data, or
+an offset computation, with no check that the address is nonzero and in
+bounds. Pinocchio and native programs that cast account data to structs are
+the usual place. An `Option` or offset that can come out as 0 is the trigger.
+
+How to confirm: build the program with `--arch v3` and run the path with the
+pointer forced to 0 (or a small offset). On V0 it faults with
+`Access violation ... at address 0x0`. On v3 it succeeds and the program acts
+on `.rodata` bytes as if they were real data.
+
+Reproducer shape: LiteSVM or Mollusk. Load the v3 build, send an instruction
+that drives the unchecked pointer to 0, and assert the transaction succeeds
+where it should have failed, or that a later check read `.rodata` contents.
+The fixture's gate (`crates/qedgen-sandbox/tests/sbpf_v3_runtime.rs`) is the
+template: it builds the same source as V0 and v3 and asserts both outcomes.
+
+Not a finding on a V0 program that will never be rebuilt. It becomes one on
+the first v3 build, which SIMD-0500 makes mandatory for any upgrade.
+
+### `sbpf_v3_stack_overrun_no_fault` — HIGH
+Basis: fixture:crates/qedgen/tests/fixtures/sbpf-v3-runtime/stack_overrun
+Spec-less, Rust programs. Stack frames are 4 KiB and a callee's frame sits
+above its caller's. V0 with stack frame gaps leaves an unmapped gap after each
+frame, so a write past the end of a frame faults. v3 has no gaps, and V0 loses
+them once SIMD-0460 (Virtual Address Space Adjustments) is active. Without
+gaps the write lands in the next frame up, which is the callee's live frame.
+It silently changes the callee's locals.
+
+Detection cue: a stack buffer passed by raw pointer to a callee that writes
+into it with an index or length taken from input, through an operation with
+no bounds check: `ptr.add(i).write(..)` in a loop, `ptr::copy_nonoverlapping`
+or `ptr::write_bytes` with a caller-chosen length, `get_unchecked_mut`, or a
+slice rebuilt with `slice::from_raw_parts_mut` from an unchecked length.
+Checked operations (`copy_from_slice`, indexing, `split_at_mut`) panic on a
+bad length instead of writing out of bounds, so they are not this class. The
+overrun has to reach past the end of the caller's 4 KiB frame, so the buffer
+is usually a large local array or the index is unbounded.
+
+Applies to V0 programs too: on a cluster with SIMD-0460 active, V0 has no
+stack frame gaps either. Check the cluster's active features before rejecting
+it for a V0 program.
+
+How to confirm: reproduce on the build and features the target actually
+runs. For a v3 build, the feature state does not matter. For a deployed V0
+program, match the cluster: SIMD-0460 on means no frame gaps, so the overrun
+corrupts silently; SIMD-0460 off means the overrun faults, which is not this
+class. Drive the length past the end of the buffer's frame. As a control, the
+same V0 build with SIMD-0460 off should fault.
+
+Reproducer shape: LiteSVM or Mollusk, with the target's build (`--arch v3`, or
+the deployed V0 `.so`) and the target cluster's feature set. Mollusk turns on
+every feature by default, so SIMD-0460 is on unless you turn it off; the
+fixture's gate (`crates/qedgen-sandbox/tests/sbpf_v3_runtime.rs`) shows how to
+turn it off and rebuild the program cache. Pick a length that crosses the
+frame boundary (the fixture uses 4160 bytes into a 64-byte buffer) and assert
+that a value the callee computes or checks afterwards is wrong. Returning a
+corrupted value, or skipping a check because a local flipped, is the evidence.
+A fault is not.
+
+### `sbpf_v3_unresolved_syscall` — LOW (build-time on current toolchains)
+Basis: fixture:crates/qedgen/tests/fixtures/sbpf-v3-runtime/extern_syscall
+sBPF v3 resolves syscalls at build time. The claimed runtime failure, a
+syscall that builds and then aborts as `call -1`, does not reproduce on
+platform-tools v1.56+ (the minimum for `--arch v3`). A hand-declared
+`extern "C"` syscall fails the v3 link with `undefined symbol`. Old syscall
+crates resolve: `solana-define-syscall` 2.3.0, `solana-program` 1.18.26,
+`anchor-lang` 0.32.1, and `pinocchio` 0.8.4 all build as v3 with every
+syscall named.
+
+Detection cue: only a `.so` of unknown origin, for example one built with an
+older toolchain, a vendored binary, or a program whose build is not
+reproducible. Source review cannot confirm this class.
+
+How to confirm: disassemble the built `.so` (`sbpf disassemble program.so`)
+and look for a `call` whose target is `-1` (`0xffffffff`) instead of a named
+syscall or an internal function. Also check the ELF `e_flags`: `qedgen
+readiness --so program.so` reports a pre-v3 build as `QED002`. A disassembly
+line is a lead, not a finding: it does not show that the program loads or
+that any path reaches the call.
+
+Reproducer shape: load the `.so` into LiteSVM or Mollusk and send a
+transaction that reaches the `call -1`. Report a runtime abort only when the
+program loads and that transaction aborts at the call. If loading rejects the
+program, the finding is that it cannot be deployed, which is a different and
+usually lower-impact result. On a program you can rebuild with current tools,
+this is a known non-finding (see
+[known-non-findings.md](known-non-findings.md#unresolved-syscalls-under-sbpf-v3)).
+
 ## qedgen-codegen runtime
 
 When the runtime is **qedgen-codegen** (detected by the

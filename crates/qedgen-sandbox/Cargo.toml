@@ -36,3 +36,6 @@ mollusk-svm-programs-token = "0.12.1-agave-4.0"
 spl-token-interface = "2.0.0"
 solana-program-pack = "3"
 tempfile = "3"
+# sBPF v3 runtime gate: turns SIMD-0460 off to show V0 stack frame gaps.
+# Same version mollusk-svm already resolves.
+agave-feature-set = { version = "4.0.0-rc.0", features = ["agave-unstable-api"] }
