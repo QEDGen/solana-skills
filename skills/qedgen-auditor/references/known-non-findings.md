@@ -128,6 +128,41 @@ value rather than from the modified accounts is a real correctness question,
 and so is failing to reload an account the callee changed. Both belong under
 `account_not_reloaded_after_cpi`.
 
+## Unresolved syscalls under sBPF v3
+
+**Claim.** A program built with `--arch v3` whose syscalls are declared with
+`extern "C"` or an old syscall crate builds cleanly, then aborts at runtime,
+because the unresolved syscall becomes `call -1`.
+
+**Why it does not hold.** On platform-tools v1.56+, the minimum for
+`--arch v3`, an unresolved syscall is a build error. A hand-declared
+`extern "C"` syscall fails the v3 link with `undefined symbol`. Old syscall
+crates resolve normally: `solana-define-syscall` 2.3.0, `solana-program`
+1.18.26, `anchor-lang` 0.32.1, and `pinocchio` 0.8.4 all build as v3 with
+every syscall named. The gate
+`crates/qedgen-sandbox/tests/sbpf_v3_runtime.rs` checks the link failure.
+
+**Where something real might be.** A `.so` that was not built with current
+tools: a vendored binary, an old build artifact, or a program whose build is
+not reproducible. Disassemble it and look for `call -1`. That is
+`sbpf_v3_unresolved_syscall`, reported with the disassembly line.
+
+## sBPF v3 classes on a program that stays on V0
+
+**Claim.** A V0 program is vulnerable to `sbpf_v3_low_address_read`, because
+v3 maps `.rodata` at address 0.
+
+**Why it does not hold.** The class exists only in a v3 build. A V0 program
+maps nothing at address 0, so a null read still faults. If the program is
+deployed and will never be upgraded, it will never run as v3.
+
+**Where something real might be.** Any upgrade. SIMD-0500 (planned for Agave
+4.4) rejects upgrades that are not v3, so the next upgrade is a v3 build and
+the class applies from then on. Report it against the upgrade, not the
+deployed program. `sbpf_v3_stack_overrun_no_fault` is different: V0 loses its
+stack frame gaps once SIMD-0460 is active, so it can apply to a V0 program
+too. Check which features the target cluster has active before rejecting it.
+
 ## Still real
 
 Two adjacent patterns are not on this list because they are genuine.
