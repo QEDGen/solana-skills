@@ -149,11 +149,14 @@ the emitted files). It never reads files left in `--out-dir` by an earlier run.
 | `failed` | qedlift failed, or Lean rejected the modules or found `sorry` | 1 |
 
 CI that needs a proof should gate on `"verdict": "verified"` in the `--json` report.
+A qedlift that cannot be launched, or a failed copy into `--out-dir`, is also a
+`failed` report (`qedlift_not_runnable`, `persist_failed`), so `--json` always
+prints one.
 
 ```bash
 $QEDGEN discharge --spec vault.qedspec --handler increment \
   --so vault.so --idl vault.codama.json --qedlift /path/to/qedlift \
-  --out-dir formal_verification/discharge --lean-project formal_verification
+  --out-dir formal_verification
 ```
 
 | Flag | Type | Default | Description |
@@ -165,7 +168,7 @@ $QEDGEN discharge --spec vault.qedspec --handler increment \
 | `--idl` | Path | required | Codama IDL (`.json`) supplying the account shape (offsets) |
 | `--qedlift` | Path | required | Built qedsvm `qedlift` binary (`cargo build -p qedlift --bin qedlift` in qedsvm's `qedsvm-rs/`) |
 | `--module` | String | `<Account><Handler>` | Lean module name for the emitted proof |
-| `--out-dir` | Path | temp dir (artifacts discarded) | Persist `<Module>TracedLifted.lean` + `<Module>Refinement.lean` into this directory. Written only when the verdict is `verified` or `emitted` |
+| `--out-dir` | Path | temp dir (artifacts discarded) | Persist `<Module>TracedLifted.lean` + `<Module>Refinement.lean` into `<out-dir>/Generated/`, so they import as `Generated.<Module>Refinement` from a Lake source root at `<out-dir>`. Written only when the verdict is `verified` or `emitted`. `--transition` writes into `<out-dir>` directly (#405) |
 | `--transition` | flag | off | Whole-transition mode (qedsvm v0.9.0, #40): lift **every** path from discovered `<stem>_<path>.pcs` traces beside the `.so`; emits per-path `*_transition_path` / `*_transition_fault` corollaries + the one bundle theorem (`<StemPascal>Transition.lean`) covering success and abort paths. Requires `--out-dir` and ≥ 2 traces |
 | `--lean-project` | Path | nearest Lake project at or above `--out-dir` | Lake project used to type-check the emitted modules. It must `require qedsvm` and be built. With neither this nor a Lake project above `--out-dir`, no Lean check runs and the verdict is at most `emitted`. Not yet supported with `--transition` (#405) |
 | `--json` | bool | false | Machine-readable report. Same verdict as the human report. Not yet supported with `--transition` (#405) |

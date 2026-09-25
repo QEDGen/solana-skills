@@ -560,9 +560,12 @@ pub(crate) enum Commands {
         #[arg(long)]
         module: Option<String>,
 
-        /// Persist the discharged proof (`<Module>TracedLifted.lean` +
-        /// `<Module>Refinement.lean`) into this directory instead of a temp
-        /// dir. Omit to keep the verdict-only (artifact-discarded) behaviour.
+        /// Persist the discharged proof into `<out-dir>/Generated/`
+        /// (`<Module>TracedLifted.lean` + `<Module>Refinement.lean`), so it
+        /// imports as `Generated.<Module>Refinement` from a Lake source root at
+        /// `<out-dir>`. Written only when the verdict passes. Omit to keep the
+        /// verdict-only (artifact-discarded) behaviour. `--transition` writes
+        /// into `<out-dir>` directly (#405).
         #[arg(long)]
         out_dir: Option<PathBuf>,
 

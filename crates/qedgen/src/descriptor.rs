@@ -259,24 +259,39 @@ pub(crate) fn run_discharge(parsed: &ParsedSpec, req: &DischargeRequest) -> Resu
     let lifted = work.path().join(format!("{}TracedLifted.lean", module));
     let refinement = work.path().join(format!("{}Refinement.lean", module));
 
-    let output = qedlift_command(req.qedlift, &desc_path, req.so, req.idl, &module, &lifted)
+    // A qedlift that cannot be launched is a `failed` report, not an early return, so
+    // `--json` consumers always get a verdict.
+    let launched = qedlift_command(req.qedlift, &desc_path, req.so, req.idl, &module, &lifted)
         .output()
         .map_err(|e| {
-            anyhow!(
+            format!(
                 "could not run qedlift at {}: {} (build it with `cargo build \
                  -p qedlift --bin qedlift` in qedsvm-rs/)",
                 req.qedlift.display(),
                 e
             )
-        })?;
-    let stderr = String::from_utf8_lossy(&output.stderr);
+        });
+    let stderr = match &launched {
+        Ok(output) => String::from_utf8_lossy(&output.stderr).into_owned(),
+        Err(_) => String::new(),
+    };
 
     let artifacts_present = lifted.is_file() && refinement.is_file();
-    let mut lift = match parse_outcome(&stderr) {
-        Ok(outcome) => classify_lift(output.status.success(), outcome.as_ref(), artifacts_present),
-        Err(e) => LiftVerdict::with(Verdict::Failed, "malformed_outcome", format!("{e:#}")),
+    let mut lift = match &launched {
+        Err(message) => LiftVerdict::with(Verdict::Failed, "qedlift_not_runnable", message.clone()),
+        Ok(output) => match parse_outcome(&stderr) {
+            Ok(outcome) => {
+                classify_lift(output.status.success(), outcome.as_ref(), artifacts_present)
+            }
+            Err(e) => LiftVerdict::with(Verdict::Failed, "malformed_outcome", format!("{e:#}")),
+        },
     };
-    if lift.verdict == Verdict::Failed && lift.reason.as_deref() != Some("malformed_outcome") {
+    if lift.verdict == Verdict::Failed
+        && !matches!(
+            lift.reason.as_deref(),
+            Some("malformed_outcome" | "qedlift_not_runnable")
+        )
+    {
         // qedlift's own diagnostics explain a crash or a missing refinement.
         let detail = stderr_tail(&stderr);
         if !detail.is_empty() {
@@ -341,12 +356,21 @@ pub(crate) fn run_discharge(parsed: &ParsedSpec, req: &DischargeRequest) -> Resu
 
     if report.verdict.passes() {
         if let Some(dest) = req.out_dir {
-            let (lifted_dst, refinement_dst) =
-                persist_discharge_artifacts(dest, &lifted, &refinement)?;
-            report.artifacts = vec![
-                refinement_dst.display().to_string(),
-                lifted_dst.display().to_string(),
-            ];
+            // The refinement imports `Generated.<Module>TracedLifted`, so both modules go
+            // under `<out-dir>/Generated/`, the same layout the Lean check compiled.
+            match persist_discharge_artifacts(&dest.join("Generated"), &lifted, &refinement) {
+                Ok((lifted_dst, refinement_dst)) => {
+                    report.artifacts = vec![
+                        refinement_dst.display().to_string(),
+                        lifted_dst.display().to_string(),
+                    ];
+                }
+                Err(e) => {
+                    report.verdict = Verdict::Failed;
+                    report.reason = Some("persist_failed".to_string());
+                    report.message = Some(format!("{e:#}"));
+                }
+            }
         }
     }
 
@@ -356,13 +380,16 @@ pub(crate) fn run_discharge(parsed: &ParsedSpec, req: &DischargeRequest) -> Resu
         print!("{}", report.render_human());
         if report.verdict.passes() && !report.artifacts.is_empty() {
             println!(
-                "    wire it in   : `import Generated.{}Refinement` (add both modules to your \
-                 lake lib",
-                module
+                "    wire it in   : `import Generated.{module}Refinement`. Add \
+                 `Generated.{module}TracedLifted` and"
             );
             println!(
-                "                   roots; the project must `require qedsvm`; lean_solana \
-                 projects already do)."
+                "                   `Generated.{module}Refinement` to a lean_lib whose source \
+                 root is --out-dir; the"
+            );
+            println!(
+                "                   project must `require qedsvm` (lean_solana projects already \
+                 do)."
             );
         }
     }
@@ -724,14 +751,17 @@ mod tests {
         let parsed = parse("tests/fixtures/descriptor/counter.qedspec");
         run_discharge(&parsed, &request(&so, &fake, Some(&out), None)).expect("discharge persists");
 
-        // Module defaults to `<Account><Handler>` = CounterIncrement.
+        // Module defaults to `<Account><Handler>` = CounterIncrement, persisted under
+        // `Generated/` so `import Generated.CounterIncrementRefinement` resolves.
         assert!(
-            out.join("CounterIncrementRefinement.lean").exists(),
-            "refinement persisted into out-dir",
+            out.join("Generated/CounterIncrementRefinement.lean")
+                .exists(),
+            "refinement persisted into out-dir/Generated",
         );
         assert!(
-            out.join("CounterIncrementTracedLifted.lean").exists(),
-            "lifted module persisted into out-dir",
+            out.join("Generated/CounterIncrementTracedLifted.lean")
+                .exists(),
+            "lifted module persisted into out-dir/Generated",
         );
     }
 
@@ -797,11 +827,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (fake, so) = fake_qedlift(tmp.path(), "#!/bin/sh\necho boom >&2\nexit 3\n");
         let out = tmp.path().join("project");
-        std::fs::create_dir_all(&out).unwrap();
-        let stale = out.join("CounterIncrementRefinement.lean");
+        std::fs::create_dir_all(out.join("Generated")).unwrap();
+        let stale = out.join("Generated/CounterIncrementRefinement.lean");
         std::fs::write(&stale, "theorem old : True := trivial\n").unwrap();
         std::fs::write(
-            out.join("CounterIncrementTracedLifted.lean"),
+            out.join("Generated/CounterIncrementTracedLifted.lean"),
             "theorem old_lift : True := trivial\n",
         )
         .unwrap();
@@ -814,6 +844,42 @@ mod tests {
             std::fs::read_to_string(&stale).unwrap(),
             "theorem old : True := trivial\n",
             "stale proof untouched"
+        );
+    }
+
+    /// A qedlift that cannot be launched produces a `failed` verdict (so `--json` still prints a
+    /// report), not an early error.
+    #[test]
+    fn unlaunchable_qedlift_is_a_failed_verdict() {
+        let tmp = tempfile::tempdir().unwrap();
+        let so = tmp.path().join("counter.so");
+        std::fs::write(&so, b"\x7fELF").unwrap();
+        let missing = tmp.path().join("no-such-qedlift");
+        let parsed = parse("tests/fixtures/descriptor/counter.qedspec");
+        let err = run_discharge(&parsed, &request(&so, &missing, None, None))
+            .expect_err("a missing qedlift must fail");
+        assert!(
+            err.to_string().contains("discharge verdict") && err.to_string().contains("failed"),
+            "{err}"
+        );
+    }
+
+    /// A copy into `--out-dir` that fails is a `failed` verdict, not an early error.
+    #[cfg(unix)]
+    #[test]
+    fn persist_failure_is_a_failed_verdict() {
+        let tmp = tempfile::tempdir().unwrap();
+        let script = "#!/bin/sh\nout=\"\"; mod=\"\"\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    --output) out=\"$2\"; shift 2 ;;\n    --module) mod=\"$2\"; shift 2 ;;\n    *) shift ;;\n  esac\ndone\ndir=$(dirname \"$out\")\nprintf 'theorem lifted : True := trivial\\n' > \"$out\"\nprintf 'theorem refines_asm : True := trivial\\n' > \"$dir/${mod}Refinement.lean\"\necho 'refinement outcome: {\"status\":\"emitted\"}' >&2\n";
+        let (fake, so) = fake_qedlift(tmp.path(), script);
+        // A regular file where the out-dir should be: creating `Generated/` under it fails.
+        let out = tmp.path().join("not-a-dir");
+        std::fs::write(&out, "x").unwrap();
+        let parsed = parse("tests/fixtures/descriptor/counter.qedspec");
+        let err = run_discharge(&parsed, &request(&so, &fake, Some(&out), None))
+            .expect_err("a failed copy must fail the discharge");
+        assert!(
+            err.to_string().contains("discharge verdict") && err.to_string().contains("failed"),
+            "{err}"
         );
     }
 
