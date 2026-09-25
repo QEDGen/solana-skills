@@ -256,8 +256,12 @@ pub fn init(
         let module_name = "Program".to_string();
         let output_file = output_dir.join("Program.lean");
         let existing = std::fs::read_to_string(&output_file).ok();
-        let version =
-            crate::asm2lean::resolve_sbpf_version(None, sbpf_version, existing.as_deref());
+        let version = crate::asm2lean::resolve_and_report_sbpf_version(
+            None,
+            sbpf_version,
+            existing.as_deref(),
+            &output_file,
+        );
         crate::asm2lean::asm2lean(asm_path, &output_file, Some(&module_name), version)?;
         eprintln!("Generated {}", output_file.display());
         Some(module_name)

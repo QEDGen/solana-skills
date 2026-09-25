@@ -600,9 +600,9 @@ pub(crate) enum Commands {
         #[arg(long)]
         namespace: Option<String>,
 
-        /// sBPF version the assembly is built for: `v0` or `v3`. It sets
-        /// where `.rodata` lives. Default: the version recorded in an
-        /// existing `--output` file (V0 if it records none), else `v3`.
+        /// sBPF version the assembly is built for: `v3`, or the deprecated
+        /// `v0`. It sets where `.rodata` lives. Default: the version recorded
+        /// in an existing `--output` file, else `v3`.
         #[arg(long, value_parser = parse_sbpf_version)]
         sbpf_version: Option<crate::asm2lean::SbpfVersion>,
     },

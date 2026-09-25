@@ -804,9 +804,11 @@ fn emit_insn(
 /// sBPF bytecode version the assembly is built for. It decides where
 /// `.rodata` lives, which the source cannot show.
 ///
-/// - `V0`: `.rodata` shares the program region at `0x100000000` with the
-///   bytecode. The deployed address also includes ELF header and section
-///   offsets that a source lift cannot see, so `asm2lean` only approximates it.
+/// - `V0` (deprecated): `.rodata` shares the program region at `0x100000000`
+///   with the bytecode. The deployed address also includes ELF header and
+///   section offsets that a source lift cannot see, so `asm2lean` only
+///   approximates it. SIMD-0500 blocks deploying or upgrading V0 programs, and
+///   V0 support goes away in qedgen v3.0.
 /// - `V3`: `.rodata` is its own segment at VM address 0 (SIMD-0189). The
 ///   assembler packs symbols from offset 0, so a symbol's address is exactly
 ///   its offset.
@@ -859,7 +861,8 @@ impl SbpfVersion {
 const VERSION_HEADER: &str = "-- sbpf-version: ";
 
 /// The sBPF version recorded in a generated Lean file. `None` for files
-/// generated before the version was recorded; those used the V0 layout.
+/// generated before the version was recorded (they used the V0 layout, but
+/// regeneration now moves them to v3, see [`resolve_sbpf_version`]).
 pub fn extract_sbpf_version(lean_content: &str) -> Option<SbpfVersion> {
     lean_content
         .lines()
@@ -868,18 +871,48 @@ pub fn extract_sbpf_version(lean_content: &str) -> Option<SbpfVersion> {
 }
 
 /// Pick the version for a (re)generation. An explicit choice (CLI flag or spec
-/// pragma, in that order) wins. Otherwise keep the version of the file being
-/// replaced, treating a file with no recorded version as V0 so regeneration
-/// never moves its addresses silently. A new file gets the default.
+/// pragma, in that order) wins. Otherwise keep the version recorded in the
+/// file being replaced. Anything else, a new file or a file generated before
+/// the version was recorded, gets v3: it is the only deployable format.
 pub fn resolve_sbpf_version(
     flag: Option<SbpfVersion>,
     spec: Option<SbpfVersion>,
     existing_output: Option<&str>,
 ) -> SbpfVersion {
     flag.or(spec)
-        .or_else(|| existing_output.map(|c| extract_sbpf_version(c).unwrap_or(SbpfVersion::V0)))
+        .or_else(|| existing_output.and_then(extract_sbpf_version))
         .unwrap_or(SbpfVersion::DEFAULT)
 }
+
+/// [`resolve_sbpf_version`], plus the two messages a user needs: a note when
+/// a module with no recorded version moves to the v3 layout, and a
+/// deprecation warning whenever V0 is chosen.
+pub fn resolve_and_report_sbpf_version(
+    flag: Option<SbpfVersion>,
+    spec: Option<SbpfVersion>,
+    existing_output: Option<&str>,
+    output: &std::path::Path,
+) -> SbpfVersion {
+    let version = resolve_sbpf_version(flag, spec, existing_output);
+    let unrecorded = existing_output.is_some_and(|c| extract_sbpf_version(c).is_none());
+    if unrecorded && flag.is_none() && spec.is_none() {
+        eprintln!(
+            "note: {} records no sBPF version. Regenerating it with the v3 layout, so its \
+             RODATA_* addresses change. Declare `pragma sbpf_version = v3` in the spec to \
+             make it explicit.",
+            output.display()
+        );
+    }
+    if version == SbpfVersion::V0 {
+        eprintln!("warning: {V0_DEPRECATION}");
+    }
+    version
+}
+
+/// Shown whenever V0 is chosen, by flag, pragma, or a recorded header.
+pub const V0_DEPRECATION: &str = "sBPF V0 is deprecated. SIMD-0500 blocks deploying or \
+     upgrading V0 programs, and qedgen v3.0 removes V0 support. Build with `sbpf build -a v3` \
+     and declare `pragma sbpf_version = v3`.";
 
 pub fn source_hash(source: &str) -> String {
     let mut hasher = Sha256::new();
@@ -1452,9 +1485,8 @@ entrypoint:
         assert_eq!(SbpfVersion::parse("v2"), None);
     }
 
-    /// Flag beats spec beats the existing file; a legacy file (no recorded
-    /// version) keeps V0 so regeneration never moves its addresses silently;
-    /// a new file gets v3.
+    /// Flag beats spec beats the version recorded in the existing file. A
+    /// legacy file (no recorded version) and a new file both get v3.
     #[test]
     fn version_resolution_order() {
         use SbpfVersion::{V0, V3};
@@ -1462,7 +1494,9 @@ entrypoint:
         let v3_file = "-- sbpf-version: v3\n";
         assert_eq!(resolve_sbpf_version(Some(V0), Some(V3), Some(v3_file)), V0);
         assert_eq!(resolve_sbpf_version(None, Some(V3), Some(legacy)), V3);
-        assert_eq!(resolve_sbpf_version(None, None, Some(legacy)), V0);
+        assert_eq!(resolve_sbpf_version(None, None, Some(legacy)), V3);
+        let v0_file = "-- sbpf-version: v0\n";
+        assert_eq!(resolve_sbpf_version(None, None, Some(v0_file)), V0);
         assert_eq!(resolve_sbpf_version(None, None, Some(v3_file)), V3);
         assert_eq!(resolve_sbpf_version(None, None, None), V3);
     }

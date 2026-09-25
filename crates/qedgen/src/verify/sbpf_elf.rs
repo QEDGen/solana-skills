@@ -83,6 +83,42 @@ fn check_header(elf: &[u8; ELF64_HEADER_LEN]) -> Result<u32> {
     Ok(u32::from_le_bytes([elf[48], elf[49], elf[50], elf[51]]))
 }
 
+/// Warn, once per path, when an execution lane is about to run a program
+/// built older than sBPF v3. `cargo build-sbf` still defaults to V0, so a
+/// plain build silently produces a program that SIMD-0500 blocks from
+/// deploys and upgrades, and any result is about that build. Silent when the
+/// file is missing or unreadable: the lane reports that itself.
+pub fn warn_if_pre_v3(so: &Path, lane: &str) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static WARNED: OnceLock<Mutex<HashSet<std::path::PathBuf>>> = OnceLock::new();
+
+    let Ok(version) = read_sbpf_version(so) else {
+        return;
+    };
+    if version >= SBPF_V3 {
+        return;
+    }
+    let first = WARNED
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .map(|mut seen| seen.insert(so.to_path_buf()))
+        .unwrap_or(true);
+    if first {
+        eprintln!("warning: {}", pre_v3_message(so, version, lane));
+    }
+}
+
+fn pre_v3_message(so: &Path, version: u32, lane: &str) -> String {
+    format!(
+        "{lane} is running {} built as sBPF v{version}, not v3. SIMD-0500 blocks deploying \
+         or upgrading it, so these results describe a build that cannot ship. Rebuild with \
+         `cargo build-sbf --arch v3` (or `anchor build -- --arch v3`); `cargo build-sbf` \
+         defaults to V0.",
+        so.display()
+    )
+}
+
 fn u16_at(bytes: &[u8], at: usize) -> u64 {
     u64::from(u16::from_le_bytes([bytes[at], bytes[at + 1]]))
 }
@@ -137,6 +173,18 @@ mod tests {
         header[18..20].copy_from_slice(&62u16.to_le_bytes()); // x86-64
         let err = check_header(&header).unwrap_err();
         assert!(format!("{err:#}").contains("not sBPF"), "{err:#}");
+    }
+
+    #[test]
+    fn pre_v3_message_names_the_fix() {
+        let msg = pre_v3_message(&fixture("counter-v0.so"), 0, "probe --fuzz");
+        assert!(
+            msg.contains("sBPF v0") && msg.contains("--arch v3"),
+            "{msg}"
+        );
+        // A v3 build and a missing file stay silent (no panic, no message).
+        warn_if_pre_v3(&fixture("counter-v3.so"), "test");
+        warn_if_pre_v3(Path::new("/does/not/exist.so"), "test");
     }
 
     /// A valid header alone, or a file cut after the header, must not pass.

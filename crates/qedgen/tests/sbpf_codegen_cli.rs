@@ -185,3 +185,57 @@ fn init_asm_rejects_unparseable_spec() {
         "a failed init must not leave a half-initialized project behind"
     );
 }
+
+fn run_asm2lean(dir: &Path, extra: &[&str]) -> std::process::Output {
+    ensure_qedgen_built();
+    let asm = repo_root().join("examples/sbpf/counter/src/counter.s");
+    Command::new(qedgen_bin())
+        .arg("asm2lean")
+        .arg("--input")
+        .arg(&asm)
+        .arg("--output")
+        .arg(dir.join("Program.lean"))
+        .args(extra)
+        .output()
+        .expect("spawn qedgen asm2lean")
+}
+
+/// sBPF v3 is the default (SIMD-0500): a module generated before the version
+/// was recorded moves to the v3 layout on regeneration, with a note, instead
+/// of staying on V0.
+#[test]
+fn asm2lean_moves_unrecorded_module_to_v3() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fs::write(
+        tmp.path().join("Program.lean"),
+        "-- source-hash: sha256:0000\nnamespace Program\nend Program\n",
+    )
+    .unwrap();
+    let out = run_asm2lean(tmp.path(), &[]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("records no sBPF version"), "{stderr}");
+    assert!(!stderr.contains("deprecated"), "{stderr}");
+    let lean = fs::read_to_string(tmp.path().join("Program.lean")).unwrap();
+    assert!(lean.contains("-- sbpf-version: v3"), "{lean}");
+}
+
+/// Choosing V0 still works, but warns that it is deprecated.
+#[test]
+fn asm2lean_v0_is_deprecated() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = run_asm2lean(tmp.path(), &["--sbpf-version", "v0"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("sBPF V0 is deprecated"), "{stderr}");
+    let lean = fs::read_to_string(tmp.path().join("Program.lean")).unwrap();
+    assert!(lean.contains("-- sbpf-version: v0"), "{lean}");
+}

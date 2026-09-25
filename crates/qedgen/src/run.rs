@@ -765,6 +765,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 // `cargo build-sbf` writes to the WORKSPACE target dir, so
                 // the resolver walks up from the program crate (#342).
                 let deploy_so = run_helpers::resolve_deploy_so(&project_root_for_idl, &prog);
+                crate::sbpf_elf::warn_if_pre_v3(&deploy_so, "probe --fuzz");
                 if generate_harness {
                     std::fs::create_dir_all(&harness_parent)?;
                     crucible_gen::generate_with_account_overlay(
@@ -1066,7 +1067,12 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             sbpf_version,
         } => {
             let existing = std::fs::read_to_string(&output).ok();
-            let version = asm2lean::resolve_sbpf_version(sbpf_version, None, existing.as_deref());
+            let version = asm2lean::resolve_and_report_sbpf_version(
+                sbpf_version,
+                None,
+                existing.as_deref(),
+                &output,
+            );
             asm2lean::asm2lean(&input, &output, namespace.as_deref(), version)?;
         }
 

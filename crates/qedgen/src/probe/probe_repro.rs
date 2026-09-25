@@ -454,6 +454,7 @@ pub fn write_parallax_repro(
         .ok_or(ConstructFailure::NotImplemented)?;
 
     let program = discover_deployed_program(&ctx.project_root)?;
+    crate::sbpf_elf::warn_if_pre_v3(&program.artifact, "probe --execute-repros");
 
     let crate_dir = ctx
         .project_root

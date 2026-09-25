@@ -111,7 +111,24 @@ pub(super) fn check_sbpf_version(spec: &ParsedSpec) -> Vec<CompletenessWarning> 
         if key != "sbpf_version" {
             continue;
         }
-        if crate::asm2lean::SbpfVersion::parse(value).is_none() {
+        let parsed = crate::asm2lean::SbpfVersion::parse(value);
+        if parsed == Some(crate::asm2lean::SbpfVersion::V0) {
+            warnings.push(
+                warn(
+                    "sbpf_version_v0_deprecated",
+                    Severity::Warning,
+                    1,
+                    format!(
+                        "`pragma sbpf_version = {value}` selects sBPF V0, which is deprecated: \
+                         SIMD-0500 blocks deploying or upgrading V0 programs, and qedgen v3.0 \
+                         removes V0 support."
+                    ),
+                )
+                .subject(value.clone())
+                .fix("Build with `sbpf build -a v3` and declare `pragma sbpf_version = v3`."),
+            );
+        }
+        if parsed.is_none() {
             warnings.push(
                 warn(
                     "sbpf_version_invalid",
@@ -1557,7 +1574,10 @@ handler good_set : State.Active -> State.Active {
                 .collect()
         };
         assert!(rules("spec S\npragma sbpf {}\npragma sbpf_version = v3\n").is_empty());
-        assert!(rules("spec S\npragma sbpf {}\npragma sbpf_version = v0\n").is_empty());
+        assert_eq!(
+            rules("spec S\npragma sbpf {}\npragma sbpf_version = v0\n"),
+            vec!["sbpf_version_v0_deprecated"]
+        );
         assert_eq!(
             rules("spec S\npragma sbpf {}\npragma sbpf_version = v2\n"),
             vec!["sbpf_version_invalid"]
