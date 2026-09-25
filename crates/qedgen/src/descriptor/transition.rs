@@ -408,8 +408,9 @@ pub(crate) fn module_stems(modules: &[PathBuf]) -> BTreeSet<String> {
 
 /// Publish this run's modules into `generated` as one set.
 ///
-/// Publishing a bundle holds an exclusive lock (`<bundle>.qedgen-lock`), so a second run that
-/// publishes the same bundle at the same time fails clearly instead of interleaving.
+/// Publishing a bundle holds an exclusive OS lock on `<bundle>.qedgen-lock`, so a second run
+/// that publishes the same bundle at the same time fails clearly instead of interleaving. The
+/// OS drops the lock if a run dies, so a killed run never blocks the next one.
 ///
 /// 1. Copy every module into this run's own staging dir inside `generated`. If any copy
 ///    fails, the staging dir is removed and nothing is published.
@@ -472,30 +473,30 @@ pub(crate) fn publish_modules(
     Ok(published)
 }
 
-/// An exclusive lock file, removed on drop. A crash can leave it behind; the error names it.
-struct PublishLock(PathBuf);
+/// An exclusive OS file lock on `<bundle>.qedgen-lock`. The OS releases it when the file is
+/// closed, including when the process dies, so an interrupted run never blocks later ones. The
+/// lock file itself stays in place; only the lock on it matters.
+struct PublishLock(#[allow(dead_code)] std::fs::File);
 
 impl PublishLock {
     fn acquire(path: &Path) -> Result<Self> {
-        match std::fs::OpenOptions::new()
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
             .write(true)
-            .create_new(true)
             .open(path)
-        {
-            Ok(_) => Ok(PublishLock(path.to_path_buf())),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => bail!(
-                "another discharge is publishing this bundle ({} exists); retry when it \
-                 finishes, or delete the file if no discharge is running",
+            .with_context(|| format!("opening {}", path.display()))?;
+        match file.try_lock() {
+            Ok(()) => Ok(PublishLock(file)),
+            Err(std::fs::TryLockError::WouldBlock) => bail!(
+                "another discharge is publishing this bundle right now (lock on {}); retry \
+                 when it finishes",
                 path.display()
             ),
-            Err(e) => Err(e).with_context(|| format!("creating {}", path.display())),
+            Err(std::fs::TryLockError::Error(e)) => {
+                Err(e).with_context(|| format!("locking {}", path.display()))
+            }
         }
-    }
-}
-
-impl Drop for PublishLock {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
     }
 }
 
@@ -911,13 +912,13 @@ mod tests {
         );
     }
 
-    /// No staging dir or lock file is left in `generated`.
+    /// No staging dir is left in `generated`. (The lock file stays; only the lock matters.)
     fn no_leftovers(generated: &Path) -> bool {
         std::fs::read_dir(generated)
             .map(|rd| {
                 rd.flatten().all(|e| {
                     let n = e.file_name().to_string_lossy().to_string();
-                    !n.starts_with(".qedgen-staging-") && !n.ends_with(".qedgen-lock")
+                    !n.starts_with(".qedgen-staging-")
                 })
             })
             .unwrap_or(true)
@@ -937,8 +938,21 @@ mod tests {
             .expect_err("lock is held");
         assert!(err.to_string().contains("another discharge"), "{err}");
         drop(held);
-        publish_modules(&generated, "PTransition", &[module]).expect("lock released");
+        publish_modules(&generated, "PTransition", std::slice::from_ref(&module))
+            .expect("lock released");
         assert!(no_leftovers(&generated));
+    }
+
+    /// A lock file left behind by a run that died holds no lock, so the next run publishes.
+    #[test]
+    fn leftover_lock_file_does_not_block() {
+        let tmp = tempfile::tempdir().unwrap();
+        let generated = tmp.path().join("Generated");
+        std::fs::create_dir_all(&generated).unwrap();
+        std::fs::write(generated.join("PTransition.qedgen-lock"), "").unwrap();
+        let module = tmp.path().join("PSuccessLifted.lean");
+        std::fs::write(&module, "x").unwrap();
+        publish_modules(&generated, "PTransition", &[module]).expect("no live lock holder");
     }
 
     /// A failed copy publishes nothing: no new module lands in `Generated/`.
