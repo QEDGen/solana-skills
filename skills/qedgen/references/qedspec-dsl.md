@@ -1242,17 +1242,20 @@ Scalar codegen directives that tune *how* a spec lowers, without a body:
 ```fsharp
 pragma checked_overflow_error = MathOverflow   // error returned on a checked-add overflow
 pragma state_repr = adt                        // inductive multi-variant State (see below)
-pragma sbpf_version = v3                       // sBPF bytecode version for `pragma sbpf` specs (v3 | v0)
+pragma sbpf_version = v3                       // sBPF bytecode version for `pragma sbpf` specs (v3; v0 deprecated)
 ```
 
-**`pragma sbpf_version = v3 | v0`**: the sBPF version an assembly program is
+**`pragma sbpf_version = v3`**: the sBPF version an assembly program is
 built for. It sets where `init --asm` and `check --asm` lay out `.rodata`: at
 VM address 0 for `v3`, after the bytecode at `0x100000000` for `v0`. The
 standalone `asm2lean` command does not read the spec; pass `--sbpf-version`
 there. Without a version, a new module uses `v3` and an existing module keeps
-its recorded version (V0 if none). `check` reports an unknown value
-(`sbpf_version_invalid`) and the pragma on a spec with no `pragma sbpf { ... }`
-block (`sbpf_version_without_sbpf`).
+its recorded version (v3 if none is recorded). `v0` still works but is
+deprecated: SIMD-0500 blocks deploying or upgrading V0 programs, and qedgen
+v3.0 removes it. `check` reports `v0` as info, so it never fails the run
+(`sbpf_version_v0_deprecated`), an
+unknown value (`sbpf_version_invalid`), and the pragma on a spec with no
+`pragma sbpf { ... }` block (`sbpf_version_without_sbpf`).
 
 **`pragma state_repr = adt`** — opt a multi-variant `type State | A | B of { … } | C`
 into the inductive representation: Lean lowers it to a real `inductive State` (with

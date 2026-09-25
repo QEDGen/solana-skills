@@ -1198,6 +1198,33 @@ fn rust_string_literal(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
+/// The `.so` a generated harness loads: the literal in its
+/// `ctx.add_program(&program_id, "...")` call (see `emit_fixture_impl`). A
+/// relative path is resolved from the harness directory, where `cargo run`
+/// executes. `None` when the harness is missing or was edited out of shape.
+pub fn harness_program_so(harness_dir: &Path) -> Option<std::path::PathBuf> {
+    let source = std::fs::read_to_string(harness_dir.join("src/main.rs")).ok()?;
+    // rustfmt may split the call across lines, so find the pieces in order.
+    let call = source.find("ctx.add_program(")?;
+    let id = call + source[call..].find("&program_id")?;
+    let start = id + source[id..].find('"')? + 1;
+    let mut literal = String::new();
+    let mut chars = source[start..].chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => break,
+            '\\' => literal.push(chars.next()?),
+            c => literal.push(c),
+        }
+    }
+    let path = std::path::PathBuf::from(literal);
+    Some(if path.is_absolute() {
+        path
+    } else {
+        harness_dir.join(path)
+    })
+}
+
 fn emit_fixture_impl(
     out: &mut String,
     spec: &ParsedSpec,
@@ -1821,6 +1848,46 @@ handler withdraw (amount : U64) : State.Active -> State.Active {
   effect { balance := balance - amount }
 }
 "#;
+
+    #[test]
+    fn harness_program_so_reads_the_emitted_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spec = crate::check::parse_spec_file(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../examples/rust/escrow/escrow.qedspec"),
+        )
+        .unwrap();
+        let so = tmp.path().join("workspace/target/deploy/escrow.so");
+        // The CLI hands `run_fuzz_probe` the leaf `<parent>/<program>`.
+        let parent = tmp.path().join("fuzz");
+        generate_with_account_overlay(&spec, &parent, InvariantMode::Spec, None, Some(&so))
+            .unwrap();
+        let leaf = harness_dir_for(&spec, &parent);
+        assert_eq!(harness_program_so(&leaf), Some(so));
+
+        let rel_parent = tmp.path().join("rel");
+        generate_with_account_overlay(&spec, &rel_parent, InvariantMode::Spec, None, None).unwrap();
+        let rel_leaf = harness_dir_for(&spec, &rel_parent);
+        assert_eq!(
+            harness_program_so(&rel_leaf),
+            Some(rel_leaf.join("../../target/deploy/escrow.so"))
+        );
+        assert_eq!(harness_program_so(&tmp.path().join("missing")), None);
+
+        // rustfmt splits the call one argument per line when it is too long
+        // to fit but the literal itself is short enough to move.
+        let split = tmp.path().join("split");
+        std::fs::create_dir_all(split.join("src")).unwrap();
+        std::fs::write(
+            split.join("src/main.rs"),
+            "        ctx.add_program(\n            &program_id,\n            \"/abs/target/deploy/p.so\",\n        )\n",
+        )
+        .unwrap();
+        assert_eq!(
+            harness_program_so(&split),
+            Some(std::path::PathBuf::from("/abs/target/deploy/p.so"))
+        );
+    }
 
     #[test]
     fn deploy_so_emits_absolute_path_else_relative_fallback() {

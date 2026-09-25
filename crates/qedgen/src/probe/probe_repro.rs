@@ -354,6 +354,8 @@ pub struct ParallaxHarness {
     test_fn: String,
     invocation: String,
     attack: String,
+    /// The built program the reproducer loads.
+    artifact: PathBuf,
 }
 
 impl ParallaxHarness {
@@ -396,6 +398,7 @@ pub fn parallax_attack_for(
 /// committed/rejected marker; process status alone is never treated as a
 /// verdict because an unrelated panic is not evidence that the guard held.
 pub fn execute_parallax_harness(harness: &ParallaxHarness) -> ExecOutcome {
+    crate::sbpf_elf::warn_if_pre_v3(&harness.artifact, "probe --execute-repros");
     let output = std::process::Command::new("cargo")
         .arg("test")
         .arg("--manifest-path")
@@ -516,6 +519,7 @@ pub fn write_parallax_repro(
         attack: generated.attack,
         manifest: manifest_path,
         test_stem,
+        artifact: program.artifact.clone(),
     })
 }
 

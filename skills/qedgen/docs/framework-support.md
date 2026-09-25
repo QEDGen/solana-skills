@@ -257,6 +257,11 @@ Rust-shaped artifact (Kani, proptest, Crucible, scaffold) is skipped by
 design — generated Rust harnesses are meaningless for assembly
 (`feedback_sbpf_no_kani_proptest`). Client-side tests own runtime checks.
 
+sBPF v3 is the default target (SIMD-0500 blocks deploying or upgrading older
+formats). `asm2lean` lays out `.rodata` for v3; V0 is deprecated and warns.
+The Lean proofs use qedsvm's V0 semantics until qedsvm adds v3 (#429); they
+cover the instructions both versions share.
+
 ⁷ A generated Pinocchio scaffold typechecks against `pinocchio` 0.8 /
 `pinocchio-pubkey` 0.3 / `zeropod` 0.1 — checked by hand with `verify
 --scaffold`, not asserted from the code. No gate compiles one, so nothing

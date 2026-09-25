@@ -836,6 +836,11 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&output)?);
                     return Ok(());
                 }
+                // Check the program the harness really loads: a reused
+                // harness keeps the path it was generated with.
+                if let Some(so) = crucible_gen::harness_program_so(&harness) {
+                    crate::sbpf_elf::warn_if_pre_v3(&so, "probe --fuzz");
+                }
                 let mut ctx = crucible_probe::FuzzProbeContext::new(
                     &spec_path_for_ctx,
                     project_root_for_idl,
@@ -1066,7 +1071,12 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             sbpf_version,
         } => {
             let existing = std::fs::read_to_string(&output).ok();
-            let version = asm2lean::resolve_sbpf_version(sbpf_version, None, existing.as_deref());
+            let version = asm2lean::resolve_and_report_sbpf_version(
+                sbpf_version,
+                None,
+                existing.as_deref(),
+                &output,
+            );
             asm2lean::asm2lean(&input, &output, namespace.as_deref(), version)?;
         }
 

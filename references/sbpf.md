@@ -7,6 +7,16 @@
 > program, you're in Phase 2. For Rust programs, Phase 1 (spec +
 > proptest + Kani) is usually the finish line.
 >
+> **sBPF v3 is the target.** SIMD-0500 (planned for Agave 4.4) blocks
+> deploying or upgrading programs older than sBPF v3, so qedgen defaults to
+> v3 everywhere. V0 still works but is deprecated: choosing it prints a
+> warning, and qedgen v3.0 removes it. `sbpf build` builds v3 by default;
+> `cargo build-sbf` still defaults to V0, so pass `--arch v3`. One gap
+> remains: the Lean proofs use qedsvm's V0 semantics until qedsvm adds v3
+> (#429). They cover the instructions V0 and v3 share, and `asm2lean`
+> rejects the v3-only JMP32 instructions. `verify --asm` prints a note about
+> this for v3 modules.
+>
 > **Experimental-intrinsic escape hatch.** The sBPF support library
 > models a fixed set of syscalls. Programs compiled with experimental
 > compiler-emitted intrinsics — e.g. proposed `sol_multi3`-style
@@ -31,7 +41,7 @@ $QEDGEN asm2lean --input src/program.s --output formal_verification/ProgramProg.
 
 This generates:
 - `abbrev` definitions for all `.equ` constants (offsets as `Int`, values as `Nat`)
-- `RODATA_<sym>` / `RODATA_<sym>_LEN` / `RODATA_<sym>_BYTES` for each `.rodata` symbol (`.ascii`/`.asciz`/`.byte`/`.short`/`.word`/`.quad`), laid out by sBPF version. **v3** (the default, and the only deployable format once SIMD-0500 is active): `.rodata` is its own segment at VM address 0, and the assembler packs symbols from offset 0, so each address is exact. **v0**: `BYTECODE_START` + .text size (lddw = 2 slots), which only approximates the deployed VA (ELF header/section offsets are invisible to a source lift). The standalone command does not read the spec: pass `--sbpf-version v0` for a v0 program. `init --asm` and `check --asm` read `pragma sbpf_version = v3` (or `v0`) from the spec instead. The generated header records the version (`-- sbpf-version: v3`), and later runs keep it unless told otherwise. Reference these symbols by NAME in proofs either way
+- `RODATA_<sym>` / `RODATA_<sym>_LEN` / `RODATA_<sym>_BYTES` for each `.rodata` symbol (`.ascii`/`.asciz`/`.byte`/`.short`/`.word`/`.quad`), laid out for sBPF v3: `.rodata` is its own segment at VM address 0, and the assembler packs symbols from offset 0, so each address is exact. The generated header records the version (`-- sbpf-version: v3`). A module generated before the version was recorded moves to v3 on regeneration, with a note, because its `RODATA_*` addresses change. Deprecated V0 (`--sbpf-version v0` on the standalone command, or `pragma sbpf_version = v0` for `init --asm` / `check --asm`) puts `.rodata` at `BYTECODE_START` + .text size (lddw = 2 slots), which only approximates the deployed VA, and prints a deprecation warning. Reference these symbols by NAME in proofs
 - `@[simp] def prog : Program` with named constants and index comments
 - For large programs (>64 instructions): `def progAt : Nat -> Option Insn` — chunked function-based lookup for O(1) simp performance
 - `@[simp] theorem ea_NAME` — effectiveAddr lemmas for each offset symbol

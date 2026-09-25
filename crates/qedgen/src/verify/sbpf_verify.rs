@@ -2,6 +2,13 @@ use anyhow::{bail, Context, Result};
 use std::path::Path;
 use std::process::Command;
 
+/// Until qedsvm ships sBPF v3 semantics (#429), the proofs run against its V0
+/// model. The layout of `.rodata` symbols is v3 (asm2lean), but the
+/// instruction and memory semantics are not.
+const QEDSVM_V3_NOTE: &str = "the Lean proofs use qedsvm's sBPF V0 semantics until qedsvm \
+     adds v3 (qedgen #429). They cover the instructions V0 and v3 share. v3-only JMP32 \
+     instructions are not modeled yet, and asm2lean rejects them.";
+
 /// Verify an sBPF project: check source hash and sBPF version, regenerate if
 /// stale, run lake build.
 ///
@@ -39,15 +46,15 @@ pub fn verify(
     };
 
     let recorded_version = crate::asm2lean::extract_sbpf_version(&generated_content);
-    let version =
-        crate::asm2lean::resolve_sbpf_version(None, spec_version, Some(&generated_content));
+    let version = crate::asm2lean::resolve_and_report_sbpf_version(
+        None,
+        spec_version,
+        Some(&generated_content),
+        &generated_file,
+    );
     let version_stale = recorded_version != Some(version);
-    if recorded_version.is_none() && spec_version.is_none() {
-        eprintln!(
-            "Warning: {} records no sBPF version; keeping the V0 .rodata layout. Declare \
-             `pragma sbpf_version = v3` (or `v0`) in the spec to make it explicit.",
-            generated_file.display()
-        );
+    if version == crate::asm2lean::SbpfVersion::V3 {
+        eprintln!("note: {}", QEDSVM_V3_NOTE);
     }
 
     if hash_stale || version_stale {
