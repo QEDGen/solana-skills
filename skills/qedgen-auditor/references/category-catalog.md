@@ -1332,12 +1332,19 @@ them once SIMD-0460 (Virtual Address Space Adjustments) is active. Without
 gaps the write lands in the next frame up, which is the callee's live frame.
 It silently changes the callee's locals.
 
-Detection cue: a stack buffer passed by pointer or `&mut` to a callee that
-writes into it with an index or length taken from input (`copy_from_slice`
-with a caller-chosen length, `ptr.add(i).write(..)` in a loop, `unsafe`
-indexing without a bound). The overrun has to reach past the end of the
-caller's 4 KiB frame, so the buffer is usually a large local array or the
-index is unbounded.
+Detection cue: a stack buffer passed by raw pointer to a callee that writes
+into it with an index or length taken from input, through an operation with
+no bounds check: `ptr.add(i).write(..)` in a loop, `ptr::copy_nonoverlapping`
+or `ptr::write_bytes` with a caller-chosen length, `get_unchecked_mut`, or a
+slice rebuilt with `slice::from_raw_parts_mut` from an unchecked length.
+Checked operations (`copy_from_slice`, indexing, `split_at_mut`) panic on a
+bad length instead of writing out of bounds, so they are not this class. The
+overrun has to reach past the end of the caller's 4 KiB frame, so the buffer
+is usually a large local array or the index is unbounded.
+
+Applies to V0 programs too: on a cluster with SIMD-0460 active, V0 has no
+stack frame gaps either. Check the cluster's active features before rejecting
+it for a V0 program.
 
 How to confirm: build with `--arch v3` and drive the length past the
 buffer's frame. Compare with a V0 build run with SIMD-0460 off: V0 faults,
@@ -1366,12 +1373,16 @@ reproducible. Source review cannot confirm this class.
 How to confirm: disassemble the built `.so` (`sbpf disassemble program.so`)
 and look for a `call` whose target is `-1` (`0xffffffff`) instead of a named
 syscall or an internal function. Also check the ELF `e_flags`: `qedgen
-readiness --so program.so` reports a pre-v3 build as `QED002`.
+readiness --so program.so` reports a pre-v3 build as `QED002`. A disassembly
+line is a lead, not a finding: it does not show that the program loads or
+that any path reaches the call.
 
-Reproducer shape: none needed when disassembly shows `call -1`. That
-instruction aborts every path that reaches it. Report it only with the
-disassembly line. On a program you can rebuild with current tools, this is a
-known non-finding (see
+Reproducer shape: load the `.so` into LiteSVM or Mollusk and send a
+transaction that reaches the `call -1`. Report a runtime abort only when the
+program loads and that transaction aborts at the call. If loading rejects the
+program, the finding is that it cannot be deployed, which is a different and
+usually lower-impact result. On a program you can rebuild with current tools,
+this is a known non-finding (see
 [known-non-findings.md](known-non-findings.md#unresolved-syscalls-under-sbpf-v3)).
 
 ## qedgen-codegen runtime

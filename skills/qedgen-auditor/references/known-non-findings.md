@@ -144,8 +144,9 @@ every syscall named. The gate
 
 **Where something real might be.** A `.so` that was not built with current
 tools: a vendored binary, an old build artifact, or a program whose build is
-not reproducible. Disassemble it and look for `call -1`. That is
-`sbpf_v3_unresolved_syscall`, reported with the disassembly line.
+not reproducible. Disassemble it and look for `call -1`, then load it and run
+a transaction that reaches the call. That is `sbpf_v3_unresolved_syscall`,
+reported only when the program loads and the transaction aborts.
 
 ## sBPF v3 classes on a program that stays on V0
 
