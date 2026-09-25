@@ -141,6 +141,8 @@ pub(crate) struct TransitionReport {
     /// SHA-256 of the `.so` the modules were lifted from. The modules embed its `.text` bytes.
     pub program_sha256: String,
     pub qedlift: String,
+    /// The bundle module qedlift emitted, once known.
+    pub bundle: Option<String>,
     pub verdict: Verdict,
     pub reason: Option<String>,
     pub message: Option<String>,
@@ -152,18 +154,25 @@ pub(crate) struct TransitionReport {
     pub artifacts: Vec<String>,
 }
 
-/// `MathOverflow` -> `math_overflow`, the trace label a rejection path must use.
+/// The trace label a rejection path must use: `MathOverflow` -> `math_overflow`,
+/// `MAX_TOTAL` -> `max_total`, `HTTPError` -> `http_error`. A word break goes before an
+/// uppercase letter that follows a lowercase letter or digit, or that starts a new word after
+/// an acronym. Existing underscores are kept, and repeated ones collapse.
 pub(crate) fn snake_label(name: &str) -> String {
+    let chars: Vec<char> = name.chars().collect();
     let mut out = String::new();
-    for (i, c) in name.chars().enumerate() {
-        if c.is_uppercase() {
-            if i > 0 && !out.ends_with('_') {
+    for (i, &c) in chars.iter().enumerate() {
+        if c.is_uppercase() && i > 0 {
+            let prev = chars[i - 1];
+            let next_lower = chars.get(i + 1).is_some_and(|n| n.is_lowercase());
+            if prev.is_lowercase() || prev.is_ascii_digit() || (prev.is_uppercase() && next_lower) {
                 out.push('_');
             }
-            out.extend(c.to_lowercase());
-        } else {
-            out.push(c);
         }
+        if c == '_' && out.ends_with('_') {
+            continue;
+        }
+        out.extend(c.to_lowercase());
     }
     out
 }
@@ -210,11 +219,14 @@ pub(crate) fn traced_labels(so: &Path) -> BTreeSet<String> {
     out
 }
 
-/// Build the per-path rows. `outcome` is qedlift's line when it printed one.
+/// Build the per-path rows. `outcome` is qedlift's line when it printed one. `emitted` holds
+/// the stems of the `.lean` files qedlift wrote; a reported path whose module is not among
+/// them fails, because Lean never saw its proof.
 pub(crate) fn path_rows(
     expected: &BTreeSet<String>,
     traced: &BTreeSet<String>,
     outcome: Option<&QedliftTransition>,
+    emitted: &BTreeSet<String>,
 ) -> Result<Vec<PathRow>> {
     let labels: BTreeSet<&String> = expected.iter().chain(traced).collect();
     let mut rows = Vec::new();
@@ -261,42 +273,92 @@ pub(crate) fn path_rows(
             Some(other) => bail!("qedlift reported an unknown path kind `{other}` for `{label}`"),
             None => PathKind::Unknown,
         };
-        row.status = match (&row.kind, label.as_str(), is_expected) {
-            (PathKind::Unknown, _, _) => PathStatus::Unconfirmed,
-            // The success path must return 0.
-            (PathKind::Return { exit_code, .. }, "success", _) if *exit_code != Some(0) => {
-                row.reason = Some("success_path_not_ok".to_string());
-                row.message = Some(format!("the success path returned {exit_code:?}, not 0"));
-                PathStatus::Failed
-            }
-            (PathKind::Fault { .. }, "success", _) => {
-                row.reason = Some("success_path_faults".to_string());
-                row.message = Some("the success path ends in a VM fault".to_string());
-                PathStatus::Failed
-            }
-            // A spec rejection must not succeed or write the tracked field.
-            (
-                PathKind::Return {
-                    exit_code,
-                    tracked_written,
-                },
-                _,
-                true,
-            ) if label != "success"
-                && (*exit_code == Some(0) || *tracked_written == Some(true)) =>
-            {
-                row.reason = Some("rejection_path_not_rejected".to_string());
-                row.message = Some(format!(
-                    "the `{label}` rejection path returned {exit_code:?} with tracked write \
-                     {tracked_written:?}"
-                ));
-                PathStatus::Failed
-            }
-            _ => PathStatus::Lifted,
-        };
+        // The path's proof must be among the modules qedlift wrote, or Lean never checked it.
+        let module_ok = row
+            .module
+            .as_ref()
+            .is_some_and(|m| emitted.contains(&format!("{m}Lifted")) || emitted.contains(m));
+        if !matches!(row.kind, PathKind::Unknown) && !module_ok {
+            row.status = PathStatus::Failed;
+            row.reason = Some("module_missing".to_string());
+            row.message = Some(match &row.module {
+                Some(m) => format!("qedlift reported module `{m}`, but wrote no `{m}Lifted.lean`"),
+                None => "qedlift reported the path without naming its module".to_string(),
+            });
+            rows.push(row);
+            continue;
+        }
+        let (status, reason, message) = judge(label, is_expected, &row.kind);
+        row.status = status;
+        row.reason = reason;
+        row.message = message;
         rows.push(row);
     }
     Ok(rows)
+}
+
+/// Check a reported kind against what the path must do. Missing details are unconfirmed,
+/// never assumed.
+fn judge(
+    label: &str,
+    expected: bool,
+    kind: &PathKind,
+) -> (PathStatus, Option<String>, Option<String>) {
+    let failed = |reason: &str, message: String| {
+        (PathStatus::Failed, Some(reason.to_string()), Some(message))
+    };
+    let unconfirmed = |message: String| {
+        (
+            PathStatus::Unconfirmed,
+            Some("path_details_missing".to_string()),
+            Some(message),
+        )
+    };
+    let is_rejection = expected && label != "success";
+    match kind {
+        PathKind::Unknown => (PathStatus::Unconfirmed, None, None),
+        // The success path must return 0.
+        PathKind::Return { exit_code, .. } if label == "success" => match exit_code {
+            Some(0) => (PathStatus::Lifted, None, None),
+            Some(code) => failed(
+                "success_path_not_ok",
+                format!("the success path returned {code}, not 0"),
+            ),
+            None => unconfirmed("qedlift gave no exit code for the success path".to_string()),
+        },
+        PathKind::Fault { .. } if label == "success" => failed(
+            "success_path_faults",
+            "the success path ends in a VM fault".to_string(),
+        ),
+        // A spec rejection must return a non-zero code and leave the tracked field alone.
+        PathKind::Return {
+            exit_code,
+            tracked_written,
+        } if is_rejection => match (exit_code, tracked_written) {
+            (Some(0), _) => failed(
+                "rejection_path_not_rejected",
+                format!("the `{label}` rejection path returned 0"),
+            ),
+            (_, Some(true)) => failed(
+                "rejection_path_writes",
+                format!("the `{label}` rejection path writes the tracked field"),
+            ),
+            (Some(_), Some(false)) => (PathStatus::Lifted, None, None),
+            _ => unconfirmed(format!(
+                "qedlift gave no exit code or tracked-write flag for the `{label}` rejection path"
+            )),
+        },
+        // The spec calls for a clean error return, not a VM fault.
+        PathKind::Fault { vm_error } if is_rejection => failed(
+            "rejection_path_faults",
+            format!(
+                "the `{label}` rejection path ends in a VM fault ({}), not an error return",
+                vm_error.as_deref().unwrap_or("?")
+            ),
+        ),
+        // A traced path the spec does not name: reported as it is.
+        PathKind::Return { .. } | PathKind::Fault { .. } => (PathStatus::Lifted, None, None),
+    }
 }
 
 /// Combine the rows and the Lean check into the overall verdict.
@@ -334,6 +396,80 @@ pub(crate) fn emitted_modules(dir: &Path) -> Vec<PathBuf> {
         .unwrap_or_default();
     out.sort();
     out
+}
+
+/// Stems of `modules` (`GuardedCounterSuccessLifted`, ...).
+pub(crate) fn module_stems(modules: &[PathBuf]) -> BTreeSet<String> {
+    modules
+        .iter()
+        .filter_map(|m| m.file_stem().and_then(|s| s.to_str()).map(str::to_string))
+        .collect()
+}
+
+/// Publish this run's modules into `generated` as one set.
+///
+/// 1. Copy every module into a staging dir inside `generated`. If any copy fails, the staging
+///    dir is removed and nothing is published.
+/// 2. Move each staged file into place (a rename on the same filesystem).
+/// 3. Delete the modules the previous run of this bundle listed in its manifest
+///    (`<bundle>.qedgen-modules`) and this run no longer has, then write the new manifest.
+///    Only files qedgen recorded are ever deleted, so other proofs in `generated` are safe.
+pub(crate) fn publish_modules(
+    generated: &Path,
+    bundle: &str,
+    modules: &[PathBuf],
+) -> Result<Vec<PathBuf>> {
+    std::fs::create_dir_all(generated)
+        .with_context(|| format!("creating {}", generated.display()))?;
+    let staging = generated.join(format!(".qedgen-staging-{bundle}"));
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging).with_context(|| format!("creating {}", staging.display()))?;
+    let staged: Result<Vec<(PathBuf, String)>> = modules
+        .iter()
+        .map(|src| {
+            let name = src
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| anyhow::anyhow!("module path has no file name: {}", src.display()))?
+                .to_string();
+            let dst = staging.join(&name);
+            std::fs::copy(src, &dst)
+                .with_context(|| format!("copying {} -> {}", src.display(), dst.display()))?;
+            Ok((dst, name))
+        })
+        .collect();
+    let staged = match staged {
+        Ok(staged) => staged,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(e);
+        }
+    };
+
+    let manifest = generated.join(format!("{bundle}.qedgen-modules"));
+    let previous: BTreeSet<String> = std::fs::read_to_string(&manifest)
+        .map(|t| t.lines().map(str::to_string).collect())
+        .unwrap_or_default();
+    let mut published = Vec::new();
+    for (staged_path, name) in &staged {
+        let dst = generated.join(name);
+        std::fs::rename(staged_path, &dst)
+            .with_context(|| format!("moving {} -> {}", staged_path.display(), dst.display()))?;
+        published.push(dst);
+    }
+    let _ = std::fs::remove_dir_all(&staging);
+
+    let current: BTreeSet<String> = staged.into_iter().map(|(_, n)| n).collect();
+    for old in previous.difference(&current) {
+        // Only plain file names from our own manifest, never a path.
+        if !old.contains('/') && !old.contains('\\') && old.ends_with(".lean") {
+            let _ = std::fs::remove_file(generated.join(old));
+        }
+    }
+    let listing: Vec<&str> = current.iter().map(String::as_str).collect();
+    std::fs::write(&manifest, listing.join("\n") + "\n")
+        .with_context(|| format!("writing {}", manifest.display()))?;
+    Ok(published)
 }
 
 /// Run the Lean check on `modules`, or say why it did not run.
@@ -476,6 +612,7 @@ pub(crate) fn new_report(
         program: so.display().to_string(),
         program_sha256: format!("{:x}", Sha256::digest(&bytes)),
         qedlift: qedlift.display().to_string(),
+        bundle: None,
         verdict: Verdict::Failed,
         reason: None,
         message: None,
@@ -498,6 +635,13 @@ mod tests {
         items.iter().map(|s| s.to_string()).collect()
     }
 
+    /// Stems qedlift writes for these labels (`P<Label>Lifted`), plus the bundle.
+    fn stems(labels: &[&str]) -> BTreeSet<String> {
+        let mut s: BTreeSet<String> = labels.iter().map(|l| format!("P{l}Lifted")).collect();
+        s.insert("PTransition".to_string());
+        s
+    }
+
     fn outcome(paths: serde_json::Value) -> QedliftTransition {
         serde_json::from_value(serde_json::json!({ "status": "emitted", "paths": paths })).unwrap()
     }
@@ -507,6 +651,9 @@ mod tests {
         assert_eq!(snake_label("MathOverflow"), "math_overflow");
         assert_eq!(snake_label("ZeroAmount"), "zero_amount");
         assert_eq!(snake_label("already_snake"), "already_snake");
+        assert_eq!(snake_label("MAX_TOTAL"), "max_total");
+        assert_eq!(snake_label("HTTPError"), "http_error");
+        assert_eq!(snake_label("Error2Big"), "error2_big");
     }
 
     #[test]
@@ -527,11 +674,17 @@ mod tests {
         let expected = set(&["success", "zero_amount"]);
         let traced = set(&["success", "zero_amount", "oob"]);
         let o = outcome(serde_json::json!([
-            { "label": "success", "kind": "return", "exit_code": 0, "tracked_written": true },
-            { "label": "zero_amount", "kind": "return", "exit_code": 1, "tracked_written": false },
-            { "label": "oob", "kind": "fault", "vm_error": "access_violation" }
+            { "label": "success", "module": "Psuccess", "kind": "return", "exit_code": 0, "tracked_written": true },
+            { "label": "zero_amount", "module": "Pzero_amount", "kind": "return", "exit_code": 1, "tracked_written": false },
+            { "label": "oob", "module": "Poob", "kind": "fault", "vm_error": "access_violation" }
         ]));
-        let rows = path_rows(&expected, &traced, Some(&o)).unwrap();
+        let rows = path_rows(
+            &expected,
+            &traced,
+            Some(&o),
+            &stems(&["success", "zero_amount", "oob"]),
+        )
+        .unwrap();
         assert!(
             rows.iter().all(|r| r.status == PathStatus::Lifted),
             "{rows:?}"
@@ -554,12 +707,13 @@ mod tests {
     #[test]
     fn missing_expected_trace_is_incomplete() {
         let o = outcome(serde_json::json!([
-            { "label": "success", "kind": "return", "exit_code": 0, "tracked_written": true }
+            { "label": "success", "module": "Psuccess", "kind": "return", "exit_code": 0, "tracked_written": true }
         ]));
         let rows = path_rows(
             &set(&["success", "zero_amount"]),
             &set(&["success"]),
             Some(&o),
+            &stems(&["success"]),
         )
         .unwrap();
         let missing = rows.iter().find(|r| r.label == "zero_amount").unwrap();
@@ -574,7 +728,13 @@ mod tests {
     /// `incomplete` even when Lean passes.
     #[test]
     fn no_outcome_line_caps_the_verdict() {
-        let rows = path_rows(&set(&["success"]), &set(&["success", "abort"]), None).unwrap();
+        let rows = path_rows(
+            &set(&["success"]),
+            &set(&["success", "abort"]),
+            None,
+            &stems(&["success", "abort"]),
+        )
+        .unwrap();
         assert!(rows.iter().all(|r| r.status == PathStatus::Unconfirmed));
         let lean = LeanCheck::Passed {
             project: "p".into(),
@@ -585,27 +745,58 @@ mod tests {
         );
     }
 
-    /// A rejection path that succeeds or writes the tracked field, a faulting success path,
-    /// and a path qedlift refused all fail.
+    /// Contradictions fail: a rejection path that returns 0, writes the tracked field, or ends
+    /// in a VM fault; a success path that faults or returns non-zero; a path qedlift refused;
+    /// a path whose module qedlift did not write.
     #[test]
     fn contradictions_fail() {
         let cases = [
-            serde_json::json!({ "label": "zero_amount", "kind": "return", "exit_code": 0 }),
-            serde_json::json!({ "label": "zero_amount", "kind": "return", "exit_code": 1, "tracked_written": true }),
-            serde_json::json!({ "label": "success", "kind": "fault", "vm_error": "abort" }),
-            serde_json::json!({ "label": "success", "status": "rejected", "reason": "mutation_mismatch" }),
+            (
+                serde_json::json!({ "label": "zero_amount", "module": "Pzero_amount", "kind": "return", "exit_code": 0, "tracked_written": false }),
+                "rejection_path_not_rejected",
+            ),
+            (
+                serde_json::json!({ "label": "zero_amount", "module": "Pzero_amount", "kind": "return", "exit_code": 1, "tracked_written": true }),
+                "rejection_path_writes",
+            ),
+            (
+                serde_json::json!({ "label": "zero_amount", "module": "Pzero_amount", "kind": "fault", "vm_error": "abort" }),
+                "rejection_path_faults",
+            ),
+            (
+                serde_json::json!({ "label": "success", "module": "Psuccess", "kind": "fault", "vm_error": "abort" }),
+                "success_path_faults",
+            ),
+            (
+                serde_json::json!({ "label": "success", "module": "Psuccess", "kind": "return", "exit_code": 3 }),
+                "success_path_not_ok",
+            ),
+            (
+                serde_json::json!({ "label": "success", "status": "rejected", "reason": "mutation_mismatch" }),
+                "mutation_mismatch",
+            ),
+            (
+                serde_json::json!({ "label": "success", "module": "Pmissing", "kind": "return", "exit_code": 0 }),
+                "module_missing",
+            ),
+            (
+                serde_json::json!({ "label": "success", "kind": "return", "exit_code": 0 }),
+                "module_missing",
+            ),
         ];
-        for case in cases {
+        for (case, want) in cases {
             let label = case["label"].as_str().unwrap().to_string();
             let o = outcome(serde_json::json!([case]));
             let rows = path_rows(
                 &set(&["success", "zero_amount"]),
                 &set(&["success", "zero_amount"]),
                 Some(&o),
+                &stems(&["success", "zero_amount"]),
             )
             .unwrap();
             let row = rows.iter().find(|r| r.label == label).unwrap();
             assert_eq!(row.status, PathStatus::Failed, "{row:?}");
+            assert_eq!(row.reason.as_deref(), Some(want), "{row:?}");
             let lean = LeanCheck::Passed {
                 project: "p".into(),
             };
@@ -616,7 +807,94 @@ mod tests {
     #[test]
     fn unknown_path_kind_fails_closed() {
         let o = outcome(serde_json::json!([{ "label": "success", "kind": "teleport" }]));
-        assert!(path_rows(&set(&["success"]), &set(&["success"]), Some(&o)).is_err());
+        assert!(path_rows(
+            &set(&["success"]),
+            &set(&["success"]),
+            Some(&o),
+            &stems(&["success"])
+        )
+        .is_err());
+    }
+
+    /// A rejection return without an exit code or tracked-write flag is unconfirmed, never
+    /// lifted, so the verdict cannot be `verified`.
+    #[test]
+    fn missing_rejection_details_are_unconfirmed() {
+        for case in [
+            serde_json::json!({ "label": "zero_amount", "module": "Pzero_amount", "kind": "return" }),
+            serde_json::json!({ "label": "zero_amount", "module": "Pzero_amount", "kind": "return", "exit_code": 1 }),
+            serde_json::json!({ "label": "zero_amount", "module": "Pzero_amount", "kind": "return", "tracked_written": false }),
+        ] {
+            let o = outcome(serde_json::json!([
+                { "label": "success", "module": "Psuccess", "kind": "return", "exit_code": 0 },
+                case
+            ]));
+            let rows = path_rows(
+                &set(&["success", "zero_amount"]),
+                &set(&["success", "zero_amount"]),
+                Some(&o),
+                &stems(&["success", "zero_amount"]),
+            )
+            .unwrap();
+            let row = rows.iter().find(|r| r.label == "zero_amount").unwrap();
+            assert_eq!(row.status, PathStatus::Unconfirmed, "{row:?}");
+            let lean = LeanCheck::Passed {
+                project: "p".into(),
+            };
+            assert_eq!(overall_verdict(&rows, &lean).0, Verdict::Incomplete);
+        }
+    }
+
+    /// Publishing replaces the set as a whole: a path dropped on a rerun is removed (it was
+    /// ours, per the manifest), and a proof qedgen did not write is left alone.
+    #[test]
+    fn publish_replaces_the_previous_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let generated = tmp.path().join("Generated");
+        let write = |name: &str| {
+            let p = src.join(name);
+            std::fs::write(&p, name).unwrap();
+            p
+        };
+        let first = vec![
+            write("PSuccessLifted.lean"),
+            write("POldLifted.lean"),
+            write("PTransition.lean"),
+        ];
+        publish_modules(&generated, "PTransition", &first).unwrap();
+        std::fs::create_dir_all(&generated).unwrap();
+        std::fs::write(generated.join("VaultIncrementRefinement.lean"), "other").unwrap();
+
+        let second = vec![write("PSuccessLifted.lean"), write("PTransition.lean")];
+        publish_modules(&generated, "PTransition", &second).unwrap();
+        assert!(generated.join("PSuccessLifted.lean").exists());
+        assert!(
+            !generated.join("POldLifted.lean").exists(),
+            "dropped path removed"
+        );
+        assert!(
+            generated.join("VaultIncrementRefinement.lean").exists(),
+            "a proof qedgen did not record is untouched"
+        );
+        assert!(!generated.join(".qedgen-staging-PTransition").exists());
+    }
+
+    /// A failed copy publishes nothing: no new module lands in `Generated/`.
+    #[test]
+    fn failed_copy_publishes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let generated = tmp.path().join("Generated");
+        let good = tmp.path().join("PSuccessLifted.lean");
+        std::fs::write(&good, "x").unwrap();
+        let missing = tmp.path().join("PGoneLifted.lean");
+        assert!(publish_modules(&generated, "PTransition", &[good, missing]).is_err());
+        assert!(
+            !generated.join("PSuccessLifted.lean").exists(),
+            "nothing published"
+        );
+        assert!(!generated.join(".qedgen-staging-PTransition").exists());
     }
 
     #[test]

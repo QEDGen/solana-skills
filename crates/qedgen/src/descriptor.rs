@@ -14,6 +14,7 @@ use std::process::Command;
 use anyhow::{anyhow, bail, Context, Result};
 
 use crate::check::ParsedSpec;
+use std::collections::BTreeSet;
 
 mod lean_check;
 mod outcome;
@@ -469,7 +470,7 @@ pub(crate) fn run_discharge_transition(parsed: &ParsedSpec, req: &DischargeReque
 
     match launched {
         Err(message) => {
-            report.paths = transition::path_rows(&expected, &traced, None)?;
+            report.paths = transition::path_rows(&expected, &traced, None, &BTreeSet::new())?;
             report.reason = Some("qedlift_not_runnable".to_string());
             report.message = Some(message);
         }
@@ -480,9 +481,9 @@ pub(crate) fn run_discharge_transition(parsed: &ParsedSpec, req: &DischargeReque
     }
 
     if report.verdict.passes() {
-        if let Some(dest) = req.out_dir {
+        if let (Some(dest), Some(bundle)) = (req.out_dir, report.bundle.clone()) {
             let modules = transition::emitted_modules(&out);
-            match persist_modules(&dest.join("Generated"), &modules) {
+            match transition::publish_modules(&dest.join("Generated"), &bundle, &modules) {
                 Ok(paths) => {
                     report.artifacts = paths.iter().map(|p| p.display().to_string()).collect()
                 }
@@ -515,8 +516,8 @@ pub(crate) fn run_discharge_transition(parsed: &ParsedSpec, req: &DischargeReque
 fn discharge_transition_run(
     report: &mut transition::TransitionReport,
     req: &DischargeRequest,
-    expected: &std::collections::BTreeSet<String>,
-    traced: &std::collections::BTreeSet<String>,
+    expected: &BTreeSet<String>,
+    traced: &BTreeSet<String>,
     output: &std::process::Output,
     stderr: &str,
     out: &Path,
@@ -537,7 +538,9 @@ fn discharge_transition_run(
             )
         }
     };
-    report.paths = match transition::path_rows(expected, traced, outcome.as_ref()) {
+    let modules = transition::emitted_modules(out);
+    let stems = transition::module_stems(&modules);
+    report.paths = match transition::path_rows(expected, traced, outcome.as_ref(), &stems) {
         Ok(rows) => rows,
         Err(e) => {
             return fail(
@@ -595,7 +598,7 @@ fn discharge_transition_run(
             ),
         );
     }
-    let modules = transition::emitted_modules(out);
+    report.bundle = Some(bundle.clone());
     if let Some(m) = modules.iter().find(|m| {
         std::fs::read_to_string(m)
             .map(|t| t.contains("sorry"))
@@ -630,24 +633,6 @@ fn discharge_transition_run(
         lean_ok && report.paths.iter().filter(|r| r.traced).all(lifted);
     report.all_expected_paths_verified =
         lean_ok && report.paths.iter().filter(|r| r.expected).all(lifted);
-}
-
-/// Copy `modules` into `dest` (created if needed). Returns the persisted paths.
-fn persist_modules(dest: &Path, modules: &[PathBuf]) -> Result<Vec<PathBuf>> {
-    std::fs::create_dir_all(dest)
-        .with_context(|| format!("creating discharge out-dir {}", dest.display()))?;
-    modules
-        .iter()
-        .map(|src| {
-            let name = src
-                .file_name()
-                .ok_or_else(|| anyhow!("module path has no file name: {}", src.display()))?;
-            let dst = dest.join(name);
-            std::fs::copy(src, &dst)
-                .with_context(|| format!("copying {} -> {}", src.display(), dst.display()))?;
-            Ok(dst)
-        })
-        .collect()
 }
 
 /// Copy the qedlift artifacts out of the throwaway workdir into `dest` (created if needed), so
@@ -1111,7 +1096,7 @@ mod tests {
         }
     }
 
-    const BOTH_PATHS: &str = r#"{"status":"emitted","bundle":"GuardedCounterTransition","paths":[{"label":"success","kind":"return","exit_code":0,"tracked_written":true},{"label":"zero_amount","kind":"return","exit_code":1,"tracked_written":false}]}"#;
+    const BOTH_PATHS: &str = r#"{"status":"emitted","bundle":"GuardedCounterTransition","paths":[{"label":"success","module":"GuardedCounterSuccess","kind":"return","exit_code":0,"tracked_written":true},{"label":"zero_amount","module":"GuardedCounterZeroAmount","kind":"return","exit_code":1,"tracked_written":false}]}"#;
 
     /// Both spec-expected paths traced and reported: `emitted` without a Lake project, and
     /// the modules persist under `<out-dir>/Generated/`.

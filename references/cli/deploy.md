@@ -194,8 +194,10 @@ $QEDGEN discharge --spec guarded.qedspec --handler credit \
 - **Path kinds come from qedlift.** A path is a `return` (with its exit code) or
   a `fault` (a VM `abort` or `access_violation`). A spec rejection is usually a
   return with a non-zero code and no write to the tracked field. The success
-  path must return 0; a rejection path must not return 0 or write the tracked
-  field. qedlift reports kinds in a `transition outcome` line (requested in
+  path must return 0. A spec rejection path must return a non-zero code, leave
+  the tracked field alone, and not end in a VM fault. A path with a missing exit
+  code or tracked-write flag is unconfirmed, and a path whose module qedlift did
+  not write fails. qedlift reports kinds in a `transition outcome` line (requested in
   QEDGen/qedsvm#70). Without that line the kinds are unknown and the verdict is
   at most `incomplete` (`no_path_outcomes`).
 - **Verdict.** `verified` needs every expected path traced, every path kind
@@ -205,5 +207,8 @@ $QEDGEN discharge --spec guarded.qedspec --handler credit \
 - **Coverage.** Trace coverage is not whole-CFG coverage. The report separates
   `all_discovered_paths_verified` from `all_expected_paths_verified`, and records
   the `program_sha256` of the binary the modules were lifted from.
-- **Stale files.** qedlift writes into a fresh temp dir. Modules are copied into
-  `<out-dir>/Generated/` only when the verdict passes.
+- **Stale files.** qedlift writes into a fresh temp dir. Modules are published
+  into `<out-dir>/Generated/` only when the verdict passes, as one set: they are
+  staged first, so a failed copy publishes nothing. A manifest
+  (`<Bundle>.qedgen-modules`) records the set, so a path dropped on a rerun is
+  removed. Proofs qedgen did not record are never touched.
