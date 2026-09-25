@@ -168,15 +168,42 @@ $QEDGEN discharge --spec vault.qedspec --handler increment \
 | `--idl` | Path | required | Codama IDL (`.json`) supplying the account shape (offsets) |
 | `--qedlift` | Path | required | Built qedsvm `qedlift` binary (`cargo build -p qedlift --bin qedlift` in qedsvm's `qedsvm-rs/`) |
 | `--module` | String | `<Account><Handler>` | Lean module name for the emitted proof |
-| `--out-dir` | Path | temp dir (artifacts discarded) | Persist `<Module>TracedLifted.lean` + `<Module>Refinement.lean` into `<out-dir>/Generated/`, so they import as `Generated.<Module>Refinement` from a Lake source root at `<out-dir>`. Written only when the verdict is `verified` or `emitted`. `--transition` writes into `<out-dir>` directly (#405) |
-| `--transition` | flag | off | Whole-transition mode (qedsvm v0.9.0, #40): lift **every** path from discovered `<stem>_<path>.pcs` traces beside the `.so`; emits per-path `*_transition_path` / `*_transition_fault` corollaries + the one bundle theorem (`<StemPascal>Transition.lean`) covering success and abort paths. Requires `--out-dir` and ≥ 2 traces |
-| `--lean-project` | Path | nearest Lake project at or above `--out-dir` | Lake project used to type-check the emitted modules. It must `require qedsvm` and be built. With neither this nor a Lake project above `--out-dir`, no Lean check runs and the verdict is at most `emitted`. Not yet supported with `--transition` (#405) |
-| `--json` | bool | false | Machine-readable report. Same verdict as the human report. Not yet supported with `--transition` (#405) |
+| `--out-dir` | Path | temp dir (artifacts discarded) | Persist `<Module>TracedLifted.lean` + `<Module>Refinement.lean` into `<out-dir>/Generated/`, so they import as `Generated.<Module>Refinement` from a Lake source root at `<out-dir>`. Written only when the verdict is `verified` or `emitted`. With `--transition`, every path module and the bundle go there |
+| `--transition` | flag | off | Whole-transition mode (qedsvm #40): lift every `<stem>_<label>.pcs` trace beside the `.so` into one module per path plus the bundle theorem (`<StemPascal>Transition.lean`). Reports one row per path; see below. Needs ≥ 2 traces |
+| `--lean-project` | Path | nearest Lake project at or above `--out-dir` | Lake project used to type-check the emitted modules. It must `require qedsvm` and be built. With neither this nor a Lake project above `--out-dir`, no Lean check runs and the verdict is at most `emitted` |
+| `--json` | bool | false | Machine-readable report. Same verdict as the human report |
 
 Whole-transition example:
 
 ```bash
-$QEDGEN discharge --spec counter.qedspec --handler increment \
-  --so counter.so --qedlift /path/to/qedlift \
-  --transition --out-dir formal_verification/discharge
+# traces beside the binary: guarded_counter_success.pcs, guarded_counter_zero_amount.pcs
+$QEDGEN discharge --spec guarded.qedspec --handler credit \
+  --so guarded_counter.so --idl guarded.codama.json --qedlift /path/to/qedlift \
+  --transition --out-dir formal_verification
 ```
+
+#### Whole-transition verdicts
+
+`--transition` reports one row per path and one overall verdict:
+
+- **Expected paths come from the spec.** The handler expects `success`, plus
+  one rejection path per `requires ... else E`, labeled with the snake_case of
+  `E` (`else ZeroAmount` expects `<stem>_zero_amount.pcs`). Implicit
+  checked-arithmetic overflow paths are not expected. A trace the spec does not
+  name is still lifted and listed as "not in spec".
+- **Path kinds come from qedlift.** A path is a `return` (with its exit code) or
+  a `fault` (a VM `abort` or `access_violation`). A spec rejection is usually a
+  return with a non-zero code and no write to the tracked field. The success
+  path must return 0; a rejection path must not return 0 or write the tracked
+  field. qedlift reports kinds in a `transition outcome` line (requested in
+  QEDGen/qedsvm#70). Without that line the kinds are unknown and the verdict is
+  at most `incomplete` (`no_path_outcomes`).
+- **Verdict.** `verified` needs every expected path traced, every path kind
+  confirmed, and Lean accepting every emitted module. An expected path with no
+  trace is `incomplete` (`expected_path_missing`), never a success. A refused
+  path, a contradicting kind, a `sorry`, or a failed Lean check is `failed`.
+- **Coverage.** Trace coverage is not whole-CFG coverage. The report separates
+  `all_discovered_paths_verified` from `all_expected_paths_verified`, and records
+  the `program_sha256` of the binary the modules were lifted from.
+- **Stale files.** qedlift writes into a fresh temp dir. Modules are copied into
+  `<out-dir>/Generated/` only when the verdict passes.

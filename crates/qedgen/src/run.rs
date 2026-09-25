@@ -1035,36 +1035,21 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             json,
         } => {
             let parsed = check::parse_spec_file(&spec)?;
+            let request = descriptor::DischargeRequest {
+                handler: &handler,
+                account,
+                so: &so,
+                idl: idl.as_deref(),
+                qedlift: &qedlift,
+                module,
+                out_dir: out_dir.as_deref(),
+                lean_project: lean_project.as_deref(),
+                json,
+            };
             if transition {
-                if lean_project.is_some() || json {
-                    anyhow::bail!(
-                        "--lean-project and --json are not supported with --transition yet (#405)"
-                    );
-                }
-                descriptor::run_discharge_transition(
-                    &parsed,
-                    &handler,
-                    account,
-                    &so,
-                    idl.as_deref(),
-                    &qedlift,
-                    out_dir.as_deref(),
-                )?;
+                descriptor::run_discharge_transition(&parsed, &request)?;
             } else {
-                descriptor::run_discharge(
-                    &parsed,
-                    &descriptor::DischargeRequest {
-                        handler: &handler,
-                        account,
-                        so: &so,
-                        idl: idl.as_deref(),
-                        qedlift: &qedlift,
-                        module,
-                        out_dir: out_dir.as_deref(),
-                        lean_project: lean_project.as_deref(),
-                        json,
-                    },
-                )?;
+                descriptor::run_discharge(&parsed, &request)?;
             }
         }
 

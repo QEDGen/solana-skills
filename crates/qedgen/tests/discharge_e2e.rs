@@ -129,3 +129,79 @@ fn discharge_verdicts_match_qedlift_and_lean() {
     assert!(!ok && verdict == "unsupported", "legacy param: {verdict}");
     assert_eq!(reason.as_deref(), Some("missing_parameter_binding"));
 }
+
+/// `--transition` on qedsvm's `guarded_counter` (#405): a success path and a rejection path
+/// (`amount == 0` returns 1). The spec's `requires amount > 0 else ZeroAmount` expects a
+/// `zero_amount` trace, so the fixture's `abort` trace is copied to that label.
+///
+/// Lean must accept every emitted module. qedlift prints per-path kinds only once
+/// QEDGen/qedsvm#70 lands; until then the verdict is capped at `incomplete / no_path_outcomes`.
+/// A qedlift with the outcome line verifies both paths.
+#[test]
+#[ignore = "needs a built qedsvm checkout and qedlift (see module docs)"]
+fn transition_paths_are_checked_by_lean_and_reconciled_with_the_spec() {
+    let env = env();
+    let dir = env.work.path();
+    let fixtures = env.qedsvm.join("qedsvm-rs/tests/fixtures");
+    for (from, to) in [
+        ("guarded_counter.so", "guarded_counter.so"),
+        ("guarded_counter_success.pcs", "guarded_counter_success.pcs"),
+        (
+            "guarded_counter_abort.pcs",
+            "guarded_counter_zero_amount.pcs",
+        ),
+    ] {
+        std::fs::copy(fixtures.join(from), dir.join(to)).unwrap();
+    }
+    let spec = dir.join("guarded.qedspec");
+    std::fs::write(
+        &spec,
+        "spec GuardedCounter\n\nstate {\n  amount  : U64\n  counter : U64\n}\n\n\
+         type Error\n  | ZeroAmount\n\nhandler credit (amount : U64) {\n  \
+         requires amount > 0 else ZeroAmount\n  effect { counter += amount }\n}\n",
+    )
+    .unwrap();
+    // qedgen emits no inline layout, so the shape comes from a small Codama IDL.
+    let idl = dir.join("guarded.codama.json");
+    std::fs::write(
+        &idl,
+        r#"{"kind":"rootNode","program":{"kind":"programNode","name":"guardedCounter","accounts":[{"kind":"accountNode","name":"GuardedCounter","data":{"kind":"structTypeNode","fields":[{"kind":"structFieldTypeNode","name":"amount","type":{"kind":"numberTypeNode","format":"u64","endian":"le"}},{"kind":"structFieldTypeNode","name":"counter","type":{"kind":"numberTypeNode","format":"u64","endian":"le"}}]}}],"instructions":[]}}"#,
+    )
+    .unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_qedgen"))
+        .args(["discharge", "--transition", "--json"])
+        .arg("--spec")
+        .arg(&spec)
+        .args(["--handler", "credit", "--account", "GuardedCounter"])
+        .arg("--so")
+        .arg(dir.join("guarded_counter.so"))
+        .arg("--idl")
+        .arg(&idl)
+        .arg("--qedlift")
+        .arg(&env.qedlift)
+        .arg("--lean-project")
+        .arg(&env.qedsvm)
+        .output()
+        .expect("spawn qedgen discharge --transition");
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "not JSON ({e}):\n{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    });
+    assert_eq!(report["lean_check"]["status"], "passed", "{report:#}");
+    let paths = report["paths"].as_array().unwrap();
+    for label in ["success", "zero_amount"] {
+        let row = paths.iter().find(|p| p["label"] == label).unwrap();
+        assert_eq!(row["expected"], true);
+        assert_eq!(row["traced"], true);
+    }
+    let verdict = report["verdict"].as_str().unwrap();
+    match verdict {
+        "incomplete" => assert_eq!(report["reason"], "no_path_outcomes", "{report:#}"),
+        "verified" => assert_eq!(report["all_expected_paths_verified"], true, "{report:#}"),
+        other => panic!("unexpected verdict {other}: {report:#}"),
+    }
+}
