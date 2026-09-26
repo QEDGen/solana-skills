@@ -564,18 +564,17 @@ pub(crate) enum Commands {
         /// (`<Module>TracedLifted.lean` + `<Module>Refinement.lean`), so it
         /// imports as `Generated.<Module>Refinement` from a Lake source root at
         /// `<out-dir>`. Written only when the verdict passes. Omit to keep the
-        /// verdict-only (artifact-discarded) behaviour. `--transition` writes
-        /// into `<out-dir>` directly (#405).
+        /// verdict-only (artifact-discarded) behaviour. With `--transition`,
+        /// every path module and the bundle go there.
         #[arg(long)]
         out_dir: Option<PathBuf>,
 
-        /// Whole-transition mode (qedsvm #40, v0.9.0): lift EVERY path of
-        /// the program from discovered `<stem>_<path>.pcs` traces beside the
-        /// `.so` and emit per-path `*_transition_path` /
-        /// `*_transition_fault` corollaries plus the one bundle theorem
-        /// covering success and abort paths under their branch guards.
-        /// Requires `--out-dir` (qedlift writes the modules directly) and
-        /// >= 2 traces beside the binary.
+        /// Whole-transition mode (qedsvm #40): lift every
+        /// `<stem>_<label>.pcs` trace beside the `.so` and emit one module
+        /// per path plus the bundle theorem. Reports one row per path. The
+        /// spec expects `success` plus one path per `requires ... else E`,
+        /// labeled with the snake_case of `E`; an expected path with no
+        /// trace is `incomplete`. Needs >= 2 traces.
         #[arg(long)]
         transition: bool,
 

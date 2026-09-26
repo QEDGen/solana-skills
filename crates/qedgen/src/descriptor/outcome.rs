@@ -60,6 +60,9 @@ pub(crate) enum Verdict {
     Unsupported,
     /// qedlift lifted the program but did not act on the descriptor.
     ModelOnly,
+    /// `--transition`: a spec-expected path has no trace, or qedlift gave no per-path
+    /// outcome, so the discovered paths cannot stand for the whole transition.
+    Incomplete,
     /// qedlift or the Lean check failed.
     Failed,
 }
@@ -71,9 +74,11 @@ impl Verdict {
     pub(crate) fn passes(self) -> bool {
         match self {
             Verdict::Verified | Verdict::Emitted => true,
-            Verdict::Rejected | Verdict::Unsupported | Verdict::ModelOnly | Verdict::Failed => {
-                false
-            }
+            Verdict::Rejected
+            | Verdict::Unsupported
+            | Verdict::ModelOnly
+            | Verdict::Incomplete
+            | Verdict::Failed => false,
         }
     }
 
@@ -84,6 +89,7 @@ impl Verdict {
             Verdict::Rejected => "rejected",
             Verdict::Unsupported => "unsupported",
             Verdict::ModelOnly => "model_only",
+            Verdict::Incomplete => "incomplete",
             Verdict::Failed => "failed",
         }
     }
@@ -193,6 +199,7 @@ impl DischargeReport {
             | Verdict::Rejected
             | Verdict::Unsupported
             | Verdict::ModelOnly
+            | Verdict::Incomplete
             | Verdict::Failed => "qedlift did not emit a refinement",
         };
         DischargeReport {
@@ -226,6 +233,7 @@ impl DischargeReport {
             Verdict::Rejected => "REJECTED : the obligation conflicts with the bytes or layout.",
             Verdict::Unsupported => "UNSUPPORTED : qedlift cannot bind this obligation.",
             Verdict::ModelOnly => "MODEL ONLY : qedlift did not act on the descriptor.",
+            Verdict::Incomplete => "INCOMPLETE : not every expected path is covered.",
             Verdict::Failed => "FAILED : the discharge did not complete.",
         };
         s.push_str(&format!("  verdict      : {summary}\n"));
