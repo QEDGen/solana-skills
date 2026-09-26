@@ -209,10 +209,12 @@ $QEDGEN discharge --spec guarded.qedspec --handler credit \
 #### Whole-transition verdicts
 
 `--transition` reports one row per path and one overall verdict. A parameter
-delta needs no input layout here: without `--account-data-lengths` the
-descriptor keeps the unbound schema v2 form, because the bundle uses the
-parameter only as a binder name. With the flags it is schema v3, as for
-single-path discharge.
+delta can run without an input layout here: without `--account-data-lengths`
+the descriptor keeps the unbound schema v2 form, which qedsvm's transition mode
+reads as a binder name. Nothing then ties the parameter to the instruction's
+serialized argument, so the verdict is at most `incomplete`
+(`parameter_unbound`). With the flags it is schema v3, as for single-path
+discharge, and can verify.
 
 - **Expected paths come from the spec.** The handler expects `success`, plus
   one rejection path per `requires ... else E`, labeled with the snake_case of

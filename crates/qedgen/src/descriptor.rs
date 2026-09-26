@@ -766,6 +766,21 @@ pub(crate) fn run_discharge_transition(parsed: &ParsedSpec, req: &DischargeReque
         }
     }
 
+    // An unbound parameter (schema v2, no input layout) names the binder but was never tied to
+    // the instruction's serialized argument, so the transition cannot be `verified` (or pass
+    // as `emitted`). The bound v3 form (`--account-data-lengths`) can verify.
+    let unbound_param =
+        descriptor["op"].get("add_param").is_some() && descriptor.get("input_layout").is_none();
+    if unbound_param && matches!(report.verdict, Verdict::Verified | Verdict::Emitted) {
+        report.verdict = Verdict::Incomplete;
+        report.reason = Some("parameter_unbound".to_string());
+        report.message = Some(format!(
+            "`{}` is not bound to its serialized instruction-data address; pass \
+             --account-data-lengths (and --idl or --account-index) to bind it",
+            descriptor["op"]["add_param"].as_str().unwrap_or("?")
+        ));
+    }
+
     if report.verdict.passes() {
         if let (Some(dest), Some(bundle)) = (req.out_dir, report.bundle.clone()) {
             let modules = transition::emitted_modules(&out);
@@ -1645,12 +1660,37 @@ mod tests {
         }
         let fake = fake_transition(tmp.path(), BOTH_PATHS, "theorem t : True := trivial");
         let out = tmp.path().join("project");
-        run_discharge_transition(&parsed, &transition_request(&so, &fake, Some(&out)))
-            .expect("both paths lifted");
+        // Bound parameter (schema v3), so the verdict can pass.
+        let mut req = transition_request(&so, &fake, Some(&out));
+        req.layout = InputLayoutFlags {
+            account_data_lengths: Some(vec![16]),
+            account_index: Some(0),
+        };
+        run_discharge_transition(&parsed, &req).expect("both paths lifted");
         assert!(out.join("Generated/GuardedCounterTransition.lean").exists());
         assert!(out
             .join("Generated/GuardedCounterZeroAmountLifted.lean")
             .exists());
+    }
+
+    /// An unbound parameter (no layout flags) caps the transition at `incomplete`, even when
+    /// every path lifts: the parameter was never tied to its serialized argument.
+    #[cfg(unix)]
+    #[test]
+    fn transition_unbound_parameter_is_incomplete() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parsed = guarded_spec(tmp.path());
+        let so = tmp.path().join("guarded_counter.so");
+        std::fs::write(&so, b"\x7fELF").unwrap();
+        for t in ["success", "zero_amount"] {
+            std::fs::write(tmp.path().join(format!("guarded_counter_{t}.pcs")), "").unwrap();
+        }
+        let fake = fake_transition(tmp.path(), BOTH_PATHS, "theorem t : True := trivial");
+        let out = tmp.path().join("project");
+        let err = run_discharge_transition(&parsed, &transition_request(&so, &fake, Some(&out)))
+            .expect_err("unbound parameter cannot pass");
+        assert!(err.to_string().contains("incomplete"), "{err}");
+        assert!(!out.exists(), "nothing persisted");
     }
 
     /// A spec-expected path with no trace is `incomplete`, and nothing is persisted.
