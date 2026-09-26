@@ -112,8 +112,9 @@ reports. Update the pin after the v3 upgrade is deployed.
 
 Hands a name-level refinement obligation to qedsvm's `qedlift`, which proves it
 against the decoded program bytes (field offsets resolved from the IDL on the
-qedsvm side). Today's scope is a single-field constant-increment handler
-(`field += <int literal>`); the bundled CPI-callee `ensures` and the sBPF bridge
+qedsvm side). Today's scope is a single-field increment handler:
+`field += <int literal>` (descriptor schema v1) or `field += <parameter>` (schema
+v3, with an input layout, needs a qedsvm build newer than v0.12.0). The bundled CPI-callee `ensures` and the sBPF bridge
 are otherwise axiomatized against a `binary_hash` pin. See
 [`docs/design/qedsvm-discharge.md`](../../docs/design/qedsvm-discharge.md).
 
@@ -123,14 +124,35 @@ of the seam. Carries only semantics (which named field a handler mutates, by how
 much); offsets are resolved IDL-side. Schema: qedsvm `docs/REFINEMENT_DESCRIPTOR.md`.
 
 ```bash
+# Constant delta (`total += 1`): schema v1
 $QEDGEN descriptor --spec vault.qedspec --handler increment
+
+# Parameter delta (`total += amount`): schema v3 with an input layout
+$QEDGEN descriptor --spec vault.qedspec --handler deposit \
+  --idl vault.codama.json --account-data-lengths 41
 ```
+
+A parameter delta needs the **input layout**: the data length of every
+non-duplicate account the instruction receives, in order, and the index of the
+tracked account. qedsvm uses it to find the serialized instruction data and
+checks that the bytecode reads the argument from there. The layout is an
+explicit assumption. qedgen never infers it, and it is printed in the
+descriptor (`input_layout`). With `--idl`, qedgen also resolves the IDL
+account type, instruction, and argument names (Codama names are usually
+camelCase, and qedsvm matches them exactly) and the account index. It checks
+that the argument is a little-endian `u64`, that the lengths match the
+instruction's accounts, and that an explicit `--account-index` agrees with the
+IDL.
+Missing or ambiguous layout information fails before qedlift runs.
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
 | `--spec` | Path | required | Path to the `.qedspec` |
-| `--handler` | String | required | Handler to inspect (single-field `+= <int literal>` effect) |
+| `--handler` | String | required | Handler to inspect (single-field `+= <int literal \| parameter>` effect) |
 | `--account` | String | first account type / program name | Account name for the descriptor — use the IDL account name so qedsvm resolves offsets |
+| `--idl` | Path | - | Codama IDL. For a parameter delta, resolves the IDL instruction and argument names and the account index |
+| `--account-data-lengths` | u64 list | - | Comma-separated data length of every non-duplicate account the instruction receives, in order. Required for a parameter delta |
+| `--account-index` | usize | resolved from `--idl` by `--account` | Index of the tracked account among those accounts |
 
 ### `discharge`
 The one-command driver over the seam: build the descriptor from the `.qedspec`,
@@ -162,7 +184,7 @@ $QEDGEN discharge --spec vault.qedspec --handler increment \
 | Flag | Type | Default | Description |
 |---|---|---|---|
 | `--spec` | Path | required | Path to the `.qedspec` |
-| `--handler` | String | required | Handler to discharge (single-field `+= <int literal>` effect) |
+| `--handler` | String | required | Handler to discharge (single-field `+= <int literal \| parameter>` effect) |
 | `--account` | String | first account type / program name | Account name — use the IDL account name so qedlift resolves offsets |
 | `--so` | Path | required | Compiled program to discharge against |
 | `--idl` | Path | required | Codama IDL (`.json`) supplying the account shape (offsets) |
@@ -172,6 +194,8 @@ $QEDGEN discharge --spec vault.qedspec --handler increment \
 | `--transition` | flag | off | Whole-transition mode (qedsvm #40): lift every `<stem>_<label>.pcs` trace beside the `.so` into one module per path plus the bundle theorem (`<StemPascal>Transition.lean`). Reports one row per path; see below. Needs ≥ 2 traces |
 | `--lean-project` | Path | nearest Lake project at or above `--out-dir` | Lake project used to type-check the emitted modules. It must `require qedsvm` and be built. With neither this nor a Lake project above `--out-dir`, no Lean check runs and the verdict is at most `emitted` |
 | `--json` | bool | false | Machine-readable report. Same verdict as the human report |
+| `--account-data-lengths` | u64 list | - | Input layout for a parameter delta, as for `descriptor` |
+| `--account-index` | usize | resolved from `--idl` | Tracked account index for a parameter delta, as for `descriptor` |
 
 Whole-transition example:
 
@@ -184,7 +208,13 @@ $QEDGEN discharge --spec guarded.qedspec --handler credit \
 
 #### Whole-transition verdicts
 
-`--transition` reports one row per path and one overall verdict:
+`--transition` reports one row per path and one overall verdict. A parameter
+delta can run without an input layout here: without `--account-data-lengths`
+the descriptor keeps the unbound schema v2 form, which qedsvm's transition mode
+reads as a binder name. Nothing then ties the parameter to the instruction's
+serialized argument, so the verdict is at most `incomplete`
+(`parameter_unbound`). With the flags it is schema v3, as for single-path
+discharge, and can verify.
 
 - **Expected paths come from the spec.** The handler expects `success`, plus
   one rejection path per `requires ... else E`, labeled with the snake_case of
