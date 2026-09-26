@@ -244,20 +244,18 @@ fn transition_paths_are_checked_by_lean_and_reconciled_with_the_spec() {
         assert_eq!(row["expected"], true);
         assert_eq!(row["traced"], true);
     }
-    let verdict = report["verdict"].as_str().unwrap();
     // `credit` is a parameter delta and this toy program reads raw input, not a serialized
-    // Solana input, so no input layout applies: the parameter stays unbound and the verdict
-    // is at most `incomplete` (`no_path_outcomes` until QEDGen/qedsvm#70, then
-    // `parameter_unbound`).
-    match verdict {
-        "incomplete" => assert!(
-            matches!(
-                report["reason"].as_str(),
-                Some("no_path_outcomes" | "parameter_unbound")
-            ),
-            "{report:#}"
+    // Solana input, so no input layout applies: the parameter stays unbound, the verdict is
+    // `incomplete` (`no_path_outcomes` until QEDGen/qedsvm#70, then `parameter_unbound`), and
+    // no path counts as verified.
+    assert_eq!(report["verdict"], "incomplete", "{report:#}");
+    assert!(
+        matches!(
+            report["reason"].as_str(),
+            Some("no_path_outcomes" | "parameter_unbound")
         ),
-        "verified" => assert_eq!(report["all_expected_paths_verified"], true, "{report:#}"),
-        other => panic!("unexpected verdict {other}: {report:#}"),
-    }
+        "{report:#}"
+    );
+    assert_eq!(report["all_discovered_paths_verified"], false, "{report:#}");
+    assert_eq!(report["all_expected_paths_verified"], false, "{report:#}");
 }

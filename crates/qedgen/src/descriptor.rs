@@ -768,9 +768,14 @@ pub(crate) fn run_discharge_transition(parsed: &ParsedSpec, req: &DischargeReque
 
     // An unbound parameter (schema v2, no input layout) names the binder but was never tied to
     // the instruction's serialized argument, so the transition cannot be `verified` (or pass
-    // as `emitted`). The bound v3 form (`--account-data-lengths`) can verify.
+    // as `emitted`), and no path counts as verified. The bound v3 form
+    // (`--account-data-lengths`) can verify.
     let unbound_param =
         descriptor["op"].get("add_param").is_some() && descriptor.get("input_layout").is_none();
+    if unbound_param {
+        report.all_discovered_paths_verified = false;
+        report.all_expected_paths_verified = false;
+    }
     if unbound_param && matches!(report.verdict, Verdict::Verified | Verdict::Emitted) {
         report.verdict = Verdict::Incomplete;
         report.reason = Some("parameter_unbound".to_string());
