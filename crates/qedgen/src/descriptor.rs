@@ -37,6 +37,9 @@ use outcome::{classify_lift, parse_outcome, DischargeReport, LeanCheck, LiftVerd
 /// and the tracked account's index), supplied by the caller and printed in the descriptor.
 const SCHEMA_VERSION_CONST: u32 = 1;
 const SCHEMA_VERSION_PARAM: u32 = 3;
+/// `--transition` without an input layout: the parameter only names a binder in the bundle,
+/// not a bound instruction-data address, which is the form qedsvm's transition mode reads.
+const SCHEMA_VERSION_PARAM_TRANSITION: u32 = 2;
 
 /// `--account-data-lengths` / `--account-index`: the schema v3 input layout a parameter delta
 /// needs. Both are explicit assumptions, never inferred from source.
@@ -64,6 +67,7 @@ impl<'a> DescriptorInputs<'a> {
             idl,
             account_data_lengths: layout.account_data_lengths.clone(),
             account_index: layout.account_index,
+            transition: false,
         }
     }
 }
@@ -82,6 +86,9 @@ pub(crate) struct DescriptorInputs<'a> {
     /// Index of the tracked account among those accounts (`--account-index`). Resolved from
     /// the IDL when omitted.
     pub account_index: Option<usize>,
+    /// `--transition` mode: a parameter delta without layout flags keeps the unbound schema v2
+    /// form, because the transition bundle uses the parameter only as a binder name.
+    pub transition: bool,
 }
 
 /// Build the name-level descriptor for `handler` in `parsed`.
@@ -192,6 +199,16 @@ fn parameter_descriptor(
     account: &str,
     inputs: &DescriptorInputs,
 ) -> Result<serde_json::Value> {
+    if inputs.transition && inputs.account_data_lengths.is_none() && inputs.account_index.is_none()
+    {
+        return Ok(serde_json::json!({
+            "schema_version": SCHEMA_VERSION_PARAM_TRANSITION,
+            "account": account,
+            "handler": handler,
+            "mutated": field,
+            "op": { "add_param": param },
+        }));
+    }
     let lengths = inputs.account_data_lengths.clone().ok_or_else(|| {
         anyhow!(
             "handler `{handler}` credits `{field}` by the parameter `{param}`, which needs a \
@@ -700,7 +717,10 @@ pub(crate) fn run_discharge_transition(parsed: &ParsedSpec, req: &DischargeReque
     let descriptor = build_descriptor(
         parsed,
         handler,
-        &DescriptorInputs::new(req.account.clone(), idl_json.as_ref(), &req.layout),
+        &DescriptorInputs {
+            transition: true,
+            ..DescriptorInputs::new(req.account.clone(), idl_json.as_ref(), &req.layout)
+        },
     )?;
     let spec_handler = parsed
         .handlers
@@ -1014,6 +1034,7 @@ mod tests {
             idl,
             account_data_lengths: lengths,
             account_index: index,
+            transition: false,
         }
     }
 
@@ -1181,6 +1202,43 @@ mod tests {
         )
         .expect_err("non-u64 argument");
         assert!(err.to_string().contains("not a little-endian u64"), "{err}");
+    }
+
+    /// `--transition` keeps the unbound v2 parameter form without layout flags (the bundle uses
+    /// the parameter as a binder only), and emits v3 when flags are given.
+    #[test]
+    fn transition_parameter_delta_is_v2_without_layout() {
+        let parsed = parse("tests/fixtures/descriptor/vault.qedspec");
+        let d = build_descriptor(
+            &parsed,
+            "deposit",
+            &DescriptorInputs {
+                transition: true,
+                ..param_inputs(None, None, None)
+            },
+        )
+        .expect("transition without layout");
+        assert_eq!(
+            d,
+            serde_json::json!({
+                "schema_version": 2,
+                "account": "vault",
+                "handler": "deposit",
+                "mutated": "total",
+                "op": { "add_param": "amount" }
+            })
+        );
+        let idl = vault_idl();
+        let d = build_descriptor(
+            &parsed,
+            "deposit",
+            &DescriptorInputs {
+                transition: true,
+                ..param_inputs(Some(&idl), Some(vec![41]), None)
+            },
+        )
+        .expect("transition with layout");
+        assert_eq!(d["schema_version"], 3);
     }
 
     /// Layout flags on a constant delta are ignored, and the descriptor stays byte-compatible.
