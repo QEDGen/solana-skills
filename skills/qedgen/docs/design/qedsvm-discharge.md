@@ -412,7 +412,8 @@ Current pins and coverage (verify before acting):
 - **qedsvm @ v0.6.0.** qedgen now pins `v0.6.0` (`lean_solana/lakefile.lean:17`,
   bumped in PR #129 — see §17). Descriptor seam merged in qedsvm#46; a
   post-v0.6.0 commit (`d2cc646`) widened it to *arbitrary positive literal*
-  deltas. Still literal-only on the consumer side.
+  deltas. Still literal-only on the consumer side. **Superseded 2026-09-29:**
+  qedgen now pins `v0.13.0` (see §17), which also ships the schema v3 consumer.
 - **qedgen producer** (`crates/qedgen/src/descriptor.rs::build_descriptor:29`):
   `add_const` (schema v1) plus **`add_param` (schema v2)** for parameter deltas
   — landed via PR #127 (`c53b56d` + rustfmt `4e7fa64`), single-field, validated
@@ -529,8 +530,14 @@ v3 descriptor.
 
 ## §17 — Shared prerequisite: bump the qedsvm pin ✅ done (PR #129)
 
-`lean_solana/lakefile.lean:17` now pins `qedsvm @ v0.6.0` (bumped from `v0.4.0`
-in PR #129; `lean_solana_mathlib` re-resolved to match). Every Mechanical
+**Current pin (2026-09-29):** `lean_solana/lakefile.lean:17` pins
+`qedsvm @ v0.13.0`, bumped from `v0.10.1` in PR #438 with every example
+manifest re-resolved. v0.13.0 is the first release with the schema v3
+descriptor consumer (§16) and qedlift's `transition outcome` line
+(QEDGen/qedsvm#70). The rest of this section records the original bump.
+
+PR #129 pinned `qedsvm @ v0.6.0` (bumped from `v0.4.0`; `lean_solana_mathlib`
+re-resolved to match). Every Mechanical
 refinement above (transfer/counter/vault/descriptor seam) lives in v0.5.0–v0.6.0,
 so the Lean consumer side can now *see* the descriptor seam. The bump was
 zero-churn (v0.5.0/v0.6.0 are additive over the narrow `SVM.Pubkey`/`SVM.SBPF`
@@ -657,7 +664,8 @@ module; add the lakefile-roots wiring deferred from A2a.
   (plan), `:36-37` (`binary_hash`), `:54-64` (transfer axioms).
 - Bridge stubs: `lean_solana/QEDGen/Solana/Bridge.lean:269-283`
   (`.refines`/`.rejects` `sorry`).
-- qedsvm pin: `lean_solana/lakefile.lean:17` (`qedsvm @ v0.6.0` since PR #129).
+- qedsvm pin: `lean_solana/lakefile.lean:17` (`qedsvm @ v0.13.0` since PR #438;
+  first bumped to `v0.6.0` in PR #129).
 - qedsvm (current as of 2026-06-23): `docs/COVERAGE.md` (coverage tiers /
   control-flow "Unsupported" row); issues #40 (whole-transition lift, open),
   #25 (delete `AsmRefinesToken*`, open), #24 (discharge route, closed), #46
