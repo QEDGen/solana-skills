@@ -11,11 +11,10 @@
 > deploying or upgrading programs older than sBPF v3, so qedgen defaults to
 > v3 everywhere. V0 still works but is deprecated: choosing it prints a
 > warning, and qedgen v3.0 removes it. `sbpf build` builds v3 by default;
-> `cargo build-sbf` still defaults to V0, so pass `--arch v3`. One gap
-> remains: the Lean proofs use qedsvm's V0 semantics until qedsvm adds v3
-> (#429). They cover the instructions V0 and v3 share, and `asm2lean`
-> rejects the v3-only JMP32 instructions. `verify --asm` prints a note about
-> this for v3 modules.
+> `cargo build-sbf` still defaults to V0, so pass `--arch v3`. qedsvm
+> (v0.13.0 and later) models v3 execution, and Mollusk differential tests
+> check it. `asm2lean` lifts the v3 JMP32 class (see below). It does not lift
+> internal calls, `callx`, or the endian instructions.
 >
 > **Experimental-intrinsic escape hatch.** The sBPF support library
 > models a fixed set of syscalls. Programs compiled with experimental
@@ -59,10 +58,31 @@ Programs that `call sol_log_` on a rodata string need `rt.containsRange RODATA_<
 | `lddw r0, 1` | `.lddw .r0 1` | Load 64-bit immediate |
 | `jge r3, r4, label` | `.jge .r3 (.reg .r4) <abs_idx>` | Branch if r3 >= r4 |
 | `jne r2, 3, label` | `.jne .r2 (.imm 3) <abs_idx>` | Branch if r2 != 3 |
+| `jne32 r2, 3, label` | `.jmp32 .ne .r2 (.imm 3) <abs_idx>` | Branch if the low 32 bits of r2 != 3 (v3 only) |
 | `add64 r2, 8` | `.add64 .r2 (.imm 8)` | r2 = r2 + 8 (wrapping) |
 | `mov64 r0, 1` | `.mov64 .r0 (.imm 1)` | r0 = 1 |
 | `call sol_log_` | `.call .sol_log_` | Invoke syscall |
 | `exit` | `.exit` | Exit with code in r0 |
+
+**JMP32 (sBPF v3).** `j{eq,ne,gt,ge,lt,le,sgt,sge,slt,sle,set}32` compare only
+the low 32 bits of both operands; the signed forms read them as `i32`. qedsvm
+has one constructor for the class, `.jmp32 cond dst src target`, and the
+branch test is `jump32Holds cond lhs rhs`. `asm2lean` rejects these mnemonics
+under `--sbpf-version v0`, because V0 has no 32-bit jumps.
+
+Bind each loaded value to a variable (see the theorem statement pattern
+below), prove the branch outcome as a `jump32Holds` fact, and `wp_exec` picks
+the branch:
+
+```lean
+    (h_ld_tag : readU64 mem (inputAddr + 96) = tag)
+    (h_tag : tag % U32_MODULUS ≠ TAG) : ... := by
+  have h_jne : jump32Holds .ne tag TAG = true := by
+    simp only [jump32Holds, TAG, U32_MODULUS] at h_tag ⊢; simp; omega
+  wp_exec [progAt] [U32_MODULUS]
+```
+
+A worked example is `crates/qedgen/tests/fixtures/sbpf-v3-jmp32/`.
 
 ## SBPF support library API
 
@@ -292,6 +312,12 @@ theorem rejects_insufficient_lamports
   have h_not_ge : ¬(senderLamports >= amount) := by omega
   wp_exec [progAt, progAt_0, progAt_1] [ea_0, ea_88]
 ```
+
+**Critical**: Bind every value a branch compares to a variable
+(`readU64 mem addr = x`), as above. If a raw `readU64 mem addr` stays in a
+branch condition, the kernel check of the `wp_exec` proof may not finish
+(one did not finish in 50 minutes).
+This applies to 64-bit and JMP32 jumps alike.
 
 **Critical**: Use `readU8` for byte loads (`ldxb`) and `readU64` for dword loads (`ldxdw`). Width must match assembly.
 

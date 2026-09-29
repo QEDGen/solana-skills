@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Builds every bundled `examples/*/formal_verification/` Lean project.
+# Builds every bundled `examples/*/formal_verification/` Lean project, plus
+# the Lean fixtures under `crates/qedgen/tests/fixtures/*/formal_verification/`.
 # Run: bash scripts/check-lake-build.sh
 # Exit code: 0 = all built clean, 1 = at least one build failed.
 #
@@ -62,7 +63,8 @@ while IFS= read -r -d '' lakefile; do
         continue
     fi
     projects+=("$project_dir")
-done < <(find examples -maxdepth 4 -name 'lakefile.lean' -print0 | sort -z)
+done < <( { find examples -maxdepth 4 -name 'lakefile.lean' -print0
+            find crates/qedgen/tests/fixtures -maxdepth 3 -path '*/formal_verification/lakefile.lean' -print0; } | sort -z)
 
 if [[ ${#projects[@]} -eq 0 ]]; then
     echo "No lake projects found under examples/." >&2

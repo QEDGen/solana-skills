@@ -340,8 +340,7 @@ pragma sbpf_version = v3
 
 sBPF v3 is the default target: SIMD-0500 blocks deploying or upgrading older
 formats. V0 still works but is deprecated and prints a warning. The Lean
-proofs use qedsvm's V0 semantics until qedsvm adds v3, and they cover the
-instructions both versions share.
+proofs use qedsvm's v3 semantics, including the v3 JMP32 instructions.
 
 ```bash
 # Transpile sBPF assembly to Lean 4

@@ -674,6 +674,7 @@ fn emit_insn(
     equates: &HashMap<String, i64>,
     labels: &HashMap<String, usize>,
     rodata: &HashMap<String, String>,
+    version: SbpfVersion,
 ) -> Result<String> {
     let mn = insn.mnemonic.as_str();
     let ops = &insn.operands;
@@ -773,6 +774,27 @@ fn emit_insn(
         let src = lean_src(&ops[1], equates, labels, rodata);
         let target = lean_jump_target(&ops[2], equates, labels);
         return Ok(format!(".{} {} {} {}", mn, dst, src, target));
+    }
+
+    // sBPF v3 JMP32 class: j{eq,ne,...}32 compares the low 32 bits. qedsvm
+    // models all eleven conditions as one constructor, `.jmp32 cond dst src target`.
+    if let Some(cond) = mn.strip_suffix("32").filter(|base| jump_ops.contains(base)) {
+        if version == SbpfVersion::V0 {
+            bail!(
+                "line {}: {} is an sBPF v3 instruction (JMP32); V0 has no 32-bit jumps. \
+                 Use `--sbpf-version v3` or `pragma sbpf_version = v3`.",
+                insn.line_no,
+                mn
+            );
+        }
+        let dst = match &ops[0] {
+            Operand::Reg(r) => lean_reg(r),
+            _ => bail!("line {}: {} dst must be register", insn.line_no, mn),
+        };
+        let src = lean_src(&ops[1], equates, labels, rodata);
+        let target = lean_jump_target(&ops[2], equates, labels);
+        // `jeq` -> `.eq`, `jsle` -> `.sle`: the condition is the mnemonic minus `j`.
+        return Ok(format!(".jmp32 .{} {} {} {}", &cond[1..], dst, src, target));
     }
 
     // Unconditional jump
@@ -1141,7 +1163,7 @@ pub fn generate(
     let rendered_insns: Vec<String> = prog
         .instructions
         .iter()
-        .map(|insn| emit_insn(insn, &equates_map, &prog.labels, &rodata_names))
+        .map(|insn| emit_insn(insn, &equates_map, &prog.labels, &rodata_names, version))
         .collect::<Result<_>>()?;
 
     // For large programs (>64 instructions), emit a function-based lookup
@@ -1455,6 +1477,57 @@ entrypoint:
             assert!(lean.contains(&line), "missing `{line}`:\n{lean}");
         }
         assert!(lean.contains("sBPF v3"), "{lean}");
+    }
+
+    const JMP32_SRC: &str = r#"
+.globl entrypoint
+entrypoint:
+    ldxb r2, [r1 + 96]
+    jeq32 r2, 1, done
+    jsle32 r2, r3, done
+    jset32 r2, 0x80, done
+    mov64 r0, 1
+done:
+    exit
+"#;
+
+    /// JMP32 mnemonics lower to qedsvm's single `.jmp32 cond` constructor,
+    /// for both immediate and register sources.
+    #[test]
+    fn jmp32_lowers_to_qedsvm_constructor() {
+        let lean = generate(JMP32_SRC, "T", "t.s", SbpfVersion::V3).unwrap();
+        assert!(lean.contains(".jmp32 .eq .r2 (.imm 1) 5"), "{}", lean);
+        assert!(lean.contains(".jmp32 .sle .r2 (.reg .r3) 5"), "{}", lean);
+        assert!(lean.contains(".jmp32 .set .r2 (.imm 128) 5"), "{}", lean);
+    }
+
+    /// V0 has no JMP32 class, so lifting one under V0 is an error, not a
+    /// model of an instruction the V0 VM would reject.
+    #[test]
+    fn jmp32_is_rejected_under_v0() {
+        let err = generate(JMP32_SRC, "T", "t.s", SbpfVersion::V0).unwrap_err();
+        assert!(
+            err.to_string().contains("jeq32 is an sBPF v3 instruction"),
+            "{err}"
+        );
+    }
+
+    /// The committed JMP32 fixture lift (built by `check-lake-build.sh`) is
+    /// exactly what `asm2lean` emits today.
+    #[test]
+    fn jmp32_fixture_lift_is_current() {
+        let lean = generate(
+            include_str!("../../tests/fixtures/sbpf-v3-jmp32/src/guard/guard.s"),
+            "GuardProg",
+            "guard.s",
+            SbpfVersion::V3,
+        )
+        .unwrap();
+        assert_eq!(
+            lean,
+            include_str!("../../tests/fixtures/sbpf-v3-jmp32/formal_verification/Program.lean"),
+            "regenerate with the command in tests/fixtures/sbpf-v3-jmp32/README.md"
+        );
     }
 
     /// The same source moves only the `.rodata` numerals between versions.
