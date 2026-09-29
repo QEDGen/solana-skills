@@ -766,13 +766,26 @@ fn emit_insn(
     let jump_ops = [
         "jeq", "jne", "jgt", "jge", "jlt", "jle", "jsgt", "jsge", "jslt", "jsle", "jset",
     ];
-    if jump_ops.contains(&mn) {
+    // Both jump classes take `dst, src, target`.
+    let jump_operands = || -> Result<(String, String, String)> {
+        if ops.len() != 3 {
+            bail!(
+                "line {}: {} takes 3 operands (dst, src, target), found {}",
+                insn.line_no,
+                mn,
+                ops.len()
+            );
+        }
         let dst = match &ops[0] {
             Operand::Reg(r) => lean_reg(r),
             _ => bail!("line {}: {} dst must be register", insn.line_no, mn),
         };
         let src = lean_src(&ops[1], equates, labels, rodata);
         let target = lean_jump_target(&ops[2], equates, labels);
+        Ok((dst, src, target))
+    };
+    if jump_ops.contains(&mn) {
+        let (dst, src, target) = jump_operands()?;
         return Ok(format!(".{} {} {} {}", mn, dst, src, target));
     }
 
@@ -787,12 +800,7 @@ fn emit_insn(
                 mn
             );
         }
-        let dst = match &ops[0] {
-            Operand::Reg(r) => lean_reg(r),
-            _ => bail!("line {}: {} dst must be register", insn.line_no, mn),
-        };
-        let src = lean_src(&ops[1], equates, labels, rodata);
-        let target = lean_jump_target(&ops[2], equates, labels);
+        let (dst, src, target) = jump_operands()?;
         // `jeq` -> `.eq`, `jsle` -> `.sle`: the condition is the mnemonic minus `j`.
         return Ok(format!(".jmp32 .{} {} {} {}", &cond[1..], dst, src, target));
     }
@@ -1510,6 +1518,20 @@ done:
             err.to_string().contains("jeq32 is an sBPF v3 instruction"),
             "{err}"
         );
+    }
+
+    /// A jump with a missing operand is a line-numbered error, not a panic.
+    #[test]
+    fn short_jump_is_an_error() {
+        for mn in ["jeq", "jeq32"] {
+            let src = format!("entrypoint:\n    {mn} r2, 1\n    exit\n");
+            let err = generate(&src, "T", "t.s", SbpfVersion::V3).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains(&format!("line 2: {mn} takes 3 operands")),
+                "{err}"
+            );
+        }
     }
 
     /// The committed JMP32 fixture lift (built by `check-lake-build.sh`) is
