@@ -114,7 +114,7 @@ Hands a name-level refinement obligation to qedsvm's `qedlift`, which proves it
 against the decoded program bytes (field offsets resolved from the IDL on the
 qedsvm side). Today's scope is a single-field increment handler:
 `field += <int literal>` (descriptor schema v1) or `field += <parameter>` (schema
-v3, with an input layout, needs a qedsvm build newer than v0.12.0). The bundled CPI-callee `ensures` and the sBPF bridge
+v3, with an input layout, needs qedlift from qedsvm v0.13.0 or later). The bundled CPI-callee `ensures` and the sBPF bridge
 are otherwise axiomatized against a `binary_hash` pin. See
 [`docs/design/qedsvm-discharge.md`](../../docs/design/qedsvm-discharge.md).
 

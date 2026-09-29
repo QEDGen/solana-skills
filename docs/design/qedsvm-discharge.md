@@ -412,7 +412,8 @@ Current pins and coverage (verify before acting):
 - **qedsvm @ v0.6.0.** qedgen now pins `v0.6.0` (`lean_solana/lakefile.lean:17`,
   bumped in PR #129 — see §17). Descriptor seam merged in qedsvm#46; a
   post-v0.6.0 commit (`d2cc646`) widened it to *arbitrary positive literal*
-  deltas. Still literal-only on the consumer side.
+  deltas. Still literal-only on the consumer side. **Superseded 2026-09-29:**
+  qedgen now pins `v0.13.0` (see §17), which also ships the schema v3 consumer.
 - **qedgen producer** (`crates/qedgen/src/descriptor.rs::build_descriptor:29`):
   `add_const` (schema v1) plus **`add_param` (schema v2)** for parameter deltas
   — landed via PR #127 (`c53b56d` + rustfmt `4e7fa64`), single-field, validated
@@ -516,20 +517,27 @@ The descriptor is versioned and fail-closed (`schema_version` ↔ qedsvm's
 |---|---|---|
 | `add_const` single-field (v1) | ✅ shipped | ✅ qedsvm#46 |
 | `add_param` single-field (v2) | superseded by v3 | parsed, but `unsupported / missing_parameter_binding` |
-| `add_param` + `input_layout` (v3) | ✅ #404 | ✅ qedsvm `main` (`DESCRIPTOR_SCHEMA_MAX = 3`); not in v0.12.0 |
+| `add_param` + `input_layout` (v3) | ✅ #404 | ✅ qedsvm v0.13.0 (`DESCRIPTOR_SCHEMA_MAX = 3`) |
 | multi-field (transfer) | ❌ §15 gate 3 | ❌ §15 gate 1 |
 
 qedsvm used schema v3 for the parameter binding (`handler` + `input_layout`), so
 the multi-field shape this section once called "v3" will need a later version.
 
 **Action:** ship the v3 producer (#404) in the same qedgen release that bumps
-the qedsvm pin to the first release with `DESCRIPTOR_SCHEMA_MAX = 3`. Before that
-release, a qedlift at v0.12.0 refuses a v3 descriptor.
+the qedsvm pin to the first release with `DESCRIPTOR_SCHEMA_MAX = 3`. That
+release is qedsvm v0.13.0, now pinned; a qedlift at v0.12.0 or earlier refuses a
+v3 descriptor.
 
 ## §17 — Shared prerequisite: bump the qedsvm pin ✅ done (PR #129)
 
-`lean_solana/lakefile.lean:17` now pins `qedsvm @ v0.6.0` (bumped from `v0.4.0`
-in PR #129; `lean_solana_mathlib` re-resolved to match). Every Mechanical
+**Current pin (2026-09-29):** `lean_solana/lakefile.lean:17` pins
+`qedsvm @ v0.13.0`, bumped from `v0.10.1` in PR #438 with every example
+manifest re-resolved. v0.13.0 is the first release with the schema v3
+descriptor consumer (§16) and qedlift's `transition outcome` line
+(QEDGen/qedsvm#70). The rest of this section records the original bump.
+
+PR #129 pinned `qedsvm @ v0.6.0` (bumped from `v0.4.0`; `lean_solana_mathlib`
+re-resolved to match). Every Mechanical
 refinement above (transfer/counter/vault/descriptor seam) lives in v0.5.0–v0.6.0,
 so the Lean consumer side can now *see* the descriptor seam. The bump was
 zero-churn (v0.5.0/v0.6.0 are additive over the narrow `SVM.Pubkey`/`SVM.SBPF`
@@ -539,8 +547,8 @@ surface; toolchain unchanged at `v4.30.0`).
 
 1. ✅ **Pin bump** v0.4.0 → v0.6.0 (§17, PR #129) — prerequisite for everything.
 2. ✅ **qedsvm parameter consumer**: landed on qedsvm `main` as schema v3 with an
-   `input_layout` (not yet released). The qedgen producer moved to v3 in #404;
-   ship both together (§16).
+   `input_layout`, released in qedsvm v0.13.0 (now pinned). The qedgen producer
+   moved to v3 in #404; ship both together (§16).
 3. **Slice A** (§14): ✅ A1 ELF cache (PR #130) → A2 wire-into-project → A3 gate
    → A4 report. First honest byte-level discharge. Starting with a `+= k` op
    while step 2 is pending.
@@ -656,7 +664,8 @@ module; add the lakefile-roots wiring deferred from A2a.
   (plan), `:36-37` (`binary_hash`), `:54-64` (transfer axioms).
 - Bridge stubs: `lean_solana/QEDGen/Solana/Bridge.lean:269-283`
   (`.refines`/`.rejects` `sorry`).
-- qedsvm pin: `lean_solana/lakefile.lean:17` (`qedsvm @ v0.6.0` since PR #129).
+- qedsvm pin: `lean_solana/lakefile.lean:17` (`qedsvm @ v0.13.0` since PR #438;
+  first bumped to `v0.6.0` in PR #129).
 - qedsvm (current as of 2026-06-23): `docs/COVERAGE.md` (coverage tiers /
   control-flow "Unsupported" row); issues #40 (whole-transition lift, open),
   #25 (delete `AsmRefinesToken*`, open), #24 (discharge route, closed), #46
