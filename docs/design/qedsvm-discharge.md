@@ -516,15 +516,16 @@ The descriptor is versioned and fail-closed (`schema_version` ↔ qedsvm's
 |---|---|---|
 | `add_const` single-field (v1) | ✅ shipped | ✅ qedsvm#46 |
 | `add_param` single-field (v2) | superseded by v3 | parsed, but `unsupported / missing_parameter_binding` |
-| `add_param` + `input_layout` (v3) | ✅ #404 | ✅ qedsvm `main` (`DESCRIPTOR_SCHEMA_MAX = 3`); not in v0.12.0 |
+| `add_param` + `input_layout` (v3) | ✅ #404 | ✅ qedsvm v0.13.0 (`DESCRIPTOR_SCHEMA_MAX = 3`) |
 | multi-field (transfer) | ❌ §15 gate 3 | ❌ §15 gate 1 |
 
 qedsvm used schema v3 for the parameter binding (`handler` + `input_layout`), so
 the multi-field shape this section once called "v3" will need a later version.
 
 **Action:** ship the v3 producer (#404) in the same qedgen release that bumps
-the qedsvm pin to the first release with `DESCRIPTOR_SCHEMA_MAX = 3`. Before that
-release, a qedlift at v0.12.0 refuses a v3 descriptor.
+the qedsvm pin to the first release with `DESCRIPTOR_SCHEMA_MAX = 3`. That
+release is qedsvm v0.13.0, now pinned; a qedlift at v0.12.0 or earlier refuses a
+v3 descriptor.
 
 ## §17 — Shared prerequisite: bump the qedsvm pin ✅ done (PR #129)
 
@@ -539,8 +540,8 @@ surface; toolchain unchanged at `v4.30.0`).
 
 1. ✅ **Pin bump** v0.4.0 → v0.6.0 (§17, PR #129) — prerequisite for everything.
 2. ✅ **qedsvm parameter consumer**: landed on qedsvm `main` as schema v3 with an
-   `input_layout` (not yet released). The qedgen producer moved to v3 in #404;
-   ship both together (§16).
+   `input_layout`, released in qedsvm v0.13.0 (now pinned). The qedgen producer
+   moved to v3 in #404; ship both together (§16).
 3. **Slice A** (§14): ✅ A1 ELF cache (PR #130) → A2 wire-into-project → A3 gate
    → A4 report. First honest byte-level discharge. Starting with a `+= k` op
    while step 2 is pending.

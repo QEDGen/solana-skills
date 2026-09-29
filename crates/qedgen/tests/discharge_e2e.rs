@@ -17,10 +17,8 @@
 //!   cargo test -p qedgen-solana-skills --test discharge_e2e -- --ignored
 //! ```
 //!
-//! qedlift writes the `.so` path into a Lean block comment, and Lean block
-//! comments nest, so a path containing `/-` breaks the emitted module. The
-//! fixtures are copied into a fresh temp dir first; keep the qedsvm checkout
-//! itself on a path without `/-` too.
+//! The qedsvm checkout must be at the pinned tag (v0.13.0) or later: the
+//! transition test expects qedlift's `transition outcome` line (QEDGen/qedsvm#70).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -180,9 +178,8 @@ fn wrong_account_index_fails_before_qedlift() {
 /// (`amount == 0` returns 1). The spec's `requires amount > 0 else ZeroAmount` expects a
 /// `zero_amount` trace, so the fixture's `abort` trace is copied to that label.
 ///
-/// Lean must accept every emitted module. qedlift prints per-path kinds only once
-/// QEDGen/qedsvm#70 lands; until then the verdict is capped at `incomplete / no_path_outcomes`.
-/// A qedlift with the outcome line verifies both paths.
+/// Lean must accept every emitted module, and qedlift reports each path's kind in its
+/// `transition outcome` line (QEDGen/qedsvm#70).
 #[test]
 #[ignore = "needs a built qedsvm checkout and qedlift (see module docs)"]
 fn transition_paths_are_checked_by_lean_and_reconciled_with_the_spec() {
@@ -246,16 +243,9 @@ fn transition_paths_are_checked_by_lean_and_reconciled_with_the_spec() {
     }
     // `credit` is a parameter delta and this toy program reads raw input, not a serialized
     // Solana input, so no input layout applies: the parameter stays unbound, the verdict is
-    // `incomplete` (`no_path_outcomes` until QEDGen/qedsvm#70, then `parameter_unbound`), and
-    // no path counts as verified.
+    // `incomplete / parameter_unbound`, and no path counts as verified.
     assert_eq!(report["verdict"], "incomplete", "{report:#}");
-    assert!(
-        matches!(
-            report["reason"].as_str(),
-            Some("no_path_outcomes" | "parameter_unbound")
-        ),
-        "{report:#}"
-    );
+    assert_eq!(report["reason"], "parameter_unbound", "{report:#}");
     assert_eq!(report["all_discovered_paths_verified"], false, "{report:#}");
     assert_eq!(report["all_expected_paths_verified"], false, "{report:#}");
 }
