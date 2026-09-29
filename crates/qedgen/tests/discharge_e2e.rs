@@ -148,6 +148,32 @@ fn discharge_verdicts_match_qedlift_and_lean() {
     );
 }
 
+/// The same checks on an sBPF v3 program (#429): qedsvm's `vault.so`, assembled as v3.
+/// qedlift decodes it with the v3 decoder, and Lean checks the lift.
+#[test]
+#[ignore = "needs a built qedsvm checkout and qedlift (see module docs)"]
+fn discharge_verifies_an_sbpf_v3_program() {
+    let env = env();
+    let dir = env.work.path();
+    let so = "vault_v3.so";
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sbpf-v3-discharge");
+    std::fs::copy(fixture.join(so), dir.join(so)).unwrap();
+    assert_eq!(
+        std::fs::read(dir.join(so)).unwrap()[48],
+        3,
+        "fixture is not sBPF v3"
+    );
+    let valid = spec(dir, "valid.qedspec", "total += 1");
+    let wrong_delta = spec(dir, "wrong_delta.qedspec", "total += 2");
+
+    let (ok, verdict, _) = discharge(&env, &valid, "increment", so, true, &[]);
+    assert!(ok && verdict == "verified", "v3 discharge: {verdict}");
+
+    let (ok, verdict, reason) = discharge(&env, &wrong_delta, "increment", so, true, &[]);
+    assert!(!ok && verdict == "rejected", "v3 wrong delta: {verdict}");
+    assert_eq!(reason.as_deref(), Some("mutation_mismatch"));
+}
+
 /// A wrong account index fails inside qedgen, before qedlift runs: the IDL puts the tracked
 /// account at index 0, so an explicit index 1 contradicts it.
 #[test]

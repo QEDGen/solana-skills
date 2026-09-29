@@ -1,7 +1,8 @@
 name: Lake build (Lean side)
 
 # Runs `bash scripts/check-lake-build.sh --strict` over every bundled
-# `examples/*/formal_verification/` project. Heavier than the Rust-side
+# `examples/*/formal_verification/` project and every Lean fixture under
+# `crates/qedgen/tests/fixtures/*/formal_verification/`. Heavier than the Rust-side
 # gates because it provisions elan + Mathlib (cache-miss can take 15–45
 # min). Temporarily manual-only: routine pushes rely on Rust-side generation,
 # snapshot, and drift gates. Run this workflow before a release or when changing
@@ -56,8 +57,10 @@ jobs:
         id: lake-cache
         uses: actions/cache/restore@v4
         with:
-          path: examples/**/formal_verification/.lake
-          key: ${{ runner.os }}-lake-${{ hashFiles('examples/**/lakefile.lean', 'examples/**/lake-manifest.json', '**/lean-toolchain') }}
+          path: |
+            examples/**/formal_verification/.lake
+            crates/qedgen/tests/fixtures/*/formal_verification/.lake
+          key: ${{ runner.os }}-lake-${{ hashFiles('examples/**/lakefile.lean', 'examples/**/lake-manifest.json', 'crates/qedgen/tests/fixtures/*/formal_verification/lakefile.lean', 'crates/qedgen/tests/fixtures/*/formal_verification/lake-manifest.json', '**/lean-toolchain') }}
           restore-keys: |
             ${{ runner.os }}-lake-
 
@@ -120,7 +123,7 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s globstar
-          for lakefile in examples/**/formal_verification/lakefile.lean; do
+          for lakefile in examples/**/formal_verification/lakefile.lean crates/qedgen/tests/fixtures/*/formal_verification/lakefile.lean; do
             dir="$(dirname "$lakefile")"
             if [ ! -d "$dir/.lake" ] || [ ! -f "$dir/lake-manifest.json" ]; then
               echo "==> lake update in $dir"
@@ -144,5 +147,7 @@ jobs:
         if: always() && steps.lake-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          path: examples/**/formal_verification/.lake
+          path: |
+            examples/**/formal_verification/.lake
+            crates/qedgen/tests/fixtures/*/formal_verification/.lake
           key: ${{ steps.lake-cache.outputs.cache-primary-key }}

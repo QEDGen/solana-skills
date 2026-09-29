@@ -259,8 +259,9 @@ design — generated Rust harnesses are meaningless for assembly
 
 sBPF v3 is the default target (SIMD-0500 blocks deploying or upgrading older
 formats). `asm2lean` lays out `.rodata` for v3; V0 is deprecated and warns.
-The Lean proofs use qedsvm's V0 semantics until qedsvm adds v3 (#429); they
-cover the instructions both versions share.
+The Lean proofs use qedsvm's v3 semantics (qedsvm v0.13.0 and later).
+`asm2lean` lifts the v3 JMP32 class, and `qedgen discharge` verifies v3
+programs (`tests/discharge_e2e.rs`).
 
 ⁷ A generated Pinocchio scaffold typechecks against `pinocchio` 0.8 /
 `pinocchio-pubkey` 0.3 / `zeropod` 0.1 — checked by hand with `verify
