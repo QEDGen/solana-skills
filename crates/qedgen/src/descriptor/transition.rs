@@ -896,7 +896,7 @@ mod tests {
         std::fs::write(generated.join("VaultIncrementRefinement.lean"), "other").unwrap();
 
         let second = vec![write("PSuccessLifted.lean"), write("PTransition.lean")];
-        publish_modules(&generated, "PTransition", &second).unwrap();
+        publish_again(&generated, "PTransition", &second).unwrap();
         assert!(generated.join("PSuccessLifted.lean").exists());
         assert!(
             !generated.join("POldLifted.lean").exists(),
@@ -910,6 +910,25 @@ mod tests {
             no_leftovers(&generated),
             "no staging dir or lock left behind"
         );
+    }
+
+    /// `publish_modules` for a bundle this test published or locked before. A `flock` belongs
+    /// to the open file, and a child process that another test thread spawns holds a copy of
+    /// every open file until it calls `exec`. So for a moment after this test drops its lock,
+    /// the lock can still look held (#440). Retry on that error only, for at most 5 seconds.
+    fn publish_again(generated: &Path, bundle: &str, modules: &[PathBuf]) -> Result<Vec<PathBuf>> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match publish_modules(generated, bundle, modules) {
+                Err(e)
+                    if e.to_string().contains("another discharge")
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                result => return result,
+            }
+        }
     }
 
     /// No staging dir is left in `generated`. (The lock file stays; only the lock matters.)
@@ -938,7 +957,7 @@ mod tests {
             .expect_err("lock is held");
         assert!(err.to_string().contains("another discharge"), "{err}");
         drop(held);
-        publish_modules(&generated, "PTransition", std::slice::from_ref(&module))
+        publish_again(&generated, "PTransition", std::slice::from_ref(&module))
             .expect("lock released");
         assert!(no_leftovers(&generated));
     }
