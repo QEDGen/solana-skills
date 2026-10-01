@@ -41,7 +41,7 @@ end EffectiveAddr
 
 /-! ## toU64 bridge lemmas (lddw constants) -/
 
-@[simp] theorem bridge_RODATA_e : toU64 (↑RODATA_e : Int) = RODATA_e := by native_decide
+@[simp] theorem bridge_RODATA_e : toU64 (↑RODATA_e : Int) = RODATA_e := by rfl
 
 /-! ## Program -/
 
@@ -71,14 +71,14 @@ end EffectiveAddr
 
 /-! ## Instruction fetch cache -/
 
-@[simp] theorem insn_0 : progAt 0 = some (.ldx .dword .r3 .r1 MINIMUM_BALANCE) := by native_decide
-@[simp] theorem insn_1 : progAt 1 = some (.ldx .dword .r4 .r1 TOKEN_ACCOUNT_BALANCE) := by native_decide
-@[simp] theorem insn_2 : progAt 2 = some (.jge .r3 (.reg .r4) 4) := by native_decide
-@[simp] theorem insn_3 : progAt 3 = some (.exit) := by native_decide
-@[simp] theorem insn_4 : progAt 4 = some (.lddw .r1 RODATA_e) := by native_decide
-@[simp] theorem insn_5 : progAt 5 = some (.lddw .r2 17) := by native_decide
-@[simp] theorem insn_6 : progAt 6 = some (.call .sol_log_) := by native_decide
-@[simp] theorem insn_7 : progAt 7 = some (.lddw .r0 1) := by native_decide
-@[simp] theorem insn_8 : progAt 8 = some (.exit) := by native_decide
+@[simp] theorem insn_0 : progAt 0 = some (.ldx .dword .r3 .r1 MINIMUM_BALANCE) := by rfl
+@[simp] theorem insn_1 : progAt 1 = some (.ldx .dword .r4 .r1 TOKEN_ACCOUNT_BALANCE) := by rfl
+@[simp] theorem insn_2 : progAt 2 = some (.jge .r3 (.reg .r4) 4) := by rfl
+@[simp] theorem insn_3 : progAt 3 = some (.exit) := by rfl
+@[simp] theorem insn_4 : progAt 4 = some (.lddw .r1 RODATA_e) := by rfl
+@[simp] theorem insn_5 : progAt 5 = some (.lddw .r2 17) := by rfl
+@[simp] theorem insn_6 : progAt 6 = some (.call .sol_log_) := by rfl
+@[simp] theorem insn_7 : progAt 7 = some (.lddw .r0 1) := by rfl
+@[simp] theorem insn_8 : progAt 8 = some (.exit) := by rfl
 
 end SlippageProg

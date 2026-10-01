@@ -1130,7 +1130,10 @@ pub fn generate(
 
     // toU64 bridge lemmas: for Nat-typed constants used in lddw instructions.
     // lddw internally involves toU64 coercion; these bridge lemmas let simp
-    // resolve `toU64 (↑NAME : Int) = NAME` without native_decide in proofs.
+    // resolve `toU64 (↑NAME : Int) = NAME`. They close by `rfl`, so the kernel
+    // checks them. `native_decide` would add a compiler-trust axiom
+    // (`<decl>._native.native_decide.ax_*` on Lean v4.30) to every proof that
+    // uses them.
     {
         let mut lddw_nat_syms: Vec<String> = Vec::new();
         for insn in &prog.instructions {
@@ -1158,7 +1161,7 @@ pub fn generate(
             for name in &lddw_nat_syms {
                 writeln!(
                     out,
-                    "@[simp] theorem bridge_{} : toU64 (↑{} : Int) = {} := by native_decide",
+                    "@[simp] theorem bridge_{} : toU64 (↑{} : Int) = {} := by rfl",
                     name, name, name
                 )?;
             }
@@ -1268,14 +1271,16 @@ pub fn generate(
     }
 
     // progAt instruction fetch cache: pre-computed theorems for each PC.
-    // Eliminates the need for `have hfN : progAt N = some (...) := by native_decide`
-    // boilerplate in proof files.
+    // Eliminates the need for `have hfN : progAt N = some (...)` boilerplate in
+    // proof files. `progAt` is a match on Nat literals, so `rfl` closes each one
+    // in the kernel. Do not use `native_decide` here: it adds a compiler-trust
+    // axiom to every sBPF proof that simp uses these lemmas in.
     {
         writeln!(out, "/-! ## Instruction fetch cache -/\n")?;
         for (idx, lean) in rendered_insns.iter().enumerate() {
             writeln!(
                 out,
-                "@[simp] theorem insn_{} : progAt {} = some ({}) := by native_decide",
+                "@[simp] theorem insn_{} : progAt {} = some ({}) := by rfl",
                 idx, idx, lean
             )?;
         }
@@ -1378,6 +1383,24 @@ entrypoint:
         assert!(lean.contains(".lddw .r1 RODATA_e"), "{}", lean);
         assert!(!lean.contains("undefined: e"), "{}", lean);
         assert!(lean.contains("theorem bridge_RODATA_e : toU64 (↑RODATA_e : Int) = RODATA_e"));
+    }
+
+    #[test]
+    fn generated_lemmas_are_kernel_checked() {
+        // `native_decide` adds a compiler-trust axiom to every proof that uses
+        // the lemma. Each fetch-cache (`insn_`) and bridge (`bridge_`) lemma
+        // must close in the kernel. Whether Lean accepts the `rfl` proofs is
+        // checked by `scripts/check-lake-build.sh`, which builds the bundled
+        // sBPF examples and the `sbpf-v3-jmp32` fixture.
+        let lean = generate(RODATA_SRC, "T", "t.s", SbpfVersion::V3).unwrap();
+        assert!(!lean.contains("native_decide"), "{}", lean);
+        for prefix in ["@[simp] theorem insn_", "@[simp] theorem bridge_"] {
+            let lemmas: Vec<&str> = lean.lines().filter(|l| l.starts_with(prefix)).collect();
+            assert!(!lemmas.is_empty(), "no `{prefix}` lemma emitted:\n{lean}");
+            for line in lemmas {
+                assert!(line.ends_with(":= by rfl"), "not kernel-checked: {line}");
+            }
+        }
     }
 
     #[test]

@@ -140,36 +140,36 @@ end EffectiveAddr
 
 /-! ## Instruction fetch cache -/
 
-@[simp] theorem insn_0 : progAt 0 = some (.ldx .dword .r2 .r1 N_ACCOUNTS_OFFSET) := by native_decide
-@[simp] theorem insn_1 : progAt 1 = some (.jne .r2 (.imm N_ACCOUNTS_EXPECTED) 17) := by native_decide
-@[simp] theorem insn_2 : progAt 2 = some (.ldx .dword .r2 .r1 SENDER_DATA_LENGTH_OFFSET) := by native_decide
-@[simp] theorem insn_3 : progAt 3 = some (.jne .r2 (.imm DATA_LENGTH_ZERO) 19) := by native_decide
-@[simp] theorem insn_4 : progAt 4 = some (.ldx .byte .r2 .r1 RECIPIENT_OFFSET) := by native_decide
-@[simp] theorem insn_5 : progAt 5 = some (.jne .r2 (.imm NON_DUP_MARKER) 21) := by native_decide
-@[simp] theorem insn_6 : progAt 6 = some (.ldx .dword .r2 .r1 RECIPIENT_DATA_LENGTH_OFFSET) := by native_decide
-@[simp] theorem insn_7 : progAt 7 = some (.jne .r2 (.imm DATA_LENGTH_ZERO) 23) := by native_decide
-@[simp] theorem insn_8 : progAt 8 = some (.ldx .byte .r2 .r1 SYSTEM_PROGRAM_OFFSET) := by native_decide
-@[simp] theorem insn_9 : progAt 9 = some (.jne .r2 (.imm NON_DUP_MARKER) 25) := by native_decide
-@[simp] theorem insn_10 : progAt 10 = some (.ldx .dword .r4 .r1 INSTRUCTION_DATA_LENGTH_OFFSET) := by native_decide
-@[simp] theorem insn_11 : progAt 11 = some (.jne .r4 (.imm INSTRUCTION_DATA_LENGTH_EXPECTED) 27) := by native_decide
-@[simp] theorem insn_12 : progAt 12 = some (.ldx .dword .r4 .r1 INSTRUCTION_DATA_OFFSET) := by native_decide
-@[simp] theorem insn_13 : progAt 13 = some (.ldx .dword .r2 .r1 SENDER_LAMPORTS_OFFSET) := by native_decide
-@[simp] theorem insn_14 : progAt 14 = some (.jlt .r2 (.reg .r4) 29) := by native_decide
-@[simp] theorem insn_15 : progAt 15 = some (.call .sol_invoke_signed) := by native_decide
-@[simp] theorem insn_16 : progAt 16 = some (.exit) := by native_decide
-@[simp] theorem insn_17 : progAt 17 = some (.mov64 .r0 (.imm 1)) := by native_decide
-@[simp] theorem insn_18 : progAt 18 = some (.exit) := by native_decide
-@[simp] theorem insn_19 : progAt 19 = some (.mov64 .r0 (.imm 2)) := by native_decide
-@[simp] theorem insn_20 : progAt 20 = some (.exit) := by native_decide
-@[simp] theorem insn_21 : progAt 21 = some (.mov64 .r0 (.imm 3)) := by native_decide
-@[simp] theorem insn_22 : progAt 22 = some (.exit) := by native_decide
-@[simp] theorem insn_23 : progAt 23 = some (.mov64 .r0 (.imm 4)) := by native_decide
-@[simp] theorem insn_24 : progAt 24 = some (.exit) := by native_decide
-@[simp] theorem insn_25 : progAt 25 = some (.mov64 .r0 (.imm 5)) := by native_decide
-@[simp] theorem insn_26 : progAt 26 = some (.exit) := by native_decide
-@[simp] theorem insn_27 : progAt 27 = some (.mov64 .r0 (.imm 6)) := by native_decide
-@[simp] theorem insn_28 : progAt 28 = some (.exit) := by native_decide
-@[simp] theorem insn_29 : progAt 29 = some (.mov64 .r0 (.imm 7)) := by native_decide
-@[simp] theorem insn_30 : progAt 30 = some (.exit) := by native_decide
+@[simp] theorem insn_0 : progAt 0 = some (.ldx .dword .r2 .r1 N_ACCOUNTS_OFFSET) := by rfl
+@[simp] theorem insn_1 : progAt 1 = some (.jne .r2 (.imm N_ACCOUNTS_EXPECTED) 17) := by rfl
+@[simp] theorem insn_2 : progAt 2 = some (.ldx .dword .r2 .r1 SENDER_DATA_LENGTH_OFFSET) := by rfl
+@[simp] theorem insn_3 : progAt 3 = some (.jne .r2 (.imm DATA_LENGTH_ZERO) 19) := by rfl
+@[simp] theorem insn_4 : progAt 4 = some (.ldx .byte .r2 .r1 RECIPIENT_OFFSET) := by rfl
+@[simp] theorem insn_5 : progAt 5 = some (.jne .r2 (.imm NON_DUP_MARKER) 21) := by rfl
+@[simp] theorem insn_6 : progAt 6 = some (.ldx .dword .r2 .r1 RECIPIENT_DATA_LENGTH_OFFSET) := by rfl
+@[simp] theorem insn_7 : progAt 7 = some (.jne .r2 (.imm DATA_LENGTH_ZERO) 23) := by rfl
+@[simp] theorem insn_8 : progAt 8 = some (.ldx .byte .r2 .r1 SYSTEM_PROGRAM_OFFSET) := by rfl
+@[simp] theorem insn_9 : progAt 9 = some (.jne .r2 (.imm NON_DUP_MARKER) 25) := by rfl
+@[simp] theorem insn_10 : progAt 10 = some (.ldx .dword .r4 .r1 INSTRUCTION_DATA_LENGTH_OFFSET) := by rfl
+@[simp] theorem insn_11 : progAt 11 = some (.jne .r4 (.imm INSTRUCTION_DATA_LENGTH_EXPECTED) 27) := by rfl
+@[simp] theorem insn_12 : progAt 12 = some (.ldx .dword .r4 .r1 INSTRUCTION_DATA_OFFSET) := by rfl
+@[simp] theorem insn_13 : progAt 13 = some (.ldx .dword .r2 .r1 SENDER_LAMPORTS_OFFSET) := by rfl
+@[simp] theorem insn_14 : progAt 14 = some (.jlt .r2 (.reg .r4) 29) := by rfl
+@[simp] theorem insn_15 : progAt 15 = some (.call .sol_invoke_signed) := by rfl
+@[simp] theorem insn_16 : progAt 16 = some (.exit) := by rfl
+@[simp] theorem insn_17 : progAt 17 = some (.mov64 .r0 (.imm 1)) := by rfl
+@[simp] theorem insn_18 : progAt 18 = some (.exit) := by rfl
+@[simp] theorem insn_19 : progAt 19 = some (.mov64 .r0 (.imm 2)) := by rfl
+@[simp] theorem insn_20 : progAt 20 = some (.exit) := by rfl
+@[simp] theorem insn_21 : progAt 21 = some (.mov64 .r0 (.imm 3)) := by rfl
+@[simp] theorem insn_22 : progAt 22 = some (.exit) := by rfl
+@[simp] theorem insn_23 : progAt 23 = some (.mov64 .r0 (.imm 4)) := by rfl
+@[simp] theorem insn_24 : progAt 24 = some (.exit) := by rfl
+@[simp] theorem insn_25 : progAt 25 = some (.mov64 .r0 (.imm 5)) := by rfl
+@[simp] theorem insn_26 : progAt 26 = some (.exit) := by rfl
+@[simp] theorem insn_27 : progAt 27 = some (.mov64 .r0 (.imm 6)) := by rfl
+@[simp] theorem insn_28 : progAt 28 = some (.exit) := by rfl
+@[simp] theorem insn_29 : progAt 29 = some (.mov64 .r0 (.imm 7)) := by rfl
+@[simp] theorem insn_30 : progAt 30 = some (.exit) := by rfl
 
 end TransferProg
