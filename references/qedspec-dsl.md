@@ -1035,9 +1035,10 @@ effect { last_update := now() }
 timestamp:
 
 - **Rust:** lowers to `(solana_program::clock::Clock::get().unwrap().unix_timestamp as u64)`.
-- **Lean:** lowers to the axiomatized symbol `QEDGen.Solana.Valid.now : Nat`
-  (re-exported as bare `now` from `QEDGen.Solana`). Proofs that depend
-  on specific timestamps discharge against this axiom.
+- **Lean:** lowers to the opaque constant `QEDGen.Solana.Valid.now : Nat`
+  (re-exported as bare `now` from `QEDGen.Solana`). It is uninterpreted,
+  so a proof cannot assume a specific timestamp. Being `opaque`, it adds
+  no axiom to the `#print axioms` trust surface.
 - **Kani / proptest:** lowers to `kani::any::<u64>()` / `any::<u64>()`
   so the harness explores arbitrary timestamps.
 

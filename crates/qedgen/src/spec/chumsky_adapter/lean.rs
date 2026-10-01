@@ -220,13 +220,13 @@ pub(super) fn expr_to_lean(e: &Expr, ctx: Ctx, consts: ConstTable, env: &TypeEnv
             )
         }
         Expr::App { func, args } => {
-            // `now()` is an axiomatized symbolic timestamp: the support
-            // library declares `axiom now : Nat` (in scope because
+            // `now()` is an uninterpreted symbolic timestamp: the support
+            // library declares `opaque now : Nat` (in scope because
             // lean_gen.rs imports QEDGen.Solana).
             if func == "now" && args.is_empty() {
                 return "now".to_string();
             }
-            // `current_epoch()` resolves the same way — axiomatized at
+            // `current_epoch()` resolves the same way — opaque at
             // `QEDGen.Solana.Valid.current_epoch : Nat`.
             if func == "current_epoch" && args.is_empty() {
                 return "current_epoch".to_string();

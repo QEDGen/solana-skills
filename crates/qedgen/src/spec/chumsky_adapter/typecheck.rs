@@ -94,8 +94,9 @@ fn walk_apps(
 ) {
     if let Expr::App { func, args } = expr {
         // Skip the `now()` / `current_epoch()` builtins — they resolve via
-        // support-library axioms (`QEDGen.Solana.Valid.now : Nat`); emitting
-        // `axiom now : Bool` here would collide at elaboration.
+        // support-library opaque constants (`QEDGen.Solana.Valid.now : Nat`);
+        // emitting an uninterpreted `now : Bool` here would collide at
+        // elaboration.
         let is_builtin = (func == "now" || func == "current_epoch") && args.is_empty();
         if !is_builtin {
             let key = (func.clone(), args.len());
