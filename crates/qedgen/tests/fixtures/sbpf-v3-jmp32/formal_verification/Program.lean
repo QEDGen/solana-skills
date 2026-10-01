@@ -61,15 +61,15 @@ end EffectiveAddr
 
 /-! ## Instruction fetch cache -/
 
-@[simp] theorem insn_0 : progAt 0 = some (.ldx .dword .r2 .r1 TAG_OFF) := by native_decide
-@[simp] theorem insn_1 : progAt 1 = some (.ldx .dword .r3 .r1 LIMIT_OFF) := by native_decide
-@[simp] theorem insn_2 : progAt 2 = some (.jmp32 .ne .r2 (.imm TAG) 6) := by native_decide
-@[simp] theorem insn_3 : progAt 3 = some (.jmp32 .lt .r3 (.reg .r2) 8) := by native_decide
-@[simp] theorem insn_4 : progAt 4 = some (.mov64 .r0 (.imm 0)) := by native_decide
-@[simp] theorem insn_5 : progAt 5 = some (.exit) := by native_decide
-@[simp] theorem insn_6 : progAt 6 = some (.mov32 .r0 (.imm E_TAG)) := by native_decide
-@[simp] theorem insn_7 : progAt 7 = some (.exit) := by native_decide
-@[simp] theorem insn_8 : progAt 8 = some (.mov32 .r0 (.imm E_ORDER)) := by native_decide
-@[simp] theorem insn_9 : progAt 9 = some (.exit) := by native_decide
+@[simp] theorem insn_0 : progAt 0 = some (.ldx .dword .r2 .r1 TAG_OFF) := by rfl
+@[simp] theorem insn_1 : progAt 1 = some (.ldx .dword .r3 .r1 LIMIT_OFF) := by rfl
+@[simp] theorem insn_2 : progAt 2 = some (.jmp32 .ne .r2 (.imm TAG) 6) := by rfl
+@[simp] theorem insn_3 : progAt 3 = some (.jmp32 .lt .r3 (.reg .r2) 8) := by rfl
+@[simp] theorem insn_4 : progAt 4 = some (.mov64 .r0 (.imm 0)) := by rfl
+@[simp] theorem insn_5 : progAt 5 = some (.exit) := by rfl
+@[simp] theorem insn_6 : progAt 6 = some (.mov32 .r0 (.imm E_TAG)) := by rfl
+@[simp] theorem insn_7 : progAt 7 = some (.exit) := by rfl
+@[simp] theorem insn_8 : progAt 8 = some (.mov32 .r0 (.imm E_ORDER)) := by rfl
+@[simp] theorem insn_9 : progAt 9 = some (.exit) := by rfl
 
 end GuardProg

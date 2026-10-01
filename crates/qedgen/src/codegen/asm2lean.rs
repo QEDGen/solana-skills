@@ -1130,7 +1130,9 @@ pub fn generate(
 
     // toU64 bridge lemmas: for Nat-typed constants used in lddw instructions.
     // lddw internally involves toU64 coercion; these bridge lemmas let simp
-    // resolve `toU64 (↑NAME : Int) = NAME` without native_decide in proofs.
+    // resolve `toU64 (↑NAME : Int) = NAME`. They close by `rfl`, so the kernel
+    // checks them. `native_decide` would add `Lean.ofReduceBool` to the axiom
+    // closure of every proof that uses them.
     {
         let mut lddw_nat_syms: Vec<String> = Vec::new();
         for insn in &prog.instructions {
@@ -1158,7 +1160,7 @@ pub fn generate(
             for name in &lddw_nat_syms {
                 writeln!(
                     out,
-                    "@[simp] theorem bridge_{} : toU64 (↑{} : Int) = {} := by native_decide",
+                    "@[simp] theorem bridge_{} : toU64 (↑{} : Int) = {} := by rfl",
                     name, name, name
                 )?;
             }
@@ -1268,14 +1270,16 @@ pub fn generate(
     }
 
     // progAt instruction fetch cache: pre-computed theorems for each PC.
-    // Eliminates the need for `have hfN : progAt N = some (...) := by native_decide`
-    // boilerplate in proof files.
+    // Eliminates the need for `have hfN : progAt N = some (...)` boilerplate in
+    // proof files. `progAt` is a match on Nat literals, so `rfl` closes each one
+    // in the kernel. Do not use `native_decide` here: it adds
+    // `Lean.ofReduceBool` (compiler trust) to every sBPF proof.
     {
         writeln!(out, "/-! ## Instruction fetch cache -/\n")?;
         for (idx, lean) in rendered_insns.iter().enumerate() {
             writeln!(
                 out,
-                "@[simp] theorem insn_{} : progAt {} = some ({}) := by native_decide",
+                "@[simp] theorem insn_{} : progAt {} = some ({}) := by rfl",
                 idx, idx, lean
             )?;
         }
@@ -1378,6 +1382,21 @@ entrypoint:
         assert!(lean.contains(".lddw .r1 RODATA_e"), "{}", lean);
         assert!(!lean.contains("undefined: e"), "{}", lean);
         assert!(lean.contains("theorem bridge_RODATA_e : toU64 (↑RODATA_e : Int) = RODATA_e"));
+    }
+
+    #[test]
+    fn generated_lemmas_are_kernel_checked() {
+        // `native_decide` adds `Lean.ofReduceBool` (compiler trust) to the axiom
+        // closure of every proof that uses the lemma. The fetch-cache and bridge
+        // lemmas must close in the kernel.
+        let lean = generate(RODATA_SRC, "T", "t.s", SbpfVersion::V3).unwrap();
+        assert!(!lean.contains("native_decide"), "{}", lean);
+        assert!(
+            lean.contains("theorem insn_0 : progAt 0 = some ("),
+            "{}",
+            lean
+        );
+        assert!(lean.contains(":= by rfl"), "{}", lean);
     }
 
     #[test]

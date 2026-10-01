@@ -623,183 +623,183 @@ def prog : Program := #[
 
 /-! ## Instruction fetch cache -/
 
-@[simp] theorem insn_0 : progAt 0 = some (.ldx .dword .r2 .r1 N_ACCOUNTS_OFF) := by native_decide
-@[simp] theorem insn_1 : progAt 1 = some (.jeq .r2 (.imm N_ACCOUNTS_INCREMENT) 116) := by native_decide
-@[simp] theorem insn_2 : progAt 2 = some (.jeq .r2 (.imm N_ACCOUNTS_INIT) 5) := by native_decide
-@[simp] theorem insn_3 : progAt 3 = some (.mov64 .r0 (.imm E_N_ACCOUNTS)) := by native_decide
-@[simp] theorem insn_4 : progAt 4 = some (.exit) := by native_decide
-@[simp] theorem insn_5 : progAt 5 = some (.ldx .dword .r2 .r1 USER_DATA_LEN_OFF) := by native_decide
-@[simp] theorem insn_6 : progAt 6 = some (.jne .r2 (.imm DATA_LEN_ZERO) 162) := by native_decide
-@[simp] theorem insn_7 : progAt 7 = some (.ldx .byte .r2 .r1 PDA_NON_DUP_MARKER_OFF) := by native_decide
-@[simp] theorem insn_8 : progAt 8 = some (.jne .r2 (.imm NON_DUP_MARKER) 168) := by native_decide
-@[simp] theorem insn_9 : progAt 9 = some (.ldx .dword .r2 .r1 PDA_DATA_LEN_OFF) := by native_decide
-@[simp] theorem insn_10 : progAt 10 = some (.jne .r2 (.imm DATA_LEN_ZERO) 164) := by native_decide
-@[simp] theorem insn_11 : progAt 11 = some (.ldx .byte .r2 .r1 SYSTEM_PROGRAM_NON_DUP_MARKER_OFF) := by native_decide
-@[simp] theorem insn_12 : progAt 12 = some (.jne .r2 (.imm NON_DUP_MARKER) 170) := by native_decide
-@[simp] theorem insn_13 : progAt 13 = some (.ldx .dword .r2 .r1 SYSTEM_PROGRAM_DATA_LEN_OFF) := by native_decide
-@[simp] theorem insn_14 : progAt 14 = some (.jne .r2 (.imm DATA_LEN_SYSTEM_PROGRAM) 166) := by native_decide
-@[simp] theorem insn_15 : progAt 15 = some (.mov64 .r2 (.reg .r1)) := by native_decide
-@[simp] theorem insn_16 : progAt 16 = some (.add64 .r2 (.imm USER_PUBKEY_OFF)) := by native_decide
-@[simp] theorem insn_17 : progAt 17 = some (.stx .dword .r10 (-STK_INIT_SEED_0_ADDR_OFF) .r2) := by native_decide
-@[simp] theorem insn_18 : progAt 18 = some (.st .dword .r10 (-STK_INIT_SEED_0_LEN_OFF) SIZE_OF_PUBKEY) := by native_decide
-@[simp] theorem insn_19 : progAt 19 = some (.mov64 .r2 (.reg .r10)) := by native_decide
-@[simp] theorem insn_20 : progAt 20 = some (.sub64 .r2 (.imm STK_INIT_BUMP_SEED_OFF)) := by native_decide
-@[simp] theorem insn_21 : progAt 21 = some (.stx .dword .r10 (-STK_INIT_SEED_1_ADDR_OFF) .r2) := by native_decide
-@[simp] theorem insn_22 : progAt 22 = some (.st .dword .r10 (-STK_INIT_SEED_1_LEN_OFF) SIZE_OF_U8) := by native_decide
-@[simp] theorem insn_23 : progAt 23 = some (.mov64 .r9 (.reg .r1)) := by native_decide
-@[simp] theorem insn_24 : progAt 24 = some (.mov64 .r1 (.reg .r10)) := by native_decide
-@[simp] theorem insn_25 : progAt 25 = some (.sub64 .r1 (.imm STK_INIT_SEED_0_ADDR_OFF)) := by native_decide
-@[simp] theorem insn_26 : progAt 26 = some (.mov64 .r2 (.imm 1)) := by native_decide
-@[simp] theorem insn_27 : progAt 27 = some (.mov64 .r3 (.reg .r9)) := by native_decide
-@[simp] theorem insn_28 : progAt 28 = some (.add64 .r3 (.imm PROGRAM_ID_INIT_OFF)) := by native_decide
-@[simp] theorem insn_29 : progAt 29 = some (.mov64 .r4 (.reg .r10)) := by native_decide
-@[simp] theorem insn_30 : progAt 30 = some (.sub64 .r4 (.imm STK_INIT_PDA_OFF)) := by native_decide
-@[simp] theorem insn_31 : progAt 31 = some (.mov64 .r5 (.reg .r10)) := by native_decide
-@[simp] theorem insn_32 : progAt 32 = some (.sub64 .r5 (.imm STK_INIT_BUMP_SEED_OFF)) := by native_decide
-@[simp] theorem insn_33 : progAt 33 = some (.call .sol_try_find_program_address) := by native_decide
-@[simp] theorem insn_34 : progAt 34 = some (.mov64 .r1 (.reg .r9)) := by native_decide
-@[simp] theorem insn_35 : progAt 35 = some (.add64 .r1 (.imm PDA_PUBKEY_OFF)) := by native_decide
-@[simp] theorem insn_36 : progAt 36 = some (.stx .dword .r10 (-STK_INIT_ACCT_META_PDA_PUBKEY_ADDR_OFF) .r1) := by native_decide
-@[simp] theorem insn_37 : progAt 37 = some (.stx .dword .r10 (-STK_INIT_ACCT_INFO_PDA_KEY_ADDR_OFF) .r1) := by native_decide
-@[simp] theorem insn_38 : progAt 38 = some (.mov64 .r2 (.reg .r10)) := by native_decide
-@[simp] theorem insn_39 : progAt 39 = some (.sub64 .r2 (.imm STK_INIT_PDA_OFF)) := by native_decide
-@[simp] theorem insn_40 : progAt 40 = some (.ldx .dword .r3 .r1 0) := by native_decide
-@[simp] theorem insn_41 : progAt 41 = some (.ldx .dword .r4 .r2 0) := by native_decide
-@[simp] theorem insn_42 : progAt 42 = some (.jne .r3 (.reg .r4) 172) := by native_decide
-@[simp] theorem insn_43 : progAt 43 = some (.ldx .dword .r3 .r1 SIZE_OF_U64) := by native_decide
-@[simp] theorem insn_44 : progAt 44 = some (.ldx .dword .r4 .r2 SIZE_OF_U64) := by native_decide
-@[simp] theorem insn_45 : progAt 45 = some (.jne .r3 (.reg .r4) 172) := by native_decide
-@[simp] theorem insn_46 : progAt 46 = some (.ldx .dword .r3 .r1 SIZE_OF_U64_2X) := by native_decide
-@[simp] theorem insn_47 : progAt 47 = some (.ldx .dword .r4 .r2 SIZE_OF_U64_2X) := by native_decide
-@[simp] theorem insn_48 : progAt 48 = some (.jne .r3 (.reg .r4) 172) := by native_decide
-@[simp] theorem insn_49 : progAt 49 = some (.ldx .dword .r3 .r1 SIZE_OF_U64_3X) := by native_decide
-@[simp] theorem insn_50 : progAt 50 = some (.ldx .dword .r4 .r2 SIZE_OF_U64_3X) := by native_decide
-@[simp] theorem insn_51 : progAt 51 = some (.jne .r3 (.reg .r4) 172) := by native_decide
-@[simp] theorem insn_52 : progAt 52 = some (.mov64 .r1 (.reg .r10)) := by native_decide
-@[simp] theorem insn_53 : progAt 53 = some (.sub64 .r1 (.imm STK_INIT_RENT_OFF)) := by native_decide
-@[simp] theorem insn_54 : progAt 54 = some (.call .sol_get_rent_sysvar) := by native_decide
-@[simp] theorem insn_55 : progAt 55 = some (.ldx .dword .r2 .r1 NO_OFFSET) := by native_decide
-@[simp] theorem insn_56 : progAt 56 = some (.mul64 .r2 (.imm PDA_DATA_WITH_ACCOUNT_OVERHEAD)) := by native_decide
-@[simp] theorem insn_57 : progAt 57 = some (.stx .dword .r10 (-STK_INIT_INSN_DATA_LAMPORTS_OFF) .r2) := by native_decide
-@[simp] theorem insn_58 : progAt 58 = some (.mov64 .r3 (.reg .r10)) := by native_decide
-@[simp] theorem insn_59 : progAt 59 = some (.sub64 .r3 (.imm STK_INIT_SYSTEM_PROGRAM_PUBKEY_OFF)) := by native_decide
-@[simp] theorem insn_60 : progAt 60 = some (.stx .dword .r10 (-STK_INIT_INSN_OFF) .r3) := by native_decide
-@[simp] theorem insn_61 : progAt 61 = some (.add64 .r3 (.imm STK_INIT_SYSTEM_PROGRAM_PUBKEY_TO_ACCOUNT_METAS_OFF)) := by native_decide
-@[simp] theorem insn_62 : progAt 62 = some (.stx .dword .r10 (-STK_INIT_INSN_ACCOUNTS_ADDR_OFF) .r3) := by native_decide
-@[simp] theorem insn_63 : progAt 63 = some (.st .dword .r10 (-STK_INIT_INSN_ACCOUNTS_LEN_OFF) INIT_CPI_N_ACCOUNTS) := by native_decide
-@[simp] theorem insn_64 : progAt 64 = some (.add64 .r3 (.imm STK_INIT_ACCOUNT_METAS_TO_INSN_DATA_OFF)) := by native_decide
-@[simp] theorem insn_65 : progAt 65 = some (.stx .dword .r10 (-STK_INIT_INSN_DATA_ADDR_OFF) .r3) := by native_decide
-@[simp] theorem insn_66 : progAt 66 = some (.st .dword .r10 (-STK_INIT_INSN_DATA_LEN_OFF) INIT_CPI_INSN_DATA_LEN) := by native_decide
-@[simp] theorem insn_67 : progAt 67 = some (.st .dword .r10 (-STK_INIT_INSN_DATA_SPACE_OFF) INIT_CPI_ACCT_SIZE) := by native_decide
-@[simp] theorem insn_68 : progAt 68 = some (.mov64 .r1 (.reg .r10)) := by native_decide
-@[simp] theorem insn_69 : progAt 69 = some (.sub64 .r1 (.imm STK_INIT_INSN_DATA_OWNER_OFF)) := by native_decide
-@[simp] theorem insn_70 : progAt 70 = some (.mov64 .r2 (.reg .r9)) := by native_decide
-@[simp] theorem insn_71 : progAt 71 = some (.add64 .r2 (.imm PROGRAM_ID_INIT_OFF)) := by native_decide
-@[simp] theorem insn_72 : progAt 72 = some (.ldx .dword .r3 .r2 0) := by native_decide
-@[simp] theorem insn_73 : progAt 73 = some (.stx .dword .r1 0 .r3) := by native_decide
-@[simp] theorem insn_74 : progAt 74 = some (.ldx .dword .r3 .r2 SIZE_OF_U64) := by native_decide
-@[simp] theorem insn_75 : progAt 75 = some (.stx .dword .r1 SIZE_OF_U64 .r3) := by native_decide
-@[simp] theorem insn_76 : progAt 76 = some (.ldx .dword .r3 .r2 SIZE_OF_U64_2X) := by native_decide
-@[simp] theorem insn_77 : progAt 77 = some (.stx .dword .r1 SIZE_OF_U64_2X .r3) := by native_decide
-@[simp] theorem insn_78 : progAt 78 = some (.ldx .dword .r3 .r2 SIZE_OF_U64_3X) := by native_decide
-@[simp] theorem insn_79 : progAt 79 = some (.stx .dword .r1 SIZE_OF_U64_3X .r3) := by native_decide
-@[simp] theorem insn_80 : progAt 80 = some (.st .half .r10 (-STK_INIT_ACCT_META_USER_IS_WRITABLE_OFF) BOOL_TRUE_2X) := by native_decide
-@[simp] theorem insn_81 : progAt 81 = some (.st .half .r10 (-STK_INIT_ACCT_META_PDA_IS_WRITABLE_OFF) BOOL_TRUE_2X) := by native_decide
-@[simp] theorem insn_82 : progAt 82 = some (.st .half .r10 (-STK_INIT_ACCT_INFO_USER_IS_SIGNER_OFF) BOOL_TRUE_2X) := by native_decide
-@[simp] theorem insn_83 : progAt 83 = some (.st .half .r10 (-STK_INIT_ACCT_INFO_PDA_IS_SIGNER_OFF) BOOL_TRUE_2X) := by native_decide
-@[simp] theorem insn_84 : progAt 84 = some (.mov64 .r2 (.reg .r9)) := by native_decide
-@[simp] theorem insn_85 : progAt 85 = some (.add64 .r2 (.imm USER_PUBKEY_OFF)) := by native_decide
-@[simp] theorem insn_86 : progAt 86 = some (.stx .dword .r10 (-STK_INIT_ACCT_META_USER_PUBKEY_ADDR_OFF) .r2) := by native_decide
-@[simp] theorem insn_87 : progAt 87 = some (.stx .dword .r10 (-STK_INIT_ACCT_INFO_USER_KEY_ADDR_OFF) .r2) := by native_decide
-@[simp] theorem insn_88 : progAt 88 = some (.add64 .r2 (.imm SIZE_OF_PUBKEY)) := by native_decide
-@[simp] theorem insn_89 : progAt 89 = some (.stx .dword .r10 (-STK_INIT_ACCT_INFO_USER_OWNER_ADDR_OFF) .r2) := by native_decide
-@[simp] theorem insn_90 : progAt 90 = some (.add64 .r2 (.imm SIZE_OF_PUBKEY)) := by native_decide
-@[simp] theorem insn_91 : progAt 91 = some (.stx .dword .r10 (-STK_INIT_ACCT_INFO_USER_LAMPORTS_ADDR_OFF) .r2) := by native_decide
-@[simp] theorem insn_92 : progAt 92 = some (.add64 .r2 (.imm SIZE_OF_U64_2X)) := by native_decide
-@[simp] theorem insn_93 : progAt 93 = some (.stx .dword .r10 (-STK_INIT_ACCT_INFO_USER_DATA_ADDR_OFF) .r2) := by native_decide
-@[simp] theorem insn_94 : progAt 94 = some (.add64 .r2 (.imm USER_DATA_TO_PDA_OWNER_OFF)) := by native_decide
-@[simp] theorem insn_95 : progAt 95 = some (.stx .dword .r10 (-STK_INIT_ACCT_INFO_PDA_OWNER_ADDR_OFF) .r2) := by native_decide
-@[simp] theorem insn_96 : progAt 96 = some (.add64 .r2 (.imm SIZE_OF_PUBKEY)) := by native_decide
-@[simp] theorem insn_97 : progAt 97 = some (.stx .dword .r10 (-STK_INIT_ACCT_INFO_PDA_LAMPORTS_ADDR_OFF) .r2) := by native_decide
-@[simp] theorem insn_98 : progAt 98 = some (.add64 .r2 (.imm SIZE_OF_U64_2X)) := by native_decide
-@[simp] theorem insn_99 : progAt 99 = some (.stx .dword .r10 (-STK_INIT_ACCT_INFO_PDA_DATA_ADDR_OFF) .r2) := by native_decide
-@[simp] theorem insn_100 : progAt 100 = some (.mov64 .r2 (.reg .r10)) := by native_decide
-@[simp] theorem insn_101 : progAt 101 = some (.sub64 .r2 (.imm STK_INIT_SEED_0_ADDR_OFF)) := by native_decide
-@[simp] theorem insn_102 : progAt 102 = some (.stx .dword .r10 (-STK_INIT_SIGNERS_SEEDS_OFF) .r2) := by native_decide
-@[simp] theorem insn_103 : progAt 103 = some (.st .dword .r10 (-STK_INIT_SIGNER_SEEDS_0_LEN_OFF) N_SIGNER_SEEDS) := by native_decide
-@[simp] theorem insn_104 : progAt 104 = some (.mov64 .r1 (.reg .r10)) := by native_decide
-@[simp] theorem insn_105 : progAt 105 = some (.sub64 .r1 (.imm STK_INIT_INSN_OFF)) := by native_decide
-@[simp] theorem insn_106 : progAt 106 = some (.mov64 .r2 (.reg .r10)) := by native_decide
-@[simp] theorem insn_107 : progAt 107 = some (.sub64 .r2 (.imm STK_INIT_ACCT_INFOS_OFF)) := by native_decide
-@[simp] theorem insn_108 : progAt 108 = some (.mov64 .r3 (.imm INIT_CPI_N_ACCOUNTS)) := by native_decide
-@[simp] theorem insn_109 : progAt 109 = some (.mov64 .r4 (.reg .r10)) := by native_decide
-@[simp] theorem insn_110 : progAt 110 = some (.sub64 .r4 (.imm STK_INIT_SIGNERS_SEEDS_OFF)) := by native_decide
-@[simp] theorem insn_111 : progAt 111 = some (.mov64 .r5 (.imm INIT_CPI_N_SIGNERS_SEEDS)) := by native_decide
-@[simp] theorem insn_112 : progAt 112 = some (.call .sol_invoke_signed_c) := by native_decide
-@[simp] theorem insn_113 : progAt 113 = some (.ldx .byte .r2 .r10 (-STK_INIT_BUMP_SEED_OFF)) := by native_decide
-@[simp] theorem insn_114 : progAt 114 = some (.stx .byte .r9 PDA_BUMP_SEED_OFF .r2) := by native_decide
-@[simp] theorem insn_115 : progAt 115 = some (.exit) := by native_decide
-@[simp] theorem insn_116 : progAt 116 = some (.ldx .dword .r9 .r1 USER_DATA_LEN_OFF) := by native_decide
-@[simp] theorem insn_117 : progAt 117 = some (.add64 .r9 (.imm 7)) := by native_decide
-@[simp] theorem insn_118 : progAt 118 = some (.and64 .r9 (.imm (-8))) := by native_decide
-@[simp] theorem insn_119 : progAt 119 = some (.add64 .r9 (.reg .r1)) := by native_decide
-@[simp] theorem insn_120 : progAt 120 = some (.ldx .byte .r8 .r9 PDA_NON_DUP_MARKER_OFF) := by native_decide
-@[simp] theorem insn_121 : progAt 121 = some (.jne .r8 (.imm NON_DUP_MARKER) 168) := by native_decide
-@[simp] theorem insn_122 : progAt 122 = some (.ldx .dword .r8 .r9 PDA_DATA_LEN_OFF) := by native_decide
-@[simp] theorem insn_123 : progAt 123 = some (.jne .r8 (.imm INIT_CPI_ACCT_SIZE) 164) := by native_decide
-@[simp] theorem insn_124 : progAt 124 = some (.ldx .dword .r8 .r9 INSTRUCTION_DATA_LEN_INC_OFF) := by native_decide
-@[simp] theorem insn_125 : progAt 125 = some (.jne .r8 (.imm SIZE_OF_U64) 174) := by native_decide
-@[simp] theorem insn_126 : progAt 126 = some (.mov64 .r3 (.reg .r9)) := by native_decide
-@[simp] theorem insn_127 : progAt 127 = some (.add64 .r3 (.imm PROGRAM_ID_INC_OFF)) := by native_decide
-@[simp] theorem insn_128 : progAt 128 = some (.mov64 .r6 (.reg .r9)) := by native_decide
-@[simp] theorem insn_129 : progAt 129 = some (.add64 .r6 (.imm PDA_PUBKEY_OFF)) := by native_decide
-@[simp] theorem insn_130 : progAt 130 = some (.ldx .dword .r8 .r9 COUNTER_INCREMENT_OFF) := by native_decide
-@[simp] theorem insn_131 : progAt 131 = some (.ldx .dword .r7 .r9 PDA_COUNTER_OFF) := by native_decide
-@[simp] theorem insn_132 : progAt 132 = some (.add64 .r7 (.reg .r8)) := by native_decide
-@[simp] theorem insn_133 : progAt 133 = some (.stx .dword .r9 PDA_COUNTER_OFF .r7) := by native_decide
-@[simp] theorem insn_134 : progAt 134 = some (.add64 .r1 (.imm USER_PUBKEY_OFF)) := by native_decide
-@[simp] theorem insn_135 : progAt 135 = some (.stx .dword .r10 (-STK_INC_SEED_0_ADDR_OFF) .r1) := by native_decide
-@[simp] theorem insn_136 : progAt 136 = some (.st .dword .r10 (-STK_INC_SEED_0_LEN_OFF) SIZE_OF_PUBKEY) := by native_decide
-@[simp] theorem insn_137 : progAt 137 = some (.add64 .r9 (.imm PDA_BUMP_SEED_OFF)) := by native_decide
-@[simp] theorem insn_138 : progAt 138 = some (.stx .dword .r10 (-STK_INC_SEED_1_ADDR_OFF) .r9) := by native_decide
-@[simp] theorem insn_139 : progAt 139 = some (.st .dword .r10 (-STK_INC_SEED_1_LEN_OFF) SIZE_OF_U8) := by native_decide
-@[simp] theorem insn_140 : progAt 140 = some (.mov64 .r1 (.reg .r10)) := by native_decide
-@[simp] theorem insn_141 : progAt 141 = some (.sub64 .r1 (.imm STK_INC_SEED_0_ADDR_OFF)) := by native_decide
-@[simp] theorem insn_142 : progAt 142 = some (.mov64 .r2 (.imm N_SIGNER_SEEDS)) := by native_decide
-@[simp] theorem insn_143 : progAt 143 = some (.mov64 .r4 (.reg .r10)) := by native_decide
-@[simp] theorem insn_144 : progAt 144 = some (.sub64 .r4 (.imm STK_INC_PDA_OFF)) := by native_decide
-@[simp] theorem insn_145 : progAt 145 = some (.call .sol_create_program_address) := by native_decide
-@[simp] theorem insn_146 : progAt 146 = some (.jne .r0 (.imm SUCCESS) 176) := by native_decide
-@[simp] theorem insn_147 : progAt 147 = some (.mov64 .r1 (.reg .r6)) := by native_decide
-@[simp] theorem insn_148 : progAt 148 = some (.mov64 .r2 (.reg .r4)) := by native_decide
-@[simp] theorem insn_149 : progAt 149 = some (.ldx .dword .r3 .r1 0) := by native_decide
-@[simp] theorem insn_150 : progAt 150 = some (.ldx .dword .r4 .r2 0) := by native_decide
-@[simp] theorem insn_151 : progAt 151 = some (.jne .r3 (.reg .r4) 172) := by native_decide
-@[simp] theorem insn_152 : progAt 152 = some (.ldx .dword .r3 .r1 SIZE_OF_U64) := by native_decide
-@[simp] theorem insn_153 : progAt 153 = some (.ldx .dword .r4 .r2 SIZE_OF_U64) := by native_decide
-@[simp] theorem insn_154 : progAt 154 = some (.jne .r3 (.reg .r4) 172) := by native_decide
-@[simp] theorem insn_155 : progAt 155 = some (.ldx .dword .r3 .r1 SIZE_OF_U64_2X) := by native_decide
-@[simp] theorem insn_156 : progAt 156 = some (.ldx .dword .r4 .r2 SIZE_OF_U64_2X) := by native_decide
-@[simp] theorem insn_157 : progAt 157 = some (.jne .r3 (.reg .r4) 172) := by native_decide
-@[simp] theorem insn_158 : progAt 158 = some (.ldx .dword .r3 .r1 SIZE_OF_U64_3X) := by native_decide
-@[simp] theorem insn_159 : progAt 159 = some (.ldx .dword .r4 .r2 SIZE_OF_U64_3X) := by native_decide
-@[simp] theorem insn_160 : progAt 160 = some (.jne .r3 (.reg .r4) 172) := by native_decide
-@[simp] theorem insn_161 : progAt 161 = some (.exit) := by native_decide
-@[simp] theorem insn_162 : progAt 162 = some (.mov32 .r0 (.imm E_USER_DATA_LEN)) := by native_decide
-@[simp] theorem insn_163 : progAt 163 = some (.exit) := by native_decide
-@[simp] theorem insn_164 : progAt 164 = some (.mov32 .r0 (.imm E_PDA_DATA_LEN)) := by native_decide
-@[simp] theorem insn_165 : progAt 165 = some (.exit) := by native_decide
-@[simp] theorem insn_166 : progAt 166 = some (.mov32 .r0 (.imm E_SYSTEM_PROGRAM_DATA_LEN)) := by native_decide
-@[simp] theorem insn_167 : progAt 167 = some (.exit) := by native_decide
-@[simp] theorem insn_168 : progAt 168 = some (.mov32 .r0 (.imm E_PDA_DUPLICATE)) := by native_decide
-@[simp] theorem insn_169 : progAt 169 = some (.exit) := by native_decide
-@[simp] theorem insn_170 : progAt 170 = some (.mov32 .r0 (.imm E_SYSTEM_PROGRAM_DUPLICATE)) := by native_decide
-@[simp] theorem insn_171 : progAt 171 = some (.exit) := by native_decide
-@[simp] theorem insn_172 : progAt 172 = some (.mov32 .r0 (.imm E_PDA_MISMATCH)) := by native_decide
-@[simp] theorem insn_173 : progAt 173 = some (.exit) := by native_decide
-@[simp] theorem insn_174 : progAt 174 = some (.mov32 .r0 (.imm E_INVALID_INSTRUCTION_DATA_LEN)) := by native_decide
-@[simp] theorem insn_175 : progAt 175 = some (.exit) := by native_decide
-@[simp] theorem insn_176 : progAt 176 = some (.mov32 .r0 (.imm E_UNABLE_TO_DERIVE_PDA)) := by native_decide
-@[simp] theorem insn_177 : progAt 177 = some (.exit) := by native_decide
+@[simp] theorem insn_0 : progAt 0 = some (.ldx .dword .r2 .r1 N_ACCOUNTS_OFF) := by rfl
+@[simp] theorem insn_1 : progAt 1 = some (.jeq .r2 (.imm N_ACCOUNTS_INCREMENT) 116) := by rfl
+@[simp] theorem insn_2 : progAt 2 = some (.jeq .r2 (.imm N_ACCOUNTS_INIT) 5) := by rfl
+@[simp] theorem insn_3 : progAt 3 = some (.mov64 .r0 (.imm E_N_ACCOUNTS)) := by rfl
+@[simp] theorem insn_4 : progAt 4 = some (.exit) := by rfl
+@[simp] theorem insn_5 : progAt 5 = some (.ldx .dword .r2 .r1 USER_DATA_LEN_OFF) := by rfl
+@[simp] theorem insn_6 : progAt 6 = some (.jne .r2 (.imm DATA_LEN_ZERO) 162) := by rfl
+@[simp] theorem insn_7 : progAt 7 = some (.ldx .byte .r2 .r1 PDA_NON_DUP_MARKER_OFF) := by rfl
+@[simp] theorem insn_8 : progAt 8 = some (.jne .r2 (.imm NON_DUP_MARKER) 168) := by rfl
+@[simp] theorem insn_9 : progAt 9 = some (.ldx .dword .r2 .r1 PDA_DATA_LEN_OFF) := by rfl
+@[simp] theorem insn_10 : progAt 10 = some (.jne .r2 (.imm DATA_LEN_ZERO) 164) := by rfl
+@[simp] theorem insn_11 : progAt 11 = some (.ldx .byte .r2 .r1 SYSTEM_PROGRAM_NON_DUP_MARKER_OFF) := by rfl
+@[simp] theorem insn_12 : progAt 12 = some (.jne .r2 (.imm NON_DUP_MARKER) 170) := by rfl
+@[simp] theorem insn_13 : progAt 13 = some (.ldx .dword .r2 .r1 SYSTEM_PROGRAM_DATA_LEN_OFF) := by rfl
+@[simp] theorem insn_14 : progAt 14 = some (.jne .r2 (.imm DATA_LEN_SYSTEM_PROGRAM) 166) := by rfl
+@[simp] theorem insn_15 : progAt 15 = some (.mov64 .r2 (.reg .r1)) := by rfl
+@[simp] theorem insn_16 : progAt 16 = some (.add64 .r2 (.imm USER_PUBKEY_OFF)) := by rfl
+@[simp] theorem insn_17 : progAt 17 = some (.stx .dword .r10 (-STK_INIT_SEED_0_ADDR_OFF) .r2) := by rfl
+@[simp] theorem insn_18 : progAt 18 = some (.st .dword .r10 (-STK_INIT_SEED_0_LEN_OFF) SIZE_OF_PUBKEY) := by rfl
+@[simp] theorem insn_19 : progAt 19 = some (.mov64 .r2 (.reg .r10)) := by rfl
+@[simp] theorem insn_20 : progAt 20 = some (.sub64 .r2 (.imm STK_INIT_BUMP_SEED_OFF)) := by rfl
+@[simp] theorem insn_21 : progAt 21 = some (.stx .dword .r10 (-STK_INIT_SEED_1_ADDR_OFF) .r2) := by rfl
+@[simp] theorem insn_22 : progAt 22 = some (.st .dword .r10 (-STK_INIT_SEED_1_LEN_OFF) SIZE_OF_U8) := by rfl
+@[simp] theorem insn_23 : progAt 23 = some (.mov64 .r9 (.reg .r1)) := by rfl
+@[simp] theorem insn_24 : progAt 24 = some (.mov64 .r1 (.reg .r10)) := by rfl
+@[simp] theorem insn_25 : progAt 25 = some (.sub64 .r1 (.imm STK_INIT_SEED_0_ADDR_OFF)) := by rfl
+@[simp] theorem insn_26 : progAt 26 = some (.mov64 .r2 (.imm 1)) := by rfl
+@[simp] theorem insn_27 : progAt 27 = some (.mov64 .r3 (.reg .r9)) := by rfl
+@[simp] theorem insn_28 : progAt 28 = some (.add64 .r3 (.imm PROGRAM_ID_INIT_OFF)) := by rfl
+@[simp] theorem insn_29 : progAt 29 = some (.mov64 .r4 (.reg .r10)) := by rfl
+@[simp] theorem insn_30 : progAt 30 = some (.sub64 .r4 (.imm STK_INIT_PDA_OFF)) := by rfl
+@[simp] theorem insn_31 : progAt 31 = some (.mov64 .r5 (.reg .r10)) := by rfl
+@[simp] theorem insn_32 : progAt 32 = some (.sub64 .r5 (.imm STK_INIT_BUMP_SEED_OFF)) := by rfl
+@[simp] theorem insn_33 : progAt 33 = some (.call .sol_try_find_program_address) := by rfl
+@[simp] theorem insn_34 : progAt 34 = some (.mov64 .r1 (.reg .r9)) := by rfl
+@[simp] theorem insn_35 : progAt 35 = some (.add64 .r1 (.imm PDA_PUBKEY_OFF)) := by rfl
+@[simp] theorem insn_36 : progAt 36 = some (.stx .dword .r10 (-STK_INIT_ACCT_META_PDA_PUBKEY_ADDR_OFF) .r1) := by rfl
+@[simp] theorem insn_37 : progAt 37 = some (.stx .dword .r10 (-STK_INIT_ACCT_INFO_PDA_KEY_ADDR_OFF) .r1) := by rfl
+@[simp] theorem insn_38 : progAt 38 = some (.mov64 .r2 (.reg .r10)) := by rfl
+@[simp] theorem insn_39 : progAt 39 = some (.sub64 .r2 (.imm STK_INIT_PDA_OFF)) := by rfl
+@[simp] theorem insn_40 : progAt 40 = some (.ldx .dword .r3 .r1 0) := by rfl
+@[simp] theorem insn_41 : progAt 41 = some (.ldx .dword .r4 .r2 0) := by rfl
+@[simp] theorem insn_42 : progAt 42 = some (.jne .r3 (.reg .r4) 172) := by rfl
+@[simp] theorem insn_43 : progAt 43 = some (.ldx .dword .r3 .r1 SIZE_OF_U64) := by rfl
+@[simp] theorem insn_44 : progAt 44 = some (.ldx .dword .r4 .r2 SIZE_OF_U64) := by rfl
+@[simp] theorem insn_45 : progAt 45 = some (.jne .r3 (.reg .r4) 172) := by rfl
+@[simp] theorem insn_46 : progAt 46 = some (.ldx .dword .r3 .r1 SIZE_OF_U64_2X) := by rfl
+@[simp] theorem insn_47 : progAt 47 = some (.ldx .dword .r4 .r2 SIZE_OF_U64_2X) := by rfl
+@[simp] theorem insn_48 : progAt 48 = some (.jne .r3 (.reg .r4) 172) := by rfl
+@[simp] theorem insn_49 : progAt 49 = some (.ldx .dword .r3 .r1 SIZE_OF_U64_3X) := by rfl
+@[simp] theorem insn_50 : progAt 50 = some (.ldx .dword .r4 .r2 SIZE_OF_U64_3X) := by rfl
+@[simp] theorem insn_51 : progAt 51 = some (.jne .r3 (.reg .r4) 172) := by rfl
+@[simp] theorem insn_52 : progAt 52 = some (.mov64 .r1 (.reg .r10)) := by rfl
+@[simp] theorem insn_53 : progAt 53 = some (.sub64 .r1 (.imm STK_INIT_RENT_OFF)) := by rfl
+@[simp] theorem insn_54 : progAt 54 = some (.call .sol_get_rent_sysvar) := by rfl
+@[simp] theorem insn_55 : progAt 55 = some (.ldx .dword .r2 .r1 NO_OFFSET) := by rfl
+@[simp] theorem insn_56 : progAt 56 = some (.mul64 .r2 (.imm PDA_DATA_WITH_ACCOUNT_OVERHEAD)) := by rfl
+@[simp] theorem insn_57 : progAt 57 = some (.stx .dword .r10 (-STK_INIT_INSN_DATA_LAMPORTS_OFF) .r2) := by rfl
+@[simp] theorem insn_58 : progAt 58 = some (.mov64 .r3 (.reg .r10)) := by rfl
+@[simp] theorem insn_59 : progAt 59 = some (.sub64 .r3 (.imm STK_INIT_SYSTEM_PROGRAM_PUBKEY_OFF)) := by rfl
+@[simp] theorem insn_60 : progAt 60 = some (.stx .dword .r10 (-STK_INIT_INSN_OFF) .r3) := by rfl
+@[simp] theorem insn_61 : progAt 61 = some (.add64 .r3 (.imm STK_INIT_SYSTEM_PROGRAM_PUBKEY_TO_ACCOUNT_METAS_OFF)) := by rfl
+@[simp] theorem insn_62 : progAt 62 = some (.stx .dword .r10 (-STK_INIT_INSN_ACCOUNTS_ADDR_OFF) .r3) := by rfl
+@[simp] theorem insn_63 : progAt 63 = some (.st .dword .r10 (-STK_INIT_INSN_ACCOUNTS_LEN_OFF) INIT_CPI_N_ACCOUNTS) := by rfl
+@[simp] theorem insn_64 : progAt 64 = some (.add64 .r3 (.imm STK_INIT_ACCOUNT_METAS_TO_INSN_DATA_OFF)) := by rfl
+@[simp] theorem insn_65 : progAt 65 = some (.stx .dword .r10 (-STK_INIT_INSN_DATA_ADDR_OFF) .r3) := by rfl
+@[simp] theorem insn_66 : progAt 66 = some (.st .dword .r10 (-STK_INIT_INSN_DATA_LEN_OFF) INIT_CPI_INSN_DATA_LEN) := by rfl
+@[simp] theorem insn_67 : progAt 67 = some (.st .dword .r10 (-STK_INIT_INSN_DATA_SPACE_OFF) INIT_CPI_ACCT_SIZE) := by rfl
+@[simp] theorem insn_68 : progAt 68 = some (.mov64 .r1 (.reg .r10)) := by rfl
+@[simp] theorem insn_69 : progAt 69 = some (.sub64 .r1 (.imm STK_INIT_INSN_DATA_OWNER_OFF)) := by rfl
+@[simp] theorem insn_70 : progAt 70 = some (.mov64 .r2 (.reg .r9)) := by rfl
+@[simp] theorem insn_71 : progAt 71 = some (.add64 .r2 (.imm PROGRAM_ID_INIT_OFF)) := by rfl
+@[simp] theorem insn_72 : progAt 72 = some (.ldx .dword .r3 .r2 0) := by rfl
+@[simp] theorem insn_73 : progAt 73 = some (.stx .dword .r1 0 .r3) := by rfl
+@[simp] theorem insn_74 : progAt 74 = some (.ldx .dword .r3 .r2 SIZE_OF_U64) := by rfl
+@[simp] theorem insn_75 : progAt 75 = some (.stx .dword .r1 SIZE_OF_U64 .r3) := by rfl
+@[simp] theorem insn_76 : progAt 76 = some (.ldx .dword .r3 .r2 SIZE_OF_U64_2X) := by rfl
+@[simp] theorem insn_77 : progAt 77 = some (.stx .dword .r1 SIZE_OF_U64_2X .r3) := by rfl
+@[simp] theorem insn_78 : progAt 78 = some (.ldx .dword .r3 .r2 SIZE_OF_U64_3X) := by rfl
+@[simp] theorem insn_79 : progAt 79 = some (.stx .dword .r1 SIZE_OF_U64_3X .r3) := by rfl
+@[simp] theorem insn_80 : progAt 80 = some (.st .half .r10 (-STK_INIT_ACCT_META_USER_IS_WRITABLE_OFF) BOOL_TRUE_2X) := by rfl
+@[simp] theorem insn_81 : progAt 81 = some (.st .half .r10 (-STK_INIT_ACCT_META_PDA_IS_WRITABLE_OFF) BOOL_TRUE_2X) := by rfl
+@[simp] theorem insn_82 : progAt 82 = some (.st .half .r10 (-STK_INIT_ACCT_INFO_USER_IS_SIGNER_OFF) BOOL_TRUE_2X) := by rfl
+@[simp] theorem insn_83 : progAt 83 = some (.st .half .r10 (-STK_INIT_ACCT_INFO_PDA_IS_SIGNER_OFF) BOOL_TRUE_2X) := by rfl
+@[simp] theorem insn_84 : progAt 84 = some (.mov64 .r2 (.reg .r9)) := by rfl
+@[simp] theorem insn_85 : progAt 85 = some (.add64 .r2 (.imm USER_PUBKEY_OFF)) := by rfl
+@[simp] theorem insn_86 : progAt 86 = some (.stx .dword .r10 (-STK_INIT_ACCT_META_USER_PUBKEY_ADDR_OFF) .r2) := by rfl
+@[simp] theorem insn_87 : progAt 87 = some (.stx .dword .r10 (-STK_INIT_ACCT_INFO_USER_KEY_ADDR_OFF) .r2) := by rfl
+@[simp] theorem insn_88 : progAt 88 = some (.add64 .r2 (.imm SIZE_OF_PUBKEY)) := by rfl
+@[simp] theorem insn_89 : progAt 89 = some (.stx .dword .r10 (-STK_INIT_ACCT_INFO_USER_OWNER_ADDR_OFF) .r2) := by rfl
+@[simp] theorem insn_90 : progAt 90 = some (.add64 .r2 (.imm SIZE_OF_PUBKEY)) := by rfl
+@[simp] theorem insn_91 : progAt 91 = some (.stx .dword .r10 (-STK_INIT_ACCT_INFO_USER_LAMPORTS_ADDR_OFF) .r2) := by rfl
+@[simp] theorem insn_92 : progAt 92 = some (.add64 .r2 (.imm SIZE_OF_U64_2X)) := by rfl
+@[simp] theorem insn_93 : progAt 93 = some (.stx .dword .r10 (-STK_INIT_ACCT_INFO_USER_DATA_ADDR_OFF) .r2) := by rfl
+@[simp] theorem insn_94 : progAt 94 = some (.add64 .r2 (.imm USER_DATA_TO_PDA_OWNER_OFF)) := by rfl
+@[simp] theorem insn_95 : progAt 95 = some (.stx .dword .r10 (-STK_INIT_ACCT_INFO_PDA_OWNER_ADDR_OFF) .r2) := by rfl
+@[simp] theorem insn_96 : progAt 96 = some (.add64 .r2 (.imm SIZE_OF_PUBKEY)) := by rfl
+@[simp] theorem insn_97 : progAt 97 = some (.stx .dword .r10 (-STK_INIT_ACCT_INFO_PDA_LAMPORTS_ADDR_OFF) .r2) := by rfl
+@[simp] theorem insn_98 : progAt 98 = some (.add64 .r2 (.imm SIZE_OF_U64_2X)) := by rfl
+@[simp] theorem insn_99 : progAt 99 = some (.stx .dword .r10 (-STK_INIT_ACCT_INFO_PDA_DATA_ADDR_OFF) .r2) := by rfl
+@[simp] theorem insn_100 : progAt 100 = some (.mov64 .r2 (.reg .r10)) := by rfl
+@[simp] theorem insn_101 : progAt 101 = some (.sub64 .r2 (.imm STK_INIT_SEED_0_ADDR_OFF)) := by rfl
+@[simp] theorem insn_102 : progAt 102 = some (.stx .dword .r10 (-STK_INIT_SIGNERS_SEEDS_OFF) .r2) := by rfl
+@[simp] theorem insn_103 : progAt 103 = some (.st .dword .r10 (-STK_INIT_SIGNER_SEEDS_0_LEN_OFF) N_SIGNER_SEEDS) := by rfl
+@[simp] theorem insn_104 : progAt 104 = some (.mov64 .r1 (.reg .r10)) := by rfl
+@[simp] theorem insn_105 : progAt 105 = some (.sub64 .r1 (.imm STK_INIT_INSN_OFF)) := by rfl
+@[simp] theorem insn_106 : progAt 106 = some (.mov64 .r2 (.reg .r10)) := by rfl
+@[simp] theorem insn_107 : progAt 107 = some (.sub64 .r2 (.imm STK_INIT_ACCT_INFOS_OFF)) := by rfl
+@[simp] theorem insn_108 : progAt 108 = some (.mov64 .r3 (.imm INIT_CPI_N_ACCOUNTS)) := by rfl
+@[simp] theorem insn_109 : progAt 109 = some (.mov64 .r4 (.reg .r10)) := by rfl
+@[simp] theorem insn_110 : progAt 110 = some (.sub64 .r4 (.imm STK_INIT_SIGNERS_SEEDS_OFF)) := by rfl
+@[simp] theorem insn_111 : progAt 111 = some (.mov64 .r5 (.imm INIT_CPI_N_SIGNERS_SEEDS)) := by rfl
+@[simp] theorem insn_112 : progAt 112 = some (.call .sol_invoke_signed_c) := by rfl
+@[simp] theorem insn_113 : progAt 113 = some (.ldx .byte .r2 .r10 (-STK_INIT_BUMP_SEED_OFF)) := by rfl
+@[simp] theorem insn_114 : progAt 114 = some (.stx .byte .r9 PDA_BUMP_SEED_OFF .r2) := by rfl
+@[simp] theorem insn_115 : progAt 115 = some (.exit) := by rfl
+@[simp] theorem insn_116 : progAt 116 = some (.ldx .dword .r9 .r1 USER_DATA_LEN_OFF) := by rfl
+@[simp] theorem insn_117 : progAt 117 = some (.add64 .r9 (.imm 7)) := by rfl
+@[simp] theorem insn_118 : progAt 118 = some (.and64 .r9 (.imm (-8))) := by rfl
+@[simp] theorem insn_119 : progAt 119 = some (.add64 .r9 (.reg .r1)) := by rfl
+@[simp] theorem insn_120 : progAt 120 = some (.ldx .byte .r8 .r9 PDA_NON_DUP_MARKER_OFF) := by rfl
+@[simp] theorem insn_121 : progAt 121 = some (.jne .r8 (.imm NON_DUP_MARKER) 168) := by rfl
+@[simp] theorem insn_122 : progAt 122 = some (.ldx .dword .r8 .r9 PDA_DATA_LEN_OFF) := by rfl
+@[simp] theorem insn_123 : progAt 123 = some (.jne .r8 (.imm INIT_CPI_ACCT_SIZE) 164) := by rfl
+@[simp] theorem insn_124 : progAt 124 = some (.ldx .dword .r8 .r9 INSTRUCTION_DATA_LEN_INC_OFF) := by rfl
+@[simp] theorem insn_125 : progAt 125 = some (.jne .r8 (.imm SIZE_OF_U64) 174) := by rfl
+@[simp] theorem insn_126 : progAt 126 = some (.mov64 .r3 (.reg .r9)) := by rfl
+@[simp] theorem insn_127 : progAt 127 = some (.add64 .r3 (.imm PROGRAM_ID_INC_OFF)) := by rfl
+@[simp] theorem insn_128 : progAt 128 = some (.mov64 .r6 (.reg .r9)) := by rfl
+@[simp] theorem insn_129 : progAt 129 = some (.add64 .r6 (.imm PDA_PUBKEY_OFF)) := by rfl
+@[simp] theorem insn_130 : progAt 130 = some (.ldx .dword .r8 .r9 COUNTER_INCREMENT_OFF) := by rfl
+@[simp] theorem insn_131 : progAt 131 = some (.ldx .dword .r7 .r9 PDA_COUNTER_OFF) := by rfl
+@[simp] theorem insn_132 : progAt 132 = some (.add64 .r7 (.reg .r8)) := by rfl
+@[simp] theorem insn_133 : progAt 133 = some (.stx .dword .r9 PDA_COUNTER_OFF .r7) := by rfl
+@[simp] theorem insn_134 : progAt 134 = some (.add64 .r1 (.imm USER_PUBKEY_OFF)) := by rfl
+@[simp] theorem insn_135 : progAt 135 = some (.stx .dword .r10 (-STK_INC_SEED_0_ADDR_OFF) .r1) := by rfl
+@[simp] theorem insn_136 : progAt 136 = some (.st .dword .r10 (-STK_INC_SEED_0_LEN_OFF) SIZE_OF_PUBKEY) := by rfl
+@[simp] theorem insn_137 : progAt 137 = some (.add64 .r9 (.imm PDA_BUMP_SEED_OFF)) := by rfl
+@[simp] theorem insn_138 : progAt 138 = some (.stx .dword .r10 (-STK_INC_SEED_1_ADDR_OFF) .r9) := by rfl
+@[simp] theorem insn_139 : progAt 139 = some (.st .dword .r10 (-STK_INC_SEED_1_LEN_OFF) SIZE_OF_U8) := by rfl
+@[simp] theorem insn_140 : progAt 140 = some (.mov64 .r1 (.reg .r10)) := by rfl
+@[simp] theorem insn_141 : progAt 141 = some (.sub64 .r1 (.imm STK_INC_SEED_0_ADDR_OFF)) := by rfl
+@[simp] theorem insn_142 : progAt 142 = some (.mov64 .r2 (.imm N_SIGNER_SEEDS)) := by rfl
+@[simp] theorem insn_143 : progAt 143 = some (.mov64 .r4 (.reg .r10)) := by rfl
+@[simp] theorem insn_144 : progAt 144 = some (.sub64 .r4 (.imm STK_INC_PDA_OFF)) := by rfl
+@[simp] theorem insn_145 : progAt 145 = some (.call .sol_create_program_address) := by rfl
+@[simp] theorem insn_146 : progAt 146 = some (.jne .r0 (.imm SUCCESS) 176) := by rfl
+@[simp] theorem insn_147 : progAt 147 = some (.mov64 .r1 (.reg .r6)) := by rfl
+@[simp] theorem insn_148 : progAt 148 = some (.mov64 .r2 (.reg .r4)) := by rfl
+@[simp] theorem insn_149 : progAt 149 = some (.ldx .dword .r3 .r1 0) := by rfl
+@[simp] theorem insn_150 : progAt 150 = some (.ldx .dword .r4 .r2 0) := by rfl
+@[simp] theorem insn_151 : progAt 151 = some (.jne .r3 (.reg .r4) 172) := by rfl
+@[simp] theorem insn_152 : progAt 152 = some (.ldx .dword .r3 .r1 SIZE_OF_U64) := by rfl
+@[simp] theorem insn_153 : progAt 153 = some (.ldx .dword .r4 .r2 SIZE_OF_U64) := by rfl
+@[simp] theorem insn_154 : progAt 154 = some (.jne .r3 (.reg .r4) 172) := by rfl
+@[simp] theorem insn_155 : progAt 155 = some (.ldx .dword .r3 .r1 SIZE_OF_U64_2X) := by rfl
+@[simp] theorem insn_156 : progAt 156 = some (.ldx .dword .r4 .r2 SIZE_OF_U64_2X) := by rfl
+@[simp] theorem insn_157 : progAt 157 = some (.jne .r3 (.reg .r4) 172) := by rfl
+@[simp] theorem insn_158 : progAt 158 = some (.ldx .dword .r3 .r1 SIZE_OF_U64_3X) := by rfl
+@[simp] theorem insn_159 : progAt 159 = some (.ldx .dword .r4 .r2 SIZE_OF_U64_3X) := by rfl
+@[simp] theorem insn_160 : progAt 160 = some (.jne .r3 (.reg .r4) 172) := by rfl
+@[simp] theorem insn_161 : progAt 161 = some (.exit) := by rfl
+@[simp] theorem insn_162 : progAt 162 = some (.mov32 .r0 (.imm E_USER_DATA_LEN)) := by rfl
+@[simp] theorem insn_163 : progAt 163 = some (.exit) := by rfl
+@[simp] theorem insn_164 : progAt 164 = some (.mov32 .r0 (.imm E_PDA_DATA_LEN)) := by rfl
+@[simp] theorem insn_165 : progAt 165 = some (.exit) := by rfl
+@[simp] theorem insn_166 : progAt 166 = some (.mov32 .r0 (.imm E_SYSTEM_PROGRAM_DATA_LEN)) := by rfl
+@[simp] theorem insn_167 : progAt 167 = some (.exit) := by rfl
+@[simp] theorem insn_168 : progAt 168 = some (.mov32 .r0 (.imm E_PDA_DUPLICATE)) := by rfl
+@[simp] theorem insn_169 : progAt 169 = some (.exit) := by rfl
+@[simp] theorem insn_170 : progAt 170 = some (.mov32 .r0 (.imm E_SYSTEM_PROGRAM_DUPLICATE)) := by rfl
+@[simp] theorem insn_171 : progAt 171 = some (.exit) := by rfl
+@[simp] theorem insn_172 : progAt 172 = some (.mov32 .r0 (.imm E_PDA_MISMATCH)) := by rfl
+@[simp] theorem insn_173 : progAt 173 = some (.exit) := by rfl
+@[simp] theorem insn_174 : progAt 174 = some (.mov32 .r0 (.imm E_INVALID_INSTRUCTION_DATA_LEN)) := by rfl
+@[simp] theorem insn_175 : progAt 175 = some (.exit) := by rfl
+@[simp] theorem insn_176 : progAt 176 = some (.mov32 .r0 (.imm E_UNABLE_TO_DERIVE_PDA)) := by rfl
+@[simp] theorem insn_177 : progAt 177 = some (.exit) := by rfl
 
 end CounterProg

@@ -45,7 +45,7 @@ This generates:
 - For large programs (>64 instructions): `def progAt : Nat -> Option Insn` — chunked function-based lookup for O(1) simp performance
 - `@[simp] theorem ea_NAME` — effectiveAddr lemmas for each offset symbol
 - `@[simp] theorem bridge_NAME` — toU64 bridge lemmas for Nat lddw constants (including rodata addresses)
-- `@[simp] theorem insn_N` — instruction fetch cache via `native_decide`
+- `@[simp] theorem insn_N` — instruction fetch cache, closed by `rfl` so the kernel checks it (no `native_decide`, no compiler trust)
 
 Programs that `call sol_log_` on a rodata string need `rt.containsRange RODATA_<sym> RODATA_<sym>_LEN = true` as a hypothesis (qedsvm ≥ v0.9.0 models the guarded read); pin the logged bytes with `readBytes mem RODATA_<sym> RODATA_<sym>_LEN = RODATA_<sym>_BYTES` when the property needs message content.
 
