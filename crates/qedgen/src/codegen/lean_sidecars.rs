@@ -261,6 +261,41 @@ fn collect_pinned_interfaces(spec: &ParsedSpec) -> std::collections::BTreeSet<St
     out
 }
 
+/// Fully qualified names (`<Iface>.<handler>.ensures_axiom_<idx>`) of every
+/// axiom the sibling `<Iface>.lean` modules declare for `spec`. Same
+/// interface set as `write_spec_with_sidecars` (pinned, minus verified
+/// callees) and the same handler loop as `render_interface_axiom_module`,
+/// so the `verify` axiom gate permits exactly what codegen emitted.
+pub(crate) fn declared_ensures_axioms(spec: &ParsedSpec) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for iface_name in collect_pinned_interfaces(spec) {
+        if spec.verified_callees.contains_key(iface_name.as_str()) {
+            continue;
+        }
+        let Some(iface) = spec.interfaces.iter().find(|i| i.name == iface_name) else {
+            continue;
+        };
+        out.extend(interface_ensures_axiom_names(iface));
+    }
+    out
+}
+
+/// Axiom names one `<Iface>.lean` module declares, in emission order.
+fn interface_ensures_axiom_names(iface: &crate::check::ParsedInterface) -> Vec<String> {
+    let mut out = Vec::new();
+    for handler in &iface.handlers {
+        for ens_idx in 0..handler.ensures.len() {
+            out.push(format!(
+                "{}.{}.ensures_axiom_{}",
+                safe_name(&iface.name),
+                safe_name(&handler.name),
+                ens_idx
+            ));
+        }
+    }
+    out
+}
+
 /// Sanitize an interface name into a valid Lean module identifier (used
 /// in both the `import` line and the lakefile `roots` list).
 fn safe_module_name(name: &str) -> String {
@@ -640,5 +675,42 @@ handler deposit (amount : U64) {
             "axiom-module renderer drifted from the golden — \
              regenerate with UPDATE_AXIOM_GOLDEN=1 if intentional"
         );
+    }
+
+    /// The `verify` axiom gate permits `declared_ensures_axioms`. Every
+    /// name it lists must be an axiom the rendered module really declares,
+    /// and every declared axiom must be listed, or the gate drifts from
+    /// codegen.
+    #[test]
+    fn declared_ensures_axioms_match_rendered_module() {
+        let spec = crate::chumsky_adapter::parse_str(LP_POOL_SPEC).expect("parse LpPool spec");
+        let declared = declared_ensures_axioms(&spec);
+        assert!(!declared.is_empty(), "LpPool pins Token; names expected");
+
+        let iface = spec
+            .interfaces
+            .iter()
+            .find(|i| i.name == "Token")
+            .expect("Token interface present");
+        let module = render_interface_axiom_module(iface);
+
+        // Rebuild qualified names from the rendered text by namespace
+        // tracking, independent of `interface_ensures_axiom_names`.
+        let mut ns: Vec<String> = Vec::new();
+        let mut rendered = std::collections::BTreeSet::new();
+        for line in module.lines() {
+            if let Some(rest) = line.strip_prefix("namespace ") {
+                ns.push(rest.trim().to_string());
+            } else if line.starts_with("end ") {
+                ns.pop();
+            } else if let Some(rest) = line.strip_prefix("axiom ") {
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                rendered.insert(format!("{}.{}", ns.join("."), name));
+            }
+        }
+        assert_eq!(declared, rendered);
     }
 }

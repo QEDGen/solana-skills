@@ -35,8 +35,9 @@ pub struct BackendReport {
     pub counterexamples: Vec<Counterexample>,
     /// `lean` backend only: unverified axioms each top-level theorem in
     /// Spec.lean / Proofs.lean depends on — the trust surface
-    /// (`*.ensures_axiom_*` from bundled callees + `sorryAx`). Empty for
-    /// other backends, failed builds, no theorems, or builtin-only closures.
+    /// (`*.ensures_axiom_*` from bundled callees, `sorryAx`, and the
+    /// `native_decide` compiler-trust axioms). Empty for other backends,
+    /// failed builds, no theorems, or classical-only closures.
     /// `omitempty` for JSON back-compat.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub axioms: Vec<AxiomDependency>,
@@ -93,16 +94,22 @@ impl BackendReport {
     }
 }
 
-/// One theorem's dependence on unverified axioms. Lean built-ins
-/// (`LEAN_BUILTIN_AXIOMS`) are filtered before construction — what remains is
-/// the user-meaningful trust surface: bundled-callee `*.ensures_axiom_*`
-/// axioms and `sorryAx` from incomplete proofs.
+/// One theorem's dependence on unverified axioms. The classical trio
+/// (`axiom_gate::CLASSICAL_AXIOMS`) is filtered before construction. What
+/// remains is the trust surface: bundled-callee `*.ensures_axiom_*`
+/// axioms, `sorryAx` from incomplete proofs, and the `native_decide`
+/// compiler-trust axioms.
 #[derive(Debug, Clone, Serialize)]
 pub struct AxiomDependency {
     /// Fully-qualified theorem name (`Namespace.theoremName`).
     pub theorem: String,
-    /// Axioms the theorem depends on, with Lean built-ins filtered.
+    /// Axioms the theorem depends on, with the classical trio filtered.
     pub axioms: Vec<String>,
+    /// The subset of `axioms` outside the spec's permitted set
+    /// (`axiom_gate::apply`). CRIT findings; `verify --strict` fails on
+    /// any. `omitempty` for JSON back-compat.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub forbidden: Vec<axiom_gate::ForbiddenAxiom>,
 }
 
 #[derive(Debug, Serialize)]
@@ -645,16 +652,11 @@ fn tail_lines(s: &str, n: usize) -> String {
 
 // ---- `#print axioms` trust-surface report ---------------------
 
-/// Lean built-ins filtered out of the report: the classical-logic trio every
-/// Mathlib proof pulls in, plus the `native_decide` compiler-trust pair —
-/// Lean's trust base, not the user's.
-const LEAN_BUILTIN_AXIOMS: &[&str] = &[
-    "propext",
-    "Classical.choice",
-    "Quot.sound",
-    "Lean.ofReduceBool",
-    "Lean.trustCompiler",
-];
+/// Axioms filtered out of the report: only the classical-logic trio every
+/// Mathlib proof pulls in. The `native_decide` compiler-trust pair
+/// (`Lean.ofReduceBool`, `Lean.trustCompiler`) is NOT filtered: it widens
+/// trust from the kernel to the compiler, so it must stay visible.
+const LEAN_BUILTIN_AXIOMS: &[&str] = axiom_gate::CLASSICAL_AXIOMS;
 
 /// Query the axiom closure of Spec.lean / Proofs.lean theorems via
 /// `lake env lean`. `None` = query couldn't run (soft-fail);
@@ -770,7 +772,11 @@ fn parse_axiom_output(stdout: &str) -> Vec<AxiomDependency> {
             .filter(|a| !a.is_empty() && !LEAN_BUILTIN_AXIOMS.contains(&a.as_str()))
             .collect();
         if !axioms.is_empty() {
-            result.push(AxiomDependency { theorem, axioms });
+            result.push(AxiomDependency {
+                theorem,
+                axioms,
+                forbidden: Vec::new(),
+            });
         }
     }
     result
@@ -845,8 +851,9 @@ fn format_counterexamples(out: &mut String, cxs: &[Counterexample]) {
     }
 }
 
-/// Render the unverified trust surface (grouped by theorem). Built-ins are
-/// filtered upstream; empty `axioms` emits no section (silent pass).
+/// Render the unverified trust surface (grouped by theorem). The classical
+/// trio is filtered upstream; empty `axioms` emits no section (silent
+/// pass). Axioms outside the permitted set carry a `[CRIT]` marker.
 fn format_axioms(out: &mut String, axioms: &[AxiomDependency]) {
     if axioms.is_empty() {
         return;
@@ -855,7 +862,14 @@ fn format_axioms(out: &mut String, axioms: &[AxiomDependency]) {
     for dep in axioms {
         out.push_str(&format!("           {}\n", dep.theorem));
         for ax in &dep.axioms {
-            out.push_str(&format!("             - {}\n", ax));
+            match dep.forbidden.iter().find(|f| &f.axiom == ax) {
+                Some(f) => out.push_str(&format!(
+                    "             - {}  [CRIT] {}\n",
+                    ax,
+                    f.reason.describe()
+                )),
+                None => out.push_str(&format!("             - {}\n", ax)),
+            }
         }
     }
 }
@@ -1118,21 +1132,24 @@ end Outer
 
     #[test]
     fn parses_lean_print_axioms_output_and_filters_builtins() {
-        // Verbatim shape Lean emits for `#print axioms <thm>`. Built-ins
-        // (propext, Classical.choice, Quot.sound) must NOT appear in the
-        // structured output; user-meaningful axioms (sorryAx, bundled-
-        // callee ensures_axiom_*) must.
+        // Verbatim shape Lean emits for `#print axioms <thm>`. The classical
+        // trio (propext, Classical.choice, Quot.sound) must NOT appear in
+        // the structured output; user-meaningful axioms (sorryAx, bundled-
+        // callee ensures_axiom_*) must. So must the `native_decide`
+        // compiler-trust pair: it widens trust beyond the kernel and was
+        // hidden by this filter before.
         let stdout = "\
 'PoolDemo.deposit_aborts_if_InvalidAmount' depends on axioms: [propext, Token.transfer.ensures_axiom_1]
 'PoolDemo.deposit_frame' depends on axioms: [Classical.choice, Quot.sound, sorryAx]
 'PoolDemo.all_proven' does not depend on any axioms
 'PoolDemo.only_builtins' depends on axioms: [propext, Classical.choice]
+'PoolDemo.native' depends on axioms: [propext, Lean.ofReduceBool, Lean.trustCompiler]
 ";
         let report = parse_axiom_output(stdout);
         assert_eq!(
             report.len(),
-            2,
-            "only theorems with non-builtin axioms surface"
+            3,
+            "only theorems with non-classical axioms surface"
         );
         assert_eq!(
             report[0].theorem,
@@ -1141,6 +1158,11 @@ end Outer
         assert_eq!(report[0].axioms, vec!["Token.transfer.ensures_axiom_1"]);
         assert_eq!(report[1].theorem, "PoolDemo.deposit_frame");
         assert_eq!(report[1].axioms, vec!["sorryAx"]);
+        assert_eq!(report[2].theorem, "PoolDemo.native");
+        assert_eq!(
+            report[2].axioms,
+            vec!["Lean.ofReduceBool", "Lean.trustCompiler"]
+        );
     }
 
     #[test]
@@ -1158,10 +1180,15 @@ end Outer
                     AxiomDependency {
                         theorem: "PoolDemo.deposit_Token_transfer_call_0_post_1".into(),
                         axioms: vec!["Token.transfer.ensures_axiom_1".into()],
+                        forbidden: Vec::new(),
                     },
                     AxiomDependency {
                         theorem: "PoolDemo.deposit_frame".into(),
                         axioms: vec!["sorryAx".into()],
+                        forbidden: vec![axiom_gate::ForbiddenAxiom {
+                            axiom: "sorryAx".into(),
+                            reason: axiom_gate::ForbiddenReason::Sorry,
+                        }],
                     },
                 ],
             }],
@@ -1169,8 +1196,9 @@ end Outer
         let out = format_human(&report);
         assert!(out.contains("trust surface"));
         assert!(out.contains("PoolDemo.deposit_Token_transfer_call_0_post_1"));
-        assert!(out.contains("- Token.transfer.ensures_axiom_1"));
-        assert!(out.contains("- sorryAx"));
+        assert!(out.contains("- Token.transfer.ensures_axiom_1\n"));
+        assert!(out.contains("- sorryAx  [CRIT] incomplete proof (sorry)"));
+        // The gate is applied by `verify --strict`, not by the report.
         assert!(out.ends_with("OK\n"));
     }
 
@@ -1193,6 +1221,7 @@ end Outer
     }
 }
 
+pub(crate) mod axiom_gate;
 pub(crate) mod drift;
 pub(crate) mod evidence;
 pub(crate) mod miri_verify;

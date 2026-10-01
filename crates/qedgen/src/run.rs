@@ -1818,6 +1818,15 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             }
             let _ = (crucible_harness_dir, crucible_no_smoke, crucible_stateful);
 
+            // Parsed once for the axiom policy and the obligation gate.
+            let parsed_spec = check::parse_spec_file(&spec)?;
+
+            // Mark every `#print axioms` entry outside the spec-derived
+            // permitted set before rendering, so both the human and JSON
+            // reports carry the CRIT findings. Gating is `--strict` only.
+            let axiom_policy = verify::axiom_gate::AxiomPolicy::for_spec(&parsed_spec);
+            verify::axiom_gate::apply(&mut report.backends, &axiom_policy);
+
             if json {
                 verify::print_json(&report)?;
             } else {
@@ -1843,9 +1852,8 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             // Computed in memory from the current spec (pure renders), so
             // the result can never be stale-file drift.
             let obligation_entries = {
-                let parsed = check::parse_spec_file(&spec)?;
-                let mir = crate::mir::lower(&parsed);
-                crate::obligations::collect_all(&mir, &parsed)
+                let mir = crate::mir::lower(&parsed_spec);
+                crate::obligations::collect_all(&mir, &parsed_spec)
             };
             let obligations_digest = if obligation_entries.is_empty() {
                 None
@@ -1871,18 +1879,38 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                     eprintln!("  {}", crate::obligations::describe_problem(problem));
                 }
                 let counts = crate::obligations::StatusCounts::of(&obligation_entries);
+                let axiom_counts =
+                    verify::axiom_gate::AxiomCounts::of(&report.backends, &axiom_policy);
                 if counts.gates_strict() {
                     eprintln!(
                         "verify --strict: {} obligation(s) not emitted — backend coverage \
                          is incomplete (see the entries above and .qed/obligations.json)",
                         counts.unsupported + counts.failed
                     );
+                } else {
+                    eprintln!(
+                        "verify --strict: all {} backend obligation(s) emitted",
+                        counts.emitted
+                    );
+                }
+                if axiom_counts.gates_strict() {
+                    eprintln!(
+                        "verify --strict: {} [CRIT] axiom use(s) outside the permitted set \
+                         ({} sorry, {} compiler trust, {} undeclared; see the trust surface above)",
+                        axiom_counts.forbidden(),
+                        axiom_counts.sorry,
+                        axiom_counts.compiler_trust,
+                        axiom_counts.undeclared
+                    );
+                } else {
+                    eprintln!(
+                        "verify --strict: all {} non-classical axiom use(s) are permitted",
+                        axiom_counts.permitted
+                    );
+                }
+                if counts.gates_strict() || axiom_counts.gates_strict() {
                     std::process::exit(1);
                 }
-                eprintln!(
-                    "verify --strict: all {} backend obligation(s) emitted",
-                    counts.emitted
-                );
             }
 
             if !report.ok() {

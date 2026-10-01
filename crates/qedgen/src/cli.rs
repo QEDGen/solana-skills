@@ -977,6 +977,13 @@ pub(crate) enum Commands {
         /// still unsupported (cross-module property preservation,
         /// multi-projection Lean abort reads, CPI ensures without
         /// `state_binders`) and would fail every affected spec.
+        ///
+        /// Also gates the Lean `#print axioms` report: exits 1 when a
+        /// theorem depends on `sorryAx`, the `native_decide` compiler
+        /// axioms (`Lean.ofReduceBool`, `Lean.trustCompiler`), or any
+        /// axiom other than the classical trio and the `ensures_axiom_*`
+        /// of the spec's pinned interfaces. Without `--strict` these
+        /// print as [CRIT] and the run passes.
         #[arg(long)]
         strict: bool,
     },
