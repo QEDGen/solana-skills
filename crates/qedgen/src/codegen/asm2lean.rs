@@ -1131,8 +1131,9 @@ pub fn generate(
     // toU64 bridge lemmas: for Nat-typed constants used in lddw instructions.
     // lddw internally involves toU64 coercion; these bridge lemmas let simp
     // resolve `toU64 (↑NAME : Int) = NAME`. They close by `rfl`, so the kernel
-    // checks them. `native_decide` would add `Lean.ofReduceBool` to the axiom
-    // closure of every proof that uses them.
+    // checks them. `native_decide` would add a compiler-trust axiom
+    // (`<decl>._native.native_decide.ax_*` on Lean v4.30) to every proof that
+    // uses them.
     {
         let mut lddw_nat_syms: Vec<String> = Vec::new();
         for insn in &prog.instructions {
@@ -1272,8 +1273,8 @@ pub fn generate(
     // progAt instruction fetch cache: pre-computed theorems for each PC.
     // Eliminates the need for `have hfN : progAt N = some (...)` boilerplate in
     // proof files. `progAt` is a match on Nat literals, so `rfl` closes each one
-    // in the kernel. Do not use `native_decide` here: it adds
-    // `Lean.ofReduceBool` (compiler trust) to every sBPF proof.
+    // in the kernel. Do not use `native_decide` here: it adds a compiler-trust
+    // axiom to every sBPF proof that simp uses these lemmas in.
     {
         writeln!(out, "/-! ## Instruction fetch cache -/\n")?;
         for (idx, lean) in rendered_insns.iter().enumerate() {
@@ -1386,17 +1387,20 @@ entrypoint:
 
     #[test]
     fn generated_lemmas_are_kernel_checked() {
-        // `native_decide` adds `Lean.ofReduceBool` (compiler trust) to the axiom
-        // closure of every proof that uses the lemma. The fetch-cache and bridge
-        // lemmas must close in the kernel.
+        // `native_decide` adds a compiler-trust axiom to every proof that uses
+        // the lemma. Each fetch-cache (`insn_`) and bridge (`bridge_`) lemma
+        // must close in the kernel. Whether Lean accepts the `rfl` proofs is
+        // checked by `scripts/check-lake-build.sh`, which builds the bundled
+        // sBPF examples and the `sbpf-v3-jmp32` fixture.
         let lean = generate(RODATA_SRC, "T", "t.s", SbpfVersion::V3).unwrap();
         assert!(!lean.contains("native_decide"), "{}", lean);
-        assert!(
-            lean.contains("theorem insn_0 : progAt 0 = some ("),
-            "{}",
-            lean
-        );
-        assert!(lean.contains(":= by rfl"), "{}", lean);
+        for prefix in ["@[simp] theorem insn_", "@[simp] theorem bridge_"] {
+            let lemmas: Vec<&str> = lean.lines().filter(|l| l.starts_with(prefix)).collect();
+            assert!(!lemmas.is_empty(), "no `{prefix}` lemma emitted:\n{lean}");
+            for line in lemmas {
+                assert!(line.ends_with(":= by rfl"), "not kernel-checked: {line}");
+            }
+        }
     }
 
     #[test]
