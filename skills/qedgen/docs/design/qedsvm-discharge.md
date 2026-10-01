@@ -550,8 +550,8 @@ surface; toolchain unchanged at `v4.30.0`).
    `input_layout`, released in qedsvm v0.13.0 (now pinned). The qedgen producer
    moved to v3 in #404; ship both together (§16).
 3. **Slice A** (§14): ✅ A1 ELF cache (PR #130) → A2 wire-into-project → A3 gate
-   → A4 report. First honest byte-level discharge. Starting with a `+= k` op
-   while step 2 is pending.
+   → A4 report. First honest byte-level discharge. It started with a `+= k` op;
+   parameter deltas work now that step 2 has shipped.
 4. **Slice B** (§15): only after qedsvm widens to multi-field+param (gate 1) and
    ships the arg-carrying tactic (gate 2). Frame success-path-only from day one.
 

@@ -227,9 +227,9 @@ discharge, and can verify.
   path must return 0. A spec rejection path must return a non-zero code, leave
   the tracked field alone, and not end in a VM fault. A path with a missing exit
   code or tracked-write flag is unconfirmed, and a path whose module qedlift did
-  not write fails. qedlift reports kinds in a `transition outcome` line (requested in
-  QEDGen/qedsvm#70). Without that line the kinds are unknown and the verdict is
-  at most `incomplete` (`no_path_outcomes`).
+  not write fails. qedlift reports kinds in a `transition outcome` line (qedsvm
+  v0.13.0 and later). With an older qedlift the line is missing, the kinds are
+  unknown, and the verdict is at most `incomplete` (`no_path_outcomes`).
 - **Verdict.** `verified` needs every expected path traced, every path kind
   confirmed, and Lean accepting every emitted module. An expected path with no
   trace is `incomplete` (`expected_path_missing`), never a success. A refused
