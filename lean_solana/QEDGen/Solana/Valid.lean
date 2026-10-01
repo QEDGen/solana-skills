@@ -30,8 +30,10 @@ theorem valid_u64_zero : valid_u64 0 := by
 -- lowers it to a fresh `Clock::get()?.unix_timestamp` read in Rust
 -- and to `now` here in Lean. The value is treated as adversarial /
 -- arbitrary at proof time — proofs that depend on a specific timestamp
--- discharge against this axiom rather than against a concrete value.
-axiom now : Nat
+-- discharge against this opaque constant rather than against a concrete
+-- value. `opaque` keeps it uninterpreted without adding an axiom to the
+-- trust surface that `#print axioms` reports.
+opaque now : Nat
 
 -- v2.24 #19: opaque on-chain epoch.
 -- Spec authors write `current_epoch()` in handler effects / requires;
@@ -39,7 +41,7 @@ axiom now : Nat
 -- `current_epoch` here in Lean. Same shape as `now` — adversarial /
 -- arbitrary at proof time. Solana protocols use epoch for
 -- stake / vote / commission scheduling.
-axiom current_epoch : Nat
+opaque current_epoch : Nat
 
 -- Example: Generic ValidState template
 -- Users can define custom ValidState predicates for their programs
@@ -69,11 +71,11 @@ abbrev valid_u64_zero := QEDGen.Solana.Valid.valid_u64_zero
 
 -- v2.21 S2.5: export `now` so the unqualified form codegen emits
 -- (`now`) resolves at use sites that `open QEDGen.Solana`.
--- `noncomputable` because `now` is an axiom and Lean's code generator
--- otherwise refuses to compile an abbrev for it.
-noncomputable abbrev now := QEDGen.Solana.Valid.now
+-- `now` is `opaque`, so the abbrev stays computable and generated
+-- transitions that read it need no `noncomputable` marker.
+abbrev now := QEDGen.Solana.Valid.now
 
 -- v2.24 #19: export `current_epoch` analogously.
-noncomputable abbrev current_epoch := QEDGen.Solana.Valid.current_epoch
+abbrev current_epoch := QEDGen.Solana.Valid.current_epoch
 
 end QEDGen.Solana

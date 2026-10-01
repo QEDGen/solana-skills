@@ -1,6 +1,6 @@
 # QEDGen.Solana — Lean 4 Support Library for Solana Verification
 
-Standalone Lean 4 library providing types, axioms, and the `qedspec` DSL for formally verifying Solana programs.
+Standalone Lean 4 library providing types, lemmas, and the `qedspec` DSL for formally verifying Solana programs.
 
 ## Quick Start
 
@@ -12,7 +12,7 @@ lake build                         # Build library
 
 ### QEDGen.Solana.Account
 
-Types and axioms for Solana account modeling.
+Types and lemmas for Solana account modeling.
 
 | Definition | Type | Description |
 |---|---|---|
@@ -24,7 +24,7 @@ Types and axioms for Solana account modeling.
 | `findByKey` | `List Account → Pubkey → Option Account` | Lookup by key |
 | `findByAuthority` | `List Account → Pubkey → Option Account` | Lookup by authority |
 
-**Axioms** (trusted, not proven):
+**Lemmas** (proved by list induction):
 - `find_map_pred_preserved` / `find_map_update_other` / `find_map_update_same` — list update properties
 - `find_by_key_map_update_other` / `find_by_key_map_update_same` — key-based lookup after update
 
@@ -129,7 +129,9 @@ proof workflow.
 
 ## Trust Boundary
 
-These axioms model the boundary between what we verify and what we trust:
+The library declares no axioms of its own. Uninterpreted runtime values
+(`now`, `current_epoch`) are `opaque` constants. The boundary between what we
+verify and what we trust is:
 
 - **Verified**: program logic (authorization, conservation, state machines, arithmetic, CPI structure)
 - **Trusted**: SPL Token implementation, Solana runtime, CPI mechanics, Anchor framework
@@ -147,10 +149,14 @@ re-elaborate) plus the generated-proof builds gated by the repo's snapshot
 suites and `scripts/check-lake-build.sh`. sBPF semantics tests live upstream
 in the qedsvm package.
 
-## Adding New Axioms
+## Adding New Definitions
+
+Prove a new lemma as a theorem. Use `opaque` for an uninterpreted value.
+Add an `axiom` only when neither works, because every axiom widens the
+trust surface that `qedgen verify` reports.
 
 1. Add to the appropriate module in `QEDGen/Solana/`
-2. Document the trust assumption with a comment
+2. Document any trust assumption with a comment
 3. Export via `QEDGen.lean` (or the module's export block)
 4. `lake build`
 
@@ -161,7 +167,7 @@ lean_solana/
 ├── lakefile.lean                  Build config (requires qedsvm, pinned tag)
 ├── QEDGen.lean                    Root export (imports the modules below)
 └── QEDGen/Solana/
-    ├── Account.lean               Pubkey, Account, lookup axioms
+    ├── Account.lean               Pubkey, Account, lookup lemmas
     ├── Arithmetic.lean            Mathlib-backed arithmetic lemmas (--mathlib projects)
     ├── Bridge.lean                qedbridge DSL
     ├── CommandBuilders.lean       Command-construction helpers (Spec dep)
