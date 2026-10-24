@@ -17,7 +17,7 @@
 //!   cargo test -p qedgen-solana-skills --test discharge_e2e -- --ignored
 //! ```
 //!
-//! The qedsvm checkout must be at the pinned tag (v0.13.0) or later: the
+//! The qedsvm checkout must be at v0.13.0 or later (the pin is v0.14.0): the
 //! transition test expects qedlift's `transition outcome` line (QEDGen/qedsvm#70).
 
 use std::path::{Path, PathBuf};
