@@ -15,7 +15,7 @@ fn crucible_generation_inputs(
     project_root: &Path,
     harness: &Path,
     synthesized_idl: Option<&str>,
-    bindings: Option<&[u8]>,
+    bindings: (Option<&[u8]>, Option<&[u8]>),
 ) -> Result<probe::crucible_artifacts::GenerationInputs> {
     let root = project_root
         .canonicalize()
@@ -47,11 +47,14 @@ fn crucible_generation_inputs(
         run_helpers::resolve_deploy_so(&root, &program).display(),
         env!("CARGO_PKG_VERSION")
     );
+    // Serialize domain bindings and state mappings at this shared seam so
+    // codegen and probe agree even when both inputs are absent.
+    let bindings = serde_json::to_vec(&bindings)?;
     Ok(probe::crucible_artifacts::GenerationInputs::new(
         &context,
         Some(format!("{spec:#?}").as_bytes()),
         Some(&idl),
-        bindings,
+        Some(&bindings),
     ))
 }
 
@@ -880,17 +883,16 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                     .as_ref()
                     .map(|prepared| serde_json::to_vec(&(&prepared.resolved, &prepared.overlay)))
                     .transpose()?;
-                let bindings_fingerprint = serde_json::to_vec(&(
-                    bindings_fingerprint.as_deref(),
-                    state_mapping_bytes.as_deref(),
-                ))?;
                 let generation_inputs = crucible_generation_inputs(
                     &synthesised_spec,
                     mode,
                     &project_root_for_idl,
                     &harness,
                     synthesised_idl.as_deref(),
-                    Some(&bindings_fingerprint),
+                    (
+                        bindings_fingerprint.as_deref(),
+                        state_mapping_bytes.as_deref(),
+                    ),
                 )?;
                 if generate_harness {
                     probe::crucible_artifacts::record_generation(&harness, &generation_inputs)?;
@@ -2511,7 +2513,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                         &spec_dir,
                         &harness,
                         None,
-                        None,
+                        (None, None),
                     )?;
                     probe::crucible_artifacts::record_generation(&harness, &inputs)?;
                 }

@@ -923,6 +923,40 @@ fn stored_counter_fixture() -> std::path::PathBuf {
     repo_root().join("crates/qedgen/tests/fixtures/regressions/crucible-stored-counter")
 }
 
+#[test]
+fn spec_probe_reuses_codegen_harness_without_bindings() {
+    ensure_qedgen_built();
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let program = tmp.path().join("stored_counter");
+    copy_dir_recursive(&stored_counter_fixture(), &program);
+    common::git_init(&program);
+    let spec = program.join("counter.qedspec");
+    let generated = Command::new(qedgen_bin())
+        .args(["codegen", "--crucible", "--spec"])
+        .arg(&spec)
+        .output()
+        .expect("generate harness");
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let source = program.join("fuzz/stored_counter/src/main.rs");
+    let original = std::fs::read(&source).unwrap();
+    let probe = Command::new(qedgen_bin())
+        .args(["probe", "--fuzz", "0", "--spec"])
+        .arg(&spec)
+        .output()
+        .expect("probe generated harness");
+    assert!(
+        probe.status.success(),
+        "{}",
+        String::from_utf8_lossy(&probe.stderr)
+    );
+    assert_eq!(extract_probe_output(&probe.stdout)["outcome"], "dry_run");
+    assert_eq!(std::fs::read(source).unwrap(), original);
+}
+
 /// Run a mapped stored-state probe from inside the program directory with a
 /// bare `--spec` file name. This is the relative-path shape a user types.
 fn run_stored_counter_probe(program: &Path, budget: &str) -> std::process::Output {
