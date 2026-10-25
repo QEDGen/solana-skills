@@ -127,9 +127,9 @@ pub fn classify_reproduced(summary: &str) -> CrashClass {
     .find(|(phrase, _)| summary.starts_with(phrase));
     if let Some((_, tag)) = guard {
         return CrashClass {
-            severity: Severity::High,
-            tag,
-            detail: None,
+            severity: Severity::Medium,
+            tag: "protocol_guard_candidate",
+            detail: Some(tag.to_string()),
         };
     }
     // Bare `fuzz_assert!(cond)` with no custom message. Real, but lower-signal
@@ -208,17 +208,31 @@ mod tests {
     fn classifies_protocol_guard_messages() {
         // Verbatim prefixes from crucible_gen::emit_guard_*.
         assert_eq!(
-            classify_reproduced("lamport inflation in escrow_vault: tracked total 5 -> 9").tag,
-            "lamport_inflation"
+            classify_reproduced("lamport inflation in escrow_vault: tracked total 5 -> 9")
+                .detail
+                .as_deref(),
+            Some("lamport_inflation")
         );
         assert_eq!(
-            classify_reproduced("ownership takeover on vault in claim: A -> B").tag,
-            "ownership_takeover"
+            classify_reproduced("ownership takeover on vault in claim: A -> B")
+                .detail
+                .as_deref(),
+            Some("ownership_takeover")
         );
         assert_eq!(
-            classify_reproduced("token inflation for mint M in mint_to: 100 -> 200").tag,
-            "token_inflation"
+            classify_reproduced("token inflation for mint M in mint_to: 100 -> 200")
+                .detail
+                .as_deref(),
+            Some("token_inflation")
         );
+    }
+
+    #[test]
+    fn protocol_guard_is_heuristic_candidate() {
+        let class = classify_reproduced("ownership takeover on vault in claim: A -> B");
+        assert_eq!(class.severity, Severity::Medium);
+        assert_eq!(class.tag, "protocol_guard_candidate");
+        assert_eq!(class.detail.as_deref(), Some("ownership_takeover"));
     }
 
     #[test]

@@ -9,6 +9,52 @@ use crate::*;
 use anyhow::{Context as _, Result};
 use std::path::{Path, PathBuf};
 
+fn crucible_generation_inputs(
+    spec: &check::ParsedSpec,
+    mode: crucible_gen::InvariantMode,
+    project_root: &Path,
+    harness: &Path,
+    synthesized_idl: Option<&str>,
+    bindings: Option<&[u8]>,
+) -> Result<probe::crucible_artifacts::GenerationInputs> {
+    let root = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf());
+    let program = crucible_gen::spec_program_name(spec);
+    let source_idl = if let Some(idl) = synthesized_idl {
+        Some(idl.as_bytes().to_vec())
+    } else {
+        [
+            root.join("target/idl").join(format!("{program}.json")),
+            root.join("idl.json"),
+            root.join("idl").join(format!("{program}.json")),
+        ]
+        .into_iter()
+        .find(|path| path.exists())
+        .map(std::fs::read)
+        .transpose()?
+    };
+    let installed_idl = harness.join("idls").join(format!("{program}.json"));
+    let installed_idl = if installed_idl.exists() {
+        Some(std::fs::read(installed_idl)?)
+    } else {
+        None
+    };
+    let idl = serde_json::to_vec(&(source_idl, installed_idl))?;
+    let context = format!(
+        "{mode:?}|root={}|deploy={}|qedgen={}",
+        root.display(),
+        run_helpers::resolve_deploy_so(&root, &program).display(),
+        env!("CARGO_PKG_VERSION")
+    );
+    Ok(probe::crucible_artifacts::GenerationInputs::new(
+        &context,
+        Some(format!("{spec:#?}").as_bytes()),
+        Some(&idl),
+        bindings,
+    ))
+}
+
 struct PreparedDomainSequenceReplay {
     resolved: probe::domain_sequence_binding::ResolvedDomainSequenceDocument,
     overlay: probe::domain_account_overlay::AccountBindingOverlay,
@@ -426,6 +472,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             domain_dossier,
             domain_sequences,
             domain_sequence_bindings,
+            crucible_state_mapping,
             harness_dir,
             no_smoke,
             stateful,
@@ -712,6 +759,42 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 // kebab-case names must become snake_case or the IDL lands
                 // in a sibling directory of the real harness.
                 let prog = crucible_gen::spec_program_name(&synthesised_spec);
+                let state_mapping_bytes = crucible_state_mapping
+                    .as_ref()
+                    .map(|path| {
+                        std::fs::read(path).with_context(|| {
+                            format!("reading Crucible state mapping {}", path.display())
+                        })
+                    })
+                    .transpose()?;
+                let resolved_state_mapping = if let Some(bytes) = state_mapping_bytes.as_deref() {
+                    if spec.is_none() {
+                        anyhow::bail!("--crucible-state-mapping requires --spec");
+                    }
+                    let idl_bytes = [
+                        project_root_for_idl
+                            .join("target/idl")
+                            .join(format!("{prog}.json")),
+                        project_root_for_idl.join("idl.json"),
+                        project_root_for_idl
+                            .join("idl")
+                            .join(format!("{prog}.json")),
+                    ]
+                    .into_iter()
+                    .find(|path| path.exists())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "--crucible-state-mapping requires an Anchor IDL for `{prog}`"
+                        )
+                    })?;
+                    Some(probe::crucible_state_mapping::resolve(
+                        &synthesised_spec,
+                        &std::fs::read(idl_bytes)?,
+                        bytes,
+                    )?)
+                } else {
+                    None
+                };
                 let harness_parent = if matches!(mode, crucible_gen::InvariantMode::Protocol) {
                     crucible_brownfield::brownfield_harness_parent(&project_root_for_idl)
                 } else {
@@ -749,9 +832,12 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 // `todo!()` account literals (or other manual fixes) that a
                 // silent regen would clobber. Plain spec/skeleton mode expects
                 // a prior `codegen --crucible` and likewise never auto-regens.
+                // A state mapping is a probe-only input, so a mapped run also
+                // emits the harness when it is absent.
                 // To pick up changed bindings, delete the harness and re-run.
                 let auto_emits = matches!(mode, crucible_gen::InvariantMode::Protocol)
-                    || matches!(requested_mode, Some(CrucibleMode::Domain));
+                    || matches!(requested_mode, Some(CrucibleMode::Domain))
+                    || resolved_state_mapping.is_some();
                 let generate_harness = auto_emits && !harness.exists();
                 if auto_emits && harness.exists() {
                     eprintln!(
@@ -767,13 +853,14 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 let deploy_so = run_helpers::resolve_deploy_so(&project_root_for_idl, &prog);
                 if generate_harness {
                     std::fs::create_dir_all(&harness_parent)?;
-                    crucible_gen::generate_with_account_overlay(
+                    crucible_gen::generate_with_observation(
                         &synthesised_spec,
                         &harness,
                         mode,
                         prepared_domain_replay
                             .as_ref()
                             .map(|prepared| &prepared.overlay),
+                        resolved_state_mapping.as_ref(),
                         Some(&deploy_so),
                     )?;
                 }
@@ -781,9 +868,41 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 // `discover_idl`): write the synthesised JSON to
                 // `<harness>/idls/<prog>.json`, overwriting each run so
                 // scanner improvements propagate.
-                if let Some(idl_json) = synthesised_idl.as_deref() {
-                    crucible_brownfield::write_synthesized_idl(&harness, &prog, idl_json)
-                        .context("writing synthesised IDL")?;
+                if generate_harness {
+                    if let Some(idl_json) = synthesised_idl.as_deref() {
+                        crucible_brownfield::write_synthesized_idl(&harness, &prog, idl_json)
+                            .context("writing synthesised IDL")?;
+                    } else {
+                        crucible_probe::discover_idl(&harness, &project_root_for_idl)?;
+                    }
+                }
+                let bindings_fingerprint = prepared_domain_replay
+                    .as_ref()
+                    .map(|prepared| serde_json::to_vec(&(&prepared.resolved, &prepared.overlay)))
+                    .transpose()?;
+                let bindings_fingerprint = serde_json::to_vec(&(
+                    bindings_fingerprint.as_deref(),
+                    state_mapping_bytes.as_deref(),
+                ))?;
+                let generation_inputs = crucible_generation_inputs(
+                    &synthesised_spec,
+                    mode,
+                    &project_root_for_idl,
+                    &harness,
+                    synthesised_idl.as_deref(),
+                    Some(&bindings_fingerprint),
+                )?;
+                if generate_harness {
+                    probe::crucible_artifacts::record_generation(&harness, &generation_inputs)?;
+                } else if harness.exists() {
+                    probe::crucible_artifacts::validate_generation(&harness, &generation_inputs)?;
+                }
+                if resolved_state_mapping.is_some() {
+                    let pinned = std::fs::read_to_string(harness.join(".qedgen/observation-source.sha256"))
+                        .context("mapped Crucible harness lacks generated observation source hash; regenerate harness")?;
+                    if pinned.trim() != crucible_gen::harness_source_sha256(&harness)? {
+                        anyhow::bail!("mapped Crucible harness source changed after generation; regenerate harness to validate account observations");
+                    }
                 }
                 let domain_seed_report = prepared_domain_replay
                     .as_ref()
@@ -836,6 +955,30 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&output)?);
                     return Ok(());
                 }
+                let readiness = crucible_gen::assess_readiness_with_mapping(
+                    &synthesised_spec,
+                    mode,
+                    resolved_state_mapping.as_ref(),
+                );
+                let unresolved = crucible_gen::unresolved_action_stubs(&harness, &readiness)?;
+                if !unresolved.is_empty() {
+                    anyhow::bail!("Crucible harness has unfilled account actions: {}; fill their accounts literals before fuzzing", unresolved.join(", "));
+                }
+                if !matches!(mode, crucible_gen::InvariantMode::Protocol) {
+                    if let Err(error) = crucible_gen::validate_domain_harness(&harness, &readiness)
+                    {
+                        if let (Some(dossier), Some(spec_path)) =
+                            (domain_dossier.as_deref(), spec.as_deref())
+                        {
+                            let _ = crucible_probe::mark_domain_lane_blocked(
+                                dossier,
+                                spec_path,
+                                &error.to_string(),
+                            );
+                        }
+                        return Err(error);
+                    }
+                }
                 // Check the program the harness really loads: a reused
                 // harness keeps the path it was generated with.
                 if let Some(so) = crucible_gen::harness_program_so(&harness) {
@@ -855,7 +998,26 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 if let Some(report) = domain_seed_report {
                     ctx.domain_seed_report = Some(report);
                 }
-                let fuzz_result = crucible_probe::run_fuzz_probe(&ctx)?;
+                let fuzz_result = match crucible_probe::run_fuzz_probe(&ctx) {
+                    Ok(result) => result,
+                    Err(error) => {
+                        let output = probe::ProbeOutput {
+                            spec_path: spec.as_ref().map(|p| p.display().to_string()),
+                            project_root: root.as_ref().map(|p| p.display().to_string()),
+                            engine_runs: vec![probe::EngineRun {
+                                engine: "crucible_fuzz".to_string(),
+                                status: probe::EngineStatus::Failed,
+                                detail: Some(format!("{error:#}")),
+                                candidates_dropped: 0,
+                                skipped_files: Vec::new(),
+                            }],
+                            outcome: probe::ProbeOutcome::EngineFailed,
+                            ..probe::ProbeOutput::envelope(probe_mode)
+                        };
+                        println!("{}", serde_json::to_string_pretty(&output)?);
+                        return Err(error);
+                    }
+                };
                 // A completed fuzz run that found nothing is `passed` (it
                 // executed) but low-coverage evidence — distinct from a
                 // finding-bearing run.
@@ -866,8 +1028,21 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 };
                 // #229: report whether minimized crashes replayed. `None`
                 // (no crashes) leaves the field absent.
-                let coverage = fuzz_result.replay_success.map(|ok| probe::ProbeCoverage {
-                    replay_success: Some(ok),
+                let coverage = Some(probe::ProbeCoverage {
+                    handlers_discovered: synthesised_spec.handlers.len() as u32,
+                    actions_generated: Some(synthesised_spec.handlers.len() as u32),
+                    actions_stubbed: Some(0),
+                    replay_success: fuzz_result.replay_success,
+                    observed_actions: if fuzz_result.observed_actions.is_empty() {
+                        None
+                    } else {
+                        Some(fuzz_result.observed_actions.clone())
+                    },
+                    observed_actions_are_lower_bounds: if fuzz_result.observed_actions.is_empty() {
+                        None
+                    } else {
+                        Some(true)
+                    },
                     ..probe::ProbeCoverage::default()
                 });
                 let output = probe::ProbeOutput {
@@ -2328,6 +2503,17 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                         &crucible_output,
                         crucible_gen::InvariantMode::Spec,
                     )?;
+                    let harness = crucible_gen::harness_dir_for(&parsed, &crucible_output);
+                    crucible_probe::discover_idl(&harness, &spec_dir)?;
+                    let inputs = crucible_generation_inputs(
+                        &parsed,
+                        crucible_gen::InvariantMode::Spec,
+                        &spec_dir,
+                        &harness,
+                        None,
+                        None,
+                    )?;
+                    probe::crucible_artifacts::record_generation(&harness, &inputs)?;
                 }
             }
             if integration || all {

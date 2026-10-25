@@ -659,6 +659,145 @@ fn domain_mode_does_not_regenerate_existing_harness() {
     );
 }
 
+fn emit_domain_fixture(program: &Path, harness: &Path) -> std::process::Output {
+    Command::new(qedgen_bin())
+        .args([
+            "probe",
+            "--fuzz",
+            "0",
+            "--crucible-mode",
+            "domain",
+            "--spec",
+        ])
+        .arg(program.join("domain.qedspec"))
+        .arg("--domain-dossier")
+        .arg(program.join("domain-dossier.json"))
+        .arg("--harness-dir")
+        .arg(harness)
+        .output()
+        .expect("emit domain fixture")
+}
+
+#[test]
+fn domain_reuse_rejects_changed_spec_without_overwriting_manual_edits() {
+    ensure_qedgen_built();
+    let tmp = tempfile::tempdir().unwrap();
+    let program = tmp.path().join("domain_boundary");
+    copy_dir_recursive(&domain_boundary_fixture(), &program);
+    let harness = tmp.path().join("fuzz/domain_boundary");
+    let first = emit_domain_fixture(&program, &harness);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let source = harness.join("src/main.rs");
+    let edited = format!(
+        "{}\n// Manual fixture customization\n",
+        std::fs::read_to_string(&source).unwrap()
+    );
+    std::fs::write(&source, &edited).unwrap();
+    let spec = program.join("domain.qedspec");
+    let changed = std::fs::read_to_string(&spec)
+        .unwrap()
+        .replace("<= 10", "<= 9");
+    std::fs::write(&spec, changed).unwrap();
+
+    let second = emit_domain_fixture(&program, &harness);
+    assert!(
+        !second.status.success(),
+        "changed spec silently reused an obsolete assertion"
+    );
+    let error = String::from_utf8_lossy(&second.stderr);
+    assert!(
+        error.contains("stale") || error.contains("changed"),
+        "{error}"
+    );
+    assert_eq!(std::fs::read_to_string(source).unwrap(), edited);
+}
+
+#[test]
+fn domain_reuse_rejects_changed_sequence_binding() {
+    ensure_qedgen_built();
+    let tmp = tempfile::tempdir().unwrap();
+    let program = tmp.path().join("domain_boundary");
+    copy_dir_recursive(&domain_boundary_fixture(), &program);
+    let harness = tmp.path().join("fuzz/domain_boundary");
+    let run = || {
+        Command::new(qedgen_bin())
+            .args([
+                "probe",
+                "--fuzz",
+                "0",
+                "--crucible-mode",
+                "domain",
+                "--spec",
+            ])
+            .arg(program.join("domain.qedspec"))
+            .arg("--domain-dossier")
+            .arg(program.join("domain-dossier.json"))
+            .arg("--domain-sequences")
+            .arg(program.join("domain-sequences.json"))
+            .arg("--domain-sequence-bindings")
+            .arg(program.join("domain-sequence-bindings.json"))
+            .arg("--harness-dir")
+            .arg(&harness)
+            .output()
+            .unwrap()
+    };
+    let first = run();
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let bindings = program.join("domain-sequence-bindings.json");
+    let changed = std::fs::read_to_string(&bindings)
+        .unwrap()
+        .replace("\"value\": 11", "\"value\": 12");
+    std::fs::write(bindings, changed).unwrap();
+    let second = run();
+    assert!(
+        !second.status.success(),
+        "changed domain seed was replayed using an old harness"
+    );
+    assert!(String::from_utf8_lossy(&second.stderr).contains("Stale Crucible harness"));
+}
+
+#[test]
+fn domain_execution_rejects_unsynchronized_shadow_before_starting_engine() {
+    ensure_qedgen_built();
+    let tmp = tempfile::tempdir().unwrap();
+    let program = tmp.path().join("domain_boundary");
+    copy_dir_recursive(&domain_boundary_fixture(), &program);
+    let spec = program.join("domain.qedspec");
+    let changed = std::fs::read_to_string(&spec)
+        .unwrap()
+        .replace("last_accepted := amount", "last_accepted := amount + 1");
+    std::fs::write(&spec, changed).unwrap();
+    let output = Command::new(qedgen_bin())
+        .args([
+            "probe",
+            "--fuzz",
+            "1",
+            "--crucible-mode",
+            "domain",
+            "--spec",
+        ])
+        .arg(&spec)
+        .arg("--domain-dossier")
+        .arg(program.join("domain-dossier.json"))
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("unsynchronized") || error.contains("unsynchronised"),
+        "must reject stale-state checking before invoking external tools: {error}"
+    );
+    assert!(error.contains("last_accepted"), "{error}");
+}
+
 /// Extract the trailing `ProbeOutput` JSON object from a live `--fuzz`
 /// run's stdout. Under a real fuzz budget Crucible streams its ASCII banner
 /// and `[FUZZ] …` progress lines to stdout ahead of the final JSON, so a
@@ -754,7 +893,8 @@ fn live_domain_boundary_protocol_misses_and_domain_finds() {
         findings.iter().any(|finding| {
             finding["handler"] == "accept" && finding["category_tag"] == "invariant_violation"
         }),
-        "domain mode must fire the ratified-limit invariant: {findings:#?}"
+        "domain mode must fire the ratified-limit invariant: {findings:#?}\nprobe stderr:\n{}",
+        String::from_utf8_lossy(&domain.stderr)
     );
 
     // Durable replay evidence: the one-action `domain-limit-accept` plan with
@@ -776,6 +916,125 @@ fn live_domain_boundary_protocol_misses_and_domain_finds() {
     assert_eq!(
         report["records"][0]["seed_sha256"].as_str().map(str::len),
         Some(64)
+    );
+}
+
+fn stored_counter_fixture() -> std::path::PathBuf {
+    repo_root().join("crates/qedgen/tests/fixtures/regressions/crucible-stored-counter")
+}
+
+/// Run a mapped stored-state probe from inside the program directory with a
+/// bare `--spec` file name. This is the relative-path shape a user types.
+fn run_stored_counter_probe(program: &Path, budget: &str) -> std::process::Output {
+    Command::new(qedgen_bin())
+        .current_dir(program)
+        .args([
+            "probe",
+            "--fuzz",
+            budget,
+            "--no-smoke",
+            "--spec",
+            "counter.qedspec",
+            "--crucible-state-mapping",
+            "state-mapping.json",
+        ])
+        .output()
+        .expect("run mapped stored-state probe")
+}
+
+/// Toolchain-independent half of the stored-state regression. A state
+/// mapping makes the probe emit the harness itself, and the harness reads
+/// the mapped field from the real account after each action.
+#[test]
+fn stored_state_mapping_emits_observing_harness() {
+    ensure_qedgen_built();
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let program = tmp.path().join("stored_counter");
+    copy_dir_recursive(&stored_counter_fixture(), &program);
+
+    let out = run_stored_counter_probe(&program, "0");
+    assert!(
+        out.status.success(),
+        "budget-0 mapped probe failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let harness = program.join("fuzz/stored_counter");
+    let body = std::fs::read_to_string(harness.join("src/main.rs")).expect("harness main.rs");
+    assert!(body.contains("stored_counter::state::Counter::deserialize"));
+    assert!(body.contains("if !fixture.action_initialize() {"));
+    assert!(body.contains("if fixture.__qedgen_observed_count {"));
+    // `increment` has no signer account; the transaction still needs a payer.
+    assert!(body.contains(".fee_payer(&self.__qedgen_fee_payer)"));
+    assert!(harness.join(".qedgen/observation-source.sha256").exists());
+
+    // A changed mapping must not reuse the harness generated for the old one.
+    let mapping = program.join("state-mapping.json");
+    let edited = std::fs::read_to_string(&mapping)
+        .unwrap()
+        .replace("\"schema_version\": 1,", "\"schema_version\": 1 ,");
+    std::fs::write(&mapping, edited).unwrap();
+    let stale = run_stored_counter_probe(&program, "0");
+    assert!(!stale.status.success(), "changed mapping must block reuse");
+    assert!(
+        String::from_utf8_lossy(&stale.stderr).contains("Stale Crucible harness"),
+        "{}",
+        String::from_utf8_lossy(&stale.stderr)
+    );
+}
+
+/// Opt-in live proof that a mapped invariant reads stored account state.
+/// The buggy program stores an unbounded count, so fuzzing must find a
+/// replay-confirmed `bounded` violation. The corrected program clamps the
+/// stored count and must stay clean.
+#[test]
+fn live_stored_state_buggy_fires_and_corrected_is_clean() {
+    if std::env::var_os("QEDGEN_RUN_LIVE_CRUCIBLE_STORED_STATE").is_none() {
+        return;
+    }
+    ensure_qedgen_built();
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let program = tmp.path().join("stored_counter");
+    copy_dir_recursive(&stored_counter_fixture(), &program);
+
+    let build_and_probe = |features: &[&str]| {
+        let build = common::sbf::build_sbf_v3(&program)
+            .args(features)
+            .output()
+            .expect("spawn cargo build-sbf");
+        assert!(
+            build.status.success(),
+            "SBF build failed:\n{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        common::sbf::assert_deploy_dir_v3(&program.join("target/deploy"));
+        let _ = std::fs::remove_dir_all(program.join("fuzz"));
+        let out = run_stored_counter_probe(&program, "30");
+        assert!(
+            out.status.success(),
+            "mapped probe failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        (extract_probe_output(&out.stdout), out.stderr)
+    };
+
+    let (buggy, stderr) = build_and_probe(&[]);
+    let findings = buggy["findings"].as_array().expect("findings array");
+    assert!(
+        findings.iter().any(|finding| {
+            finding["handler"] == "increment"
+                && finding["category_tag"] == "invariant_violation"
+                && finding["reproducer"]["invariant_id"] == "bounded"
+        }),
+        "buggy stored update must fire `bounded`: {findings:#?}\nprobe stderr:\n{}",
+        String::from_utf8_lossy(&stderr)
+    );
+
+    let (corrected, stderr) = build_and_probe(&["--features", "corrected"]);
+    assert_eq!(
+        corrected["findings"],
+        serde_json::json!([]),
+        "corrected stored update must stay clean\nprobe stderr:\n{}",
+        String::from_utf8_lossy(&stderr)
     );
 }
 

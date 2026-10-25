@@ -1,5 +1,67 @@
 # QEDGen — known limitations
 
+## Crucible fuzzing and invariant evidence
+
+`qedgen probe --fuzz` executes a generated harness against a built program. A
+domain invariant or property becomes a `fuzz_assert!` checked after actions.
+When a sequence violates it, the crash metadata and replay show the handler,
+inputs, and assertion that failed. Replay-confirmed named spec assertions are
+counterexamples to the harness's executable claim. They still require review
+of the account setup and shadow-state mapping before drawing a conclusion
+about the deployed program.
+
+For example, the bundled domain-boundary fixture declares
+`last_accepted <= 10` and mirrors the argument of a successful `accept(amount)`
+call. A sequence containing `accept(11)` is a counterexample if the program
+accepts it: the fixture records 11 and the generated assertion fails. The
+same transaction produces no domain finding in protocol-only mode because
+the generic account guards have no rule about this business limit. The
+replayed seed supplies a repeatable input for debugging the missing check.
+
+The harness can mirror a successfully accepted scalar argument into a fixture
+field. An assertion about that field tests the accepted input envelope after
+the first successful action. It does **not** test decoded account state. Other
+state fields need an account-specific post-transaction read and a source-bound
+review at `.qedgen/readiness-review.json` before domain fuzzing. That JSON
+contains `schema_version: 1`, the SHA-256 of `src/main.rs` as
+`harness_sha256`, and `synchronized_fields` naming the fields the harness
+author reviewed. An edit to `src/main.rs` invalidates the review. Missing
+account literals and unsupported PDA seeds block execution until repaired.
+
+`--crucible-state-mapping` removes this limit for the fields it maps. The
+generated action reads the mapped account after every transaction, whether
+the transaction succeeded or failed. It checks that the account exists, has
+lamports, is owned by the program, and starts with the IDL discriminator. Then
+it decodes the account and copies the field into the fixture. An assertion on
+a mapped field runs only after a successful read. The first slice supports
+`bool` and fixed-width integer fields of named Borsh structs whose fields are
+all such scalars. Zero-copy, generic, and variable-length layouts are rejected.
+The bundled `crucible-stored-counter` fixture is the live regression: the buggy
+program stores a count above the spec bound and fuzzing finds it; the corrected
+program stays clean.
+
+Primitive numeric and boolean arguments are fuzzed. Complex payloads may use
+fixed defaults; see the emitted `qedgen-readiness.json` for exact limits of
+each harness. Generic funded accounts may fail a program's initialization or
+authorization checks, reducing reached states. The `coverage.observed_actions`
+counts are sampled lower bounds of actual send outcomes; missing handlers are
+unknown. No result claims how many invariant evaluations occurred.
+
+Protocol guards produce investigation candidates for mechanical account
+changes. Legitimate withdrawals and other intended state changes can trigger
+them. Faults inside the program often appear as failed transactions and need
+a spec assertion or another test to become a finding. A completed run with no
+findings is low-coverage evidence, especially if no actions succeeded.
+
+Existing harnesses carry `.qedgen/generation-inputs.json` to guard against
+changed spec, IDL, mode, bindings, or action layout. Manual action-body edits
+are preserved. A stale or legacy harness must be regenerated in a new
+directory after preserving those edits. Generated Crucible dependencies and
+the live CI CLI use revision `086b423506bf4928a878f292e34c7beed9c7056d`.
+The upstream IDL generator at that revision still fails for an enum whose
+first variant includes an array longer than 32 elements; see issue #341's
+local investigation in `docs/rca-341-crucible-enum-default.md`.
+
 A running list of constructs the spec parser accepts but downstream codegen
 can't (yet) lower to a non-vacuous harness. Each entry includes the lint
 `qedgen check` emits when the shape appears, plus the supported workaround.

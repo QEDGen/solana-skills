@@ -40,10 +40,14 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) {
                 .to_string_lossy()
                 .to_string();
             // .lake/ and target/ build outputs aren't part of codegen.
+            // Crucible's freshness manifest intentionally records the
+            // absolute deployment root, so it is run-specific provenance
+            // rather than deterministic generated source.
             if rel.starts_with(".lake/")
                 || rel.contains("/.lake/")
                 || rel.starts_with("target/")
                 || rel.contains("/target/")
+                || rel.ends_with("/.qedgen/generation-inputs.json")
             {
                 continue;
             }

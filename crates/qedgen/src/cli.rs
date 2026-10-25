@@ -362,6 +362,10 @@ pub(crate) enum Commands {
         #[arg(long, requires = "fuzz", requires = "domain_sequences")]
         domain_sequence_bindings: Option<PathBuf>,
 
+        /// Versioned JSON binding spec state fields to IDL account data.
+        #[arg(long, requires = "fuzz")]
+        crucible_state_mapping: Option<PathBuf>,
+
         /// Crucible harness directory. Defaults to `./fuzz/<spec_program>`,
         /// matching `qedgen codegen --crucible` output.
         #[arg(long)]

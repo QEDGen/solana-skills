@@ -19,9 +19,11 @@ use crate::check::parse_spec_file;
 // scaffolding) plus the spec-aware predicates driven by the enumerator.
 pub(crate) mod arithmetic_symbol_probe;
 pub(crate) mod cluster;
+pub(crate) mod crucible_artifacts;
 pub(crate) mod crucible_brownfield;
 pub(crate) mod crucible_probe;
 pub(crate) mod crucible_replay;
+pub(crate) mod crucible_state_mapping;
 pub(crate) mod dead_guard_probe;
 pub(crate) mod domain_account_overlay;
 pub(crate) mod domain_extract;
@@ -727,6 +729,13 @@ pub struct ProbeCoverage {
     /// Whether minimized crashes replayed successfully (Crucible triage).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replay_success: Option<bool>,
+    /// Actual completed action outcomes observed in periodic harness output.
+    /// Missing handlers and the tail of each process remain unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_actions:
+        Option<std::collections::BTreeMap<String, crucible_probe::ObservedActionCounts>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_actions_are_lower_bounds: Option<bool>,
 }
 
 /// Top-level interpretation of the run. Lets a consumer branch on outcome

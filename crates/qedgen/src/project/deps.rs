@@ -59,14 +59,20 @@ fn require_kani_with_path(path: Option<&std::ffi::OsStr>) -> Result<()> {
 /// Check that `crucible` (Crucible coverage-guided fuzzer) is available.
 /// Called before any command that needs to run a fuzz harness.
 pub fn require_crucible() -> Result<()> {
-    if Command::new("crucible").arg("--version").output().is_ok() {
+    if Command::new("crucible")
+        .arg("--help")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
         return Ok(());
     }
     bail!(
         "Crucible fuzzer not found. Required for `qedgen probe --fuzz` and `qedgen verify --crucible`.\n\n\
          Install Crucible:\n\
          \n\
-           cargo install --git https://github.com/asymmetric-research/crucible crucible-fuzz-cli\n\
+           git clone https://github.com/asymmetric-research/crucible /tmp/crucible\n\
+           git -C /tmp/crucible checkout 086b423506bf4928a878f292e34c7beed9c7056d\n\
+           cargo install --path /tmp/crucible/crates/crucible-fuzz-cli --locked\n\
          \n\
          Crucible is alpha software pinned to Solana v3 + Anchor 1.0.1. The first\n\
          build of a fuzz harness can take 2-5 minutes (LibAFL is a heavy dep tree).\n"
