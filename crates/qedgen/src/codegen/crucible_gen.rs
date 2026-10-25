@@ -104,7 +104,13 @@ pub fn validate_domain_harness(
     let blockers: Vec<&String> = readiness
         .domain_blockers
         .iter()
-        .filter(|blocker| !blocker.starts_with("unfilled accounts for handler `"))
+        // These wiring errors describe the original spec. The source check
+        // above has established that every affected action was filled in.
+        .filter(|blocker| {
+            !blocker.starts_with("unfilled accounts for handler `")
+                && !blocker.starts_with("Crucible cannot resolve PDA seed `")
+                && !blocker.starts_with("Crucible PDA seed `")
+        })
         .collect();
     if blockers.is_empty() {
         return Ok(DomainReadinessValidation {
@@ -1973,7 +1979,6 @@ fn emit_action_fn(
                 .join(", ");
             let account_type = &binding.account_type;
             let data_field = &binding.data_field;
-            let max_len = binding.discriminator.len() + binding.serialized_len + 1024;
             out.push_str(&format!(r#"        self.__qedgen_observed_{field} = false;
         {{
             let __pk = {identity};
@@ -1982,14 +1987,13 @@ fn emit_action_fn(
             if __account.lamports == 0 {{ observation_error("{op_name}.{field}: mapped account closed"); }}
             if __account.owner != self.program_id {{ observation_error("{op_name}.{field}: mapped account owner mismatch"); }}
             let __disc: &[u8] = &[{discriminator}];
-            if __account.data.len() < __disc.len() + {serialized_len} || __account.data.len() > {max_len} {{
+            if __account.data.len() < __disc.len() + {serialized_len} {{
                 observation_error("{op_name}.{field}: mapped account data length invalid");
             }}
             if !__account.data.starts_with(__disc) {{ observation_error("{op_name}.{field}: mapped account discriminator mismatch"); }}
-            let mut __body = &__account.data[__disc.len()..];
+            let mut __body = &__account.data[__disc.len()..__disc.len() + {serialized_len}];
             let __decoded = {prog}::state::{account_type}::deserialize(&mut __body)
                 .unwrap_or_else(|_| observation_error("{op_name}.{field}: mapped account Borsh decode failed"));
-            if !__body.iter().all(|byte| *byte == 0) {{ observation_error("{op_name}.{field}: mapped account nonzero trailing bytes"); }}
             self.{field} = __decoded.{data_field};
             self.__qedgen_observed_{field} = true;
         }}
@@ -2358,6 +2362,76 @@ handler withdraw (amount : U64) : State.Active -> State.Active {
     }
 
     #[test]
+    fn mapped_reader_accepts_account_padding_but_rejects_truncated_layout() {
+        let (_, _, harness) = stored_harness();
+        let body = action_body(&harness, "increment");
+        // Execute the generated data validation/decoding block independently of
+        // the SVM transaction. The small decoder below consumes one Borsh u64,
+        // just like this fixture's fixed-layout Counter.
+        let start = body.find("let __disc:").unwrap();
+        let end = body.find("self.count = __decoded.count;").unwrap();
+        let reader = &body[start..end];
+        let program = format!(
+            r#"
+struct Account {{ data: Vec<u8> }}
+mod stored_counter {{
+    pub mod state {{
+        pub struct Counter {{ pub count: u64 }}
+        impl Counter {{
+            pub fn deserialize(data: &mut &[u8]) -> Result<Self, ()> {{
+                if data.len() < 8 {{ return Err(()); }}
+                let (value, rest) = data.split_at(8);
+                *data = rest;
+                Ok(Self {{ count: u64::from_le_bytes(value.try_into().unwrap()) }})
+            }}
+        }}
+    }}
+}}
+fn observation_error(message: &str) -> ! {{ panic!("{{}}", message) }}
+fn read(data: Vec<u8>) -> u64 {{
+    let __account = Account {{ data }};
+    {reader}
+    __decoded.count
+}}
+fn main() {{
+    for (length, padding) in [(16, 0), (32, 0xA5), (2048, 0), (2048, 0xA5)] {{
+        let mut data = vec![padding; length];
+        data[..8].copy_from_slice(&[255, 176, 4, 245, 188, 253, 124, 25]);
+        data[8..16].copy_from_slice(&42u64.to_le_bytes());
+        assert_eq!(read(data), 42, "length={{length}}, padding={{padding}}");
+    }}
+    for length in [0, 7, 8, 15] {{
+        assert!(std::panic::catch_unwind(|| read(vec![0; length])).is_err());
+    }}
+    assert!(std::panic::catch_unwind(|| read(vec![0; 16])).is_err());
+}}
+"#
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("reader.rs");
+        let binary = directory.path().join("reader");
+        std::fs::write(&source, program).unwrap();
+        let compiled = std::process::Command::new("rustc")
+            .args(["--edition=2021"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&binary)
+            .output()
+            .unwrap();
+        assert!(
+            compiled.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+        let executed = std::process::Command::new(&binary).output().unwrap();
+        assert!(
+            executed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&executed.stderr)
+        );
+    }
+
+    #[test]
     fn mapped_field_uses_each_handlers_own_account_role() {
         let source = STORED_SPEC.replace(
             "accounts { counter : writable, pda [\"counter\"] }",
@@ -2717,6 +2791,55 @@ handler liquidate (amount : U64) : State.Active -> State.Active {
             .domain_blockers
             .iter()
             .any(|blocker| blocker.contains("cannot resolve PDA seed `borrower`")));
+    }
+
+    #[test]
+    fn repaired_pda_seed_can_pass_source_bound_readiness_review() {
+        let source_spec = UNRESOLVED_SEED_SPEC
+            .replace(
+                "handler liquidate",
+                "invariant total_bounded :\n  state.total <= 100\n\nhandler liquidate",
+            )
+            .replace(
+                "  requires state.total",
+                "  invariant total_bounded\n  requires state.total",
+            );
+        let spec = parse_str(&source_spec).unwrap();
+        let readiness = assess_readiness(&spec, InvariantMode::Spec);
+        let source = emit_harness(&spec, InvariantMode::Spec, None).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(directory.path().join("src")).unwrap();
+        std::fs::create_dir_all(directory.path().join(".qedgen")).unwrap();
+        let path = directory.path().join("src/main.rs");
+        std::fs::write(&path, &source).unwrap();
+        assert!(validate_domain_harness(directory.path(), &readiness).is_err());
+
+        let repaired = source.replace(
+            "todo!(\"agent-fill: pda seed liquidate::borrower\")",
+            "b\"borrower\"",
+        );
+        assert_ne!(source, repaired);
+        std::fs::write(&path, repaired).unwrap();
+        // Fixing wiring must not waive the separate state synchronization review.
+        assert!(validate_domain_harness(directory.path(), &readiness).is_err());
+        let review = ManualReadinessReview {
+            schema_version: 1,
+            harness_sha256: harness_source_sha256(directory.path()).unwrap(),
+            synchronized_fields: vec!["total".into()],
+        };
+        std::fs::write(
+            directory.path().join(".qedgen/readiness-review.json"),
+            serde_json::to_vec(&review).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            validate_domain_harness(directory.path(), &readiness)
+                .unwrap()
+                .scope,
+            "manual_review",
+        );
+        std::fs::write(&path, source).unwrap();
+        assert!(validate_domain_harness(directory.path(), &readiness).is_err());
     }
 
     #[test]
