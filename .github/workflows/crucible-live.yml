@@ -1,0 +1,36 @@
+name: Crucible generated harness live gate
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  generated-harness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space for the generated harness build
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                      /usr/local/.ghcup /opt/hostedtoolcache/CodeQL \
+                      /usr/local/share/boost /usr/local/share/powershell \
+                      /usr/local/lib/node_modules
+          sudo docker image prune --all --force >/dev/null 2>&1 || true
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install SBF v3 toolchain
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/v4.3.0/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@v2
+      # cargo install --git traverses upstream nested example workspaces and
+      # rejects them; install the exact package from a pinned checkout instead.
+      - uses: actions/checkout@v4
+        with:
+          repository: asymmetric-research/crucible
+          ref: 086b423506bf4928a878f292e34c7beed9c7056d
+          path: .toolchains/crucible
+      - name: Install pinned Crucible CLI
+        run: cargo install --path .toolchains/crucible/crates/crucible-fuzz-cli --locked --force
+      - name: Run generated protocol, domain, and stored-state fixtures
+        run: bash scripts/crucible-live-gate.sh

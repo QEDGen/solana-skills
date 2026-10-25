@@ -181,6 +181,13 @@ pub(crate) fn doubled_spec_dir_warning(
 /// 3. else fall back to the crate root itself (standalone crate — the
 ///    pre-#342 behavior, correct there).
 pub(crate) fn resolve_deploy_so(project_root: &Path, prog: &str) -> PathBuf {
+    // `--spec counter.qedspec` has an empty parent. Resolve it as the
+    // current directory so the harness never gets a cwd-relative path.
+    let project_root = if project_root.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        project_root
+    };
     let root = std::fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
     let so_name = format!("{prog}.so");
     let candidate = |dir: &Path| dir.join("target").join("deploy").join(&so_name);
@@ -1405,6 +1412,12 @@ mod tests {
 
     /// #342: a standalone crate (no workspace anywhere above) keeps the
     /// crate-rooted path — the pre-#342 behavior, correct there.
+    #[test]
+    fn deploy_so_resolves_empty_spec_parent_to_an_absolute_path() {
+        let resolved = super::resolve_deploy_so(std::path::Path::new(""), "bare_spec");
+        assert!(resolved.is_absolute(), "{}", resolved.display());
+    }
+
     #[test]
     fn deploy_so_falls_back_to_crate_root_for_standalone_crate() {
         let dir = tempfile::tempdir().unwrap();

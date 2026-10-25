@@ -19,9 +19,11 @@ use crate::rust_codegen_util;
 /// `Protocol` — brownfield, no spec: `invariant_test` body is empty, but the
 /// per-action protocol-invariant suite (`PROTOCOL_GUARDS`) fires as
 /// `fuzz_assert!`s — wallet-lamport inflation, total-lamport conservation,
-/// ownership takeover, discriminator/type change, close-scrub integrity,
-/// rent-exemption loss, realloc data leak, and SPL token-balance
-/// conservation. Plus any panic in the *harness/host* code.
+/// ownership takeover, close-scrub integrity, rent-exemption loss,
+/// and SPL token-balance
+/// conservation. These are investigation heuristics. Prefix/discriminator and
+/// realloc-tail checks require account-specific layout/semantics and are disabled.
+/// Plus any panic in the *harness/host* code.
 ///
 /// IMPORTANT — what this does NOT catch: a fault *inside* the deployed `.so`
 /// (arithmetic overflow, div-by-zero, `unwrap` on `None`, `require!` abort)
@@ -43,6 +45,280 @@ pub enum InvariantMode {
     Both,
 }
 
+/// Generation readiness describes emitted checks, never runtime coverage.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct HarnessReadiness {
+    pub schema_version: u32,
+    pub actions_emitted: usize,
+    pub actions_stubbed: Vec<String>,
+    pub assertions_emitted: usize,
+    pub domain_blockers: Vec<String>,
+    pub limitations: Vec<String>,
+    /// Mirrors of successfully accepted instruction arguments, not decoded account state.
+    pub accepted_input_fields: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ManualReadinessReview {
+    pub schema_version: u32,
+    pub harness_sha256: String,
+    pub synchronized_fields: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DomainReadinessValidation {
+    pub scope: &'static str,
+}
+
+pub fn harness_source_sha256(dir: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let source = std::fs::read(dir.join("src/main.rs"))?;
+    Ok(format!("{:x}", Sha256::digest(source)))
+}
+
+pub fn unresolved_action_stubs(dir: &Path, readiness: &HarnessReadiness) -> Result<Vec<String>> {
+    let source = std::fs::read_to_string(dir.join("src/main.rs"))?;
+    Ok(readiness
+        .actions_stubbed
+        .iter()
+        .filter(|handler| {
+            !source.contains(&format!("pub fn action_{handler}"))
+                || source.contains(&format!("agent-fill: accounts::{}", pascal_case(handler)))
+                || source.contains(&format!("agent-fill: pda seed {handler}::"))
+        })
+        .cloned()
+        .collect())
+}
+
+/// A manual review acknowledges only the named account-state mirrors and is
+/// bound to the exact harness source. It cannot waive missing account wiring
+/// or an assertion whose Rust expression cannot be inspected.
+pub fn validate_domain_harness(
+    dir: &Path,
+    readiness: &HarnessReadiness,
+) -> Result<DomainReadinessValidation> {
+    let unresolved = unresolved_action_stubs(dir, readiness)?;
+    if !unresolved.is_empty() {
+        bail!("Crucible harness has unfilled account actions: {}; fill their accounts literals before fuzzing", unresolved.join(", "));
+    }
+    let blockers: Vec<&String> = readiness
+        .domain_blockers
+        .iter()
+        // These wiring errors describe the original spec. The source check
+        // above has established that every affected action was filled in.
+        .filter(|blocker| {
+            !blocker.starts_with("unfilled accounts for handler `")
+                && !blocker.starts_with("Crucible cannot resolve PDA seed `")
+                && !blocker.starts_with("Crucible PDA seed `")
+        })
+        .collect();
+    if blockers.is_empty() {
+        return Ok(DomainReadinessValidation {
+            scope: if readiness.accepted_input_fields.is_empty() {
+                "no_state_assertions"
+            } else {
+                "accepted_input_mirrors"
+            },
+        });
+    }
+    let mut fields = Vec::new();
+    for blocker in &blockers {
+        let Some(field) = blocker
+            .strip_prefix("unsynchronized assertion field `")
+            .and_then(|tail| tail.split_once('`').map(|(field, _)| field))
+        else {
+            bail!("Crucible domain harness is incomplete: {blocker}");
+        };
+        fields.push(field);
+    }
+    let review_path = dir.join(".qedgen/readiness-review.json");
+    let review: ManualReadinessReview =
+        serde_json::from_slice(&std::fs::read(&review_path).map_err(|error| {
+            anyhow::anyhow!(
+                "{}; manual synchronization requires {}: {error}",
+                readiness.domain_blockers.join("; "),
+                review_path.display()
+            )
+        })?)?;
+    if review.schema_version != 1 || review.harness_sha256 != harness_source_sha256(dir)? {
+        bail!("manual Crucible readiness review has an invalid schema or source hash; review src/main.rs again and update {}", review_path.display());
+    }
+    for field in fields {
+        if !review
+            .synchronized_fields
+            .iter()
+            .any(|reviewed| reviewed == field)
+        {
+            bail!(
+                "unsynchronized assertion field `{field}` lacks a source-bound manual review in {}",
+                review_path.display()
+            );
+        }
+    }
+    Ok(DomainReadinessValidation {
+        scope: "manual_review",
+    })
+}
+
+impl HarnessReadiness {
+    #[cfg(test)]
+    pub fn validate_domain(&self) -> Result<()> {
+        if !self.domain_blockers.is_empty() {
+            bail!("Crucible domain harness is incomplete: {}. Synchronize assertions from observed account state and fill account/seed wiring, then regenerate or explicitly review your manually synchronized harness", self.domain_blockers.join("; "));
+        }
+        Ok(())
+    }
+}
+
+/// Extract state reads structurally; strings and comments cannot masquerade as reads.
+fn assertion_state_fields(expression: &str) -> Result<Vec<String>> {
+    use syn::visit::Visit;
+    #[derive(Default)]
+    struct Fields {
+        named: std::collections::BTreeSet<String>,
+        whole_state: bool,
+    }
+    impl<'ast> Visit<'ast> for Fields {
+        fn visit_expr_field(&mut self, field: &'ast syn::ExprField) {
+            if matches!(&*field.base, syn::Expr::Path(path) if path.path.is_ident("s") || path.path.is_ident("fixture"))
+            {
+                if let syn::Member::Named(name) = &field.member {
+                    self.named.insert(name.to_string());
+                }
+                return;
+            }
+            syn::visit::visit_expr_field(self, field);
+        }
+        fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
+            if path.path.is_ident("s") || path.path.is_ident("fixture") {
+                self.whole_state = true;
+            }
+            syn::visit::visit_expr_path(self, path);
+        }
+    }
+    let expression = syn::parse_str::<syn::Expr>(expression)?;
+    let mut fields = Fields::default();
+    fields.visit_expr(&expression);
+    if fields.whole_state {
+        bail!("assertion passes the entire state/fixture to a helper; its account-state reads cannot be inspected");
+    }
+    Ok(fields.named.into_iter().collect())
+}
+
+fn executable_assertion_expressions(spec: &ParsedSpec) -> Vec<&str> {
+    spec.invariants
+        .iter()
+        .filter(|inv| {
+            spec.handlers.iter().any(|handler| {
+                handler.invariants.contains(&inv.name) || handler.establishes.contains(&inv.name)
+            })
+        })
+        .filter_map(|inv| inv.rust_expr.as_deref())
+        .chain(
+            spec.properties
+                .iter()
+                .filter_map(|prop| prop.rust_expression.as_deref()),
+        )
+        .filter(|expr| !check::rust_expr_is_unsupported(expr))
+        .collect()
+}
+
+/// Conservative readiness for the mechanically generated harness. Manual source edits
+/// must be reviewed separately and bound to the edited source hash by the caller.
+#[allow(dead_code)]
+pub fn assess_readiness(spec: &ParsedSpec, mode: InvariantMode) -> HarnessReadiness {
+    assess_readiness_with_mapping(spec, mode, None)
+}
+
+pub fn assess_readiness_with_mapping(
+    spec: &ParsedSpec,
+    mode: InvariantMode,
+    state_mapping: Option<&crate::probe::crucible_state_mapping::ResolvedStateMapping>,
+) -> HarnessReadiness {
+    let mut result = HarnessReadiness {
+        schema_version: 1,
+        actions_emitted: spec.handlers.len(),
+        actions_stubbed: spec.handlers.iter().filter(|h| h.accounts.is_empty()).map(|h| h.name.clone()).collect(),
+        assertions_emitted: if matches!(mode, InvariantMode::Protocol) { 0 } else { executable_assertion_count(spec) },
+        domain_blockers: Vec::new(),
+        limitations: vec!["Account fixtures are generic funded accounts; application-specific initialization and successful execution are not established by generation".into(),
+            "Protocol guard firings are investigation heuristics, not confirmed semantic vulnerabilities".into(),
+            "Runtime action summaries are sampled cumulative lower bounds; no summary means unknown execution coverage".into()],
+        accepted_input_fields: Vec::new(),
+    };
+    for handler in &spec.handlers {
+        if handler.accounts.is_empty() {
+            result.domain_blockers.push(format!(
+                "unfilled accounts for handler `{}`: supply IDL/spec account bindings",
+                handler.name
+            ));
+        }
+        for (name, ty) in &handler.takes_params {
+            if matches!(
+                fuzz_param_kind(ty),
+                FuzzParamKind::Inline(_) | FuzzParamKind::OptionInline(_)
+            ) {
+                result.limitations.push(format!("handler `{}` argument `{name}` ({ty}) uses a fixed/default-only payload; compound payload values are not fuzzed", handler.name));
+            }
+        }
+        for account in &handler.accounts {
+            if account.pda_seeds.is_some() {
+                for seed in pda_seeds_for_account(spec, account).unwrap_or_default() {
+                    if let Err(error) = render_pda_seed_expr(spec, handler, seed, None) {
+                        result.domain_blockers.push(error.to_string());
+                        if !result.actions_stubbed.contains(&handler.name) {
+                            result.actions_stubbed.push(handler.name.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if !matches!(mode, InvariantMode::Protocol) {
+        let mut referenced = std::collections::BTreeSet::new();
+        for expression in executable_assertion_expressions(spec) {
+            match assertion_state_fields(expression) {
+                Ok(fields) => referenced.extend(fields),
+                Err(error) => result
+                    .domain_blockers
+                    .push(format!("cannot analyze assertion `{expression}`: {error}")),
+            }
+        }
+        for field in referenced {
+            if state_mapping.is_some_and(|mapping| mapping.fields.contains_key(&field)) {
+                continue;
+            }
+            let effects: Vec<_> = spec
+                .handlers
+                .iter()
+                .flat_map(|handler| {
+                    handler
+                        .effects
+                        .iter()
+                        .filter(|effect| effect.field == field)
+                        .map(move |effect| (handler, effect))
+                })
+                .collect();
+            let mirrored = !effects.is_empty()
+                && effects.iter().all(|(handler, effect)| {
+                    handler.effect_branches.is_none()
+                        && direct_scalar_shadow_assignment(spec, handler, effect).is_some()
+                });
+            if mirrored {
+                result.accepted_input_fields.push(field);
+            } else {
+                result.domain_blockers.push(format!("unsynchronized assertion field `{field}`: deserialize observed post-state into the fixture; default/stale shadows are not executable semantic coverage"));
+            }
+        }
+        if !result.accepted_input_fields.is_empty() {
+            result.limitations.push("Accepted-input mirrors check only the latest successfully accepted scalar arguments, after observation; they do not verify account-state effects or persistent invariants".into());
+        }
+    }
+    result.domain_blockers.sort();
+    result.domain_blockers.dedup();
+    result
+}
+
 /// Write a `fuzz/<program>/` harness. `output_dir` may be the parent (e.g.
 /// `fuzz/`) or the leaf itself — see `harness_dir_for`. `mode` selects the
 /// invariant family asserted after each action; brownfield callers (no
@@ -59,6 +335,17 @@ pub(crate) fn generate_with_account_overlay(
     // Absolute path to `<project>/target/deploy/<prog>.so`. When set, the
     // harness loads the program from this exact path so it works from any
     // location; when None it falls back to a layout-relative path.
+    deploy_so: Option<&Path>,
+) -> Result<()> {
+    generate_with_observation(spec, output_dir, mode, account_overlay, None, deploy_so)
+}
+
+pub(crate) fn generate_with_observation(
+    spec: &ParsedSpec,
+    output_dir: &Path,
+    mode: InvariantMode,
+    account_overlay: Option<&crate::probe::domain_account_overlay::AccountBindingOverlay>,
+    state_mapping: Option<&crate::probe::crucible_state_mapping::ResolvedStateMapping>,
     deploy_so: Option<&Path>,
 ) -> Result<()> {
     if spec.handlers.is_empty() {
@@ -82,7 +369,19 @@ pub(crate) fn generate_with_account_overlay(
     std::fs::write(dir.join("idls").join("README.md"), emit_idls_readme(spec))?;
     crate::codegen_shared::write_generated_file(
         &dir.join("src").join("main.rs"),
-        &emit_harness_with_deploy(spec, mode, account_overlay, deploy_so)?,
+        &emit_harness_with_observation(spec, mode, account_overlay, state_mapping, deploy_so)?,
+    )?;
+    if state_mapping.is_some() {
+        std::fs::create_dir_all(dir.join(".qedgen"))?;
+        std::fs::write(
+            dir.join(".qedgen/observation-source.sha256"),
+            harness_source_sha256(&dir)?,
+        )?;
+    }
+
+    std::fs::write(
+        dir.join("qedgen-readiness.json"),
+        serde_json::to_vec_pretty(&assess_readiness_with_mapping(spec, mode, state_mapping))?,
     )?;
 
     let assertion_count = match mode {
@@ -236,9 +535,9 @@ The IDL must be in Anchor 0.30+ format. Anchor 0.29 IDLs need
 /// The Crucible deps are pinned by git ref (Crucible v0.x — no stable
 /// crates.io release yet). Worth checking the resolved git ref into the
 /// emitted `Cargo.lock` so the harness reproduces.
-const CRUCIBLE_DEP: &str = r#"crucible-fuzzer = { git = "https://github.com/asymmetric-research/crucible", branch = "main" }
-crucible-test-context = { git = "https://github.com/asymmetric-research/crucible", branch = "main" }
-crucible-idl-gen = { git = "https://github.com/asymmetric-research/crucible", branch = "main" }"#;
+const CRUCIBLE_DEP: &str = r#"crucible-fuzzer = { git = "https://github.com/asymmetric-research/crucible", rev = "086b423506bf4928a878f292e34c7beed9c7056d" }
+crucible-test-context = { git = "https://github.com/asymmetric-research/crucible", rev = "086b423506bf4928a878f292e34c7beed9c7056d" }
+crucible-idl-gen = { git = "https://github.com/asymmetric-research/crucible", rev = "086b423506bf4928a878f292e34c7beed9c7056d" }"#;
 
 fn emit_cargo_toml(spec: &ParsedSpec) -> String {
     let prog = spec_program_name(spec);
@@ -302,10 +601,21 @@ fn emit_harness(
     emit_harness_with_deploy(spec, mode, account_overlay, None)
 }
 
+#[allow(dead_code)]
 fn emit_harness_with_deploy(
     spec: &ParsedSpec,
     mode: InvariantMode,
     account_overlay: Option<&crate::probe::domain_account_overlay::AccountBindingOverlay>,
+    deploy_so: Option<&Path>,
+) -> Result<String> {
+    emit_harness_with_observation(spec, mode, account_overlay, None, deploy_so)
+}
+
+fn emit_harness_with_observation(
+    spec: &ParsedSpec,
+    mode: InvariantMode,
+    account_overlay: Option<&crate::probe::domain_account_overlay::AccountBindingOverlay>,
+    state_mapping: Option<&crate::probe::crucible_state_mapping::ResolvedStateMapping>,
     deploy_so: Option<&Path>,
 ) -> Result<String> {
     let prog = spec_program_name(spec);
@@ -335,6 +645,25 @@ use {prog}::accounts;
 "#
     ));
 
+    if state_mapping.is_some() {
+        out.push_str(
+            r#"fn observation_error(detail: &str) -> ! {
+    let message = format!("QEDGEN_OBSERVATION_ERROR: {detail}");
+    let Some(path) = std::env::var_os("QEDGEN_OBSERVATION_ERROR_FILE") else {
+        eprintln!("{message}; missing diagnostic file path");
+        std::process::exit(70);
+    };
+    if let Err(error) = std::fs::write(path, &message) {
+        eprintln!("{message}; could not persist diagnostic: {error}");
+        std::process::exit(70);
+    }
+    panic!("{message}");
+}
+
+"#,
+        );
+    }
+
     let want_protocol = matches!(mode, InvariantMode::Protocol | InvariantMode::Both);
     if want_protocol {
         emit_protocol_invariants_helpers(&mut out);
@@ -344,9 +673,17 @@ use {prog}::accounts;
         account_overlay.is_some_and(|overlay| !overlay.handlers.is_empty());
     emit_fixture_struct(&mut out, spec, &fixture, mode, force_fixture_accounts);
     out.push('\n');
-    emit_fixture_impl(&mut out, spec, &fixture, mode, account_overlay, deploy_so)?;
+    emit_fixture_impl(
+        &mut out,
+        spec,
+        &fixture,
+        mode,
+        account_overlay,
+        state_mapping,
+        deploy_so,
+    )?;
     out.push('\n');
-    emit_invariant_fn(&mut out, spec, &fixture, mode);
+    emit_invariant_fn(&mut out, spec, &fixture, mode, state_mapping);
 
     out.push_str("\n// ---- GENERATED BY QEDGEN — DO NOT EDIT BELOW THIS LINE ----\n");
     Ok(out)
@@ -534,29 +871,12 @@ fn assert_no_ownership_takeover(ctx: &TestContext, before: &[AccountSnapshot], l
     );
 }
 
-/// `account_type_confusion` / `discriminator_collision`: a live typed
-/// account's 8-byte discriminator must not change type across a call.
+/// Disabled without a known account layout and allowed type transitions.
 fn emit_guard_discriminator(out: &mut String) {
-    out.push_str(
-        r#"/// A live typed account's discriminator must not change type.
-fn assert_no_discriminator_change(ctx: &TestContext, before: &[AccountSnapshot], label: &str) {
-    for b in before {
-        if !b.exists || b.data_len < 8 {
-            continue;
-        }
-        let after = account_state(ctx, &b.pk);
-        if after.exists && after.data_len >= 8 && after.disc != b.disc {
-            fuzz_assert!(
-                false,
-                "discriminator change on {} in {}: {:?} -> {:?}",
-                b.pk, label, b.disc, after.disc
-            );
-        }
-    }
-}
+    out.push_str(r#"// Disabled generic assumption: First eight bytes are arbitrary data unless the account layout and allowed type transitions are known. Supply an account-specific discriminator check.
+fn assert_no_discriminator_change(_ctx: &TestContext, _before: &[AccountSnapshot], _label: &str) {}
 
-"#,
-    );
+"#);
 }
 
 /// `pda_lifecycle_reuse_after_close` / close-redirection: draining an
@@ -614,30 +934,13 @@ fn assert_rent_exemption_preserved(ctx: &TestContext, before: &[AccountSnapshot]
     );
 }
 
-/// `realloc_zero_init_data_leak`: when an account grows, the new tail bytes
-/// must be zero-initialized — non-zero tail leaks prior heap contents.
+/// Disabled: legitimate instruction writes and leaked memory are indistinguishable
+/// from post-state alone.
 fn emit_guard_realloc_leak(out: &mut String) {
-    out.push_str(
-        r#"/// A grown account's new tail bytes must be zero-initialized.
-fn assert_no_realloc_data_leak(ctx: &TestContext, before: &[AccountSnapshot], label: &str) {
-    for b in before {
-        if !b.exists {
-            continue;
-        }
-        if let Some(a) = ctx.svm.get_account(&b.pk) {
-            if a.data.len() > b.data_len && a.data[b.data_len..].iter().any(|byte| *byte != 0) {
-                fuzz_assert!(
-                    false,
-                    "realloc data leak on {} in {}: bytes [{}..{}] not zero-initialized",
-                    b.pk, label, b.data_len, a.data.len()
-                );
-            }
-        }
-    }
-}
+    out.push_str(r#"// Disabled generic assumption: Nonzero grown bytes may be legitimate writes by the instruction. A post-state snapshot cannot distinguish initialization from leaked prior memory; supply an account-specific expected-tail check.
+fn assert_no_realloc_data_leak(_ctx: &TestContext, _before: &[AccountSnapshot], _label: &str) {}
 
-"#,
-    );
+"#);
 }
 
 /// `arithmetic`/mint-authority manifestation: per-mint SPL token balances
@@ -903,8 +1206,8 @@ fn header(spec: &ParsedSpec, mode: InvariantMode) -> String {
             s.push_str("// Mode: PROTOCOL (no spec). invariant_test() body is empty; the\n");
             s.push_str("// per-action protocol-invariant suite below is the live detector:\n");
             s.push_str("// wallet-lamport inflation, total-lamport conservation, ownership\n");
-            s.push_str("// takeover, discriminator change, close-scrub, rent-exemption loss,\n");
-            s.push_str("// realloc data leak, SPL token-balance conservation.\n");
+            s.push_str("// takeover, close-scrub, rent-exemption loss,\n");
+            s.push_str("// SPL token-balance conservation. These are heuristic alerts.\n");
             s.push_str("// NOTE: in-program faults (overflow, div-by-zero, unwrap, require!)\n");
             s.push_str("// surface as TX ERRORS, not host panics — the host-loop crash\n");
             s.push_str("// detector does NOT catch them. Only harness/host panics do.\n");
@@ -922,6 +1225,8 @@ fn header(spec: &ParsedSpec, mode: InvariantMode) -> String {
     s.push_str("//   crucible run <program> invariant_test\n");
     s.push_str("// ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----\n");
     s.push_str("#![allow(unused_imports, unused_variables, dead_code)]\n\n");
+    s.push_str(include_str!("../../templates/crucible-action-evidence.rs"));
+    s.push('\n');
     s
 }
 
@@ -953,6 +1258,10 @@ fn emit_fixture_struct(
     out.push_str(&format!("struct {fixture} {{\n"));
     out.push_str("    ctx: TestContext,\n");
     out.push_str("    program_id: Pubkey,\n");
+    out.push_str("    __qedgen_in_setup: bool,\n");
+    if needs_fee_payer(spec) {
+        out.push_str("    __qedgen_fee_payer: Rc<Keypair>,\n");
+    }
 
     if uses_brownfield_accounts(spec, mode, force_fixture_accounts) {
         // Brownfield: one Keypair per non-default, non-PDA account (signers
@@ -976,7 +1285,9 @@ fn emit_fixture_struct(
     let mutable_fields = rust_codegen_util::field_refs(state_fields);
     for (fname, ftype) in &mutable_fields {
         let rust_ty = map_simple_type(ftype);
-        out.push_str(&format!("    {fname}: {rust_ty},\n"));
+        out.push_str(&format!(
+            "    {fname}: {rust_ty},\n    __qedgen_observed_{fname}: bool,\n"
+        ));
     }
 
     out.push_str("}\n");
@@ -1165,12 +1476,19 @@ fn collect_brownfield_keypair_names(spec: &ParsedSpec) -> Vec<String> {
     let mut seen = std::collections::BTreeSet::new();
     for h in &spec.handlers {
         for acc in &h.accounts {
-            if acc.default_pubkey.is_none() && acc.pda_seeds.is_none() {
+            if acc.default_pubkey.is_none()
+                && acc.pda_seeds.is_none()
+                && !is_system_program_account(acc)
+            {
                 seen.insert(acc.name.clone());
             }
         }
     }
     seen.into_iter().collect()
+}
+
+fn is_system_program_account(account: &crate::check::ParsedHandlerAccount) -> bool {
+    account.is_program && account.name == "system_program"
 }
 
 /// Convert a brownfield account name (kept in the IDL's case so it
@@ -1231,6 +1549,7 @@ fn emit_fixture_impl(
     fixture: &str,
     mode: InvariantMode,
     account_overlay: Option<&crate::probe::domain_account_overlay::AccountBindingOverlay>,
+    state_mapping: Option<&crate::probe::crucible_state_mapping::ResolvedStateMapping>,
     deploy_so: Option<&Path>,
 ) -> Result<()> {
     let prog = spec_program_name(spec);
@@ -1272,6 +1591,10 @@ fn emit_fixture_impl(
         "        ctx.add_program(&program_id, {so_literal})\n"
     ));
     out.push_str("            .unwrap();\n");
+    if needs_fee_payer(spec) {
+        out.push_str("        let __qedgen_fee_payer = Rc::new(Keypair::new());\n");
+        out.push_str("        ctx.create_account()\n            .pubkey(__qedgen_fee_payer.pubkey())\n            .lamports(100_000_000_000)\n            .owner(system_program::ID)\n            .create()\n            .unwrap();\n");
+    }
     if is_brownfield {
         for name in &brownfield_names {
             let ident = brownfield_keypair_ident(name);
@@ -1291,9 +1614,16 @@ fn emit_fixture_impl(
     let state_fields = rust_codegen_util::resolve_state_fields(spec);
     let mutable_fields = rust_codegen_util::field_refs(state_fields);
 
-    out.push_str("        Self {\n");
+    out.push_str("        let mut fixture = Self {\n");
     out.push_str("            ctx,\n");
     out.push_str("            program_id,\n");
+    out.push_str(&format!(
+        "            __qedgen_in_setup: {},\n",
+        state_mapping.is_some()
+    ));
+    if needs_fee_payer(spec) {
+        out.push_str("            __qedgen_fee_payer,\n");
+    }
     if is_brownfield {
         for name in &brownfield_names {
             let ident = brownfield_keypair_ident(name);
@@ -1311,18 +1641,42 @@ fn emit_fixture_impl(
             t if t.starts_with("()") => "()".to_string(),
             _ => "0".to_string(),
         };
-        out.push_str(&format!("            {fname}: {init},\n"));
+        out.push_str(&format!(
+            "            {fname}: {init},\n            __qedgen_observed_{fname}: false,\n"
+        ));
     }
-    out.push_str("        }\n    }\n\n");
+    out.push_str("        };\n");
+    if let Some(mapping) = state_mapping {
+        for setup in &mapping.setup {
+            out.push_str(&format!("        if !fixture.action_{}({}) {{ observation_error(\"setup action `{}` failed\"); }}\n", setup.handler, setup.args.join(", "), setup.handler));
+        }
+    }
+    out.push_str("        fixture.__qedgen_in_setup = false;\n");
+    out.push_str("        fixture\n    }\n\n");
 
     // ── action_* per handler ─────────────────────────────────────────────
     for h in &spec.handlers {
-        emit_action_fn(out, spec, h, mode, account_overlay)?;
+        emit_action_fn(out, spec, h, mode, account_overlay, state_mapping)?;
         out.push('\n');
     }
 
     out.push_str("}\n");
     Ok(())
+}
+
+/// A handler with no instruction signer still needs a transaction fee
+/// payer. Crucible otherwise takes the payer from the signer list and
+/// rejects the call before it reaches the program.
+fn handler_lacks_signer(op: &ParsedHandler) -> bool {
+    op.who.is_none()
+        && !op
+            .accounts
+            .iter()
+            .any(|a| a.is_signer && a.default_pubkey.is_none() && a.pda_seeds.is_none())
+}
+
+fn needs_fee_payer(spec: &ParsedSpec) -> bool {
+    spec.handlers.iter().any(handler_lacks_signer)
 }
 
 fn emit_action_fn(
@@ -1331,7 +1685,9 @@ fn emit_action_fn(
     op: &ParsedHandler,
     mode: InvariantMode,
     account_overlay: Option<&crate::probe::domain_account_overlay::AccountBindingOverlay>,
+    state_mapping: Option<&crate::probe::crucible_state_mapping::ResolvedStateMapping>,
 ) -> Result<()> {
+    let prog = spec_program_name(spec);
     out.push_str(&format!("    /// {} → action variant.\n", op.name));
     if op.accounts.is_empty() {
         // No IDL/spec accounts to render → the `.accounts(...)` literal is
@@ -1401,24 +1757,25 @@ fn emit_action_fn(
     for account in &pda_accounts {
         let seeds = pda_seeds_for_account(spec, account).unwrap_or_default();
         let local = pda_local_ident(&account.name);
-        let rendered = seeds
+        let seed_exprs = seeds
             .iter()
-            .map(|seed| render_pda_seed_expr(spec, op, seed, account_overlay))
-            .collect::<Result<Vec<_>>>();
-        let seed_exprs = match rendered {
-            Ok(exprs) => exprs,
-            // Domain replay pins byte-exact addresses, so an overlay run must
-            // fail loudly rather than derive a placeholder the resolved plan
-            // never referenced.
-            Err(err) if account_overlay.is_some() => return Err(err),
-            Err(err) => {
-                out.push_str(&format!(
-                    "        // qedgen: {err}.\n        // Placeholder empty-seed derivation — fuzzing proceeds, but this\n        // PDA's real address is NOT exercised; agent-fill the seed tuple\n        // if `{}` matters to the properties under test.\n",
-                    account.name
-                ));
-                Vec::new()
-            }
-        };
+            .map(
+                |seed| match render_pda_seed_expr(spec, op, seed, account_overlay) {
+                    Ok(expression) => Ok(expression),
+                    Err(error) if account_overlay.is_none() => {
+                        // Codegen may still emit the other backends. Keep the
+                        // unresolved Crucible action explicit and impossible to
+                        // execute until a developer supplies the missing seed.
+                        let _ = error;
+                        Ok(format!(
+                            "todo!(\"agent-fill: pda seed {}::{}\")",
+                            op.name, seed
+                        ))
+                    }
+                    Err(error) => Err(error),
+                },
+            )
+            .collect::<Result<Vec<_>>>()?;
         out.push_str(&format!(
             "        let {local} = Pubkey::find_program_address(&[{}], &self.program_id).0;\n",
             seed_exprs.join(", ")
@@ -1505,7 +1862,7 @@ fn emit_action_fn(
     } else {
         out.push_str(&format!("            .accounts(accounts::{ix_name} {{\n"));
         for acc in &op.accounts {
-            if acc.default_pubkey.is_some() {
+            if acc.default_pubkey.is_some() || is_system_program_account(acc) {
                 // Crucible auto-fills fixed-address accounts (no struct field).
                 continue;
             }
@@ -1537,11 +1894,17 @@ fn emit_action_fn(
         out.push_str(&format!("            .signers(&[{}])\n", refs.join(", ")));
     } else if let Some(who) = &op.who {
         out.push_str(&format!("            .signers(&[&self.{who}])\n"));
+    } else {
+        // No instruction signer: the transaction still needs a fee payer.
+        out.push_str("            .fee_payer(&self.__qedgen_fee_payer)\n");
     }
     out.push_str("            .send();\n");
     out.push_str(
         "        let success = outcome.as_ref().map(|o| o.is_success()).unwrap_or(false);\n",
     );
+
+    out.push_str(&format!(
+        "        static COUNTS: std::sync::Mutex<(u64, u64, u64)> = std::sync::Mutex::new((0, 0, 0));\n        if !self.__qedgen_in_setup {{ record_action_outcome({:?}, &COUNTS, success); }}\n", op.name));
 
     // Registry-driven asserts after .send() (Protocol / Both). Run even when
     // .send() failed — a reverted tx can still leave partial mutations under
@@ -1571,7 +1934,11 @@ fn emit_action_fn(
         if !matches!(mode, InvariantMode::Protocol) {
             for eff in &op.effects {
                 if let Some(rhs) = direct_scalar_shadow_assignment(spec, op, eff) {
-                    out.push_str(&format!("            self.{} = {rhs};\n", eff.field));
+                    if state_mapping.is_some_and(|mapping| mapping.fields.contains_key(&eff.field))
+                    {
+                        continue;
+                    }
+                    out.push_str(&format!("            self.{} = {rhs};\n            self.__qedgen_observed_{} = true;\n", eff.field, eff.field));
                 }
             }
         }
@@ -1586,6 +1953,52 @@ fn emit_action_fn(
             out.push_str(&format!("            //   self.{field} = acc.{field};\n"));
         }
         out.push_str("        }\n");
+    }
+
+    if let Some(mapping) = state_mapping {
+        for (field, binding) in &mapping.fields {
+            let role = &binding.handlers[&op.name];
+            let account = op
+                .accounts
+                .iter()
+                .find(|account| &account.name == role)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("mapped role `{role}` missing from `{}`", op.name)
+                })?;
+            let identity = if account.pda_seeds.is_some() {
+                pda_local_ident(role)
+            } else {
+                let target = account_overlay_target(account_overlay, &op.name, role)?;
+                format!("self.{}.pubkey()", brownfield_keypair_ident(target))
+            };
+            let discriminator = binding
+                .discriminator
+                .iter()
+                .map(u8::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let account_type = &binding.account_type;
+            let data_field = &binding.data_field;
+            out.push_str(&format!(r#"        self.__qedgen_observed_{field} = false;
+        {{
+            let __pk = {identity};
+            let __account = self.ctx.svm.get_account(&__pk)
+                .unwrap_or_else(|| observation_error("{op_name}.{field}: mapped account missing"));
+            if __account.lamports == 0 {{ observation_error("{op_name}.{field}: mapped account closed"); }}
+            if __account.owner != self.program_id {{ observation_error("{op_name}.{field}: mapped account owner mismatch"); }}
+            let __disc: &[u8] = &[{discriminator}];
+            if __account.data.len() < __disc.len() + {serialized_len} {{
+                observation_error("{op_name}.{field}: mapped account data length invalid");
+            }}
+            if !__account.data.starts_with(__disc) {{ observation_error("{op_name}.{field}: mapped account discriminator mismatch"); }}
+            let mut __body = &__account.data[__disc.len()..__disc.len() + {serialized_len}];
+            let __decoded = {prog}::state::{account_type}::deserialize(&mut __body)
+                .unwrap_or_else(|_| observation_error("{op_name}.{field}: mapped account Borsh decode failed"));
+            self.{field} = __decoded.{data_field};
+            self.__qedgen_observed_{field} = true;
+        }}
+"#, op_name=op.name, serialized_len=binding.serialized_len));
+        }
     }
 
     out.push_str("        success\n");
@@ -1667,7 +2080,13 @@ fn pascal_case(s: &str) -> String {
     crate::codegen_shared::to_pascal_case(s)
 }
 
-fn emit_invariant_fn(out: &mut String, spec: &ParsedSpec, fixture: &str, mode: InvariantMode) {
+fn emit_invariant_fn(
+    out: &mut String,
+    spec: &ParsedSpec,
+    fixture: &str,
+    mode: InvariantMode,
+    state_mapping: Option<&crate::probe::crucible_state_mapping::ResolvedStateMapping>,
+) {
     // Protocol-only: empty body. The live detector for this mode is the
     // wallet-lamport-inflation guard (plus the rest of the protocol suite)
     // emitted per action, plus any harness/host panic. In-program faults are
@@ -1736,8 +2155,9 @@ fn emit_invariant_fn(out: &mut String, spec: &ParsedSpec, fixture: &str, mode: I
                 .map(|le| format!(" — {le}"))
                 .unwrap_or_default()
         ));
+        let observed = assertion_observation_guard(spec, rust, state_mapping);
         out.push_str(&format!(
-            "    fuzz_assert!({body}, \"invariant {} violated\");\n",
+            "    if {observed} {{ fuzz_assert!({body}, \"invariant {} violated\"); }}\n",
             inv.name
         ));
     }
@@ -1755,13 +2175,37 @@ fn emit_invariant_fn(out: &mut String, spec: &ParsedSpec, fixture: &str, mode: I
                 .map(|e| format!(" — {e}"))
                 .unwrap_or_default()
         ));
+        let observed = assertion_observation_guard(spec, rust, state_mapping);
         out.push_str(&format!(
-            "    fuzz_assert!({body}, \"property {} violated\");\n",
+            "    if {observed} {{ fuzz_assert!({body}, \"property {} violated\"); }}\n",
             prop.name
         ));
     }
 
     out.push_str("}\n");
+}
+
+// Mirrors are meaningful only once an accepted call supplies their value.
+fn assertion_observation_guard(
+    spec: &ParsedSpec,
+    expression: &str,
+    state_mapping: Option<&crate::probe::crucible_state_mapping::ResolvedStateMapping>,
+) -> String {
+    let readiness = assess_readiness_with_mapping(spec, InvariantMode::Spec, state_mapping);
+    let fields = assertion_state_fields(expression).unwrap_or_default();
+    let guards: Vec<_> = fields
+        .iter()
+        .filter(|field| {
+            readiness.accepted_input_fields.contains(field)
+                || state_mapping.is_some_and(|mapping| mapping.fields.contains_key(*field))
+        })
+        .map(|field| format!("fixture.__qedgen_observed_{field}"))
+        .collect();
+    if guards.is_empty() {
+        "true".into()
+    } else {
+        guards.join(" && ")
+    }
 }
 
 /// The body strings produced by `translate_property_to_rust` (invariants)
@@ -1848,6 +2292,373 @@ handler withdraw (amount : U64) : State.Active -> State.Active {
   effect { balance := balance - amount }
 }
 "#;
+
+    const STORED_SPEC: &str =
+        include_str!("../../tests/fixtures/regressions/crucible-stored-counter/counter.qedspec");
+    const STORED_IDL: &str =
+        include_str!("../../tests/fixtures/regressions/crucible-stored-counter/idl.json");
+    const STORED_MAPPING: &str =
+        include_str!("../../tests/fixtures/regressions/crucible-stored-counter/state-mapping.json");
+
+    fn stored_harness() -> (
+        ParsedSpec,
+        crate::probe::crucible_state_mapping::ResolvedStateMapping,
+        String,
+    ) {
+        let spec = parse_str(STORED_SPEC).unwrap();
+        let mapping = crate::probe::crucible_state_mapping::resolve(
+            &spec,
+            STORED_IDL.as_bytes(),
+            STORED_MAPPING.as_bytes(),
+        )
+        .unwrap();
+        let harness =
+            emit_harness_with_observation(&spec, InvariantMode::Spec, None, Some(&mapping), None)
+                .unwrap();
+        (spec, mapping, harness)
+    }
+
+    fn action_body<'a>(harness: &'a str, handler: &str) -> &'a str {
+        let start = harness.find(&format!("fn action_{handler}(")).unwrap();
+        let end = harness[start..].find("\n    }\n").unwrap();
+        &harness[start..start + end]
+    }
+
+    #[test]
+    fn mapped_field_is_read_from_account_after_every_action() {
+        let (_, _, harness) = stored_harness();
+        for handler in ["initialize", "increment"] {
+            let body = action_body(&harness, handler);
+            let send = body
+                .find("let success = outcome")
+                .expect("action records its outcome");
+            let clear = body.find("self.__qedgen_observed_count = false;").unwrap();
+            let read = body.find("self.ctx.svm.get_account(&__pk)").unwrap();
+            let set = body.find("self.__qedgen_observed_count = true;").unwrap();
+            assert!(
+                send < clear && clear < read && read < set,
+                "{handler}: {body}"
+            );
+            // The read is not nested under `if success`: it runs whether the
+            // transaction was accepted or rejected.
+            assert!(!body[clear..].contains("if success"), "{handler}");
+            for guard in [
+                "mapped account missing",
+                "mapped account closed",
+                "mapped account owner mismatch",
+                "mapped account data length invalid",
+                "mapped account discriminator mismatch",
+                "mapped account Borsh decode failed",
+            ] {
+                assert!(
+                    body.contains(&format!("{handler}.count: {guard}")),
+                    "{handler}: {guard}"
+                );
+            }
+            assert!(body.contains("stored_counter::state::Counter::deserialize"));
+            assert!(body.contains("self.count = __decoded.count;"));
+        }
+        assert!(harness.contains("QEDGEN_OBSERVATION_ERROR"));
+    }
+
+    #[test]
+    fn mapped_reader_accepts_account_padding_but_rejects_truncated_layout() {
+        let (_, _, harness) = stored_harness();
+        let body = action_body(&harness, "increment");
+        // Execute the generated data validation/decoding block independently of
+        // the SVM transaction. The small decoder below consumes one Borsh u64,
+        // just like this fixture's fixed-layout Counter.
+        let start = body.find("let __disc:").unwrap();
+        let end = body.find("self.count = __decoded.count;").unwrap();
+        let reader = &body[start..end];
+        let program = format!(
+            r#"
+struct Account {{ data: Vec<u8> }}
+mod stored_counter {{
+    pub mod state {{
+        pub struct Counter {{ pub count: u64 }}
+        impl Counter {{
+            pub fn deserialize(data: &mut &[u8]) -> Result<Self, ()> {{
+                if data.len() < 8 {{ return Err(()); }}
+                let (value, rest) = data.split_at(8);
+                *data = rest;
+                Ok(Self {{ count: u64::from_le_bytes(value.try_into().unwrap()) }})
+            }}
+        }}
+    }}
+}}
+fn observation_error(message: &str) -> ! {{ panic!("{{}}", message) }}
+fn read(data: Vec<u8>) -> u64 {{
+    let __account = Account {{ data }};
+    {reader}
+    __decoded.count
+}}
+fn main() {{
+    for (length, padding) in [(16, 0), (32, 0xA5), (2048, 0), (2048, 0xA5)] {{
+        let mut data = vec![padding; length];
+        data[..8].copy_from_slice(&[255, 176, 4, 245, 188, 253, 124, 25]);
+        data[8..16].copy_from_slice(&42u64.to_le_bytes());
+        assert_eq!(read(data), 42, "length={{length}}, padding={{padding}}");
+    }}
+    for length in [0, 7, 8, 15] {{
+        assert!(std::panic::catch_unwind(|| read(vec![0; length])).is_err());
+    }}
+    assert!(std::panic::catch_unwind(|| read(vec![0; 16])).is_err());
+}}
+"#
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("reader.rs");
+        let binary = directory.path().join("reader");
+        std::fs::write(&source, program).unwrap();
+        let compiled = std::process::Command::new("rustc")
+            .args(["--edition=2021"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&binary)
+            .output()
+            .unwrap();
+        assert!(
+            compiled.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+        let executed = std::process::Command::new(&binary).output().unwrap();
+        assert!(
+            executed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&executed.stderr)
+        );
+    }
+
+    #[test]
+    fn mapped_field_uses_each_handlers_own_account_role() {
+        let source = STORED_SPEC.replace(
+            "accounts { counter : writable, pda [\"counter\"] }",
+            "accounts { store : writable, pda [\"counter\"] }",
+        );
+        assert_ne!(source, STORED_SPEC);
+        let spec = parse_str(&source).unwrap();
+        let mapping_source =
+            STORED_MAPPING.replace("\"increment\": \"counter\"", "\"increment\": \"store\"");
+        assert_ne!(mapping_source, STORED_MAPPING);
+        let mapping = crate::probe::crucible_state_mapping::resolve(
+            &spec,
+            STORED_IDL.as_bytes(),
+            mapping_source.as_bytes(),
+        )
+        .unwrap();
+        let harness =
+            emit_harness_with_observation(&spec, InvariantMode::Spec, None, Some(&mapping), None)
+                .unwrap();
+        let init = action_body(&harness, "initialize");
+        let inc = action_body(&harness, "increment");
+        let init_pk = format!("let __pk = {};", pda_local_ident("counter"));
+        let inc_pk = format!("let __pk = {};", pda_local_ident("store"));
+        assert!(init.contains(&init_pk), "{init}");
+        assert!(inc.contains(&inc_pk), "{inc}");
+        // The observed identity is the one the action passed to the program.
+        let inc_local = format!("let {} ", pda_local_ident("store"));
+        assert!(
+            inc.find(&inc_local).unwrap() < inc.find(&inc_pk).unwrap(),
+            "{inc}"
+        );
+    }
+
+    #[test]
+    fn mapped_field_uses_exact_idl_discriminator() {
+        let (_, mapping, harness) = stored_harness();
+        let bytes = mapping.fields["count"]
+            .discriminator
+            .iter()
+            .map(u8::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        assert!(harness.contains(&format!("let __disc: &[u8] = &[{bytes}];")));
+    }
+
+    #[test]
+    fn mapped_field_is_not_written_by_accepted_input_mirror() {
+        // `count := amount` is a mirrorable direct scalar assignment.
+        let source = STORED_SPEC.replace("count := count + amount", "count := amount");
+        let spec = parse_str(&source).unwrap();
+        let unmapped = emit_harness(&spec, InvariantMode::Spec, None).unwrap();
+        assert!(action_body(&unmapped, "increment").contains("self.count = amount;"));
+        let mapping = crate::probe::crucible_state_mapping::resolve(
+            &spec,
+            STORED_IDL.as_bytes(),
+            STORED_MAPPING.as_bytes(),
+        )
+        .unwrap();
+        let mapped =
+            emit_harness_with_observation(&spec, InvariantMode::Spec, None, Some(&mapping), None)
+                .unwrap();
+        assert!(!action_body(&mapped, "increment").contains("self.count = amount;"));
+    }
+
+    #[test]
+    fn mapped_invariant_is_guarded_and_setup_runs_real_actions() {
+        let (spec, mapping, harness) = stored_harness();
+        assert!(harness.contains(
+            "if fixture.__qedgen_observed_count { fuzz_assert!(fixture.count <= 10, \"invariant bounded violated\"); }"
+        ), "{harness}");
+        assert!(harness.contains("if !fixture.action_initialize() { observation_error(\"setup action `initialize` failed\"); }"));
+        assert!(harness.contains("__qedgen_in_setup: true,"));
+        let readiness = assess_readiness_with_mapping(&spec, InvariantMode::Spec, Some(&mapping));
+        assert!(
+            readiness.validate_domain().is_ok(),
+            "{:?}",
+            readiness.domain_blockers
+        );
+        let unmapped = assess_readiness(&spec, InvariantMode::Spec);
+        assert!(unmapped.validate_domain().is_err());
+    }
+
+    #[test]
+    fn generated_stale_shadow_assertion_blocks_domain_readiness() {
+        let spec = parse_str(MINIMAL_SPEC).unwrap();
+        let readiness = assess_readiness(&spec, InvariantMode::Spec);
+        let error = readiness.validate_domain().unwrap_err().to_string();
+        assert!(error.contains("unsynchronized assertion field `count`"));
+        assert!(error.contains("deserialize observed post-state"));
+    }
+
+    #[test]
+    fn readiness_reports_unfilled_accounts_and_fixed_payloads() {
+        let mut spec = parse_str(MINIMAL_SPEC).unwrap();
+        spec.handlers[0].takes_params = vec![
+            ("payload".into(), "Vec(U8)".into()),
+            ("maybe".into(), "Option(U64)".into()),
+        ];
+        let readiness = assess_readiness(&spec, InvariantMode::Spec);
+        assert_eq!(readiness.actions_stubbed, vec!["increment"]);
+        assert_eq!(readiness.actions_emitted, 1);
+        assert_eq!(readiness.assertions_emitted, 1);
+        assert!(readiness
+            .limitations
+            .iter()
+            .any(|limitation| limitation.contains("payload")
+                && limitation.contains("fixed/default-only")));
+        assert!(!readiness
+            .limitations
+            .iter()
+            .any(|limitation| limitation.contains("`maybe`")));
+        assert!(readiness.validate_domain().is_err());
+    }
+
+    #[test]
+    fn assertion_field_analysis_ignores_strings_and_handles_spacing() {
+        assert_eq!(
+            assertion_state_fields(r#"s . count <= 10 && "s.fake" == "s.fake""#).unwrap(),
+            vec!["count"]
+        );
+        assert!(assertion_state_fields("is_valid(s)").is_err());
+    }
+
+    #[test]
+    fn action_summary_template_executes_sampled_cumulative_outcomes() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("evidence.rs");
+        let binary = directory.path().join("evidence");
+        let mut program = include_str!("../../templates/crucible-action-evidence.rs").to_string();
+        program.push_str(
+            r#"
+fn main() {
+    static COUNTS: std::sync::Mutex<(u64, u64, u64)> = std::sync::Mutex::new((0, 0, 0));
+    for index in 0..1025 { record_action_outcome("accept", &COUNTS, index % 2 == 0); }
+}
+"#,
+        );
+        std::fs::write(&source, program).unwrap();
+        let compiled = std::process::Command::new("rustc")
+            .arg(&source)
+            .arg("-o")
+            .arg(&binary)
+            .output()
+            .expect("rustc runs");
+        assert!(
+            compiled.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+        let executed = std::process::Command::new(&binary).output().unwrap();
+        assert!(executed.status.success());
+        let stderr = String::from_utf8(executed.stderr).unwrap();
+        let lines: Vec<_> = stderr.lines().collect();
+        assert_eq!(lines.len(), 2);
+        let snapshots: Vec<serde_json::Value> = lines
+            .iter()
+            .map(|line| {
+                serde_json::from_str(line.strip_prefix("QEDGEN_CRUCIBLE_ACTION_V1 ").unwrap())
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(snapshots[0]["attempted"], 1);
+        assert_eq!(snapshots[0]["succeeded"], 1);
+        assert_eq!(snapshots[0]["rejected"], 0);
+        assert_eq!(snapshots[1]["attempted"], 1024);
+        assert_eq!(snapshots[1]["succeeded"], 512);
+        assert_eq!(snapshots[1]["rejected"], 512);
+        assert!(snapshots[1]["process_id"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn manual_readiness_review_is_source_bound_and_cannot_waive_stubs() {
+        let mut spec = parse_str(MINIMAL_SPEC).unwrap();
+        spec.handlers[0]
+            .accounts
+            .push(crate::check::ParsedHandlerAccount {
+                name: "payer".into(),
+                is_signer: true,
+                is_writable: true,
+                ..Default::default()
+            });
+        let readiness = assess_readiness(&spec, InvariantMode::Spec);
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(directory.path().join("src")).unwrap();
+        std::fs::create_dir_all(directory.path().join(".qedgen")).unwrap();
+        let source = directory.path().join("src/main.rs");
+        std::fs::write(&source, "// reviewed hand-filled harness").unwrap();
+        assert!(validate_domain_harness(directory.path(), &readiness).is_err());
+        let review = ManualReadinessReview {
+            schema_version: 1,
+            harness_sha256: harness_source_sha256(directory.path()).unwrap(),
+            synchronized_fields: vec!["count".into()],
+        };
+        std::fs::write(
+            directory.path().join(".qedgen/readiness-review.json"),
+            serde_json::to_vec(&review).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            validate_domain_harness(directory.path(), &readiness)
+                .unwrap()
+                .scope,
+            "manual_review"
+        );
+        let stubbed = assess_readiness(&parse_str(MINIMAL_SPEC).unwrap(), InvariantMode::Spec);
+        assert!(validate_domain_harness(directory.path(), &stubbed).is_err());
+        std::fs::write(&source, "// changed harness").unwrap();
+        assert!(validate_domain_harness(directory.path(), &readiness)
+            .unwrap_err()
+            .to_string()
+            .contains("source hash"));
+    }
+
+    #[test]
+    fn generated_dispatch_has_actual_outcome_marker() {
+        let spec = parse_str(MINIMAL_SPEC).unwrap();
+        let harness = emit_harness(&spec, InvariantMode::Protocol, None).unwrap();
+        assert!(harness.contains("QEDGEN_CRUCIBLE_ACTION_V1"));
+    }
+
+    #[test]
+    fn generic_guards_do_not_assume_zero_tail_or_anchor_prefix() {
+        let spec = parse_str(MINIMAL_SPEC).unwrap();
+        let harness = emit_harness(&spec, InvariantMode::Protocol, None).unwrap();
+        assert!(!harness.contains("after.disc != b.disc"));
+        assert!(!harness.contains("a.data[b.data_len..].iter().any"));
+    }
 
     #[test]
     fn harness_program_so_reads_the_emitted_path() {
@@ -1969,23 +2780,66 @@ handler liquidate (amount : U64) : State.Active -> State.Active {
 "#;
 
     #[test]
-    fn unresolved_pda_seed_degrades_to_placeholder_without_overlay() {
+    fn unresolved_pda_seed_emits_blocking_stub_without_overlay() {
         let spec = parse_str(UNRESOLVED_SEED_SPEC).expect("parse spec");
-        let harness = emit_harness(&spec, InvariantMode::Spec, None)
-            .expect("unresolved seed must not abort generation");
-        assert!(
-            harness.contains("Pubkey::find_program_address(&[], &self.program_id)"),
-            "{harness}"
+        let source = emit_harness(&spec, InvariantMode::Spec, None).expect("emit harness");
+        syn::parse_file(&source).expect("blocking stub must still be valid Rust");
+        assert!(source.contains("todo!(\"agent-fill: pda seed liquidate::borrower\")"));
+        let readiness = assess_readiness(&spec, InvariantMode::Spec);
+        assert!(readiness.actions_stubbed.contains(&"liquidate".to_string()));
+        assert!(readiness
+            .domain_blockers
+            .iter()
+            .any(|blocker| blocker.contains("cannot resolve PDA seed `borrower`")));
+    }
+
+    #[test]
+    fn repaired_pda_seed_can_pass_source_bound_readiness_review() {
+        let source_spec = UNRESOLVED_SEED_SPEC
+            .replace(
+                "handler liquidate",
+                "invariant total_bounded :\n  state.total <= 100\n\nhandler liquidate",
+            )
+            .replace(
+                "  requires state.total",
+                "  invariant total_bounded\n  requires state.total",
+            );
+        let spec = parse_str(&source_spec).unwrap();
+        let readiness = assess_readiness(&spec, InvariantMode::Spec);
+        let source = emit_harness(&spec, InvariantMode::Spec, None).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(directory.path().join("src")).unwrap();
+        std::fs::create_dir_all(directory.path().join(".qedgen")).unwrap();
+        let path = directory.path().join("src/main.rs");
+        std::fs::write(&path, &source).unwrap();
+        assert!(validate_domain_harness(directory.path(), &readiness).is_err());
+
+        let repaired = source.replace(
+            "todo!(\"agent-fill: pda seed liquidate::borrower\")",
+            "b\"borrower\"",
         );
-        assert!(
-            harness.contains("Placeholder empty-seed derivation"),
-            "{harness}"
+        assert_ne!(source, repaired);
+        std::fs::write(&path, repaired).unwrap();
+        // Fixing wiring must not waive the separate state synchronization review.
+        assert!(validate_domain_harness(directory.path(), &readiness).is_err());
+        let review = ManualReadinessReview {
+            schema_version: 1,
+            harness_sha256: harness_source_sha256(directory.path()).unwrap(),
+            synchronized_fields: vec!["total".into()],
+        };
+        std::fs::write(
+            directory.path().join(".qedgen/readiness-review.json"),
+            serde_json::to_vec(&review).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            validate_domain_harness(directory.path(), &readiness)
+                .unwrap()
+                .scope,
+            "manual_review",
         );
-        assert!(
-            harness.contains("cannot resolve PDA seed `borrower`"),
-            "{harness}"
-        );
-        syn::parse_file(&harness).expect("degraded harness must still be valid Rust");
+        std::fs::write(&path, source).unwrap();
+        assert!(validate_domain_harness(directory.path(), &readiness).is_err());
     }
 
     #[test]
@@ -2048,6 +2902,7 @@ handler resume : State.Inactive -> State.Active {
             &spec,
             "LifecycleFixture",
             InvariantMode::Spec,
+            None,
             None,
             None,
         )
@@ -2120,6 +2975,7 @@ handler resume : State.Inactive -> State.Active {
             InvariantMode::Spec,
             None,
             None,
+            None,
         )
         .expect("emit");
         assert!(out.contains("#[fuzz_fixture]"));
@@ -2165,6 +3021,7 @@ handler resume : State.Inactive -> State.Active {
             &spec,
             "PullPaymentsFixture",
             InvariantMode::Spec,
+            None,
             None,
             None,
         )
@@ -2280,7 +3137,7 @@ handler resume : State.Inactive -> State.Active {
     fn emits_invariant_test_with_fuzz_assert() {
         let spec = parse_str(MINIMAL_SPEC).expect("parse");
         let mut out = String::new();
-        emit_invariant_fn(&mut out, &spec, "CounterFixture", InvariantMode::Spec);
+        emit_invariant_fn(&mut out, &spec, "CounterFixture", InvariantMode::Spec, None);
         assert!(out.contains("#[invariant_test]"));
         assert!(out.contains("fn invariant_test(fixture: &mut CounterFixture)"));
         assert!(out.contains("fuzz_assert!"));
@@ -2322,7 +3179,13 @@ handler resume : State.Inactive -> State.Active {
     fn protocol_mode_emits_empty_invariant_body() {
         let spec = parse_str(MINIMAL_SPEC).expect("parse");
         let mut out = String::new();
-        emit_invariant_fn(&mut out, &spec, "CounterFixture", InvariantMode::Protocol);
+        emit_invariant_fn(
+            &mut out,
+            &spec,
+            "CounterFixture",
+            InvariantMode::Protocol,
+            None,
+        );
         assert!(out.contains("#[invariant_test]"));
         assert!(
             out.contains("Protocol mode — no spec assertions"),
@@ -2341,7 +3204,7 @@ handler resume : State.Inactive -> State.Active {
     fn both_mode_keeps_spec_assertions() {
         let spec = parse_str(MINIMAL_SPEC).expect("parse");
         let mut out = String::new();
-        emit_invariant_fn(&mut out, &spec, "CounterFixture", InvariantMode::Both);
+        emit_invariant_fn(&mut out, &spec, "CounterFixture", InvariantMode::Both, None);
         assert!(out.contains("fuzz_assert!"));
         assert!(out.contains("fixture.count"));
     }
@@ -2370,6 +3233,21 @@ handler accept (amount : U64) : State.Active -> State.Active {
         let protocol =
             emit_harness(&spec, InvariantMode::Protocol, None).expect("protocol harness");
 
+        let mut ready_spec = spec.clone();
+        ready_spec.handlers[0]
+            .accounts
+            .push(crate::check::ParsedHandlerAccount {
+                name: "payer".into(),
+                is_signer: true,
+                is_writable: true,
+                ..Default::default()
+            });
+        let readiness = assess_readiness(&ready_spec, InvariantMode::Both);
+        readiness.validate_domain().unwrap();
+        assert_eq!(readiness.accepted_input_fields, vec!["last_accepted"]);
+        assert!(domain.contains("fixture.__qedgen_observed_last_accepted"));
+        assert!(domain.contains("__qedgen_observed_last_accepted: false"));
+        assert!(domain.contains("self.__qedgen_observed_last_accepted = true"));
         assert!(domain.contains("if success {\n            self.last_accepted = amount;"));
         assert!(domain.contains("fixture.last_accepted <= 10"));
         assert!(!protocol.contains("self.last_accepted = amount;"));

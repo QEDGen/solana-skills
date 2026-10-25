@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "fields": {
+    "count": {
+      "account_type": "Counter",
+      "data_field": "count",
+      "handlers": {
+        "initialize": "counter",
+        "increment": "counter"
+      }
+    }
+  },
+  "setup": [
+    { "handler": "initialize", "args": {} }
+  ]
+}

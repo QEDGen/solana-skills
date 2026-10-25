@@ -60,10 +60,11 @@ pub enum DomainReplayStatus {
     CompletedZeroExit,
     CompletedNonzeroExit,
     /// The replay child was killed by a signal (SIGSEGV/SIGABRT/OOM), so it
-    /// has no numeric exit code. This is a REPRODUCED crash — exactly what a
-    /// fuzzer cares about — not a spawn failure.
+    /// has no numeric exit code. A signal is process evidence, and alone does
+    /// not establish that a semantic invariant reproduced.
     TerminatedBySignal,
     SpawnFailed,
+    TimedOut,
 }
 
 /// Validate the domain handoff before Crucible claims semantic coverage.
@@ -207,7 +208,11 @@ fn inspect_ratified_domain_facts(dossier_path: &Path) -> Result<usize> {
     Ok(eligible)
 }
 
-fn mark_domain_lane_blocked(dossier_path: &Path, spec_path: &Path, reason: &str) -> Result<()> {
+pub(crate) fn mark_domain_lane_blocked(
+    dossier_path: &Path,
+    spec_path: &Path,
+    reason: &str,
+) -> Result<()> {
     let Some(parent) = dossier_path.parent() else {
         return Ok(());
     };
@@ -279,7 +284,12 @@ pub const MAX_REPLAYS_PER_CRASH_SHAPE: usize = 4;
 pub const MAX_REPLAY_TRIAGE_BUDGET: Duration = Duration::from_secs(30);
 
 /// One malformed replay must not consume the whole triage allowance.
-pub const MAX_REPLAY_PER_CRASH: Duration = Duration::from_secs(2);
+pub const MAX_REPLAY_PER_CRASH: Duration = Duration::from_secs(30);
+/// Deterministic domain seeds start a full Crucible process and may load an
+/// sBPF program before executing their first action. They need a larger bound
+/// than crash classification, which reuses a hot harness.
+pub const MAX_DOMAIN_REPLAY_PER_SEED: Duration = Duration::from_secs(30);
+pub const MAX_DOMAIN_REPLAY_BUDGET: Duration = Duration::from_secs(300);
 
 /// Default full-run budget for `--fuzz` without an explicit value
 /// (~a few k iterations for a small/medium harness on a laptop).
@@ -338,7 +348,65 @@ impl<'a> FuzzProbeContext<'a> {
 /// Requires `crucible` on PATH and an existing harness directory
 /// (`qedgen codegen --crucible` first).
 /// Findings from a fuzz probe plus the replay-triage summary (#229).
+/// Observed cumulative snapshots are lower bounds: generated harnesses emit
+/// only their first dispatch and periodic updates, and output is tail-bounded.
+#[derive(Debug, Clone, Default, serde::Deserialize, Serialize, PartialEq, Eq)]
+pub struct ObservedActionCounts {
+    pub attempted: u64,
+    pub succeeded: u64,
+    pub rejected: u64,
+}
+
+fn parse_action_counts(output: &str) -> Result<BTreeMap<String, ObservedActionCounts>> {
+    #[derive(serde::Deserialize)]
+    struct Marker {
+        process_id: u32,
+        handler: String,
+        attempted: u64,
+        succeeded: u64,
+        rejected: u64,
+    }
+    let mut snapshots: BTreeMap<(u32, String), ObservedActionCounts> = BTreeMap::new();
+    for line in output.lines() {
+        let Some(json) = line.strip_prefix("QEDGEN_CRUCIBLE_ACTION_V1 ") else {
+            continue;
+        };
+        let marker: Marker =
+            serde_json::from_str(json).context("malformed runtime action coverage marker")?;
+        if marker.handler.is_empty()
+            || marker.succeeded.checked_add(marker.rejected) != Some(marker.attempted)
+        {
+            bail!("inconsistent runtime action coverage marker");
+        }
+        let entry = snapshots
+            .entry((marker.process_id, marker.handler))
+            .or_default();
+        // Cumulative snapshots from one process must never regress.
+        if marker.attempted < entry.attempted
+            || marker.succeeded < entry.succeeded
+            || marker.rejected < entry.rejected
+        {
+            bail!("runtime action coverage counters regressed; cannot aggregate multiple workers safely");
+        }
+        *entry = ObservedActionCounts {
+            attempted: marker.attempted,
+            succeeded: marker.succeeded,
+            rejected: marker.rejected,
+        };
+    }
+    let mut counts: BTreeMap<String, ObservedActionCounts> = BTreeMap::new();
+    for ((_, handler), snapshot) in snapshots {
+        let entry = counts.entry(handler).or_default();
+        entry.attempted = entry.attempted.saturating_add(snapshot.attempted);
+        entry.succeeded = entry.succeeded.saturating_add(snapshot.succeeded);
+        entry.rejected = entry.rejected.saturating_add(snapshot.rejected);
+    }
+    Ok(counts)
+}
+
 pub struct FuzzProbeResult {
+    /// Actual runtime snapshots only; empty means unknown. Always lower bounds.
+    pub observed_actions: BTreeMap<String, ObservedActionCounts>,
     pub findings: Vec<Finding>,
     /// Whether minimized crashes replayed successfully: `None` when there were
     /// no crashes to replay; `Some(true)` when every replayed crash
@@ -361,14 +429,23 @@ pub fn run_fuzz_probe(ctx: &FuzzProbeContext) -> Result<FuzzProbeResult> {
 
     build_harness(&ctx.harness_dir).context("building Crucible harness")?;
 
+    let observation_file = ctx.harness_dir.join(".qedgen/observation-error");
+    if observation_file.exists() {
+        std::fs::remove_file(&observation_file)?;
+    }
+
     let mut acc = HarvestResult::default();
 
     if let Some(seed_report) = &ctx.domain_seed_report {
+        prepare_fresh_crash_dir(&ctx.harness_dir)?;
         replay_domain_seed_report(&ctx.harness_dir, seed_report)?;
-        acc.merge(harvest_crucible_findings(
-            ctx,
-            replay_triage_budget(ctx.fuzz_budget),
-        )?);
+        require_no_observation_error(&ctx.harness_dir)?;
+        let crashes = ctx.harness_dir.join("crashes").join(HARNESS_TEST_NAME);
+        let mut harvested =
+            harvest_crucible_findings_from(ctx, &crashes, replay_triage_budget(ctx.fuzz_budget))?;
+        require_no_observation_error(&ctx.harness_dir)?;
+        preserve_harvested_crashes(&ctx.harness_dir, &crashes, &mut harvested)?;
+        acc.merge(harvested);
     }
 
     if !ctx.smoke_budget.is_zero() {
@@ -404,6 +481,7 @@ fn finalize_fuzz_result(acc: HarvestResult) -> FuzzProbeResult {
         )
     };
     FuzzProbeResult {
+        observed_actions: acc.observed_actions,
         findings: dedupe_findings(acc.findings),
         replay_success,
     }
@@ -416,7 +494,7 @@ fn run_crucible_round(
     budget: Duration,
     label: &str,
 ) -> Result<HarvestResult> {
-    let crash_dir = run_crucible(
+    let (crash_dir, observed_actions) = run_crucible(
         &ctx.harness_dir,
         budget,
         ctx.stateful,
@@ -425,29 +503,80 @@ fn run_crucible_round(
             .map(|report| report.corpus_dir.as_path()),
     )
     .with_context(|| format!("crucible run ({label}) failed"))?;
-    harvest_crucible_findings_from(ctx, &crash_dir, replay_triage_budget(budget))
+    require_no_observation_error(&ctx.harness_dir)?;
+    let mut harvested =
+        harvest_crucible_findings_from(ctx, &crash_dir, replay_triage_budget(budget))?;
+    require_no_observation_error(&ctx.harness_dir)?;
+    harvested.observed_actions = observed_actions;
+    preserve_harvested_crashes(&ctx.harness_dir, &crash_dir, &mut harvested)?;
+    Ok(harvested)
+}
+
+fn require_no_observation_error(harness: &Path) -> Result<()> {
+    let path = observation_error_file(harness)?;
+    if path.exists() {
+        bail!(
+            "Crucible account observation incomplete: {}",
+            std::fs::read_to_string(path)?.trim()
+        );
+    }
+    Ok(())
+}
+
+fn observation_error_file(harness: &Path) -> Result<PathBuf> {
+    Ok(harness.canonicalize()?.join(".qedgen/observation-error"))
+}
+
+fn preserve_harvested_crashes(
+    harness: &Path,
+    original: &Path,
+    harvested: &mut HarvestResult,
+) -> Result<()> {
+    let archived = archive_crash_dir(harness)?;
+    if archived == original {
+        return Ok(());
+    }
+    let rebase = |path: &mut String| {
+        if let Ok(relative) = Path::new(path.as_str()).strip_prefix(original) {
+            *path = archived.join(relative).display().to_string();
+        }
+    };
+    for finding in &mut harvested.findings {
+        if let Some(Reproducer::Crucible {
+            crash_path,
+            invocation,
+            extra_seeds,
+            ..
+        }) = &mut finding.reproducer
+        {
+            let previous = crash_path.clone();
+            rebase(crash_path);
+            let previous_input = raw_crash_input_path(Path::new(&previous))?;
+            let archived_input = raw_crash_input_path(Path::new(crash_path))?;
+            let before = previous_input.display().to_string();
+            let after = archived_input.display().to_string();
+            *invocation = invocation.replace(&before, &after);
+            finding.investigation_hint = finding.investigation_hint.replace(&before, &after);
+            for seed in extra_seeds {
+                rebase(seed);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn replay_triage_budget(fuzz_budget: Duration) -> Duration {
-    fuzz_budget
-        .max(Duration::from_secs(1))
-        .min(MAX_REPLAY_TRIAGE_BUDGET)
-}
-
-fn harvest_crucible_findings(
-    ctx: &FuzzProbeContext,
-    replay_budget: Duration,
-) -> Result<HarvestResult> {
-    harvest_crucible_findings_from(
-        ctx,
-        &ctx.harness_dir.join("crashes").join(HARNESS_TEST_NAME),
-        replay_budget,
-    )
+    let _ = fuzz_budget;
+    // Replay starts a fresh Crucible process and loads the program again.
+    // A one-second fuzz budget must not silently reduce evidence triage to
+    // one second, otherwise a real invariant crash becomes "unverified".
+    MAX_REPLAY_TRIAGE_BUDGET
 }
 
 /// Findings plus replay accounting from harvesting one crash directory.
 #[derive(Default)]
 struct HarvestResult {
+    observed_actions: BTreeMap<String, ObservedActionCounts>,
     findings: Vec<Finding>,
     /// Parseable crashes discovered before bounded sampling.
     crashes_discovered: usize,
@@ -459,6 +588,12 @@ struct HarvestResult {
 
 impl HarvestResult {
     fn merge(&mut self, other: HarvestResult) {
+        for (handler, counts) in other.observed_actions {
+            let entry = self.observed_actions.entry(handler).or_default();
+            entry.attempted = entry.attempted.saturating_add(counts.attempted);
+            entry.succeeded = entry.succeeded.saturating_add(counts.succeeded);
+            entry.rejected = entry.rejected.saturating_add(counts.rejected);
+        }
         self.findings.extend(other.findings);
         self.crashes_discovered += other.crashes_discovered;
         self.crashes_seen += other.crashes_seen;
@@ -474,13 +609,20 @@ fn harvest_crucible_findings_from(
     let mut crashes = load_crash_candidates(crash_dir)?;
     let discovered = crashes.len();
     let started = Instant::now();
-    if discovered <= MAX_CRASH_REPLAYS && !crashes.is_empty() {
+    if discovered <= MAX_CRASH_REPLAYS
+        && !crashes.is_empty()
+        && crash_dir == ctx.harness_dir.join("crashes").join(HARNESS_TEST_NAME)
+    {
         // tmin failure is non-fatal — raw crashes are still valid
         // reproducers, we just lose minimization.
         // Reserve at least half the triage allowance for the evidence-bearing
         // replay step; minimization is useful but non-authoritative.
         let tmin_budget = ctx.tmin_cap.min(replay_budget / 2);
-        let _ = auto_tmin_all(&ctx.harness_dir, tmin_budget);
+        if let Err(error) = auto_tmin_all(&ctx.harness_dir, tmin_budget) {
+            eprintln!(
+                "[crucible] minimization unavailable; retaining raw crash evidence: {error:#}"
+            );
+        }
         // tmin may rewrite metadata in place; classification must use the
         // minimized evidence rather than the pre-minimization snapshot.
         crashes = load_crash_candidates(crash_dir)?;
@@ -512,7 +654,7 @@ fn harvest_crucible_findings_from(
             &crash,
             remaining.min(MAX_REPLAY_PER_CRASH),
         ) {
-            Some(ev) if !ev.reproduces => {
+            ReplayCapture::Evidence(ev) if !ev.reproduces => {
                 // The recorded crash did not re-fire on replay — no
                 // reproducible evidence, so it must NOT become a finding.
                 // Demote to a visible note rather than silently dropping.
@@ -521,7 +663,7 @@ fn harvest_crucible_findings_from(
                     ev.crash_id
                 );
             }
-            Some(ev) => {
+            ReplayCapture::Evidence(ev) => {
                 result.crashes_reproduced += 1;
                 let class = crate::probe::crucible_replay::classify_reproduced(&ev.summary);
                 result.findings.push(finding_from_crash(
@@ -531,7 +673,17 @@ fn harvest_crucible_findings_from(
                     Some(&class),
                 )?);
             }
-            None => {
+            unavailable => {
+                let reason = match &unavailable {
+                    ReplayCapture::Failed(error) => error.as_str(),
+                    ReplayCapture::TimedOut => "deadline exceeded",
+                    ReplayCapture::MissingMarker => "marker missing or malformed",
+                    ReplayCapture::Evidence(_) => unreachable!(),
+                };
+                eprintln!(
+                    "[crucible] incomplete replay for {}: {reason}",
+                    crash.display()
+                );
                 // Replay unavailable or marker unparseable — fall back to the
                 // heuristic so we don't lose the crash, but the finding text
                 // flags that its class is not replay-confirmed.
@@ -585,12 +737,14 @@ fn crash_shape_key(meta: &CrucibleCrashMetadata) -> CrashShapeKey {
 fn load_crash_candidates(crash_dir: &Path) -> Result<Vec<CrashCandidate>> {
     let mut candidates = Vec::new();
     for path in collect_crash_files(crash_dir)? {
-        let Ok(raw) = std::fs::read(&path) else {
-            continue;
-        };
-        let Ok(meta) = parse_crash_metadata(&raw) else {
-            continue;
-        };
+        let raw = std::fs::read(&path)
+            .with_context(|| format!("reading crash evidence {}", path.display()))?;
+        let meta = parse_crash_metadata(&raw).with_context(|| {
+            format!(
+                "parsing crash evidence {}; repair or archive this file before retrying",
+                path.display()
+            )
+        })?;
         candidates.push(CrashCandidate { path, meta });
     }
     Ok(candidates)
@@ -763,7 +917,8 @@ fn finding_from_crash(
         Some(c) => (c.severity.clone(), c.tag, c.detail.clone(), true),
         None => {
             let (sev, tag) = categorize_crash(meta);
-            (sev, tag, None, false)
+            let _ = (sev, tag);
+            (Severity::Medium, "unverified_crash_candidate", None, false)
         }
     };
     let handler = derive_handler_for_crash(meta);
@@ -779,7 +934,7 @@ fn finding_from_crash(
     let invocation = format!(
         "crucible show {} {} --replay",
         harness_dir.display(),
-        crash_path.display()
+        raw_crash_input_path(crash_path)?.display()
     );
     let crucible_version = crucible_version().unwrap_or_else(|| "unknown".to_string());
 
@@ -787,7 +942,9 @@ fn finding_from_crash(
         Some(name) => format!(" (`{name}`)"),
         None => String::new(),
     };
-    let spec_silent_on = if evidence_based {
+    let spec_silent_on = if tag == "protocol_guard_candidate" {
+        format!("replay reproduced protocol guard `{}`; this is a heuristic investigation candidate, not a confirmed security violation. Validate expected program behavior and tracked-account coverage.", detail.as_deref().unwrap_or("unknown"))
+    } else if evidence_based {
         format!("replay-confirmed `{tag}`{named}: a fuzz-discovered action sequence reproduces the violation. The spec is silent on this case.")
     } else {
         format!("fuzz-discovered path triggers `{tag}` (heuristic classification — replay evidence unavailable). The spec is silent on this case.")
@@ -824,37 +981,103 @@ fn finding_from_crash(
 /// Uses the same `crucible run … --replay <file>` surface the domain-replay
 /// path already drives (`crucible_replay_command`): it re-runs the
 /// already-built harness binary in replay mode (`FUZZ_INPUT_FILE` set) and
-/// prints the marker to stdout. The harness's replay block reconstructs the
-/// action sequence from the `.meta.json` when the raw bytes don't fully
-/// deserialize, so passing the crash meta path is sufficient.
+/// prints the marker to stdout. The raw crash file is the replay input;
+/// Crucible reads its adjacent `.meta.json` only as a deserialization fallback.
 ///
 /// Returns `None` if crucible can't be spawned or emits no parseable marker —
 /// the caller then falls back to heuristic classification rather than dropping
 /// the crash.
-fn replay_capture(
-    harness_dir: &Path,
-    crash_path: &Path,
-    timeout: Duration,
-) -> Option<crate::probe::crucible_replay::ReplayEvidence> {
-    let command = crucible_replay_command(harness_dir, crash_path).ok()?;
-    let mut process = Command::new(&command[0]);
-    process.args(&command[1..]);
-    let TimedCommandOutput::Completed { stdout } =
-        run_command_with_timeout(&mut process, timeout).ok()?
-    else {
-        eprintln!(
-            "[crucible] replay timed out after {}ms for {}.",
-            timeout.as_millis(),
-            crash_path.display()
+#[derive(Debug)]
+enum ReplayCapture {
+    Evidence(crate::probe::crucible_replay::ReplayEvidence),
+    TimedOut,
+    Failed(String),
+    MissingMarker,
+}
+
+fn replay_capture(harness_dir: &Path, crash_path: &Path, timeout: Duration) -> ReplayCapture {
+    let capture = || -> Result<(ReplayCapture, serde_json::Value)> {
+        let raw_input = raw_crash_input_path(crash_path)?;
+        anyhow::ensure!(
+            raw_input.is_file(),
+            "raw Crucible crash input missing: {}",
+            raw_input.display()
         );
-        return None;
+        let command = crucible_replay_command(harness_dir, &raw_input)?;
+        let mut process = Command::new(&command[0]);
+        process.args(&command[1..]);
+        process.env(
+            "QEDGEN_OBSERVATION_ERROR_FILE",
+            observation_error_file(harness_dir)?,
+        );
+        match run_command_with_timeout(&mut process, timeout)? {
+            TimedCommandOutput::TimedOut => Ok((
+                ReplayCapture::TimedOut,
+                serde_json::json!({"status":"timed_out", "timeout_ms":timeout.as_millis()}),
+            )),
+            TimedCommandOutput::Completed {
+                stdout,
+                stderr,
+                status,
+            } => {
+                let stdout = String::from_utf8_lossy(&stdout);
+                let stderr = String::from_utf8_lossy(&stderr);
+                let evidence = crate::probe::crucible_replay::parse_fuzz_finding(&stdout);
+                let result = if status.code() == Some(70) {
+                    ReplayCapture::Failed("harness exited 70".into())
+                } else if let Some(evidence) = evidence {
+                    ReplayCapture::Evidence(evidence)
+                } else if !status.success() {
+                    ReplayCapture::Failed(format!("replay exited {status}"))
+                } else {
+                    ReplayCapture::MissingMarker
+                };
+                let kind = match &result {
+                    ReplayCapture::Evidence(_) => "marker",
+                    ReplayCapture::Failed(_) => "process_failed",
+                    _ => "missing_marker",
+                };
+                Ok((
+                    result,
+                    serde_json::json!({"status":kind,"exit_code":status.code(),"stdout_tail":stdout,"stderr_tail":stderr}),
+                ))
+            }
+        }
     };
-    let stdout = String::from_utf8_lossy(&stdout);
-    crate::probe::crucible_replay::parse_fuzz_finding(&stdout)
+    let (result, record) = capture().unwrap_or_else(|error| {
+        let error = format!("{error:#}");
+        (
+            ReplayCapture::Failed(error.clone()),
+            serde_json::json!({"status":"spawn_or_io_failed","error":error}),
+        )
+    });
+    let report = crash_path.with_extension("replay.json");
+    if let Err(error) = std::fs::write(&report, format!("{}\n", record)) {
+        return ReplayCapture::Failed(format!(
+            "persisting replay evidence {}: {error}",
+            report.display()
+        ));
+    }
+    result
+}
+
+fn raw_crash_input_path(metadata: &Path) -> Result<PathBuf> {
+    let name = metadata
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_suffix(".meta.json"))
+        .ok_or_else(|| {
+            anyhow::anyhow!("expected Crucible .meta.json path: {}", metadata.display())
+        })?;
+    Ok(metadata.with_file_name(name))
 }
 
 enum TimedCommandOutput {
-    Completed { stdout: Vec<u8> },
+    Completed {
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+        status: std::process::ExitStatus,
+    },
     TimedOut,
 }
 
@@ -865,10 +1088,11 @@ fn run_command_with_timeout(
     command: &mut Command,
     timeout: Duration,
 ) -> Result<TimedCommandOutput> {
-    let mut stdout = tempfile::tempfile().context("creating replay stdout capture")?;
+    let mut stdout = tempfile::tempfile().context("creating subprocess stdout capture")?;
+    let mut stderr = tempfile::tempfile().context("creating subprocess stderr capture")?;
     command
         .stdout(Stdio::from(stdout.try_clone()?))
-        .stderr(Stdio::null());
+        .stderr(Stdio::from(stderr.try_clone()?));
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -878,11 +1102,12 @@ fn run_command_with_timeout(
     let mut child = command.spawn().context("spawning bounded subprocess")?;
     let started = Instant::now();
     loop {
-        if child.try_wait()?.is_some() {
-            stdout.seek(SeekFrom::Start(0))?;
-            let mut bytes = Vec::new();
-            stdout.read_to_end(&mut bytes)?;
-            return Ok(TimedCommandOutput::Completed { stdout: bytes });
+        if let Some(status) = child.try_wait()? {
+            return Ok(TimedCommandOutput::Completed {
+                stdout: capture_tail(&mut stdout)?,
+                stderr: capture_tail(&mut stderr)?,
+                status,
+            });
         }
         if started.elapsed() >= timeout {
             #[cfg(unix)]
@@ -900,6 +1125,17 @@ fn run_command_with_timeout(
         }
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+// Bound memory even when a broken harness floods diagnostics. Markers outside
+// this tail remain unknown, never inferred from a crash or successful exit.
+fn capture_tail(file: &mut std::fs::File) -> Result<Vec<u8>> {
+    const MAX_CAPTURE: u64 = 1024 * 1024;
+    let length = file.metadata()?.len();
+    file.seek(SeekFrom::Start(length.saturating_sub(MAX_CAPTURE)))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_CAPTURE).read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 fn stable_finding_id(
@@ -966,7 +1202,7 @@ pub fn discover_idl(harness_dir: &Path, project_root: &Path) -> Result<()> {
     }
     #[cfg(unix)]
     {
-        std::os::unix::fs::symlink(src_idl, &dest)?;
+        std::os::unix::fs::symlink(src_idl.canonicalize()?, &dest)?;
     }
     #[cfg(not(unix))]
     {
@@ -996,12 +1232,45 @@ fn build_harness(harness_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+fn archive_crash_dir(harness: &Path) -> Result<PathBuf> {
+    let source = harness.join("crashes").join(HARNESS_TEST_NAME);
+    if !source.exists() {
+        return Ok(source);
+    }
+    let parent = harness.join(".qedgen/crash-runs");
+    std::fs::create_dir_all(&parent)?;
+    let archive = tempfile::Builder::new()
+        .prefix("run-")
+        .tempdir_in(&parent)?
+        .keep();
+    let destination = archive.join(HARNESS_TEST_NAME);
+    std::fs::rename(&source, &destination)
+        .with_context(|| format!("preserving previous crash evidence {}", source.display()))?;
+    Ok(destination)
+}
+
+fn prepare_fresh_crash_dir(harness: &Path) -> Result<()> {
+    archive_crash_dir(harness)?;
+    Ok(())
+}
+fn validate_run_status(status: std::process::ExitStatus, crashes: &Path) -> Result<()> {
+    if status.success() {
+        return Ok(());
+    }
+    // The CLI forwards its child status; 70 is explicitly a harness bug,
+    // while exit 1 can carry a reproduced assertion. Require fresh evidence.
+    if status.code() == Some(1) && !load_crash_candidates(crashes)?.is_empty() {
+        return Ok(());
+    }
+    bail!("crucible run exited with {status}; no supported fresh crash evidence establishes a successful fuzz round at {}. Inspect Crucible diagnostics and harness readiness", crashes.display())
+}
+
 fn run_crucible(
     harness_dir: &Path,
     budget: Duration,
     stateful: bool,
     corpus_in: Option<&Path>,
-) -> Result<PathBuf> {
+) -> Result<(PathBuf, BTreeMap<String, ObservedActionCounts>)> {
     let prog = harness_dir
         .file_name()
         .and_then(|s| s.to_str())
@@ -1011,20 +1280,44 @@ fn run_crucible(
         .arg(prog)
         .arg(HARNESS_TEST_NAME)
         .arg("-C")
-        .arg(harness_dir)
+        .arg(crucible_harness_arg(harness_dir)?)
         .arg("--timeout")
         .arg(budget.as_secs().to_string());
+    cmd.env(
+        "QEDGEN_OBSERVATION_ERROR_FILE",
+        observation_error_file(harness_dir)?,
+    );
     if stateful {
         cmd.arg("--stateful");
     }
     if let Some(corpus_in) = corpus_in {
         cmd.arg("--corpus-in").arg(corpus_in);
     }
-    let status = cmd.status().context("spawning `crucible run`")?;
-    // Non-zero exit can mean "found crashes", not failure — harvest the
-    // crashes dir regardless.
-    let _ = status;
-    Ok(harness_dir.join("crashes").join(HARNESS_TEST_NAME))
+    prepare_fresh_crash_dir(harness_dir)?;
+    let TimedCommandOutput::Completed {
+        stdout,
+        stderr,
+        status,
+    } = run_command_with_timeout(&mut cmd, budget.saturating_add(Duration::from_secs(60)))
+        .context("running `crucible run`")?
+    else {
+        bail!("crucible run exceeded its budget plus 60s shutdown allowance; inspect the harness and saved crashes");
+    };
+    eprint!("{}", String::from_utf8_lossy(&stderr));
+    print!("{}", String::from_utf8_lossy(&stdout));
+    let observed_actions = parse_action_counts(&String::from_utf8_lossy(&stderr))?;
+    let crash_dir = harness_dir.join("crashes").join(HARNESS_TEST_NAME);
+    validate_run_status(status, &crash_dir)?;
+    Ok((crash_dir, observed_actions))
+}
+
+/// Crucible sets the child's working directory to the harness and then
+/// spawns `<harness>/target/<profile>/invariant_test`. A relative `-C`
+/// path therefore resolves twice and the spawn fails. Always pass an
+/// absolute path.
+fn crucible_harness_arg(harness_dir: &Path) -> Result<PathBuf> {
+    std::path::absolute(harness_dir)
+        .with_context(|| format!("resolving Crucible harness path {}", harness_dir.display()))
 }
 
 fn crucible_replay_command(harness_dir: &Path, seed: &Path) -> Result<Vec<String>> {
@@ -1038,21 +1331,37 @@ fn crucible_replay_command(harness_dir: &Path, seed: &Path) -> Result<Vec<String
         prog.to_string(),
         HARNESS_TEST_NAME.to_string(),
         "-C".to_string(),
-        harness_dir.display().to_string(),
+        crucible_harness_arg(harness_dir)?.display().to_string(),
         "--replay".to_string(),
         seed.display().to_string(),
     ])
 }
 
+#[derive(Debug)]
+struct ReplayTimeout;
+impl std::fmt::Display for ReplayTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "domain seed replay incomplete: {}s per-seed deadline or aggregate triage limit reached",
+            MAX_DOMAIN_REPLAY_PER_SEED.as_secs()
+        )
+    }
+}
+impl std::error::Error for ReplayTimeout {}
+
 fn run_crucible_replay(harness_dir: &Path, seed: &Path) -> Result<Option<i32>> {
     let command = crucible_replay_command(harness_dir, seed)?;
-    let status = Command::new(&command[0])
-        .args(&command[1..])
-        .status()
-        .context("spawning `crucible run --replay`")?;
-    // As in fuzz mode, a non-zero status may mean that the replay reproduced
-    // a violation. Crash harvesting is the source of truth.
-    Ok(status.code())
+    let mut process = Command::new(&command[0]);
+    process.args(&command[1..]);
+    process.env(
+        "QEDGEN_OBSERVATION_ERROR_FILE",
+        observation_error_file(harness_dir)?,
+    );
+    match run_command_with_timeout(&mut process, MAX_DOMAIN_REPLAY_PER_SEED)? {
+        TimedCommandOutput::Completed { status, .. } => Ok(status.code()),
+        TimedCommandOutput::TimedOut => Err(ReplayTimeout.into()),
+    }
 }
 
 fn replay_domain_seed_report(
@@ -1082,9 +1391,16 @@ where
         .join(".qedgen")
         .join("domain-replay-report.json");
 
-    for seed in &seeds.seeds {
+    let started = Instant::now();
+    for (index, seed) in seeds.seeds.iter().enumerate() {
         let command = crucible_replay_command(harness_dir, &seed.path)?;
-        match replay(harness_dir, &seed.path) {
+        let outcome = if index >= MAX_CRASH_REPLAYS || started.elapsed() >= MAX_DOMAIN_REPLAY_BUDGET
+        {
+            Err(ReplayTimeout.into())
+        } else {
+            replay(harness_dir, &seed.path)
+        };
+        match outcome {
             Ok(exit_code) => {
                 report.records.push(DomainReplayRecord {
                     plan_id: seed.plan_id.clone(),
@@ -1095,7 +1411,7 @@ where
                     status: match exit_code {
                         Some(0) => DomainReplayStatus::CompletedZeroExit,
                         Some(_) => DomainReplayStatus::CompletedNonzeroExit,
-                        // No code → killed by a signal (a reproduced crash).
+                        // No code → killed by a signal; this alone proves no invariant.
                         None => DomainReplayStatus::TerminatedBySignal,
                     },
                     exit_code,
@@ -1110,7 +1426,11 @@ where
                     seed_sha256: seed.seed_sha256.clone(),
                     action_count: seed.action_count,
                     command,
-                    status: DomainReplayStatus::SpawnFailed,
+                    status: if error.is::<ReplayTimeout>() {
+                        DomainReplayStatus::TimedOut
+                    } else {
+                        DomainReplayStatus::SpawnFailed
+                    },
                     exit_code: None,
                     error: Some(format!("{error:#}")),
                 });
@@ -1158,15 +1478,19 @@ fn auto_tmin_all(harness_dir: &Path, timeout: Duration) -> Result<()> {
         .arg(HARNESS_TEST_NAME)
         .arg("--all")
         .arg("-C")
-        .arg(harness_dir);
-    if matches!(
-        run_command_with_timeout(&mut command, timeout),
-        Ok(TimedCommandOutput::TimedOut)
-    ) {
-        eprintln!(
-            "[crucible] `tmin --all` exceeded its {}s budget; replaying raw sampled crashes.",
-            timeout.as_secs()
-        );
+        .arg(crucible_harness_arg(harness_dir)?);
+    command.env(
+        "QEDGEN_OBSERVATION_ERROR_FILE",
+        observation_error_file(harness_dir)?,
+    );
+    match run_command_with_timeout(&mut command, timeout)? {
+        TimedCommandOutput::TimedOut => {
+            bail!("tmin exceeded its {}ms deadline", timeout.as_millis())
+        }
+        TimedCommandOutput::Completed { status, stderr, .. } if !status.success() => {
+            bail!("tmin exited {status}: {}", String::from_utf8_lossy(&stderr))
+        }
+        TimedCommandOutput::Completed { .. } => {}
     }
     Ok(())
 }
@@ -1179,7 +1503,11 @@ fn collect_crash_files(crash_dir: &Path) -> Result<Vec<PathBuf>> {
     for entry in std::fs::read_dir(crash_dir)? {
         let entry = entry?;
         let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) == Some("json") {
+        if path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .is_some_and(|name| name.ends_with(".meta.json"))
+        {
             out.push(path);
         }
     }
@@ -1199,6 +1527,24 @@ fn crucible_version() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn short_fuzz_budget_still_allows_fresh_process_replay() {
+        assert_eq!(
+            replay_triage_budget(Duration::from_secs(1)),
+            Duration::from_secs(30)
+        );
+        assert_eq!(MAX_REPLAY_PER_CRASH, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn crash_replay_uses_raw_input_beside_metadata() {
+        let meta = Path::new("crashes/invariant_test/crash_abc.meta.json");
+        assert_eq!(
+            raw_crash_input_path(meta).unwrap(),
+            PathBuf::from("crashes/invariant_test/crash_abc")
+        );
+    }
     use crate::probe::{CrucibleActionRecord, CrucibleCrashMetadata};
 
     fn domain_dossier(ratification: &str, lanes: &[&str]) -> serde_json::Value {
@@ -1370,6 +1716,14 @@ mod tests {
     }
 
     #[test]
+    fn crucible_harness_arg_is_absolute_for_relative_harness() {
+        let command = crucible_replay_command(Path::new("fuzz/vault"), Path::new("seed")).unwrap();
+        let harness = Path::new(&command[5]);
+        assert!(harness.is_absolute(), "{}", harness.display());
+        assert!(harness.ends_with("fuzz/vault"));
+    }
+
+    #[test]
     fn replay_command_uses_native_crucible_replay_surface() {
         let command = crucible_replay_command(
             Path::new("/tmp/vault"),
@@ -1415,7 +1769,7 @@ mod tests {
     }
 
     #[test]
-    fn replay_ledger_records_signal_termination_as_reproduced_crash() {
+    fn replay_ledger_records_signal_termination_without_semantic_claim() {
         // A replay killed by a signal (no exit code) is a reproduced crash,
         // not a spawn failure. It must serialize as `terminated_by_signal`
         // with a null exit_code and no error — the shape the shipped
@@ -1431,6 +1785,22 @@ mod tests {
         assert_eq!(report["records"][0]["status"], "terminated_by_signal");
         assert!(report["records"][0]["exit_code"].is_null());
         assert!(report["records"][0]["error"].is_null());
+    }
+
+    #[test]
+    fn replay_ledger_distinguishes_timeout_from_spawn_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let harness = tmp.path().join("vault");
+        std::fs::create_dir_all(&harness).unwrap();
+        let mut seeds = seed_report(&harness);
+        seeds.seeds.truncate(1);
+        replay_domain_seed_report_with(&harness, &seeds, |_, _| Err(ReplayTimeout.into()))
+            .unwrap_err();
+        let report: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(harness.join(".qedgen/domain-replay-report.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(report["records"][0]["status"], "timed_out");
     }
 
     #[test]
@@ -1460,6 +1830,123 @@ mod tests {
     /// example (commit 689e63a) — exercises real crash output, not just
     /// synthetic data.
     const REAL_CRASH_META: &str = include_str!("../../test-fixtures/real-crucible-crash.meta.json");
+
+    #[test]
+    fn replay_sidecars_do_not_become_crash_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("crash.meta.replay.json"), "{}").unwrap();
+        std::fs::write(tmp.path().join("unrelated.json"), "{}").unwrap();
+        assert!(load_crash_candidates(tmp.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn archived_findings_keep_replayable_crash_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let original = tmp.path().join("crashes").join(HARNESS_TEST_NAME);
+        std::fs::create_dir_all(&original).unwrap();
+        let path = original.join("one.meta.json");
+        std::fs::write(&path, REAL_CRASH_META).unwrap();
+        let raw = raw_crash_input_path(&path).unwrap();
+        std::fs::write(&raw, [0u8; 4]).unwrap();
+        let mut harvested = HarvestResult::default();
+        let mut finding = synthetic_finding(
+            "withdraw",
+            "invariant_violation",
+            None,
+            path.to_str().unwrap(),
+        );
+        let old_invocation = format!("crucible show harness {} --replay", raw.display());
+        if let Some(Reproducer::Crucible { invocation, .. }) = &mut finding.reproducer {
+            *invocation = old_invocation.clone();
+        }
+        finding.investigation_hint = old_invocation;
+        harvested.findings.push(finding);
+        preserve_harvested_crashes(tmp.path(), &original, &mut harvested).unwrap();
+        let Reproducer::Crucible {
+            crash_path,
+            invocation,
+            ..
+        } = harvested.findings[0].reproducer.as_ref().unwrap()
+        else {
+            panic!("crucible")
+        };
+        assert!(Path::new(crash_path).exists());
+        assert!(!original.exists());
+        let archived_raw = raw_crash_input_path(Path::new(crash_path)).unwrap();
+        assert!(archived_raw.exists());
+        assert!(invocation.contains(archived_raw.to_str().unwrap()));
+        assert!(harvested.findings[0]
+            .investigation_hint
+            .contains(archived_raw.to_str().unwrap()));
+    }
+
+    #[test]
+    fn action_markers_sum_processes_without_double_counting_snapshots() {
+        let output = concat!(
+            "QEDGEN_CRUCIBLE_ACTION_V1 {\"process_id\":1,\"handler\":\"claim\",\"attempted\":1,\"succeeded\":0,\"rejected\":1}\n",
+            "QEDGEN_CRUCIBLE_ACTION_V1 {\"process_id\":1,\"handler\":\"claim\",\"attempted\":1024,\"succeeded\":24,\"rejected\":1000}\n",
+            "QEDGEN_CRUCIBLE_ACTION_V1 {\"process_id\":2,\"handler\":\"claim\",\"attempted\":1,\"succeeded\":1,\"rejected\":0}\n");
+        let counts = parse_action_counts(output).unwrap();
+        assert_eq!(
+            counts["claim"],
+            ObservedActionCounts {
+                attempted: 1025,
+                succeeded: 25,
+                rejected: 1000
+            }
+        );
+        assert!(parse_action_counts("no execution markers")
+            .unwrap()
+            .is_empty());
+        assert!(parse_action_counts("QEDGEN_CRUCIBLE_ACTION_V1 {broken}").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_capture_preserves_failure_status_and_stderr() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "echo bad-harness >&2; exit 70"]);
+        let output = run_command_with_timeout(&mut command, Duration::from_secs(1)).unwrap();
+        let TimedCommandOutput::Completed { status, stderr, .. } = output else {
+            panic!("completed")
+        };
+        assert_eq!(status.code(), Some(70));
+        assert!(String::from_utf8_lossy(&stderr).contains("bad-harness"));
+    }
+
+    #[test]
+    fn malformed_crash_is_an_error_with_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("truncated.meta.json");
+        std::fs::write(&path, "{").unwrap();
+        let error = load_crash_candidates(tmp.path())
+            .err()
+            .expect("must surface malformed evidence");
+        assert!(format!("{error:#}").contains("truncated.meta.json"));
+    }
+
+    #[test]
+    fn abnormal_exit_without_fresh_crash_is_error() {
+        use std::os::unix::process::ExitStatusExt;
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(
+            validate_run_status(std::process::ExitStatus::from_raw(2 << 8), tmp.path()).is_err()
+        );
+        assert!(
+            validate_run_status(std::process::ExitStatus::from_raw(1 << 8), tmp.path()).is_err()
+        );
+    }
+
+    #[test]
+    fn previous_crashes_are_archived_before_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let crash_dir = tmp.path().join("crashes/invariant_test");
+        std::fs::create_dir_all(&crash_dir).unwrap();
+        std::fs::write(crash_dir.join("old.meta.json"), REAL_CRASH_META).unwrap();
+        prepare_fresh_crash_dir(tmp.path()).unwrap();
+        assert!(!crash_dir.exists());
+        assert!(load_crash_candidates(&crash_dir).unwrap().is_empty());
+    }
 
     #[test]
     fn parses_real_crucible_crash_metadata() {

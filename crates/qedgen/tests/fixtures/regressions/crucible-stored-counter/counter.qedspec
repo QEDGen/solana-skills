@@ -1,0 +1,30 @@
+spec StoredCounter
+program_id "8QZ9bJtGZqfNfZ5Bw4tEp7Np5nVbA2qDMoZ3XaTw5H4R"
+
+type State
+  | Uninitialized
+  | Active of { count : U64 }
+
+type Error
+  | E
+
+pda counter ["counter"]
+
+invariant bounded :
+  state.count <= 10
+
+handler initialize : State.Uninitialized -> State.Active {
+  accounts {
+    counter : writable, pda ["counter"]
+    authority : signer, writable
+    system_program : program
+  }
+  invariant bounded
+  effect { count := 0 }
+}
+
+handler increment (amount : U64) : State.Active -> State.Active {
+  accounts { counter : writable, pda ["counter"] }
+  invariant bounded
+  effect { count := count + amount }
+}
