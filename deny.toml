@@ -60,6 +60,14 @@ ignore = [
     # doesn't fire in our usage. Tracking upstream `rand` 0.9.x
     # for a patched release.
     "RUSTSEC-2026-0097",
+    # `crypto-bigint 0.5.5` — RUSTSEC-2026-0387 (timing variability in
+    # operations meant to be constant-time). Pulled by `k256 0.13` via
+    # `solana-secp256k1-recover` (Anza), only inside qedgen-sandbox's
+    # Mollusk harness. secp256k1 recovery there runs on public
+    # signatures and keys, with no secret material to leak via timing.
+    # The fix is crypto-bigint 0.7.6, which k256 0.13 can't take; drop
+    # this when Anza moves to a k256 on crypto-bigint 0.7.
+    "RUSTSEC-2026-0387",
 ]
 
 # ── Licenses ──────────────────────────────────────────────────────────
