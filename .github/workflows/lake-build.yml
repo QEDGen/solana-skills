@@ -22,11 +22,12 @@ jobs:
     runs-on: ubuntu-latest
     # Warm-cache runs finish in ~50 min; a cold run (cache invalidated by
     # a qedsvm/Mathlib bump, or evicted by the repo's 10 GB cache limit)
-    # takes ~2h+ across all 9 examples. The job timeout must cover the
-    # cold case: with the old 60-min ceiling every cold run was cancelled,
-    # and a cancelled job skips the cache post-steps, so the cache could
-    # never be re-seeded (35 consecutive cancellations, 2026-07-07→15).
-    timeout-minutes: 170
+    # takes ~16 min per example, ~2h45m across all 10. The job timeout must
+    # cover the cold case: with the old 60-min ceiling every cold run was
+    # cancelled, and a cancelled job skips the cache post-steps, so the cache
+    # could never be re-seeded (35 consecutive cancellations, 2026-07-07→15).
+    # The 150-min sweep step last timed out on the 10th example (2026-10-24).
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
 
@@ -131,11 +132,11 @@ jobs:
             fi
           done
 
-      # Step-level timeout (below the job's 170) so a hung sweep fails the
+      # Step-level timeout (below the job's 240) so a hung sweep fails the
       # STEP, leaving the job alive to run the always() cache save below.
       # A job-level cancellation would skip it.
       - name: Run lake-build sweep
-        timeout-minutes: 150
+        timeout-minutes: 210
         run: bash scripts/check-lake-build.sh --strict
 
       # Save even when the sweep failed or timed out: the oleans built so
