@@ -24,7 +24,7 @@ namespace Metadata
     `binary_hash` declared in `metaplex.qedspec`'s `upstream { ... }`
     block. -/
 def binary_hash : String :=
-  "sha256:31f0a627dba051a938de650464e55cc5397a4be0fd496929c1f9cf02fe5e9011"
+  "sha256:8fdb14984e4756f3157881754fdc9444646b15cad27a5c78fa249dc5f507e3a7"
 
 -- ---------------------------------------------------------------------
 -- sign_metadata

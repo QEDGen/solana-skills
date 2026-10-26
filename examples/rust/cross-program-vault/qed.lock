@@ -13,9 +13,9 @@ imported_account_type_names = "State"
 [[dependency]]
 name = "spl"
 source = "builtin:spl"
-spec_hash = "sha256:5d99132da0384275bc5dced955549db8de53afe6a097c8f508bd0f6dfc1bedf8"
+spec_hash = "sha256:cd2783a1a968e1453c67432a382c50928f0ef70068f415b058d488b0d705c1da"
 program_id = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
-upstream_binary_hash = "sha256:8190d3f7ceb6cb7a7a8d8924bff89f9f611e15ce1f806f2b6237f3311a98f697"
+upstream_binary_hash = "sha256:435df1e70f1ca6258eb01a4507701688c7f1a22656e3e4ef361db473bf478075"
 upstream_version = "4.0.3"
 verified = true
-proof_hash = "sha256:9ac644d3090b94b0eb9393bf600dcbe79a8e788b636a5dfae36d73ad257a8c78"
+proof_hash = "sha256:97cbaf0a4489d2d20c18402898f3468aa5bf3c81501733364fda59065c871392"

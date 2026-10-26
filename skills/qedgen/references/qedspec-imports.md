@@ -91,7 +91,19 @@ Stance 2" section below.
 
 Real `binary_hash` pins replace the v2.26 `sha256:0000…`
 placeholders for SPL Token + Metaplex (captured 2026-05-23 from
-mainnet payload dumps). The System Program stays at the all-zero
+mainnet payload dumps). Since #452 (2026-10-26) a pin is the
+`solana-verify` hash: SHA-256 of the dump after trailing zero bytes are
+stripped. An upgradeable program's data account carries zero padding
+after the ELF (86,558 bytes for Metaplex), and its length depends on the
+deploy, not the program, so a plain hash of the dump is not a property
+of the binary. A pin made the old way (plain SHA-256 of the dump) still
+passes when it matches, with a P2 warning that names the new pin.
+
+Upgrade note: the re-pin changes the bundled SPL Token and Metaplex
+interfaces, so their `spec_hash` changes too, as with any change to a
+bundled interface (see the v2.27 upgrade notes). A `qed.lock` that imports
+them needs a refresh after upgrading: run any non-`--frozen` `qedgen check`.
+CI gates that run `check --frozen` should expect the lock diff. The System Program stays at the all-zero
 sentinel (native program; no deployed binary to hash).
 
 User-authored interfaces (`import X from "..."` referencing a github
@@ -306,7 +318,8 @@ entirely; rely solely on `--no-cache`.
 ## `qedgen verify --check-upstream`
 
 Diffs every imported library's pinned `upstream_binary_hash` against the
-on-chain `.so` binary. Implemented via dispatch to the user's existing
+on-chain program, hashed the `solana-verify` way (trailing zero bytes
+stripped, then SHA-256). Implemented via dispatch to the user's existing
 `solana` CLI:
 
 ```bash

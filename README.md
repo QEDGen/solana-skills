@@ -434,8 +434,8 @@ qedgen aristotle cancel <project-id>
 ### Upstream binary pinning
 
 When a `.qedspec` `import`s another program's interface (e.g. SPL Token),
-the import can pin an `upstream_binary_hash` — the SHA-256 of the on-chain
-`.so`. `qedgen verify --check-upstream` diffs each pinned hash against
+the import can pin an `upstream_binary_hash`: the `solana-verify` hash of the on-chain program (SHA-256 after trailing zero bytes are stripped), the
+same number `solana-verify` and explorers show. `qedgen verify --check-upstream` diffs each pinned hash against
 what's actually deployed via `solana program dump`, so a callee program
 upgraded after you wrote your proofs surfaces as a verification failure
 instead of a silent risk.

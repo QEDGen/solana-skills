@@ -34,7 +34,7 @@ namespace Token
     `binary_hash` declared in `spl_token.qedspec`'s `upstream { ... }`
     block. The qedgen resolver enforces equality at lock time. -/
 def binary_hash : String :=
-  "sha256:8190d3f7ceb6cb7a7a8d8924bff89f9f611e15ce1f806f2b6237f3311a98f697"
+  "sha256:435df1e70f1ca6258eb01a4507701688c7f1a22656e3e4ef361db473bf478075"
 
 -- ---------------------------------------------------------------------
 -- transfer (amount : U64)

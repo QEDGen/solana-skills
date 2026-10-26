@@ -13,10 +13,11 @@
 // imported theorem from the bundled proof package when present
 // (Stance 2). The hash is a content pin against the canonical SPL
 // Token program ID `TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA` at
-// version v4.0.3. `binary_hash` is the sha256 of the deployed program
-// payload as returned by `solana program dump
-// TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA` against mainnet,
-// captured 2026-05-23 (Track C3).
+// version v4.0.3. `binary_hash` is the solana-verify hash (SHA-256 after
+// trailing zero bytes are stripped) of the program payload returned by
+// `solana program dump TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA`
+// against mainnet. Captured 2026-05-23 (Track C3), re-pinned to this rule
+// 2026-10-26 (#452).
 //
 // v2.27 — state-aware ensures pin substantive contracts via Track A's
 // abstract-accessor mechanism + Phase 0's typed `state { ... }` block.
@@ -37,7 +38,7 @@ interface Token {
     package      "spl-token"
     version      "4.0.3"
     source       "https://github.com/solana-program/token/tree/v4.0.3"
-    binary_hash  "sha256:8190d3f7ceb6cb7a7a8d8924bff89f9f611e15ce1f806f2b6237f3311a98f697"
+    binary_hash  "sha256:435df1e70f1ca6258eb01a4507701688c7f1a22656e3e4ef361db473bf478075"
     verified_with ["proptest"]
     verified_at  "2026-05-23"
   }

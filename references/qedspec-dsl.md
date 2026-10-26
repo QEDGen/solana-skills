@@ -1437,7 +1437,7 @@ interface Token {
   upstream {
     package       "spl-token"
     version       "4.0.3"
-    binary_hash   "sha256:..."      // deployed .so, authoritative
+    binary_hash   "sha256:..."      // deployed program, solana-verify hash (trailing zeros stripped)
     verified_with ["proptest", "kani"]  // honest — "lean" only when proven
     verified_at   "2026-04-18"
   }
