@@ -128,3 +128,46 @@ fn refuses_when_no_build_image_can_be_picked() {
         stderr(&out)
     );
 }
+
+/// `--program programs/x` under a root `[workspace]`: `[profile.release]`
+/// and `Cargo.lock` are read at the workspace root, not the member crate.
+#[test]
+fn member_crate_uses_the_workspace_root() {
+    let d =
+        committed_crate("[workspace]\nmembers = [\"programs/*\"]\n[profile.release]\ndebug = 1\n");
+    let member = d.path().join("programs/x");
+    std::fs::create_dir_all(member.join("src")).unwrap();
+    std::fs::write(
+        member.join("Cargo.toml"),
+        "[package]\nname = \"x\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(member.join("src/lib.rs"), "").unwrap();
+    git(d.path(), &["add", "."]);
+    git(d.path(), &["commit", "-q", "-m", "member"]);
+    let out = qedgen(&["build", "--program", member.to_str().unwrap()]);
+    let err = stderr(&out);
+    assert!(!out.status.success());
+    // It got past the root's debug setting and reports the root's missing lock.
+    let root = d.path().canonicalize().unwrap();
+    assert!(
+        err.contains(&format!("{} has no Cargo.lock", root.display())),
+        "{err}"
+    );
+}
+
+#[test]
+fn rejects_a_library_name_that_is_a_path() {
+    let d = committed_crate(
+        "[package]\nname = \"x\"\nversion = \"0.1.0\"\n[profile.release]\ndebug = 1\n",
+    );
+    let out = qedgen(&[
+        "build",
+        "--program",
+        d.path().to_str().unwrap(),
+        "--library",
+        "../../x",
+    ]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("--library"), "{}", stderr(&out));
+}

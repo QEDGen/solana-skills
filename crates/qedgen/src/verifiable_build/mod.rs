@@ -98,11 +98,58 @@ pub fn write_record(workspace: &Path, record: &BuildRecord) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// `--library` becomes a file name under `.qed/build/`, so it must be a
+/// plain crate-style identifier, never a path.
+pub fn validate_library(name: &str) -> Result<()> {
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        bail!("--library {name:?} must be a library name (letters, digits, _), not a path");
+    }
+    Ok(())
+}
+
+/// Compare the hash `solana-verify` printed with qedgen's own. A mismatch
+/// is an error. When nothing was printed (for example after an output
+/// format change), return a warning instead of skipping the check silently.
+pub fn cross_check_hash(printed: Option<&str>, ours: &str) -> Result<Option<String>> {
+    match printed {
+        Some(printed) if printed == ours => Ok(None),
+        Some(printed) => {
+            bail!("solana-verify printed program hash {printed}, but qedgen computed {ours}")
+        }
+        None => Ok(Some(format!(
+            "solana-verify did not print a program hash, so qedgen could not cross-check {ours}"
+        ))),
+    }
+}
+
+/// Write the two binaries and `.gitignore` to `out_dir`, first removing any
+/// `.so` left by an earlier build (for example under another library name),
+/// so the directory only holds this build's binaries.
+pub fn write_outputs(out_dir: &Path, library: &str, deploy: &[u8], debug: &[u8]) -> Result<()> {
+    std::fs::create_dir_all(out_dir)?;
+    for entry in std::fs::read_dir(out_dir)? {
+        let path = entry?.path();
+        if path.extension().is_some_and(|ext| ext == "so") {
+            std::fs::remove_file(&path)
+                .with_context(|| format!("removing old build output {}", path.display()))?;
+        }
+    }
+    std::fs::write(out_dir.join(".gitignore"), "*.so\n")?;
+    std::fs::write(out_dir.join(format!("{library}.so")), deploy)?;
+    std::fs::write(out_dir.join(format!("{library}.debug.so")), debug)?;
+    Ok(())
+}
+
 /// Build the program in Docker, check the result, and keep both binaries
 /// and the record under `<workspace>/.qed/build/`. Every refusal happens
 /// before Docker starts.
 pub fn run_build(opts: &BuildOptions) -> Result<BuildRecord> {
     let expected_sbpf = selfcheck::arch_to_sbpf_version(&opts.arch)?;
+    let library = match &opts.library {
+        Some(name) => name.clone(),
+        None => solana_verify::library_name(&opts.program)?,
+    };
+    validate_library(&library)?;
     let workspace = preflight::workspace_root(&opts.program)?;
     let commit = preflight::git_head(&workspace)?;
     let workspace_path = preflight::repo_relative(&workspace)?;
@@ -125,14 +172,12 @@ pub fn run_build(opts: &BuildOptions) -> Result<BuildRecord> {
             workspace.display()
         );
     }
-    preflight::check_image_arch(
-        preflight::solana_image_version(&manifest_text, lock.as_deref()),
-        &opts.arch,
-    )?;
-    let library = match &opts.library {
-        Some(name) => name.clone(),
-        None => solana_verify::library_name(&opts.program)?,
-    };
+    let image_version = preflight::solana_image_version(&manifest_text, lock.as_deref());
+    preflight::check_image_arch(image_version, &opts.arch)?;
+    if let Some(warning) = preflight::image_warning(image_version) {
+        eprintln!("warning: {warning}");
+    }
+
     let solana_verify_version = preflight::check_tools()?;
 
     let args = solana_verify::BuildArgs {
@@ -155,20 +200,14 @@ pub fn run_build(opts: &BuildOptions) -> Result<BuildRecord> {
     selfcheck::self_check(&deploy, &debug, expected_sbpf)?;
 
     let program_hash = selfcheck::program_hash(&deploy);
-    if let Some(printed) = solana_verify::printed_program_hash(&output) {
-        if printed != program_hash {
-            bail!(
-                "solana-verify printed program hash {printed}, but {} hashes to {program_hash}",
-                deploy_path.display()
-            );
-        }
+    if let Some(warning) = cross_check_hash(
+        solana_verify::printed_program_hash(&output).as_deref(),
+        &program_hash,
+    )? {
+        eprintln!("warning: {warning}");
     }
 
-    let out_dir = workspace.join(BUILD_DIR);
-    std::fs::create_dir_all(&out_dir)?;
-    std::fs::write(out_dir.join(".gitignore"), "*.so\n")?;
-    std::fs::write(out_dir.join(format!("{library}.so")), &deploy)?;
-    std::fs::write(out_dir.join(format!("{library}.debug.so")), &debug)?;
+    write_outputs(&workspace.join(BUILD_DIR), &library, &deploy, &debug)?;
 
     let record = BuildRecord {
         schema_version: 1,
@@ -259,6 +298,49 @@ mod tests {
         assert_eq!(
             record_workspace(std::path::Path::new("x.qedspec"), None).unwrap(),
             preflight::workspace_root(std::path::Path::new(".")).unwrap()
+        );
+    }
+
+    #[test]
+    fn library_must_be_an_identifier() {
+        validate_library("gate_anchor").unwrap();
+        validate_library("Prog2").unwrap();
+        for bad in ["../x", "a/b", "", "x.so", "a b"] {
+            assert!(validate_library(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn hash_cross_check() {
+        assert_eq!(cross_check_hash(Some("aa"), "aa").unwrap(), None);
+        assert!(cross_check_hash(Some("bb"), "aa").is_err());
+        let warning = cross_check_hash(None, "aa").unwrap().expect("warns");
+        assert!(
+            warning.contains("did not print a program hash"),
+            "{warning}"
+        );
+    }
+
+    #[test]
+    fn outputs_replace_binaries_from_an_earlier_build() {
+        let d = tempfile::tempdir().unwrap();
+        let out = d.path().join(BUILD_DIR);
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join("old.so"), b"old").unwrap();
+        std::fs::write(out.join("old.debug.so"), b"old").unwrap();
+        std::fs::write(out.join("build.json"), b"{}").unwrap();
+        write_outputs(&out, "new", b"deploy", b"debug").unwrap();
+        assert!(!out.join("old.so").exists());
+        assert!(!out.join("old.debug.so").exists());
+        assert!(
+            out.join("build.json").exists(),
+            "the record is not a binary"
+        );
+        assert_eq!(std::fs::read(out.join("new.so")).unwrap(), b"deploy");
+        assert_eq!(std::fs::read(out.join("new.debug.so")).unwrap(), b"debug");
+        assert_eq!(
+            std::fs::read_to_string(out.join(".gitignore")).unwrap(),
+            "*.so\n"
         );
     }
 

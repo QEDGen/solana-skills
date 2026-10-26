@@ -39,7 +39,7 @@ sBPF assembly is selected by `pragma sbpf` in the spec, not by a `Target`.
 | Probe: runtime-specific findings (`probe/`) | ❌ agent-layer (SKILL.md) | ❌ agent-layer | ✅ richest (`pinocchio_probe`) | ⚠️ Shank dispatcher discovery only | ❌ |
 | Miri divergence repros (`verify/miri_verify`) | ❌ | ❌ | ✅ | ❌ | n/a |
 | Ratchet / readiness (`verify/ratchet`) | ✅ | ✅ | ❌ no ratchet crate | ❌ | ❌ |
-| Verifiable debug build (`verifiable_build`, `qedgen build`, #449) | ✅ `solana-verify build` ⁸ | ⚠️ not tested | ✅ `solana-verify build` (p-token tested) | ⚠️ not tested | ❌ not built by `cargo build-sbf` |
+| Verifiable debug build (`verifiable_build`, `qedgen build`, #449) | ✅ `solana-verify build` (gate: minimal 0.32.1 program) ⁸ | ⚠️ not tested | ✅ `solana-verify build` (gate: minimal program; spike: p-token) | ⚠️ not tested | ❌ not built by `cargo build-sbf` |
 
 ¹ `pragma state_repr = adt` (#326): single-account specs with defaultable
 variant payloads verify over the ADT state space — the flat carrier gains a

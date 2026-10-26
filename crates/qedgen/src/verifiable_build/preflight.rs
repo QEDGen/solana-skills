@@ -102,6 +102,20 @@ pub fn check_image_arch(version: Option<(u64, u64, u64)>, arch: &str) -> Result<
     }
 }
 
+/// A warning for an image that may fail inside Docker after minutes: the
+/// Solana 2.x images ship cargo 1.84, which cannot read crates on edition
+/// 2024, and a fresh lockfile today pulls some.
+pub fn image_warning(version: Option<(u64, u64, u64)>) -> Option<String> {
+    match version {
+        Some((2, minor, patch)) => Some(format!(
+            "solana-verify will build in the Solana 2.{minor}.{patch} image, whose cargo 1.84 \
+             cannot read crates on edition 2024; if the build fails on that, set \
+             [workspace.metadata.cli] solana = \"3.0.1\" and commit it"
+        )),
+        _ => None,
+    }
+}
+
 /// The full commit SHA of `HEAD` in the repository that holds `dir`.
 pub fn git_head(dir: &Path) -> Result<String> {
     let out = Command::new("git")
@@ -277,6 +291,14 @@ mod tests {
         );
         let e = check_image_arch(None, "v3").unwrap_err().to_string();
         assert!(e.contains("[workspace.metadata.cli]"), "{e}");
+    }
+
+    #[test]
+    fn solana_2_image_gets_a_cargo_warning() {
+        let w = image_warning(Some((2, 3, 0))).expect("warns");
+        assert!(w.contains("edition 2024") && w.contains("3.0.1"), "{w}");
+        assert_eq!(image_warning(Some((3, 0, 1))), None);
+        assert_eq!(image_warning(None), None);
     }
 
     #[test]

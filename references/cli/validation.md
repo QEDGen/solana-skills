@@ -158,7 +158,7 @@ $QEDGEN build --program . --arch v3 --tools-version v1.57
 | Flag | Type | Default | Description |
 |---|---|---|---|
 | `--program` | Path | required | Program crate (the directory with the program's own `Cargo.toml`). The workspace root is the nearest ancestor whose `Cargo.toml` has `[workspace]`. |
-| `--library` | String | `[lib] name`, else the package name with `-` as `_` | Name of the `.so`. |
+| `--library` | String | `[lib] name`, else the package name with `-` as `_` | Name of the `.so`. Must be letters, digits and `_` only, never a path. |
 | `--arch` | String | `v3` | sBPF arch passed to `cargo build-sbf`. |
 | `--tools-version` | String | `v1.57` | Platform-tools version passed to `cargo build-sbf`. On v1.57, debug info does not change the deployed bytes. |
 
@@ -187,12 +187,15 @@ The image's own cargo reads `Cargo.lock`, so the lockfile must be one that
 cargo can parse. The Solana 2.x images ship cargo 1.84, which cannot read
 crates on edition 2024. A fresh `cargo generate-lockfile` today pulls such
 crates (for example `zeroize` 1.9), so pin `solana = "3.0.1"` when that
-happens.
+happens. `build` warns before Docker starts when it will use a 2.x image.
 
 After the build it stops when the unstripped `.text` differs from the deploy
 `.so`, when the unstripped binary has no `.debug_info`/`.debug_line`, when the
 sBPF version is not the requested arch, or when the hash `solana-verify`
-printed differs from qedgen's own hash. On a non-amd64 host it sets
+printed differs from qedgen's own hash. If `solana-verify` printed no hash,
+it warns that the cross-check could not run. Each build replaces every `.so`
+in `.qed/build/`, so binaries from an earlier build (for example under
+another library name) do not stay behind. On a non-amd64 host it sets
 `DOCKER_DEFAULT_PLATFORM=linux/amd64`, because the build images are amd64
 only. Expect a few minutes per build under emulation and about 5 GB per image.
 
@@ -307,7 +310,7 @@ $QEDGEN verify --spec my_program.qedspec --check-deployed <PROGRAM_ID>
 | `--check-upstream` | bool | false | Diff each pinned `upstream_binary_hash` against the on-chain `.so` via `solana program dump`. Skips deps without a pinned hash. Non-zero exit on any mismatch. |
 | `--rpc-url` | String | Solana CLI default | Override RPC endpoint passed to `solana program dump --url <rpc>` |
 | `--offline` | bool | false | Refuse to reach the network. Any dep that would require an on-chain fetch reports as Error. CI-gate friendly. |
-| `--check-deployed` | String | none | Program id. Fetch the deployed program (`solana program dump`) and compare its hash, computed the `solana-verify` way (trailing zero bytes stripped), with the [`build`](#build) record. A match and a program that is not deployed print one info line. A mismatch prints a `P2:` line and the exit code stays 0: the stamp still covers the verified commit. Other fetch errors fail the run, including an RPC that cannot be reached. The record is read from the workspace of `--program`, else the workspace of the spec directory, the same way `build` resolves it. Honors `--rpc-url` and `--offline`. |
+| `--check-deployed` | String | none | Program id. Fetch the deployed program (`solana program dump`) and compare its hash, computed the `solana-verify` way (trailing zero bytes stripped), with the [`build`](#build) record. A match and a program that is not deployed print one info line. A mismatch prints a `P2:` line and the exit code stays 0: the stamp still covers the verified commit. Other fetch errors fail the run, including an RPC that cannot be reached. The record is read from the workspace of `--program`, else the workspace of the spec directory, the same way `build` resolves it. Honors `--rpc-url` and `--offline`. Like `--check-upstream`, when it is the only verb (no backend flag and no `--probe-repros`), verify returns after the check and runs no backends. |
 | `--upstream-stale-ok` | bool | false | Suppress the upstream binary-hash check even when the lock declares pinned hashes. Mismatches demote to Info; verify exits zero. Offline-dev only — do not use in CI. Pairs with the auto-on behavior of `--check-upstream`. |
 | `--probe-repros` | bool | false | Discover and run probe reproducers under `<project>/target/qedgen-repros/`, including agent-authored audit repros and mechanically generated category repros. Reports `Fired`, `Silent`, or `BuildError` per repro; emits `note: no repros found` only when the directory contains no runnable reproducers. |
 | `--crucible` | u64 | none | Run the coverage-guided fuzz engine for the given wall-clock seconds. Thin alias over `probe --fuzz` — folds findings into the BackendReport so they render through the same named-trace human surface as Kani / proptest. |

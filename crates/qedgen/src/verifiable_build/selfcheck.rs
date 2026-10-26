@@ -25,7 +25,10 @@ pub fn file_sha256(bytes: &[u8]) -> String {
 pub fn self_check(deploy: &[u8], debug: &[u8], expected_sbpf: u32) -> Result<()> {
     let deploy_text = sbpf_elf::section_bytes(deploy, ".text")?;
     let debug_text = sbpf_elf::section_bytes(debug, ".text")?;
-    if deploy_text.is_none() || deploy_text != debug_text {
+    if deploy_text.is_none() {
+        bail!("the deploy .so has no .text section, so it is not a cargo build-sbf program");
+    }
+    if deploy_text != debug_text {
         bail!(
             "the unstripped binary's .text differs from the deploy .so; \
              the labels would not describe the deployed bytes"
@@ -99,6 +102,15 @@ mod tests {
         let g = std::fs::read(fixture("anchor-v3-debug.so")).unwrap();
         let e = self_check(&d, &g, 0).unwrap_err().to_string();
         assert!(e.contains(".text"), "{e}");
+    }
+
+    #[test]
+    fn self_check_names_a_missing_text_section() {
+        // counter-v3.so has no section headers at all.
+        let d = std::fs::read(fixture("counter-v3.so")).unwrap();
+        let g = std::fs::read(fixture("anchor-v3-debug.so")).unwrap();
+        let e = self_check(&d, &g, 3).unwrap_err().to_string();
+        assert!(e.contains("the deploy .so has no .text section"), "{e}");
     }
 
     #[test]
