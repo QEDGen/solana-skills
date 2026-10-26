@@ -181,6 +181,23 @@ pub fn assert_clean_tree(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Refuse when `HEAD` moved or the tree changed since the build started.
+/// `solana-verify` builds the live working tree, so a change made during the
+/// build can be in the binary while the record would name `commit`.
+pub fn assert_unchanged_since(dir: &Path, commit: &str) -> Result<()> {
+    let head = git_head(dir)?;
+    if head != commit {
+        bail!(
+            "the source changed during the build: HEAD moved from {commit} to {head}; \
+             nothing was recorded, so run qedgen build again"
+        );
+    }
+    if let Err(e) = assert_clean_tree(dir) {
+        bail!("the source changed during the build; nothing was recorded. {e}");
+    }
+    Ok(())
+}
+
 /// Parse `solana-verify --version` output (`solana-verify 0.5.2`).
 pub fn parse_solana_verify_version(stdout: &str) -> Result<(u64, u64, u64)> {
     let version = stdout
@@ -425,6 +442,33 @@ mod tests {
         std::fs::create_dir_all(&sub).unwrap();
         assert_eq!(repo_relative(d.path()).unwrap(), "");
         assert_eq!(repo_relative(&sub).unwrap(), "programs/p");
+    }
+
+    /// The source is mounted live, so an edit or a commit during the build
+    /// can end up in the binary. The build must see the same commit and a
+    /// clean tree after it finishes, or it records nothing.
+    #[test]
+    fn source_change_during_the_build_is_refused() {
+        let d = tempfile::tempdir().unwrap();
+        git(d.path(), &["init", "-q"]);
+        std::fs::write(d.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+        git(d.path(), &["add", "."]);
+        git(d.path(), &["commit", "-q", "-m", "a"]);
+        let start = git_head(d.path()).unwrap();
+        assert_unchanged_since(d.path(), &start).unwrap();
+
+        std::fs::write(d.path().join("lib.rs"), "fn x() {}\n").unwrap();
+        let e = assert_unchanged_since(d.path(), &start)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("changed during the build"), "{e}");
+
+        git(d.path(), &["add", "."]);
+        git(d.path(), &["commit", "-q", "-m", "b"]);
+        let e = assert_unchanged_since(d.path(), &start)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("changed during the build"), "{e}");
     }
 
     #[test]

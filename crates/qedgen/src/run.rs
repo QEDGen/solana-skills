@@ -1857,6 +1857,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                     && !any_verify_backend
                     && !probe_repros
                     && check_deployed.is_none()
+                    && crucible.is_none()
                 {
                     return Ok(());
                 }
@@ -1866,7 +1867,11 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 eprintln!(
                     "note: --upstream-stale-ok suppressed --check-upstream (offline-dev mode)"
                 );
-                if !any_verify_backend && !probe_repros && check_deployed.is_none() {
+                if !any_verify_backend
+                    && !probe_repros
+                    && check_deployed.is_none()
+                    && crucible.is_none()
+                {
                     return Ok(());
                 }
             }
@@ -1874,16 +1879,25 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             // --check-deployed compares the deployed program with the
             // `qedgen build` record (#449). Reported, never gating.
             if let Some(program_id) = check_deployed.as_deref() {
-                let workspace = verifiable_build::record_workspace(&spec, program.as_deref())?;
-                let record = verifiable_build::load_record(&workspace)?;
+                let Some((workspace, library)) =
+                    verifiable_build::record_target(&spec, program.as_deref())?
+                else {
+                    anyhow::bail!(
+                        "--check-deployed: {} is not in a program crate, so it names no single \
+                         program's build; pass --program <crate>",
+                        spec.display()
+                    );
+                };
+                let record = verifiable_build::load_record(&workspace, &library)?;
                 let mut fetcher = upstream_check::fetcher(rpc_url.as_deref(), offline);
                 let result = verifiable_build::deploy_check::check_deployed(
                     record.as_ref(),
+                    &library,
                     program_id,
                     fetcher.as_mut(),
                 )?;
                 verifiable_build::deploy_check::print_deploy_check(&result, program_id);
-                if !any_verify_backend && !probe_repros {
+                if !any_verify_backend && !probe_repros && crucible.is_none() {
                     return Ok(());
                 }
             }

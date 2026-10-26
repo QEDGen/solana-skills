@@ -12,10 +12,12 @@ fn program_hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(&bytes[..end]))
 }
 
+/// A program crate `p` with its spec, and a build record for library `p`.
 fn fixture(dir: &Path, recorded_bytes: &[u8]) -> std::path::PathBuf {
     let spec = dir.join("program.qedspec");
     std::fs::write(&spec, "").unwrap();
-    std::fs::create_dir_all(dir.join(".qed/build")).unwrap();
+    std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"p\"\n").unwrap();
+    std::fs::create_dir_all(dir.join(".qed/build/p")).unwrap();
     let record = serde_json::json!({
         "schema_version": 1,
         "commit": "a".repeat(40),
@@ -30,7 +32,7 @@ fn fixture(dir: &Path, recorded_bytes: &[u8]) -> std::path::PathBuf {
         "text_matches": true,
         "recorded_at_unix": 1,
     });
-    std::fs::write(dir.join(".qed/build/build.json"), record.to_string()).unwrap();
+    std::fs::write(dir.join(".qed/build/p/build.json"), record.to_string()).unwrap();
     spec
 }
 
@@ -97,4 +99,32 @@ fn runs_alongside_check_upstream() {
     let (ok, stderr) = verify(&spec, "verified-bytes", &["--check-upstream"]);
     assert!(ok, "{stderr}");
     assert!(stderr.contains("matches the verified build"), "{stderr}");
+}
+
+/// `--check-deployed` must not swallow other requested work: with
+/// `--crucible` the fuzz stage still runs (here it fails on the empty spec).
+#[test]
+fn crucible_still_runs_after_the_deploy_check() {
+    let d = tempfile::tempdir().unwrap();
+    let spec = fixture(d.path(), b"verified-bytes");
+    let (ok, stderr) = verify(&spec, "verified-bytes", &["--crucible", "1"]);
+    assert!(stderr.contains("matches the verified build"), "{stderr}");
+    assert!(!ok, "crucible was skipped:\n{stderr}");
+    assert!(stderr.contains("parse error"), "{stderr}");
+}
+
+/// A record for another library in the same workspace is not this
+/// program's build.
+#[test]
+fn record_for_another_library_is_not_used() {
+    let d = tempfile::tempdir().unwrap();
+    let spec = fixture(d.path(), b"verified-bytes");
+    std::fs::rename(
+        d.path().join(".qed/build/p"),
+        d.path().join(".qed/build/other"),
+    )
+    .unwrap();
+    let (ok, stderr) = verify(&spec, "verified-bytes", &[]);
+    assert!(ok, "{stderr}");
+    assert!(stderr.contains("no qedgen build record for p"), "{stderr}");
 }

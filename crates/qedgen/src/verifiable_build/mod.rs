@@ -56,26 +56,45 @@ pub struct BuildOptions {
     pub tools_version: String,
 }
 
-pub fn record_path(workspace: &Path) -> PathBuf {
-    workspace.join(BUILD_DIR).join(RECORD_FILENAME)
+/// Where one program's binaries and record live: `.qed/build/<library>/`.
+/// Programs that share a workspace keep separate builds.
+pub fn build_dir(workspace: &Path, library: &str) -> PathBuf {
+    workspace.join(BUILD_DIR).join(library)
 }
 
-/// The workspace whose `.qed/build/` holds the record for a verify run:
-/// the workspace of `--program` when given, else the workspace of the spec
-/// directory. It resolves the same way `qedgen build` does.
-pub fn record_workspace(spec: &Path, program: Option<&Path>) -> Result<PathBuf> {
-    let start = match program {
+pub fn record_path(workspace: &Path, library: &str) -> PathBuf {
+    build_dir(workspace, library).join(RECORD_FILENAME)
+}
+
+/// The build record a verify run should use: the workspace `qedgen build`
+/// wrote it in, and the program's library name. The program is `--program`
+/// when given, else the crate the spec sits in. `None` when the spec is not
+/// in a program crate (for example at a workspace root), because then no
+/// single program's build can be named.
+pub fn record_target(spec: &Path, program: Option<&Path>) -> Result<Option<(PathBuf, String)>> {
+    let anchor = match program {
         Some(program) => program,
         None => spec
             .parent()
             .filter(|dir| !dir.as_os_str().is_empty())
             .unwrap_or(Path::new(".")),
     };
-    preflight::workspace_root(start)
+    let workspace = preflight::workspace_root(anchor)?;
+    if program.is_some() {
+        return Ok(Some((workspace, solana_verify::library_name(anchor)?)));
+    }
+    let names_a_program = std::fs::read_to_string(anchor.join("Cargo.toml"))
+        .ok()
+        .and_then(|text| text.parse::<toml::Value>().ok())
+        .is_some_and(|manifest| manifest.get("package").is_some() || manifest.get("lib").is_some());
+    if !names_a_program {
+        return Ok(None);
+    }
+    Ok(Some((workspace, solana_verify::library_name(anchor)?)))
 }
 
-pub fn load_record(workspace: &Path) -> Result<Option<BuildRecord>> {
-    let path = record_path(workspace);
+pub fn load_record(workspace: &Path, library: &str) -> Result<Option<BuildRecord>> {
+    let path = record_path(workspace, library);
     if !path.exists() {
         return Ok(None);
     }
@@ -87,7 +106,7 @@ pub fn load_record(workspace: &Path) -> Result<Option<BuildRecord>> {
 }
 
 pub fn write_record(workspace: &Path, record: &BuildRecord) -> Result<PathBuf> {
-    let path = record_path(workspace);
+    let path = record_path(workspace, &record.library);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -122,11 +141,14 @@ pub fn cross_check_hash(printed: Option<&str>, ours: &str) -> Result<Option<Stri
     }
 }
 
-/// Write the two binaries and `.gitignore` to `out_dir`, first removing any
-/// `.so` left by an earlier build (for example under another library name),
-/// so the directory only holds this build's binaries.
+/// Write the two binaries to `out_dir` (this program's build directory) and
+/// the `.gitignore` to its parent, first removing any `.so` an earlier build
+/// of this program left there. Other programs' directories are not touched.
 pub fn write_outputs(out_dir: &Path, library: &str, deploy: &[u8], debug: &[u8]) -> Result<()> {
     std::fs::create_dir_all(out_dir)?;
+    if let Some(build_root) = out_dir.parent() {
+        std::fs::write(build_root.join(".gitignore"), "*.so\n")?;
+    }
     for entry in std::fs::read_dir(out_dir)? {
         let path = entry?.path();
         if path.extension().is_some_and(|ext| ext == "so") {
@@ -134,7 +156,6 @@ pub fn write_outputs(out_dir: &Path, library: &str, deploy: &[u8], debug: &[u8])
                 .with_context(|| format!("removing old build output {}", path.display()))?;
         }
     }
-    std::fs::write(out_dir.join(".gitignore"), "*.so\n")?;
     std::fs::write(out_dir.join(format!("{library}.so")), deploy)?;
     std::fs::write(out_dir.join(format!("{library}.debug.so")), debug)?;
     Ok(())
@@ -207,7 +228,8 @@ pub fn run_build(opts: &BuildOptions) -> Result<BuildRecord> {
         eprintln!("warning: {warning}");
     }
 
-    write_outputs(&workspace.join(BUILD_DIR), &library, &deploy, &debug)?;
+    preflight::assert_unchanged_since(&workspace, &commit)?;
+    write_outputs(&build_dir(&workspace, &library), &library, &deploy, &debug)?;
 
     let record = BuildRecord {
         schema_version: 1,
@@ -271,34 +293,78 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut json = serde_json::to_value(sample()).unwrap();
         json.as_object_mut().unwrap().remove("workspace_path");
-        std::fs::create_dir_all(d.path().join(BUILD_DIR)).unwrap();
-        std::fs::write(record_path(d.path()), json.to_string()).unwrap();
-        assert_eq!(load_record(d.path()).unwrap().unwrap().workspace_path, "");
+        std::fs::create_dir_all(build_dir(d.path(), "dbgprog")).unwrap();
+        std::fs::write(record_path(d.path(), "dbgprog"), json.to_string()).unwrap();
+        let loaded = load_record(d.path(), "dbgprog").unwrap().unwrap();
+        assert_eq!(loaded.workspace_path, "");
     }
 
-    /// Standard layout: `programs/x/x.qedspec` under a root `[workspace]`.
-    /// `qedgen build --program programs/x` writes the record at the root, so
-    /// verify must find it there with or without `--program`.
-    #[test]
-    fn record_workspace_resolves_to_the_build_workspace() {
+    fn two_program_workspace() -> tempfile::TempDir {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(
             d.path().join("Cargo.toml"),
             "[workspace]\nmembers = [\"programs/*\"]\n",
         )
         .unwrap();
-        let program = d.path().join("programs/x");
-        std::fs::create_dir_all(&program).unwrap();
-        std::fs::write(program.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
-        let spec = program.join("x.qedspec");
-        std::fs::write(&spec, "").unwrap();
+        for name in ["x", "y"] {
+            let program = d.path().join("programs").join(name);
+            std::fs::create_dir_all(&program).unwrap();
+            std::fs::write(
+                program.join("Cargo.toml"),
+                format!("[package]\nname = \"{name}\"\n"),
+            )
+            .unwrap();
+            std::fs::write(program.join(format!("{name}.qedspec")), "").unwrap();
+        }
+        d
+    }
+
+    /// The record belongs to one program: the workspace `qedgen build`
+    /// wrote it in, and the program's library name. Without `--program`
+    /// the spec's own crate names the program.
+    #[test]
+    fn record_target_names_the_workspace_and_the_library() {
+        let d = two_program_workspace();
         let root = d.path().canonicalize().unwrap();
-        assert_eq!(record_workspace(&spec, None).unwrap(), root);
-        assert_eq!(record_workspace(&spec, Some(&program)).unwrap(), root);
+        let x = d.path().join("programs/x");
+        let y = d.path().join("programs/y");
         assert_eq!(
-            record_workspace(std::path::Path::new("x.qedspec"), None).unwrap(),
-            preflight::workspace_root(std::path::Path::new(".")).unwrap()
+            record_target(&x.join("x.qedspec"), None).unwrap(),
+            Some((root.clone(), "x".to_string()))
         );
+        assert_eq!(
+            record_target(&x.join("x.qedspec"), Some(&y)).unwrap(),
+            Some((root.clone(), "y".to_string()))
+        );
+        // A spec at the workspace root names no program.
+        std::fs::write(d.path().join("all.qedspec"), "").unwrap();
+        assert_eq!(
+            record_target(&d.path().join("all.qedspec"), None).unwrap(),
+            None
+        );
+    }
+
+    /// Two programs in one workspace keep separate records and binaries:
+    /// building one never removes or replaces the other.
+    #[test]
+    fn records_and_outputs_are_per_library() {
+        let d = two_program_workspace();
+        let mut x = sample();
+        x.library = "x".into();
+        let mut y = sample();
+        y.library = "y".into();
+        y.program_hash = "d".repeat(64);
+        write_outputs(&build_dir(d.path(), "x"), "x", b"x-deploy", b"x-debug").unwrap();
+        write_record(d.path(), &x).unwrap();
+        write_outputs(&build_dir(d.path(), "y"), "y", b"y-deploy", b"y-debug").unwrap();
+        write_record(d.path(), &y).unwrap();
+        assert_eq!(load_record(d.path(), "x").unwrap(), Some(x));
+        assert_eq!(load_record(d.path(), "y").unwrap(), Some(y));
+        assert_eq!(
+            std::fs::read(build_dir(d.path(), "x").join("x.so")).unwrap(),
+            b"x-deploy"
+        );
+        assert!(record_path(d.path(), "x").ends_with(".qed/build/x/build.json"));
     }
 
     #[test]
@@ -324,7 +390,7 @@ mod tests {
     #[test]
     fn outputs_replace_binaries_from_an_earlier_build() {
         let d = tempfile::tempdir().unwrap();
-        let out = d.path().join(BUILD_DIR);
+        let out = build_dir(d.path(), "new");
         std::fs::create_dir_all(&out).unwrap();
         std::fs::write(out.join("old.so"), b"old").unwrap();
         std::fs::write(out.join("old.debug.so"), b"old").unwrap();
@@ -339,7 +405,7 @@ mod tests {
         assert_eq!(std::fs::read(out.join("new.so")).unwrap(), b"deploy");
         assert_eq!(std::fs::read(out.join("new.debug.so")).unwrap(), b"debug");
         assert_eq!(
-            std::fs::read_to_string(out.join(".gitignore")).unwrap(),
+            std::fs::read_to_string(d.path().join(BUILD_DIR).join(".gitignore")).unwrap(),
             "*.so\n"
         );
     }
@@ -347,9 +413,8 @@ mod tests {
     #[test]
     fn record_round_trips() {
         let d = tempfile::tempdir().unwrap();
-        assert_eq!(load_record(d.path()).unwrap(), None);
+        assert_eq!(load_record(d.path(), "dbgprog").unwrap(), None);
         write_record(d.path(), &sample()).unwrap();
-        assert_eq!(load_record(d.path()).unwrap(), Some(sample()));
-        assert!(record_path(d.path()).ends_with(".qed/build/build.json"));
+        assert_eq!(load_record(d.path(), "dbgprog").unwrap(), Some(sample()));
     }
 }

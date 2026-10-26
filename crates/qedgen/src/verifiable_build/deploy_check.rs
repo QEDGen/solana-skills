@@ -20,7 +20,9 @@ pub enum DeployCheck {
     NotDeployed {
         program_id: String,
     },
-    NoRecord,
+    NoRecord {
+        library: String,
+    },
 }
 
 /// Fetch `program_id` and compare its hash, computed the `solana-verify`
@@ -28,11 +30,14 @@ pub enum DeployCheck {
 /// exist is `NotDeployed`; any other fetch error is returned, not hidden.
 pub fn check_deployed(
     record: Option<&BuildRecord>,
+    library: &str,
     program_id: &str,
     fetcher: &mut dyn BinaryFetcher,
 ) -> Result<DeployCheck> {
     let Some(record) = record else {
-        return Ok(DeployCheck::NoRecord);
+        return Ok(DeployCheck::NoRecord {
+            library: library.to_string(),
+        });
     };
     let bytes = match fetcher.fetch(program_id) {
         Ok(bytes) => bytes,
@@ -85,8 +90,9 @@ pub fn render(check: &DeployCheck, program_id: &str) -> String {
         DeployCheck::NotDeployed { program_id } => {
             format!("program {program_id} is not deployed on this cluster")
         }
-        DeployCheck::NoRecord => format!(
-            "no qedgen build record to compare {program_id} against; run qedgen build first"
+        DeployCheck::NoRecord { library } => format!(
+            "no qedgen build record for {library} to compare {program_id} against; \
+             run qedgen build first"
         ),
     }
 }
@@ -143,7 +149,7 @@ mod tests {
             calls: 0,
         };
         assert_eq!(
-            check_deployed(Some(&r), "Prog", &mut f).unwrap(),
+            check_deployed(Some(&r), "p", "Prog", &mut f).unwrap(),
             DeployCheck::Match {
                 program_hash: program_hash(b"elf")
             }
@@ -158,7 +164,7 @@ mod tests {
             calls: 0,
         };
         assert_eq!(
-            check_deployed(Some(&r), "Prog", &mut f).unwrap(),
+            check_deployed(Some(&r), "p", "Prog", &mut f).unwrap(),
             DeployCheck::Mismatch {
                 on_chain: program_hash(b"other"),
                 recorded: program_hash(b"elf"),
@@ -179,7 +185,7 @@ mod tests {
             calls: 0,
         };
         assert_eq!(
-            check_deployed(Some(&r), "Prog", &mut f).unwrap(),
+            check_deployed(Some(&r), "p", "Prog", &mut f).unwrap(),
             DeployCheck::NotDeployed {
                 program_id: "Prog".into()
             }
@@ -199,7 +205,7 @@ mod tests {
             ),
             calls: 0,
         };
-        assert!(check_deployed(Some(&r), "Prog", &mut f).is_err());
+        assert!(check_deployed(Some(&r), "p", "Prog", &mut f).is_err());
     }
 
     #[test]
@@ -209,7 +215,7 @@ mod tests {
             reply: Err("connection refused".into()),
             calls: 0,
         };
-        assert!(check_deployed(Some(&r), "Prog", &mut f).is_err());
+        assert!(check_deployed(Some(&r), "p", "Prog", &mut f).is_err());
     }
 
     #[test]
@@ -219,8 +225,10 @@ mod tests {
             calls: 0,
         };
         assert_eq!(
-            check_deployed(None, "Prog", &mut f).unwrap(),
-            DeployCheck::NoRecord
+            check_deployed(None, "p", "Prog", &mut f).unwrap(),
+            DeployCheck::NoRecord {
+                library: "p".into()
+            }
         );
         assert_eq!(f.calls, 0);
     }

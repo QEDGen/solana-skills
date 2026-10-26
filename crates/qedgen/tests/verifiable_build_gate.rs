@@ -165,7 +165,7 @@ fn assert_build(manifest: &str, lib: &str, library: &str) {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "qedgen build failed:\n{stderr}");
 
-    let dir = repo.path().join(".qed/build");
+    let dir = repo.path().join(".qed/build").join(library);
     assert!(dir.join(format!("{library}.so")).exists());
     assert!(dir.join(format!("{library}.debug.so")).exists());
     let record: serde_json::Value =

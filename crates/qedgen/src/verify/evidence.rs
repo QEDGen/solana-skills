@@ -79,19 +79,19 @@ pub struct BinaryBuildRef {
     pub program_hash: String,
 }
 
-/// The build record for `program`'s workspace, when it was built from the
+/// `library`'s build record in `workspace`, when it was built from the
 /// current `HEAD` and the tree is still clean. A record for another commit
 /// is stale: warn and return `None`, so evidence never names a binary that
 /// was not built from the verified source.
-pub fn fresh_build_ref(program: &Path) -> Option<BinaryBuildRef> {
+pub fn fresh_build_ref(workspace: &Path, library: &str) -> Option<BinaryBuildRef> {
     use crate::verifiable_build::{load_record, preflight, record_path};
-    let workspace = preflight::workspace_root(program).ok()?;
-    let record = load_record(&workspace).ok()??;
+    let record = load_record(workspace, library).ok()??;
+    let workspace = workspace.to_path_buf();
     let head = preflight::git_head(&workspace).ok()?;
     if record.commit != head {
         eprintln!(
             "warning: build record at {} is for commit {}, not HEAD {head}; run qedgen build again",
-            record_path(&workspace).display(),
+            record_path(&workspace, library).display(),
             record.commit
         );
         return None;
@@ -531,7 +531,7 @@ mod tests {
         let first = crate::verifiable_build::preflight::git_head(d.path()).unwrap();
         crate::verifiable_build::write_record(d.path(), &sample_build_record(&first)).unwrap();
         assert_eq!(
-            fresh_build_ref(d.path()),
+            fresh_build_ref(d.path(), "program"),
             Some(BinaryBuildRef {
                 commit: first.clone(),
                 program_hash: "b".repeat(64),
@@ -540,17 +540,17 @@ mod tests {
 
         git(d.path(), &["commit", "-q", "--allow-empty", "-m", "b"]);
         assert_eq!(
-            fresh_build_ref(d.path()),
+            fresh_build_ref(d.path(), "program"),
             None,
             "record is for an older commit"
         );
 
         let second = crate::verifiable_build::preflight::git_head(d.path()).unwrap();
         crate::verifiable_build::write_record(d.path(), &sample_build_record(&second)).unwrap();
-        assert!(fresh_build_ref(d.path()).is_some());
+        assert!(fresh_build_ref(d.path(), "program").is_some());
 
         std::fs::write(d.path().join("dirty.rs"), "fn x() {}\n").unwrap();
-        assert_eq!(fresh_build_ref(d.path()), None, "dirty tree");
+        assert_eq!(fresh_build_ref(d.path(), "program"), None, "dirty tree");
     }
 
     #[test]

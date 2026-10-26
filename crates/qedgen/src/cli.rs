@@ -232,7 +232,7 @@ pub(crate) enum Commands {
     /// Build the program in Docker with `solana-verify` (#449). Keeps the
     /// stripped deploy `.so` and the unstripped `.so` (its debug info is the
     /// label source for the lift), and writes a build record tied to the
-    /// current git commit, all under `<workspace>/.qed/build/`.
+    /// current git commit, all under `<workspace>/.qed/build/<lib>/`.
     ///
     /// Refuses on a dirty tree, when `[profile.release]` has no `debug`
     /// setting, or when Docker or `solana-verify` (0.5.2+) is missing. There

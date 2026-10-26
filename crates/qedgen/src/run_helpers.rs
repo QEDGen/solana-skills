@@ -659,9 +659,12 @@ pub(crate) fn record_verify_evidence(
         obligations_digest,
     )
     .and_then(|mut e| {
-        e.binary_build = crate::verifiable_build::record_workspace(spec, program)
+        e.binary_build = crate::verifiable_build::record_target(spec, program)
             .ok()
-            .and_then(|workspace| crate::verify::evidence::fresh_build_ref(&workspace));
+            .flatten()
+            .and_then(|(workspace, library)| {
+                crate::verify::evidence::fresh_build_ref(&workspace, &library)
+            });
         crate::verify::evidence::record(&e, spec)
     }) {
         Ok(path) => eprintln!("Recorded verification evidence at {}", path.display()),
