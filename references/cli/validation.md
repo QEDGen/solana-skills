@@ -199,7 +199,11 @@ in its own `.qed/build/<lib>/`, so binaries from an earlier build of that
 program do not stay behind. Other programs' directories are not touched.
 After the build it checks that `HEAD` and the tree did not change while
 Docker ran, because `solana-verify` builds the live working tree. If they
-changed, it records nothing. On a non-amd64 host it sets
+changed, it records nothing. When `solana-verify build` fails, it leaves
+its Docker container running. `build` then removes only the container that
+was building this workspace: a `solana-verifiable-build` container that
+started during this build and mounts this workspace. Other builds, even
+concurrent ones, are not touched. On a non-amd64 host it sets
 `DOCKER_DEFAULT_PLATFORM=linux/amd64`, because the build images are amd64
 only. Expect a few minutes per build under emulation and about 5 GB per image.
 
