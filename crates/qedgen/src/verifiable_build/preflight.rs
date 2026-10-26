@@ -38,6 +38,15 @@ pub fn release_debug_setting(workspace_cargo_toml: &str) -> Option<String> {
     }
 }
 
+/// True when a `[profile.release] debug` value gives full debug info, with
+/// the DWARF types and struct members the concept map reads. Limited levels
+/// (`1`, `"limited"`, `"line-tables-only"`, `"line-directives-only"`) keep
+/// functions and lines but no types: measured on an Anchor 0.32.1 build,
+/// `debug = 1` has 0 struct members and `debug = 2` has 6,735.
+pub fn debug_is_full(value: &str) -> bool {
+    matches!(value, "2" | "full" | "true")
+}
+
 /// The Solana version `solana-verify` will pick its build image by, read
 /// the same way it reads it: `[workspace.metadata.cli] solana` in the
 /// workspace `Cargo.toml`, else the first of `solana-program`,
@@ -345,6 +354,19 @@ mod tests {
             None
         );
         assert_eq!(release_debug_setting("not toml ["), None);
+    }
+
+    /// The concept map reads DWARF types and members, which only full debug
+    /// info carries. `debug = 1`, `"limited"`, `"line-tables-only"` and
+    /// `"line-directives-only"` drop them.
+    #[test]
+    fn only_full_debug_info_counts() {
+        for full in ["2", "full", "true"] {
+            assert!(debug_is_full(full), "{full}");
+        }
+        for limited in ["1", "limited", "line-tables-only", "line-directives-only"] {
+            assert!(!debug_is_full(limited), "{limited}");
+        }
     }
 
     #[test]

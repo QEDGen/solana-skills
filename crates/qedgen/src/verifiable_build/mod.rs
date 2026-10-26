@@ -179,11 +179,19 @@ pub fn run_build(opts: &BuildOptions) -> Result<BuildRecord> {
         .with_context(|| format!("reading {}", manifest.display()))?;
     let Some(debug_setting) = preflight::release_debug_setting(&manifest_text) else {
         bail!(
-            "set debug = 1 (or \"line-tables-only\") in [profile.release] of {} and commit it; \
-             a verifier rebuild must produce the same labels",
+            "set debug = 2 in [profile.release] of {} and commit it; the lift reads labels \
+             from full debug info, and a verifier rebuild must produce the same labels",
             manifest.display()
         );
     };
+    if !preflight::debug_is_full(&debug_setting) {
+        bail!(
+            "debug = {debug_setting} in [profile.release] of {} gives limited debug info with no \
+             types, so the concept map cannot read struct members from it; the lift needs full \
+             debug info, so set debug = 2 and commit it",
+            manifest.display()
+        );
+    }
     preflight::assert_clean_tree(&workspace)?;
     let lock = std::fs::read_to_string(workspace.join("Cargo.lock")).ok();
     if lock.is_none() {

@@ -161,14 +161,16 @@ $QEDGEN build --program . --arch v3 --tools-version v1.57
 | `--program` | Path | required | Program crate (the directory with the program's own `Cargo.toml`). The workspace root is the nearest ancestor whose `Cargo.toml` has `[workspace]`. |
 | `--library` | String | `[lib] name`, else the package name with `-` as `_` | Name of the `.so`. Must be letters, digits and `_` only, never a path. |
 | `--arch` | String | `v3` | sBPF arch passed to `cargo build-sbf`. |
-| `--tools-version` | String | `v1.57` | Platform-tools version passed to `cargo build-sbf`. On v1.57, debug info does not change the deployed bytes. |
+| `--tools-version` | String | `v1.57` | Platform-tools version passed to `cargo build-sbf`. Debug info can change the generated code (see below), so deploy the `.so` this build produced. |
 
 It refuses, before Docker starts, when:
 
 - the workspace has uncommitted changes (files under `.qed/` do not count);
-- `[profile.release]` has no `debug` setting. Add `debug = 1` (or
-  `"line-tables-only"`) and commit it. `[profile.release.build-override]` does
-  not count;
+- `[profile.release]` has no full `debug` setting. Add `debug = 2` (or
+  `"full"`) and commit it. Limited levels (`1`, `"limited"`,
+  `"line-tables-only"`, `"line-directives-only"`) are refused: they have no
+  types, so the concept map cannot read struct members from them.
+  `[profile.release.build-override]` does not count;
 - the workspace has no `Cargo.lock` (`solana-verify` builds with `--locked`);
 - `solana-verify` cannot pick a build image, or would pick a Solana 1.x
   image. It reads the Solana version from `[workspace.metadata.cli] solana`
@@ -206,6 +208,20 @@ started during this build and mounts this workspace. Other builds, even
 concurrent ones, are not touched. On a non-amd64 host it sets
 `DOCKER_DEFAULT_PLATFORM=linux/amd64`, because the build images are amd64
 only. Expect a few minutes per build under emulation and about 5 GB per image.
+
+Debug info and the generated code, measured on platform-tools v1.57
+(2026-10-26), V0 and v3:
+
+| Program | `debug = 1` | `debug = 2` |
+|---|---|---|
+| p-token (Pinocchio) | deployed bytes unchanged | deployed bytes unchanged |
+| minimal Pinocchio 0.9.3 | deployed bytes unchanged | deployed bytes unchanged |
+| minimal Anchor 0.32.1 | same size, about 2.7 KB of `.text` differs | 2 more instructions, `.rodata` differs |
+
+So debug info is not free in general. This is why the binary to deploy is
+the one `build` produced, and why the labels come from the same build. On
+the same Anchor program, `debug = 1` has 0 DWARF struct members and
+`debug = 2` has 6,735, which is why `build` requires full debug info.
 
 `build.json` fields: `commit`, `library`, `program_hash` (SHA-256 after
 trailing zero bytes are stripped; the number `solana-verify` prints),
