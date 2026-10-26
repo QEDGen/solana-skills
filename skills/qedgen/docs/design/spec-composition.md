@@ -255,8 +255,9 @@ interface Token {
 
 Semantics:
 
-- **`binary_hash` is authoritative.** It's the SHA-256 of the deployed
-  program's `.so` bytes (what `solana program dump <program_id>` returns).
+- **`binary_hash` is authoritative.** It's the `solana-verify` hash of the
+  deployed program: SHA-256 of what `solana program dump <program_id>`
+  returns, after trailing zero bytes are stripped (#452).
   Version strings and commit hashes are informational; the binary hash is
   what a caller's attestation chains to.
 - **`verified_with`** is honest. `"proptest"` means we ran property tests

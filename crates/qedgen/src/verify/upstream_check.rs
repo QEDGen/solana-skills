@@ -48,6 +48,14 @@ pub enum DepCheckOutcome {
         pinned: String,
         on_chain: String,
     },
+    /// #452: the pin is a plain SHA-256 of the `solana program dump` output
+    /// (the pre-#452 rule) and it still matches. It passes, as a deprecation
+    /// warning that names `current`, the pin under the `solana-verify` rule.
+    LegacyPinMatch {
+        program_id: String,
+        pinned: String,
+        current: String,
+    },
     /// proof_hash drift between the lock and the provider's `.qed/proofs/`
     /// content (`qed_lock::compute_proof_hash`; no network). Same
     /// [`Gate`]-aware severity routing as `Mismatch`. Surfaces when a
@@ -163,6 +171,29 @@ pub fn route_findings(results: Vec<DepCheckResult>, gate: Gate) -> RoutedReport 
                     message: format!(
                         "binary_hash pin for {} ({}) is stale — pinned {}, on-chain {}",
                         r.name, program_id, pinned, on_chain
+                    ),
+                });
+            }
+            DepCheckOutcome::LegacyPinMatch {
+                program_id,
+                pinned,
+                current,
+            } => {
+                // The binary is the pinned one; only the hash rule is old. A
+                // warning everywhere, never CRIT, so no gate breaks on it.
+                let severity = match gate {
+                    Gate::VerifyStaleOk => FindingSeverity::Info,
+                    Gate::Verify | Gate::CheckFrozen | Gate::CheckFrozenStrict => {
+                        FindingSeverity::P2
+                    }
+                };
+                findings.push(Finding {
+                    name: r.name.clone(),
+                    severity,
+                    message: format!(
+                        "binary_hash pin for {} ({}) uses the old rule (plain SHA-256 of the dump): \
+                         pinned {}. It still matches. Re-pin to {}, the solana-verify hash",
+                        r.name, program_id, pinned, current
                     ),
                 });
             }
@@ -400,23 +431,33 @@ fn check_one(
             }
         }
     };
-    let on_chain = format_hash(&bytes);
-    if on_chain == pinned {
+    let on_chain = pin_hash(&bytes);
+    let matched = on_chain == pinned || legacy_pin_hash(&bytes) == pinned;
+    if matched {
         // A1: cache the just-verified bytes content-addressed by their hash
         // (== the pin on this branch) so a later `qedsvm_discharge` reads them
         // without re-dumping. Best-effort — a cache-write failure must never
         // turn a clean Match into a gating error.
         if let Some(root) = elf_cache {
-            if let Err(e) = stash_elf_in(root, &on_chain, &bytes) {
+            // Keyed by the pin as written, which is what discharge reads by.
+            if let Err(e) = stash_elf_in(root, pinned, &bytes) {
                 eprintln!(
                     "  · note: could not cache verified ELF for {} ({}): {}",
                     program_id, on_chain, e
                 );
             }
         }
-        DepCheckOutcome::Match {
-            program_id,
-            hash: on_chain,
+        if on_chain == pinned {
+            DepCheckOutcome::Match {
+                program_id,
+                hash: on_chain,
+            }
+        } else {
+            DepCheckOutcome::LegacyPinMatch {
+                program_id,
+                pinned: pinned.to_string(),
+                current: on_chain,
+            }
         }
     } else {
         DepCheckOutcome::Mismatch {
@@ -433,7 +474,21 @@ fn resolve_program_id(entry: &LockEntry) -> Option<String> {
     entry.program_id.clone()
 }
 
-fn format_hash(bytes: &[u8]) -> String {
+/// A `binary_hash` pin (#452): `sha256:` plus the `solana-verify` program
+/// hash, SHA-256 after trailing zero bytes are stripped. An upgradeable
+/// program's data account carries zero padding after the ELF whose length
+/// depends on the deploy, not the program, so a plain hash of the dump is
+/// not a property of the binary.
+pub(crate) fn pin_hash(bytes: &[u8]) -> String {
+    format!(
+        "sha256:{}",
+        crate::verifiable_build::selfcheck::program_hash(bytes)
+    )
+}
+
+/// The pre-#452 pin rule: plain SHA-256 of the dump. Still accepted when it
+/// matches, as a deprecation warning.
+pub(crate) fn legacy_pin_hash(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     format!("sha256:{:x}", hasher.finalize())
@@ -545,6 +600,11 @@ pub fn print_routed_report(report: &RoutedReport) -> bool {
             }
             DepCheckOutcome::Mismatch { program_id, .. } => {
                 eprintln!("  ✗ {} ({}): MISMATCH", r.name, program_id);
+            }
+            DepCheckOutcome::LegacyPinMatch {
+                program_id, pinned, ..
+            } => {
+                eprintln!("  ✓ {} ({}): {} (old pin rule)", r.name, program_id, pinned);
             }
             DepCheckOutcome::ProofHashMismatch { .. } => {
                 eprintln!("  ✗ {}: PROOF_HASH MISMATCH", r.name);
@@ -719,7 +779,7 @@ mod tests {
         assert!(is_sentinel_hash("SHA256:0000"));
         assert!(is_sentinel_hash("0000000000000000"));
         assert!(!is_sentinel_hash(
-            "sha256:8190d3f7ceb6cb7a7a8d8924bff89f9f611e15ce1f806f2b6237f3311a98f697"
+            "sha256:435df1e70f1ca6258eb01a4507701688c7f1a22656e3e4ef361db473bf478075"
         ));
         // Empty body = "no hash pinned" branch, not sentinel.
         assert!(!is_sentinel_hash("sha256:"));
@@ -729,7 +789,7 @@ mod tests {
     #[test]
     fn skips_when_imported_interface_omits_program_id() {
         // Hash pin but no `program_id` (shape-only Tier 0 import) → Skipped.
-        let hash = format_hash(b"some bytes");
+        let hash = legacy_pin_hash(b"some bytes");
         let mut e = entry_with_hash("pinned", Some(&hash));
         e.program_id = None; // imported interface had no program_id
         let lock = LockFile {
@@ -752,7 +812,7 @@ mod tests {
     #[test]
     fn matches_when_program_id_present_and_hash_matches() {
         let bytes = b"qedgen-test-binary".to_vec();
-        let hash = format_hash(&bytes);
+        let hash = legacy_pin_hash(&bytes);
         let mut e = entry_with_hash("pinned", Some(&hash));
         e.program_id = Some("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA".to_string());
         let lock = LockFile {
@@ -806,11 +866,99 @@ mod tests {
         ));
     }
 
+    const PADDED_ID: &str = "FakeProgramId11111111111111111111111111111111";
+
+    fn padded_lock(pin: &str) -> LockFile {
+        let mut e = entry_with_hash("padded", Some(pin));
+        e.program_id = Some(PADDED_ID.to_string());
+        LockFile {
+            version: LOCK_VERSION,
+            dependencies: vec![e],
+        }
+    }
+
+    /// #452: a pin is the `solana-verify` hash (trailing zeros stripped), so
+    /// it matches a dump that carries program-data padding.
+    #[test]
+    fn solana_verify_pin_matches_a_padded_dump() {
+        let mut dump = b"elf-bytes".to_vec();
+        dump.extend([0u8; 4096]);
+        assert_eq!(pin_hash(&dump), pin_hash(b"elf-bytes"));
+        let lock = padded_lock(&pin_hash(b"elf-bytes"));
+        let mut fetcher = FakeFetcher::new().ok(PADDED_ID, dump);
+        let results = check_lock_with_fetcher(&lock, &mut fetcher, None);
+        assert!(
+            matches!(&results[0].outcome, DepCheckOutcome::Match { hash, .. } if *hash == pin_hash(b"elf-bytes")),
+            "{:?}",
+            results[0].outcome
+        );
+    }
+
+    /// #452: a verified dump is cached under the pin as written, the key
+    /// discharge reads by. For a padded dump the old and new hashes differ,
+    /// so this is the case that tells the two keys apart.
+    #[test]
+    fn padded_dump_is_cached_under_the_pin_as_written() {
+        let mut dump = b"elf-bytes".to_vec();
+        dump.extend([0u8; 64]);
+        for pin in [pin_hash(&dump), legacy_pin_hash(&dump)] {
+            let cache = tempfile::tempdir().unwrap();
+            let lock = padded_lock(&pin);
+            let mut fetcher = FakeFetcher::new().ok(PADDED_ID, dump.clone());
+            let results = check_lock_with_fetcher(&lock, &mut fetcher, Some(cache.path()));
+            assert!(
+                matches!(
+                    results[0].outcome,
+                    DepCheckOutcome::Match { .. } | DepCheckOutcome::LegacyPinMatch { .. }
+                ),
+                "{:?}",
+                results[0].outcome
+            );
+            assert_eq!(
+                read_cached_elf_in(cache.path(), &pin).as_deref(),
+                Some(dump.as_slice()),
+                "pin {pin}"
+            );
+        }
+    }
+
+    /// #452: a pin made the old way (plain SHA-256 of the dump) still passes
+    /// when it matches, but as a deprecation warning that names the new pin.
+    /// It is never CRIT, even under the strict gates.
+    #[test]
+    fn legacy_plain_pin_is_a_warning_with_the_new_pin() {
+        let mut dump = b"elf-bytes".to_vec();
+        dump.extend([0u8; 16]);
+        let lock = padded_lock(&legacy_pin_hash(&dump));
+        let mut fetcher = FakeFetcher::new().ok(PADDED_ID, dump.clone());
+        let results = check_lock_with_fetcher(&lock, &mut fetcher, None);
+        match &results[0].outcome {
+            DepCheckOutcome::LegacyPinMatch {
+                pinned, current, ..
+            } => {
+                assert_eq!(pinned, &legacy_pin_hash(&dump));
+                assert_eq!(current, &pin_hash(&dump));
+            }
+            other => panic!("expected LegacyPinMatch, got {other:?}"),
+        }
+        for gate in [Gate::Verify, Gate::CheckFrozenStrict, Gate::CheckFrozen] {
+            let routed = route_findings(results.clone(), gate);
+            assert_eq!(routed.findings.len(), 1);
+            assert_eq!(routed.findings[0].severity, FindingSeverity::P2, "{gate:?}");
+            assert!(
+                routed.findings[0].message.contains(&pin_hash(&dump)),
+                "{}",
+                routed.findings[0].message
+            );
+            assert!(!routed.any_blocking());
+        }
+    }
+
     #[test]
     fn mismatches_when_on_chain_differs_from_pinned_hash() {
         let pinned_bytes = b"original-binary".to_vec();
         let on_chain_bytes = b"redeployed-binary".to_vec();
-        let mut e = entry_with_hash("pinned", Some(&format_hash(&pinned_bytes)));
+        let mut e = entry_with_hash("pinned", Some(&legacy_pin_hash(&pinned_bytes)));
         e.program_id = Some("FakeProgramId11111111111111111111111111111111".to_string());
         let lock = LockFile {
             version: LOCK_VERSION,
@@ -825,8 +973,8 @@ mod tests {
             DepCheckOutcome::Mismatch {
                 pinned, on_chain, ..
             } => {
-                assert_eq!(pinned, &format_hash(&pinned_bytes));
-                assert_eq!(on_chain, &format_hash(&on_chain_bytes));
+                assert_eq!(pinned, &legacy_pin_hash(&pinned_bytes));
+                assert_eq!(on_chain, &legacy_pin_hash(&on_chain_bytes));
             }
             other => panic!("expected Mismatch, got {:?}", other),
         }
@@ -835,8 +983,8 @@ mod tests {
     #[test]
     fn format_hash_matches_pinned_on_identical_bytes() {
         let bytes = b"qedgen-test-binary-payload".to_vec();
-        let hash = format_hash(&bytes);
-        assert_eq!(hash, format_hash(&bytes), "deterministic");
+        let hash = legacy_pin_hash(&bytes);
+        assert_eq!(hash, legacy_pin_hash(&bytes), "deterministic");
         assert!(hash.starts_with("sha256:"));
     }
 
@@ -1016,11 +1164,11 @@ mod tests {
         }
     }
 
-    /// Minimal `qed.lock` with one dep pinned to `format_hash(pinned_payload)`;
+    /// Minimal `qed.lock` with one dep pinned to `legacy_pin_hash(pinned_payload)`;
     /// returns the program_id. The env var controls whether the fetch matches.
     fn write_lock_with_pin(dir: &Path, pinned_payload: &[u8]) -> String {
         let program_id = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA".to_string();
-        let pinned_hash = format_hash(pinned_payload);
+        let pinned_hash = legacy_pin_hash(pinned_payload);
         let lock = LockFile {
             version: LOCK_VERSION,
             dependencies: vec![LockEntry {
@@ -1168,7 +1316,7 @@ mod tests {
     fn stash_then_read_roundtrips_and_is_idempotent() {
         let dir = tempfile::tempdir().expect("tempdir");
         let bytes = b"\x7fELF-fake-program-bytes".to_vec();
-        let hash = format_hash(&bytes);
+        let hash = legacy_pin_hash(&bytes);
 
         let path = stash_elf_in(dir.path(), &hash, &bytes).expect("stash");
         assert!(path.exists(), "cache file written");
@@ -1186,13 +1334,13 @@ mod tests {
     #[test]
     fn read_cached_elf_returns_none_when_absent() {
         let dir = tempfile::tempdir().expect("tempdir");
-        assert!(read_cached_elf_in(dir.path(), &format_hash(b"never-stored")).is_none());
+        assert!(read_cached_elf_in(dir.path(), &legacy_pin_hash(b"never-stored")).is_none());
     }
 
     #[test]
     fn match_stashes_verified_bytes_under_their_hash() {
         let bytes = b"deployed-program-bytes".to_vec();
-        let hash = format_hash(&bytes);
+        let hash = legacy_pin_hash(&bytes);
         let pid = "Tokenkeg11111111111111111111111111111111111".to_string();
         let lock = LockFile {
             version: LOCK_VERSION,
@@ -1216,7 +1364,7 @@ mod tests {
 
     #[test]
     fn mismatch_does_not_stash() {
-        let pinned = format_hash(b"pinned-v1");
+        let pinned = legacy_pin_hash(b"pinned-v1");
         let pid = "Tokenkeg11111111111111111111111111111111111".to_string();
         let lock = LockFile {
             version: LOCK_VERSION,
@@ -1241,7 +1389,7 @@ mod tests {
             "pinned hash not cached on mismatch",
         );
         assert!(
-            read_cached_elf_in(dir.path(), &format_hash(&on_chain)).is_none(),
+            read_cached_elf_in(dir.path(), &legacy_pin_hash(&on_chain)).is_none(),
             "untrusted on-chain bytes are not cached",
         );
     }
