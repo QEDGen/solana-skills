@@ -39,6 +39,7 @@ sBPF assembly is selected by `pragma sbpf` in the spec, not by a `Target`.
 | Probe: runtime-specific findings (`probe/`) | ❌ agent-layer (SKILL.md) | ❌ agent-layer | ✅ richest (`pinocchio_probe`) | ⚠️ Shank dispatcher discovery only | ❌ |
 | Miri divergence repros (`verify/miri_verify`) | ❌ | ❌ | ✅ | ❌ | n/a |
 | Ratchet / readiness (`verify/ratchet`) | ✅ | ✅ | ❌ no ratchet crate | ❌ | ❌ |
+| Verifiable debug build (`verifiable_build`, `qedgen build`, #449) | ✅ `solana-verify build` (gate: minimal 0.32.1 program) ⁸ | ⚠️ not tested | ✅ `solana-verify build` (gate: minimal program; spike: p-token) | ⚠️ not tested | ❌ not built by `cargo build-sbf` |
 
 ¹ `pragma state_repr = adt` (#326): single-account specs with defaultable
 variant payloads verify over the ADT state space — the flat carrier gains a
@@ -267,3 +268,10 @@ programs (`tests/discharge_e2e.rs`).
 `pinocchio-pubkey` 0.3 / `zeropod` 0.1 — checked by hand with `verify
 --scaffold`, not asserted from the code. No gate compiles one, so nothing
 keeps it that way; `generated_artifact_gate` covers Anchor and Quasar.
+
+⁸ `qedgen build` uses `solana-verify build` for Anchor too, not `anchor
+build --verifiable`: the Anchor flow deletes the unstripped binary, and in
+Anchor 0.32 and newer `anchor verify` runs `solana-verify verify-from-repo`,
+so it reproduces the `solana-verify` build. In Anchor 0.31 and older, `anchor
+verify` uses Anchor's own Docker build and does not reproduce it; check those
+programs with `solana-verify verify-from-repo` directly.
