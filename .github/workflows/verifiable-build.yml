@@ -1,0 +1,85 @@
+name: Verifiable build gate
+
+# #451: runs the Docker-backed `qedgen build` gate
+# (crates/qedgen/tests/verifiable_build_gate.rs, #449). It builds a minimal
+# Anchor and a minimal Pinocchio program with `solana-verify build` and
+# checks both binaries, the build record, and that the recorded hash is the
+# one `solana-verify` printed. The runner is amd64, so the build images run
+# without emulation.
+on:
+  pull_request:
+    paths:
+      - "crates/qedgen/src/verifiable_build/**"
+      - "crates/qedgen/src/verify/sbpf_elf.rs"
+      - "crates/qedgen/src/verify/evidence.rs"
+      # `qedgen build` is defined in cli.rs and dispatched in run.rs.
+      - "crates/qedgen/src/cli.rs"
+      - "crates/qedgen/src/run.rs"
+      - "crates/qedgen/Cargo.toml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/qedgen/tests/verifiable_build_gate.rs"
+      - ".github/workflows/verifiable-build.yml"
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  SOLANA_VERIFY_VERSION: "0.5.2"
+  # The image both gate programs pin with [workspace.metadata.cli]
+  # solana = "3.0.1" (solana-verify's digest for Solana 3.0.1).
+  VERIFY_IMAGE: solanafoundation/solana-verifiable-build@sha256:b970a392e4ad5170680f7d1b37b1f25c75675f095e8309b5cb0a7d18bc314eec
+
+jobs:
+  verifiable-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # The build image is about 3.7 GB and each gate program builds its
+      # own target/ inside the container, on top of qedgen's own build.
+      - name: Free disk space
+        run: |
+          echo "before:"; df -h / | tail -1
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                      /usr/local/.ghcup /opt/hostedtoolcache/CodeQL \
+                      /usr/local/share/boost /usr/local/share/powershell \
+                      /usr/local/lib/node_modules
+          sudo docker image prune --all --force >/dev/null 2>&1 || true
+          echo "after:"; df -h / | tail -1
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Cache solana-verify
+        id: solana-verify-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/solana-verify
+          key: ${{ runner.os }}-solana-verify-${{ env.SOLANA_VERIFY_VERSION }}
+
+      - name: Install solana-verify
+        if: steps.solana-verify-cache.outputs.cache-hit != 'true'
+        run: cargo install solana-verify --version "$SOLANA_VERIFY_VERSION" --locked
+
+      # Pulled up front so a slow registry shows as its own step, not as a
+      # test that seems to hang.
+      - name: Pull the build image
+        run: docker pull "$VERIFY_IMAGE"
+
+      # One build at a time: it keeps peak disk use low, and one program's
+      # failure cannot affect the other's run.
+      - name: Verifiable build gate
+        run: cargo test -p qedgen-solana-skills --test verifiable_build_gate -- --ignored --nocapture --test-threads=1
+
+      - name: Leftover verify containers
+        if: always()
+        run: |
+          left=$(docker ps --format '{{.ID}} {{.Image}}' | grep solana-verifiable-build || true)
+          if [ -n "$left" ]; then
+            echo "::warning::solana-verify containers still running after the gate:"
+            echo "$left"
+          fi
+          df -h / | tail -1
