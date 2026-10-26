@@ -53,7 +53,7 @@ fn refuses_without_release_debug() {
 #[test]
 fn refuses_dirty_tree() {
     let d = committed_crate(
-        "[package]\nname = \"x\"\nversion = \"0.1.0\"\n[profile.release]\ndebug = 1\n",
+        "[package]\nname = \"x\"\nversion = \"0.1.0\"\n[profile.release]\ndebug = 2\n",
     );
     std::fs::write(d.path().join("src/new.rs"), "fn x() {}\n").unwrap();
     let out = qedgen(&["build", "--program", d.path().to_str().unwrap()]);
@@ -70,7 +70,7 @@ fn refuses_outside_git() {
     let d = tempfile::tempdir().unwrap();
     std::fs::write(
         d.path().join("Cargo.toml"),
-        "[package]\nname = \"x\"\n[profile.release]\ndebug = 1\n",
+        "[package]\nname = \"x\"\n[profile.release]\ndebug = 2\n",
     )
     .unwrap();
     let out = qedgen(&["build", "--program", d.path().to_str().unwrap()]);
@@ -85,7 +85,7 @@ fn refuses_outside_git() {
 #[test]
 fn rejects_unknown_arch() {
     let d = committed_crate(
-        "[package]\nname = \"x\"\nversion = \"0.1.0\"\n[profile.release]\ndebug = 1\n",
+        "[package]\nname = \"x\"\nversion = \"0.1.0\"\n[profile.release]\ndebug = 2\n",
     );
     let out = qedgen(&[
         "build",
@@ -101,7 +101,7 @@ fn rejects_unknown_arch() {
 #[test]
 fn refuses_without_cargo_lock() {
     let d = committed_crate(
-        "[package]\nname = \"x\"\nversion = \"0.1.0\"\n[profile.release]\ndebug = 1\n",
+        "[package]\nname = \"x\"\nversion = \"0.1.0\"\n[profile.release]\ndebug = 2\n",
     );
     let out = qedgen(&["build", "--program", d.path().to_str().unwrap()]);
     assert!(!out.status.success());
@@ -115,7 +115,7 @@ fn refuses_without_cargo_lock() {
 #[test]
 fn refuses_when_no_build_image_can_be_picked() {
     let d = committed_crate(
-        "[package]\nname = \"x\"\nversion = \"0.1.0\"\n[profile.release]\ndebug = 1\n",
+        "[package]\nname = \"x\"\nversion = \"0.1.0\"\n[profile.release]\ndebug = 2\n",
     );
     std::fs::write(d.path().join("Cargo.lock"), "version = 4\n").unwrap();
     git(d.path(), &["add", "."]);
@@ -134,7 +134,7 @@ fn refuses_when_no_build_image_can_be_picked() {
 #[test]
 fn member_crate_uses_the_workspace_root() {
     let d =
-        committed_crate("[workspace]\nmembers = [\"programs/*\"]\n[profile.release]\ndebug = 1\n");
+        committed_crate("[workspace]\nmembers = [\"programs/*\"]\n[profile.release]\ndebug = 2\n");
     let member = d.path().join("programs/x");
     std::fs::create_dir_all(member.join("src")).unwrap();
     std::fs::write(
@@ -159,7 +159,7 @@ fn member_crate_uses_the_workspace_root() {
 #[test]
 fn rejects_a_library_name_that_is_a_path() {
     let d = committed_crate(
-        "[package]\nname = \"x\"\nversion = \"0.1.0\"\n[profile.release]\ndebug = 1\n",
+        "[package]\nname = \"x\"\nversion = \"0.1.0\"\n[profile.release]\ndebug = 2\n",
     );
     let out = qedgen(&[
         "build",
@@ -170,4 +170,20 @@ fn rejects_a_library_name_that_is_a_path() {
     ]);
     assert!(!out.status.success());
     assert!(stderr(&out).contains("--library"), "{}", stderr(&out));
+}
+
+/// Limited debug info has no types, so the concept map cannot read struct
+/// members from it. Refused before Docker, with the fix.
+#[test]
+fn refuses_limited_debug_info() {
+    let d = committed_crate(
+        "[package]\nname = \"x\"\nversion = \"0.1.0\"\n[profile.release]\ndebug = \"line-tables-only\"\n",
+    );
+    let out = qedgen(&["build", "--program", d.path().to_str().unwrap()]);
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(
+        err.contains("full debug info") && err.contains("debug = 2"),
+        "{err}"
+    );
 }

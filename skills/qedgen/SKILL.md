@@ -135,8 +135,10 @@ Step 5. Verify generated backends.
 Before verifying a real program, build it with `qedgen build --program <crate>`.
 It runs one Docker build with `solana-verify`, keeps the deploy `.so` and the
 unstripped `.so` (the label source for the lift), and ties them to the current
-commit. Commit first and set `debug = 1` in `[profile.release]`: on
-platform-tools v1.57 this costs no code size or compute units.
+commit. Commit first and set `debug = 2` in `[profile.release]`: the lift
+needs full debug info. It can change the generated code slightly (an Anchor
+0.32.1 program gained 2 instructions on platform-tools v1.57), so deploy the
+`.so` that `qedgen build` produced.
 
 ```bash
 $QEDGEN verify --spec program.qedspec --scaffold   # v2.49 — the generated program crate compiles

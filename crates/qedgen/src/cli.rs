@@ -253,8 +253,9 @@ pub(crate) enum Commands {
         #[arg(long, default_value = crate::verifiable_build::DEFAULT_ARCH)]
         arch: String,
 
-        /// Platform-tools version passed to `cargo build-sbf`. On v1.57 debug
-        /// info does not change the deployed bytes.
+        /// Platform-tools version passed to `cargo build-sbf`. Debug info can
+        /// change the generated code (it does for Anchor 0.32.1 on v1.57), so
+        /// the deployed binary must come from this build.
         #[arg(long, default_value = crate::verifiable_build::DEFAULT_TOOLS_VERSION)]
         tools_version: String,
     },

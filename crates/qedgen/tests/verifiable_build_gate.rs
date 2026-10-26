@@ -9,7 +9,7 @@
 //! CI runs it in `.github/workflows/verifiable-build.yml` (#451) on PRs that
 //! touch the build code, on pushes to `main`, and on demand.
 //!
-//! Each case writes a minimal program into a temp git repo (with `debug = 1`
+//! Each case writes a minimal program into a temp git repo (with `debug = 2`
 //! in `[profile.release]`), generates its `Cargo.lock` (`solana-verify`
 //! needs one), commits, and runs `qedgen build`. The programs live here,
 //! not under `tests/fixtures/`, because the existing program fixtures are
@@ -48,7 +48,7 @@ anchor-lang = "=0.32.1"
 solana = "3.0.1"
 
 [profile.release]
-debug = 1
+debug = 2
 "#;
 
 const ANCHOR_LIB: &str = r#"use anchor_lang::prelude::*;
@@ -97,7 +97,7 @@ pinocchio = "=0.9.3"
 solana = "3.0.1"
 
 [profile.release]
-debug = 1
+debug = 2
 "#;
 
 const PINOCCHIO_LIB: &str = r#"use pinocchio::{
