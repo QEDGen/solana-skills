@@ -6,6 +6,9 @@
 //! cargo test -p qedgen-solana-skills --test verifiable_build_gate -- --ignored --nocapture
 //! ```
 //!
+//! CI runs it in `.github/workflows/verifiable-build.yml` (#451) on PRs that
+//! touch the build code, on pushes to `main`, and on demand.
+//!
 //! Each case writes a minimal program into a temp git repo (with `debug = 1`
 //! in `[profile.release]`), generates its `Cargo.lock` (`solana-verify`
 //! needs one), commits, and runs `qedgen build`. The programs live here,
