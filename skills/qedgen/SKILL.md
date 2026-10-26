@@ -132,6 +132,12 @@ cargo test --manifest-path programs/Cargo.toml
 
 Step 5. Verify generated backends.
 
+Before verifying a real program, build it with `qedgen build --program <crate>`.
+It runs one Docker build with `solana-verify`, keeps the deploy `.so` and the
+unstripped `.so` (the label source for the lift), and ties them to the current
+commit. Commit first and set `debug = 1` in `[profile.release]`: on
+platform-tools v1.57 this costs no code size or compute units.
+
 ```bash
 $QEDGEN verify --spec program.qedspec --scaffold   # v2.49 — the generated program crate compiles
 $QEDGEN verify --spec program.qedspec --proptest
@@ -140,6 +146,7 @@ $QEDGEN verify --spec program.qedspec --kani-impl   # v2.26 — calls user's rea
 $QEDGEN verify --spec program.qedspec --lean
 $QEDGEN verify --spec program.qedspec --crucible 300   # coverage-guided fuzz (5 min)
 $QEDGEN verify --spec program.qedspec --check-upstream # v2.26 — pin-mismatch is CRIT (use --upstream-stale-ok offline)
+$QEDGEN verify --spec program.qedspec --check-deployed <PROGRAM_ID> # deployed program vs the qedgen build record; mismatch is P2
 $QEDGEN verify --spec program.qedspec --recursive       # v2.27 — DFS-walk transitive proof packages; lake build per layer
 $QEDGEN verify --spec program.qedspec --require-verified # v2.27 — exits non-zero on any Tier-1+ import without a bundled proof package (default-off)
 ```

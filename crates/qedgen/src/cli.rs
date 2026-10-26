@@ -229,6 +229,36 @@ pub(crate) enum Commands {
         evidence: Option<PathBuf>,
     },
 
+    /// Build the program in Docker with `solana-verify` (#449). Keeps the
+    /// stripped deploy `.so` and the unstripped `.so` (its debug info is the
+    /// label source for the lift), and writes a build record tied to the
+    /// current git commit, all under `<workspace>/.qed/build/`.
+    ///
+    /// Refuses on a dirty tree, when `[profile.release]` has no `debug`
+    /// setting, or when Docker or `solana-verify` (0.5.2+) is missing. There
+    /// is no local-build fallback: a local build does not reproduce the
+    /// Docker build byte for byte.
+    Build {
+        /// Path to the program crate (the directory containing the
+        /// program's own `Cargo.toml`).
+        #[arg(long)]
+        program: PathBuf,
+
+        /// Library name of the `.so` (default: `[lib] name`, else the
+        /// package name with `-` replaced by `_`).
+        #[arg(long)]
+        library: Option<String>,
+
+        /// sBPF arch passed to `cargo build-sbf` (`v0`, `v1`, `v2`, `v3`).
+        #[arg(long, default_value = crate::verifiable_build::DEFAULT_ARCH)]
+        arch: String,
+
+        /// Platform-tools version passed to `cargo build-sbf`. On v1.57 debug
+        /// info does not change the deployed bytes.
+        #[arg(long, default_value = crate::verifiable_build::DEFAULT_TOOLS_VERSION)]
+        tools_version: String,
+    },
+
     /// Generate a Tier-0 .qedspec interface block from an Anchor IDL.
     ///
     /// Shape only — program ID, discriminators, accounts, argument types.
@@ -885,6 +915,14 @@ pub(crate) enum Commands {
         /// pinned hash. Non-zero exit on any mismatch.
         #[arg(long)]
         check_upstream: bool,
+
+        /// Fetch this deployed program (`solana program dump`) and compare
+        /// its hash, computed the `solana-verify` way, with the
+        /// `qedgen build` record (#449). A mismatch is a P2 warning and the
+        /// exit code stays 0: the stamp still covers the verified commit.
+        /// Honors `--rpc-url` and `--offline`.
+        #[arg(long, value_name = "PROGRAM_ID")]
+        check_deployed: Option<String>,
 
         /// Override the RPC endpoint passed through to `solana program dump
         /// --url <rpc>`. If omitted, the Solana CLI uses whatever cluster is

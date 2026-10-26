@@ -1,6 +1,6 @@
 # CLI: validation
 
-`check`, `reconcile`, `verify` — linting the spec and running the backends.
+`check`, `reconcile`, `build`, `verify`: linting the spec, building the verified binary, and running the backends.
 
 Part of the [CLI Reference](../cli.md).
 
@@ -136,6 +136,93 @@ Typical use:
 - As the first step of the agent-driven reconciliation loop described in
   SKILL.md **Step 4d**.
 
+### `build`
+
+Build the program in Docker with `solana-verify build` (#449) and keep three
+things under `<workspace>/.qed/build/`:
+
+- `<lib>.so`: the stripped deploy binary. This is the file to deploy.
+- `<lib>.debug.so`: the unstripped binary. Its debug info is the label source
+  for the lift. Its `.text` is byte-identical to the deploy binary.
+- `build.json`: the build record, tied to the git commit that was built.
+
+The agent runs it before `verify` on a program it verifies. A local build is
+not a fallback: it does not reproduce the Docker build byte for byte, so
+labels from it could describe different bytes.
+
+```bash
+$QEDGEN build --program programs/my_program
+$QEDGEN build --program . --arch v3 --tools-version v1.57
+```
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--program` | Path | required | Program crate (the directory with the program's own `Cargo.toml`). The workspace root is the nearest ancestor whose `Cargo.toml` has `[workspace]`. |
+| `--library` | String | `[lib] name`, else the package name with `-` as `_` | Name of the `.so`. |
+| `--arch` | String | `v3` | sBPF arch passed to `cargo build-sbf`. |
+| `--tools-version` | String | `v1.57` | Platform-tools version passed to `cargo build-sbf`. On v1.57, debug info does not change the deployed bytes. |
+
+It refuses, before Docker starts, when:
+
+- the workspace has uncommitted changes (files under `.qed/` do not count);
+- `[profile.release]` has no `debug` setting. Add `debug = 1` (or
+  `"line-tables-only"`) and commit it. `[profile.release.build-override]` does
+  not count;
+- the workspace has no `Cargo.lock` (`solana-verify` builds with `--locked`);
+- `solana-verify` cannot pick a build image, or would pick a Solana 1.x
+  image. It reads the Solana version from `[workspace.metadata.cli] solana`
+  in the workspace `Cargo.toml`, else from `solana-program`,
+  `solana-program-error` or `solana-account-info` in `Cargo.lock`. Pinocchio
+  programs often have none of these crates. A 1.x image's `cargo build-sbf`
+  has no `--arch v3`. The fix is to set the version and commit it:
+
+  ```toml
+  [workspace.metadata.cli]
+  solana = "3.0.1"
+  ```
+- `solana-verify` 0.5.2 or newer is missing (`cargo install solana-verify --locked`);
+- Docker is not running.
+
+The image's own cargo reads `Cargo.lock`, so the lockfile must be one that
+cargo can parse. The Solana 2.x images ship cargo 1.84, which cannot read
+crates on edition 2024. A fresh `cargo generate-lockfile` today pulls such
+crates (for example `zeroize` 1.9), so pin `solana = "3.0.1"` when that
+happens.
+
+After the build it stops when the unstripped `.text` differs from the deploy
+`.so`, when the unstripped binary has no `.debug_info`/`.debug_line`, when the
+sBPF version is not the requested arch, or when the hash `solana-verify`
+printed differs from qedgen's own hash. On a non-amd64 host it sets
+`DOCKER_DEFAULT_PLATFORM=linux/amd64`, because the build images are amd64
+only. Expect a few minutes per build under emulation and about 5 GB per image.
+
+`build.json` fields: `commit`, `library`, `program_hash` (SHA-256 after
+trailing zero bytes are stripped; the number `solana-verify` prints),
+`file_sha256` (plain SHA-256), `solana_verify_version`, `image` (the image's
+Solana version, as `solana-verify` printed it), `platform_tools`, `arch`,
+`debug_setting`, `build_argv`, `workspace_path` (the workspace's path inside the repo, empty at the root), `text_matches`, `recorded_at_unix`.
+`.qed/build/.gitignore` keeps the two `.so` files out of git, so `build.json`
+can be committed.
+
+Every `verify` run looks for the record in the workspace of `--program`,
+else the workspace of the spec directory. It copies the record's `commit`
+and `program_hash` into `.qed/verify-evidence.json` (`binary_build`) when
+the record's commit is `HEAD` and the tree is clean. Otherwise it warns that
+the build is stale. Files under any `.qed/` directory (build output,
+evidence, the obligation manifest) never count as uncommitted changes, for
+`build` or for `verify`.
+[`stamp`](spec-authoring.md#stamp) prints `Verified binary: <hash> at
+<commit>` when the evidence has it. A missing build never blocks `stamp`.
+
+The build ends by printing a ready-to-run `solana-verify verify-from-repo`
+command with `<PROGRAM_ID>` and `<REPO_URL>` placeholders. It adds
+`--mount-path <workspace_path>` when the workspace is not the repo root. To check a
+deployed program later, use `verify --check-deployed`, or rebuild
+with `solana-verify verify-from-repo` and the same `--library-name`, `--arch`
+and `--cargo-build-sbf-args` values. For Anchor 0.32 and newer, `anchor
+verify` runs `solana-verify verify-from-repo` and passes those arguments
+through.
+
 ### `verify`
 Run the generated harnesses against the implementation. `check` validates
 the spec; `verify` validates the code the spec produced. With no backend
@@ -197,6 +284,10 @@ $QEDGEN verify --spec my_program.qedspec --check-upstream --offline
 # Offline development — suppress the upstream check; mismatches demote
 # to Info and verify exits zero. Do NOT use in CI.
 $QEDGEN verify --spec my_program.qedspec --check-upstream --upstream-stale-ok
+
+# Compare the deployed program with the `qedgen build` record. A mismatch
+# is a P2 warning; the exit code stays 0.
+$QEDGEN verify --spec my_program.qedspec --check-deployed <PROGRAM_ID>
 ```
 
 | Flag | Type | Default | Description |
@@ -216,6 +307,7 @@ $QEDGEN verify --spec my_program.qedspec --check-upstream --upstream-stale-ok
 | `--check-upstream` | bool | false | Diff each pinned `upstream_binary_hash` against the on-chain `.so` via `solana program dump`. Skips deps without a pinned hash. Non-zero exit on any mismatch. |
 | `--rpc-url` | String | Solana CLI default | Override RPC endpoint passed to `solana program dump --url <rpc>` |
 | `--offline` | bool | false | Refuse to reach the network. Any dep that would require an on-chain fetch reports as Error. CI-gate friendly. |
+| `--check-deployed` | String | none | Program id. Fetch the deployed program (`solana program dump`) and compare its hash, computed the `solana-verify` way (trailing zero bytes stripped), with the [`build`](#build) record. A match and a program that is not deployed print one info line. A mismatch prints a `P2:` line and the exit code stays 0: the stamp still covers the verified commit. Other fetch errors fail the run, including an RPC that cannot be reached. The record is read from the workspace of `--program`, else the workspace of the spec directory, the same way `build` resolves it. Honors `--rpc-url` and `--offline`. |
 | `--upstream-stale-ok` | bool | false | Suppress the upstream binary-hash check even when the lock declares pinned hashes. Mismatches demote to Info; verify exits zero. Offline-dev only — do not use in CI. Pairs with the auto-on behavior of `--check-upstream`. |
 | `--probe-repros` | bool | false | Discover and run probe reproducers under `<project>/target/qedgen-repros/`, including agent-authored audit repros and mechanically generated category repros. Reports `Fired`, `Silent`, or `BuildError` per repro; emits `note: no repros found` only when the directory contains no runnable reproducers. |
 | `--crucible` | u64 | none | Run the coverage-guided fuzz engine for the given wall-clock seconds. Thin alias over `probe --fuzz` — folds findings into the BackendReport so they render through the same named-trace human surface as Kani / proptest. |

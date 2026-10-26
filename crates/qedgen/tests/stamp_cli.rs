@@ -208,6 +208,48 @@ fn stamp_emits_attributes_with_matching_impl_evidence() {
         stderr.contains("implementation-verified by miri"),
         "stderr: {stderr}"
     );
+    assert!(!stderr.contains("Verified binary"), "stderr: {stderr}");
+}
+
+/// A recorded binary build shows in the stamp report. It never gates stamp.
+#[test]
+fn stamp_reports_verified_binary_when_recorded() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec = dir.path().join("demo.qedspec");
+    std::fs::write(&spec, SPEC).unwrap();
+    let prog = dir.path().join("prog");
+    write_anchor_project(&prog);
+    write_evidence(
+        dir.path(),
+        &qedgen_hash_core::sha256_hex16(SPEC),
+        true,
+        Some(&prog),
+    );
+    let path = dir.path().join(".qed/verify-evidence.json");
+    let mut evidence: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    evidence["binary_build"] = serde_json::json!({
+        "commit": "a".repeat(40),
+        "program_hash": "b".repeat(64),
+    });
+    std::fs::write(&path, evidence.to_string()).unwrap();
+    let out = qedgen(&[
+        "stamp",
+        "--program",
+        prog.to_str().unwrap(),
+        "--spec",
+        spec.to_str().unwrap(),
+    ]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "stderr: {stderr}");
+    assert!(
+        stderr.contains(&format!(
+            "Verified binary: {} at {}",
+            "b".repeat(64),
+            "a".repeat(40)
+        )),
+        "stderr: {stderr}"
+    );
 }
 
 /// Matching spec evidence cannot be reused after the implementation changes.

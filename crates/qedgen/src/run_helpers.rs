@@ -208,7 +208,7 @@ pub(crate) fn resolve_deploy_so(project_root: &Path, prog: &str) -> PathBuf {
 /// True when the manifest declares a Cargo workspace table. Parse TOML
 /// instead of scanning header text so valid formatting such as
 /// `[workspace] # root workspace` and `[ workspace ]` is recognized.
-fn manifest_declares_workspace(manifest: &Path) -> bool {
+pub(crate) fn manifest_declares_workspace(manifest: &Path) -> bool {
     std::fs::read_to_string(manifest)
         .ok()
         .and_then(|text| text.parse::<toml::Value>().ok())
@@ -658,8 +658,12 @@ pub(crate) fn record_verify_evidence(
         probe_repros_passed,
         obligations_digest,
     )
-    .and_then(|e| crate::verify::evidence::record(&e, spec))
-    {
+    .and_then(|mut e| {
+        e.binary_build = crate::verifiable_build::record_workspace(spec, program)
+            .ok()
+            .and_then(|workspace| crate::verify::evidence::fresh_build_ref(&workspace));
+        crate::verify::evidence::record(&e, spec)
+    }) {
         Ok(path) => eprintln!("Recorded verification evidence at {}", path.display()),
         Err(e) => eprintln!("warning: failed to record verification evidence: {e}"),
     }

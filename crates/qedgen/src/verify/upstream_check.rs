@@ -260,6 +260,17 @@ pub fn check_lock(
     }
 }
 
+/// The production fetcher for one program, honoring `--rpc-url` and
+/// `--offline`. `verify --check-deployed` uses it for the program under
+/// verification; `check_lock` uses the same two fetchers for callees.
+pub(crate) fn fetcher<'a>(rpc_url: Option<&'a str>, offline: bool) -> Box<dyn BinaryFetcher + 'a> {
+    if offline {
+        Box::new(OfflineFetcher)
+    } else {
+        Box::new(SolanaCliFetcher { rpc_url })
+    }
+}
+
 /// `--offline` fetcher: always errors with an "offline mode" message.
 /// Skipped entries never reach `fetch`, so offline runs still distinguish
 /// "couldn't reach RPC" from "nothing to verify".

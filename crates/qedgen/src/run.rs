@@ -237,6 +237,7 @@ pub(crate) fn command_name_of(c: &Commands) -> &'static str {
         Commands::FillSorry { .. } => "fill-sorry",
         Commands::Adapt { .. } => "adapt",
         Commands::Stamp { .. } => "stamp",
+        Commands::Build { .. } => "build",
         Commands::Interface { .. } => "interface",
         Commands::Probe { .. } => "probe",
         Commands::Ratify { .. } => "ratify",
@@ -420,6 +421,12 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 impl_backends.join(", "),
                 record.recorded_at_unix
             );
+            if let Some(build) = &record.binary_build {
+                eprintln!(
+                    "Verified binary: {} at {}",
+                    build.program_hash, build.commit
+                );
+            }
             let mut overrides = std::collections::HashMap::new();
             for raw in &handler_overrides {
                 let (name, parsed) = anchor_adapt::parse_handler_override(raw)?;
@@ -428,6 +435,20 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             let entries = anchor_adapt::compute_attributes(&program, &spec, &overrides)?;
             let rendered = anchor_adapt::render_attributes(&entries);
             write_attribute_report(&rendered, out.as_deref())?;
+        }
+
+        Commands::Build {
+            program,
+            library,
+            arch,
+            tools_version,
+        } => {
+            verifiable_build::run_build(&verifiable_build::BuildOptions {
+                program,
+                library,
+                arch,
+                tools_version,
+            })?;
         }
 
         Commands::Interface { idl, out, vendor } => {
@@ -1756,6 +1777,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             fail_fast,
             json,
             check_upstream,
+            check_deployed,
             rpc_url,
             offline,
             upstream_stale_ok,
@@ -1831,7 +1853,11 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 // When --check-upstream is the only verb, exit cleanly
                 // without firing the backend runners. Combine with
                 // --proptest etc. to do both in one invocation.
-                if check_upstream && !any_verify_backend && !probe_repros {
+                if check_upstream
+                    && !any_verify_backend
+                    && !probe_repros
+                    && check_deployed.is_none()
+                {
                     return Ok(());
                 }
             } else if check_upstream && upstream_stale_ok {
@@ -1840,6 +1866,23 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 eprintln!(
                     "note: --upstream-stale-ok suppressed --check-upstream (offline-dev mode)"
                 );
+                if !any_verify_backend && !probe_repros && check_deployed.is_none() {
+                    return Ok(());
+                }
+            }
+
+            // --check-deployed compares the deployed program with the
+            // `qedgen build` record (#449). Reported, never gating.
+            if let Some(program_id) = check_deployed.as_deref() {
+                let workspace = verifiable_build::record_workspace(&spec, program.as_deref())?;
+                let record = verifiable_build::load_record(&workspace)?;
+                let mut fetcher = upstream_check::fetcher(rpc_url.as_deref(), offline);
+                let result = verifiable_build::deploy_check::check_deployed(
+                    record.as_ref(),
+                    program_id,
+                    fetcher.as_mut(),
+                )?;
+                verifiable_build::deploy_check::print_deploy_check(&result, program_id);
                 if !any_verify_backend && !probe_repros {
                     return Ok(());
                 }
