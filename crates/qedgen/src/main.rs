@@ -12,6 +12,7 @@ mod project;
 mod run;
 mod run_helpers;
 mod spec;
+mod verifiable_build;
 mod verify;
 
 // Root re-exports: the v2.35 src/ reorg moved flat modules into directory

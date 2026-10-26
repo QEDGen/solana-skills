@@ -15,6 +15,7 @@ pub const SBPF_V3: u32 = 3;
 
 const ELF64_HEADER_LEN: usize = 64;
 const ELF64_PHDR_LEN: u64 = 56;
+const ELF64_SHDR_LEN: u64 = 64;
 const ELFCLASS64: u8 = 2;
 const ELFDATA2LSB: u8 = 1;
 const EM_BPF: u16 = 247;
@@ -66,6 +67,89 @@ fn sbpf_version(file: &mut std::fs::File) -> Result<u32> {
     in_file("section header table", shoff, shentsize * shnum)?;
 
     Ok(version)
+}
+
+/// The same check as [`read_sbpf_version`], on a program already in memory.
+pub fn sbpf_version_of(elf: &[u8]) -> Result<u32> {
+    let header = header_of(elf)?;
+    let version = check_header(header)?;
+    let (phoff, phentsize, phnum) = (u64_at(elf, 32), u16_at(elf, 54), u16_at(elf, 56));
+    if phnum == 0 {
+        bail!("ELF has no program headers, so it is not a loadable program");
+    }
+    if phentsize < ELF64_PHDR_LEN {
+        bail!("ELF program header entries are {phentsize} bytes, expected {ELF64_PHDR_LEN}");
+    }
+    let table = slice_in(elf, "program header table", phoff, phentsize * phnum)?;
+    for i in 0..phnum {
+        let at = (i * phentsize) as usize;
+        slice_in(
+            elf,
+            "segment",
+            u64_at(table, at + 8),
+            u64_at(table, at + 32),
+        )?;
+    }
+    Ok(version)
+}
+
+/// The bytes of the section called `name`, or `None` when the ELF has no
+/// such section. A malformed or truncated section table is an error. The
+/// `qedgen build` self-check uses this to compare `.text` and to find the
+/// debug sections.
+pub fn section_bytes<'a>(elf: &'a [u8], name: &str) -> Result<Option<&'a [u8]>> {
+    let header = header_of(elf)?;
+    check_header(header)?;
+    let (shoff, shentsize, shnum) = (u64_at(elf, 40), u16_at(elf, 58), u16_at(elf, 60));
+    if shnum == 0 {
+        return Ok(None);
+    }
+    if shentsize < ELF64_SHDR_LEN {
+        bail!("ELF section header entries are {shentsize} bytes, expected {ELF64_SHDR_LEN}");
+    }
+    let table = slice_in(elf, "section header table", shoff, shentsize * shnum)?;
+    let entry = |i: u64| &table[(i * shentsize) as usize..];
+    let strndx = u16_at(elf, 62);
+    if strndx >= shnum {
+        bail!("ELF section name table index {strndx} is out of range ({shnum} sections)");
+    }
+    let names = entry(strndx);
+    let names = slice_in(
+        elf,
+        "section name table",
+        u64_at(names, 24),
+        u64_at(names, 32),
+    )?;
+    for i in 0..shnum {
+        let sh = entry(i);
+        let name_at = u32::from_le_bytes(sh[..4].try_into().expect("4-byte field")) as usize;
+        let Some(rest) = names.get(name_at..) else {
+            bail!("ELF section name offset {name_at} is past the name table");
+        };
+        let end = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
+        if &rest[..end] == name.as_bytes() {
+            return slice_in(elf, "section", u64_at(sh, 24), u64_at(sh, 32)).map(Some);
+        }
+    }
+    Ok(None)
+}
+
+fn header_of(elf: &[u8]) -> Result<&[u8; ELF64_HEADER_LEN]> {
+    elf.get(..ELF64_HEADER_LEN)
+        .and_then(|h| h.try_into().ok())
+        .ok_or_else(|| {
+            anyhow::anyhow!("too short to be an ELF program ({ELF64_HEADER_LEN}-byte header)")
+        })
+}
+
+fn slice_in<'a>(elf: &'a [u8], what: &str, offset: u64, size: u64) -> Result<&'a [u8]> {
+    match offset.checked_add(size) {
+        Some(end) if end <= elf.len() as u64 => Ok(&elf[offset as usize..end as usize]),
+        _ => bail!(
+            "ELF is truncated: its {what} ends past the file end ({} bytes)",
+            elf.len()
+        ),
+    }
 }
 
 /// Check the fixed ELF64 header and return its `e_flags`.
@@ -185,6 +269,51 @@ mod tests {
         // A v3 build and a missing file stay silent (no panic, no message).
         warn_if_pre_v3(&fixture("counter-v3.so"), "test");
         warn_if_pre_v3(Path::new("/does/not/exist.so"), "test");
+    }
+
+    #[test]
+    fn text_section_matches_between_stripped_and_debug_fixture() {
+        let a = std::fs::read(fixture("anchor-v3.so")).unwrap();
+        let b = std::fs::read(fixture("anchor-v3-debug.so")).unwrap();
+        let ta = section_bytes(&a, ".text").unwrap().expect("has .text");
+        let tb = section_bytes(&b, ".text").unwrap().expect("has .text");
+        assert!(!ta.is_empty());
+        assert_eq!(ta, tb);
+    }
+
+    #[test]
+    fn debug_sections_present_only_in_debug_fixture() {
+        let a = std::fs::read(fixture("anchor-v3.so")).unwrap();
+        let b = std::fs::read(fixture("anchor-v3-debug.so")).unwrap();
+        assert!(section_bytes(&a, ".debug_info").unwrap().is_none());
+        assert!(section_bytes(&b, ".debug_info").unwrap().is_some());
+        assert!(section_bytes(&b, ".debug_line").unwrap().is_some());
+    }
+
+    #[test]
+    fn v0_and_v3_text_differ() {
+        let a = std::fs::read(fixture("counter-v0.so")).unwrap();
+        let b = std::fs::read(fixture("anchor-v3.so")).unwrap();
+        assert_ne!(
+            section_bytes(&a, ".text").unwrap(),
+            section_bytes(&b, ".text").unwrap()
+        );
+    }
+
+    #[test]
+    fn section_bytes_rejects_truncated_elf() {
+        let a = std::fs::read(fixture("anchor-v3.so")).unwrap();
+        assert!(section_bytes(&a[..80], ".text").is_err());
+        assert!(section_bytes(&a[..a.len() - 1], ".text").is_err());
+    }
+
+    #[test]
+    fn sbpf_version_of_bytes_matches_file_reader() {
+        let a = std::fs::read(fixture("anchor-v3.so")).unwrap();
+        assert_eq!(sbpf_version_of(&a).unwrap(), 3);
+        let b = std::fs::read(fixture("counter-v0.so")).unwrap();
+        assert_eq!(sbpf_version_of(&b).unwrap(), 0);
+        assert!(sbpf_version_of(&a[..ELF64_HEADER_LEN]).is_err());
     }
 
     /// A valid header alone, or a file cut after the header, must not pass.

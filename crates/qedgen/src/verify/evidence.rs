@@ -64,6 +64,46 @@ pub struct VerifyEvidence {
     /// and records written before schema v3.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub obligations_digest: Option<String>,
+    /// The verified binary (#449): the commit and program hash from a
+    /// `qedgen build` record that matched `HEAD` on a clean tree when verify
+    /// ran. Absent when there was no fresh build, and on records before
+    /// schema v4. Informational: `stamp` reports it and never requires it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary_build: Option<BinaryBuildRef>,
+}
+
+/// The part of a `qedgen build` record that verify evidence keeps.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BinaryBuildRef {
+    pub commit: String,
+    pub program_hash: String,
+}
+
+/// `library`'s build record in `workspace`, when it was built from the
+/// current `HEAD` and the tree is still clean. A record for another commit
+/// is stale: warn and return `None`, so evidence never names a binary that
+/// was not built from the verified source.
+pub fn fresh_build_ref(workspace: &Path, library: &str) -> Option<BinaryBuildRef> {
+    use crate::verifiable_build::{load_record, preflight, record_path};
+    let record = load_record(workspace, library).ok()??;
+    let workspace = workspace.to_path_buf();
+    let head = preflight::git_head(&workspace).ok()?;
+    if record.commit != head {
+        eprintln!(
+            "warning: build record at {} is for commit {}, not HEAD {head}; run qedgen build again",
+            record_path(&workspace, library).display(),
+            record.commit
+        );
+        return None;
+    }
+    if let Err(e) = preflight::assert_clean_tree(&workspace) {
+        eprintln!("warning: not recording the build in evidence: {e}");
+        return None;
+    }
+    Some(BinaryBuildRef {
+        commit: record.commit,
+        program_hash: record.program_hash,
+    })
 }
 
 /// Canonical evidence location for a spec: `<spec_dir>/.qed/verify-evidence.json`
@@ -197,7 +237,7 @@ pub fn build(
     let program_hash = program.map(program_source_hash).transpose()?;
     let implementation_verified = has_impl_pass && program_hash.is_some();
     Ok(VerifyEvidence {
-        schema_version: 3,
+        schema_version: 4,
         spec: spec.display().to_string(),
         spec_hash: spec_file_hash(spec)?,
         program: program.map(|p| p.display().to_string()),
@@ -209,6 +249,7 @@ pub fn build(
         backends,
         implementation_verified,
         obligations_digest,
+        binary_build: None,
     })
 }
 
@@ -412,6 +453,104 @@ mod tests {
             "a fired bug reproducer is not implementation conformance evidence"
         );
         let _ = std::fs::remove_dir_all(spec.parent().unwrap());
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let ok = std::process::Command::new("git")
+            .args(["-c", "user.email=t@example.com", "-c", "user.name=t"])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok, "git {args:?}");
+    }
+
+    fn sample_build_record(commit: &str) -> crate::verifiable_build::BuildRecord {
+        crate::verifiable_build::BuildRecord {
+            schema_version: 1,
+            commit: commit.to_string(),
+            library: "program".into(),
+            program_hash: "b".repeat(64),
+            file_sha256: "c".repeat(64),
+            solana_verify_version: "0.5.2".into(),
+            image: None,
+            platform_tools: "v1.57".into(),
+            arch: "v3".into(),
+            debug_setting: "1".into(),
+            build_argv: vec!["build".into()],
+            workspace_path: String::new(),
+            text_matches: true,
+            recorded_at_unix: 1,
+        }
+    }
+
+    #[test]
+    fn schema3_record_without_binary_build_still_loads() {
+        let spec = tmp_spec("schema3");
+        let path = spec.parent().unwrap().join("evidence.json");
+        std::fs::write(
+            &path,
+            r#"{"schema_version":3,"spec":"prog.qedspec","spec_hash":"x",
+                "recorded_at_unix":1,"backends":[],"implementation_verified":false}"#,
+        )
+        .unwrap();
+        let e = load(&path).unwrap();
+        assert_eq!(e.binary_build, None);
+        let _ = std::fs::remove_dir_all(spec.parent().unwrap());
+    }
+
+    #[test]
+    fn binary_build_round_trips() {
+        let spec = tmp_spec("binbuild");
+        let program = tmp_program(&spec);
+        let r = report(vec![("miri", BackendStatus::Passed)]);
+        let mut e = build(&spec, Some(&program), &r, false, None, None).unwrap();
+        assert_eq!(e.schema_version, 4);
+        e.binary_build = Some(BinaryBuildRef {
+            commit: "a".repeat(40),
+            program_hash: "b".repeat(64),
+        });
+        let path = record(&e, &spec).unwrap();
+        assert_eq!(load(&path).unwrap().binary_build, e.binary_build);
+        let _ = std::fs::remove_dir_all(spec.parent().unwrap());
+    }
+
+    #[test]
+    fn stale_build_record_not_copied() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(
+            d.path().join("Cargo.toml"),
+            "[package]\nname = \"program\"\n",
+        )
+        .unwrap();
+        git(d.path(), &["init", "-q"]);
+        git(d.path(), &["add", "."]);
+        git(d.path(), &["commit", "-q", "-m", "a"]);
+        let first = crate::verifiable_build::preflight::git_head(d.path()).unwrap();
+        crate::verifiable_build::write_record(d.path(), &sample_build_record(&first)).unwrap();
+        assert_eq!(
+            fresh_build_ref(d.path(), "program"),
+            Some(BinaryBuildRef {
+                commit: first.clone(),
+                program_hash: "b".repeat(64),
+            })
+        );
+
+        git(d.path(), &["commit", "-q", "--allow-empty", "-m", "b"]);
+        assert_eq!(
+            fresh_build_ref(d.path(), "program"),
+            None,
+            "record is for an older commit"
+        );
+
+        let second = crate::verifiable_build::preflight::git_head(d.path()).unwrap();
+        crate::verifiable_build::write_record(d.path(), &sample_build_record(&second)).unwrap();
+        assert!(fresh_build_ref(d.path(), "program").is_some());
+
+        std::fs::write(d.path().join("dirty.rs"), "fn x() {}\n").unwrap();
+        assert_eq!(fresh_build_ref(d.path(), "program"), None, "dirty tree");
     }
 
     #[test]
