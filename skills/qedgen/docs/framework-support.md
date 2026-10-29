@@ -40,6 +40,7 @@ sBPF assembly is selected by `pragma sbpf` in the spec, not by a `Target`.
 | Miri divergence repros (`verify/miri_verify`) | ❌ | ❌ | ✅ | ❌ | n/a |
 | Ratchet / readiness (`verify/ratchet`) | ✅ | ✅ | ❌ no ratchet crate | ❌ | ❌ |
 | Verifiable debug build (`verifiable_build`, `qedgen build`, #449) | ✅ `solana-verify build` (gate: minimal 0.32.1 program) ⁸ | ⚠️ not tested | ✅ `solana-verify build` (gate: minimal program; spike: p-token) | ⚠️ not tested | ❌ not built by `cargo build-sbf` |
+| Binary lift (`lift`, `qedgen lift`, #450) | ❌ | ❌ | ⚠️ V0, inlined handlers (gate: label-vault) ⁹ | ❌ | ❌ |
 
 ¹ `pragma state_repr = adt` (#326): single-account specs with defaultable
 variant payloads verify over the ADT state space — the flat carrier gains a
@@ -275,3 +276,10 @@ Anchor 0.32 and newer `anchor verify` runs `solana-verify verify-from-repo`,
 so it reproduces the `solana-verify` build. In Anchor 0.31 and older, `anchor
 verify` uses Anchor's own Docker build and does not reproduce it; check those
 programs with `solana-verify verify-from-repo` directly.
+
+⁹ `qedgen lift` proves success paths from the binary with no spec. It needs
+the handlers inlined into the entrypoint (the path layer only sees guards in
+the entry function) and sBPF V0 (the v3 port is pending). Unchecked account
+lengths are assumed 0 and listed as gaps. The checks still use
+`native_decide` (qedsvm#98). Anchor needs dataflow through Borsh
+deserialization first.

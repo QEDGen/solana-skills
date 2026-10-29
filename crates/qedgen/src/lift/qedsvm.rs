@@ -4,9 +4,9 @@ use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The qedsvm revision whose `qed-discover` and Lean checkers the lift is tested against.
-/// `None` until those land on qedsvm `main`; until then only `--qedsvm-dev` works.
-pub const QEDSVM_LIFT_REV: Option<&str> = None;
+/// The qedsvm revision whose `qed-discover` and Lean checkers the lift is tested against
+/// (QEDGen/qedsvm#142). `.github/workflows/label-lift.yml` checks out the same revision.
+pub const QEDSVM_LIFT_REV: Option<&str> = Some("c94a07da87184105bee7be45dfe8642231ef298f");
 pub const QEDSVM_REPO: &str = "https://github.com/QEDGen/qedsvm.git";
 
 pub(crate) trait QedsvmTools {
@@ -91,12 +91,7 @@ pub(crate) fn resolve_checkout(given: Option<&Path>, dev: bool) -> Result<(PathB
         "no qedsvm revision is pinned for the lift yet; pass --qedsvm <checkout> --qedsvm-dev",
     )?;
     let dir = cache_dir()?.join(pin);
-    if !dir.join(".git").exists() {
-        std::fs::create_dir_all(&dir)?;
-        git(&dir, &["init", "-q"])?;
-        git(&dir, &["fetch", "-q", "--depth", "1", QEDSVM_REPO, pin])?;
-        git(&dir, &["checkout", "-q", "FETCH_HEAD"])?;
-    }
+    ensure_clone(&dir, QEDSVM_REPO, pin)?;
     let rev = check_checkout(&dir, Some(pin), false)?;
     Ok((dir, rev))
 }
@@ -111,6 +106,36 @@ pub(crate) fn lift_tree(root: &Path) -> Result<tempfile::TempDir> {
         .prefix("run-")
         .tempdir_in(&base)
         .with_context(|| format!("creating a module tree under {}", base.display()))
+}
+
+/// A shallow checkout of `rev` from `repo` at `dir`, unless one is already there. It is
+/// built in a temporary directory beside `dir` and renamed into place only when complete,
+/// so a failed fetch never leaves a `dir` that later runs would take as finished.
+pub(crate) fn ensure_clone(dir: &Path, repo: &str, rev: &str) -> Result<()> {
+    if dir.exists() {
+        return Ok(());
+    }
+    let parent = dir
+        .parent()
+        .with_context(|| format!("{} has no parent directory", dir.display()))?;
+    std::fs::create_dir_all(parent)?;
+    let tmp = tempfile::Builder::new()
+        .prefix(".clone-")
+        .tempdir_in(parent)
+        .with_context(|| format!("creating a clone directory in {}", parent.display()))?;
+    git(tmp.path(), &["init", "-q"])?;
+    git(tmp.path(), &["fetch", "-q", "--depth", "1", repo, rev])?;
+    git(tmp.path(), &["checkout", "-q", "FETCH_HEAD"])?;
+    let built = tmp.keep();
+    if let Err(e) = std::fs::rename(&built, dir) {
+        let _ = std::fs::remove_dir_all(&built);
+        // Another run finished the same clone first.
+        if dir.exists() {
+            return Ok(());
+        }
+        return Err(e).with_context(|| format!("moving the clone to {}", dir.display()));
+    }
+    Ok(())
 }
 
 pub(crate) struct RealTools {

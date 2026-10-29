@@ -294,8 +294,9 @@ $QEDGEN lift --program . --skip-build --qedsvm ../qedsvm --qedsvm-dev --json
 | `--json` | bool | false | Print the report as JSON |
 
 Exit codes: 0 when every readable theorem checks with only allowed axioms; 1
-otherwise. No qedsvm revision is pinned yet, so `--qedsvm <dir> --qedsvm-dev`
-is required until the qedsvm side lands.
+otherwise. Without `--qedsvm`, the lift clones the pinned qedsvm revision into
+the qedgen cache on first use. A `--qedsvm` checkout must be clean and at that
+revision unless `--qedsvm-dev` is given.
 
 ### `verify`
 Run the generated harnesses against the implementation. `check` validates

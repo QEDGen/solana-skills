@@ -38,15 +38,14 @@ Program hash (`solana-verify`): `4c9dff9951c4b9d236d31d9659248475ed10c160d77085d
 ## Lift
 
 From a clean checkout, with Docker, `solana-verify` 0.5.2+ and elan installed, and
-a qedsvm checkout that has the lift tools:
+nothing else (the lift clones the pinned qedsvm revision on first use):
 
 ```sh
 cargo build --release && bin/qedgen lift \
-  --program crates/qedgen/tests/fixtures/pinocchio-fixtures/label-vault \
-  --qedsvm ../qedsvm --qedsvm-dev
+  --program crates/qedgen/tests/fixtures/pinocchio-fixtures/label-vault
 ```
 
-`--qedsvm-dev` is needed until a qedsvm revision is pinned. `qedgen build` refuses a
+`qedgen build` refuses a
 dirty tree, so run it from a commit where this directory is checked in. The gate
 `crates/qedgen/tests/label_lift_gate.rs` does the same from a temporary repository and
 checks that the rebuilt pair matches the hashes above.
