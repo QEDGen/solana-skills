@@ -5,6 +5,7 @@ mod codegen;
 mod descriptor;
 mod dispatch;
 mod fs_walk;
+mod lift;
 mod mir;
 mod obligations;
 mod probe;

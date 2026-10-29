@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "commit": "50a415ad6b2250e688521d3898afb27543ed187f",
+  "library": "label_vault",
+  "program_hash": "4c9dff9951c4b9d236d31d9659248475ed10c160d77085dee4bbf87e40a53285",
+  "file_sha256": "914f0f0e58ec5c19b7eaba9a0f7d9eb978f5053fcd2383db91985c63368dfc8d",
+  "solana_verify_version": "0.5.2",
+  "image": "solana v3.0.1",
+  "platform_tools": "v1.57",
+  "arch": "v0",
+  "debug_setting": "2",
+  "build_argv": [
+    "build",
+    "--library-name",
+    "label_vault",
+    "--arch",
+    "v0",
+    "--cargo-build-sbf-args=--tools-version v1.57"
+  ],
+  "workspace_path": "",
+  "text_matches": true,
+  "recorded_at_unix": 1793186133
+}

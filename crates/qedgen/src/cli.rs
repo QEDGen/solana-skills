@@ -260,6 +260,40 @@ pub(crate) enum Commands {
         tools_version: String,
     },
 
+    /// Prove a built program's success paths from its binary, with no `.qedspec` (#450).
+    ///
+    /// Builds with `qedgen build --arch v0` (unless `--skip-build`), then a pinned
+    /// qedsvm checkout reads the concept map, discovers the instructions, authority
+    /// checks and field labels, generates Lean and checks it. Writes the report,
+    /// bindings and Lean modules to `<workspace>/.qed/lift/<lib>/`. Never writes
+    /// `.qed/verify-evidence.json`. Pinocchio programs with inlined handlers, sBPF V0.
+    Lift {
+        /// Path to the program crate.
+        #[arg(long)]
+        program: PathBuf,
+
+        /// Library name of the `.so` (default: from the crate).
+        #[arg(long)]
+        library: Option<String>,
+
+        /// A qedsvm checkout to use instead of cloning the pinned revision.
+        #[arg(long)]
+        qedsvm: Option<PathBuf>,
+
+        /// Accept a `--qedsvm` checkout at any revision, with local changes
+        /// (development only; the report records the revision).
+        #[arg(long)]
+        qedsvm_dev: bool,
+
+        /// Use the existing build under `.qed/build/<lib>/`.
+        #[arg(long)]
+        skip_build: bool,
+
+        /// Print the report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Generate a Tier-0 .qedspec interface block from an Anchor IDL.
     ///
     /// Shape only — program ID, discriminators, accounts, argument types.

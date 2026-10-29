@@ -1,0 +1,74 @@
+name: Label lift gate
+
+# Runs `qedgen lift` end to end on the label-vault fixture
+# (crates/qedgen/tests/label_lift_gate.rs, #450): a fresh `solana-verify` build must give
+# the committed binary pair byte for byte, and the lift of that build must pass.
+# On demand only until a qedsvm revision with the lift tools is pinned
+# (`QEDSVM_LIFT_REV` in crates/qedgen/src/lift/qedsvm.rs); then add PR triggers.
+on:
+  workflow_dispatch:
+    inputs:
+      qedsvm_ref:
+        description: qedsvm branch, tag or commit with the lift tools
+        required: true
+        default: main
+
+env:
+  SOLANA_VERIFY_VERSION: "0.5.2"
+  VERIFY_IMAGE: solanafoundation/solana-verifiable-build@sha256:b970a392e4ad5170680f7d1b37b1f25c75675f095e8309b5cb0a7d18bc314eec
+
+jobs:
+  label-lift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: QEDGen/qedsvm
+          ref: ${{ inputs.qedsvm_ref }}
+          path: qedsvm
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                      /usr/local/.ghcup /opt/hostedtoolcache/CodeQL \
+                      /usr/local/share/boost /usr/local/share/powershell \
+                      /usr/local/lib/node_modules
+          df -h / | tail -1
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install elan
+        run: |
+          curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
+            | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Cache qedsvm Lean build
+        uses: actions/cache@v4
+        with:
+          path: qedsvm/.lake
+          key: ${{ runner.os }}-qedsvm-lake-${{ hashFiles('qedsvm/lean-toolchain', 'qedsvm/lake-manifest.json') }}
+
+      - name: Cache solana-verify
+        id: solana-verify-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/solana-verify
+          key: ${{ runner.os }}-solana-verify-${{ env.SOLANA_VERIFY_VERSION }}
+
+      - name: Install solana-verify
+        if: steps.solana-verify-cache.outputs.cache-hit != 'true'
+        run: cargo install solana-verify --version "$SOLANA_VERIFY_VERSION" --locked
+
+      - name: Pull the build image
+        run: docker pull "$VERIFY_IMAGE"
+
+      - name: Label lift gate
+        env:
+          QEDSVM_DIR: ${{ github.workspace }}/qedsvm
+        run: cargo test -p qedgen-solana-skills --test label_lift_gate -- --ignored --nocapture

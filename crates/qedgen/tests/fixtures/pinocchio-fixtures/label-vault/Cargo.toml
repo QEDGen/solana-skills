@@ -1,0 +1,21 @@
+[package]
+name = "label_vault"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+pinocchio = "=0.9.3"
+
+[workspace]
+
+[workspace.metadata.cli]
+solana = "3.0.1"
+
+[profile.release]
+debug = 2
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

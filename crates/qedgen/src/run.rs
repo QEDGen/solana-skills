@@ -238,6 +238,7 @@ pub(crate) fn command_name_of(c: &Commands) -> &'static str {
         Commands::Adapt { .. } => "adapt",
         Commands::Stamp { .. } => "stamp",
         Commands::Build { .. } => "build",
+        Commands::Lift { .. } => "lift",
         Commands::Interface { .. } => "interface",
         Commands::Probe { .. } => "probe",
         Commands::Ratify { .. } => "ratify",
@@ -448,6 +449,24 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 library,
                 arch,
                 tools_version,
+            })?;
+        }
+
+        Commands::Lift {
+            program,
+            library,
+            qedsvm,
+            qedsvm_dev,
+            skip_build,
+            json,
+        } => {
+            crate::lift::run_lift(&crate::lift::LiftOptions {
+                program,
+                library,
+                qedsvm,
+                qedsvm_dev,
+                skip_build,
+                json,
             })?;
         }
 
