@@ -362,3 +362,28 @@ fn s2_gate_workflow_checks_out_the_pinned_qedsvm() {
         "label-lift.yml must check out qedsvm at {pin}"
     );
 }
+
+#[test]
+fn s2_failed_clone_leaves_no_cached_checkout() {
+    let upstream = repo();
+    let url = format!("file://{}", upstream.path().display());
+    let head = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(upstream.path())
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    let head = head.trim();
+    let cache = tempfile::tempdir().unwrap();
+    let dir = cache.path().join(head);
+    // The fetch fails: the revision does not exist upstream.
+    super::qedsvm::ensure_clone(&dir, &url, "0123456789abcdef0123456789abcdef01234567")
+        .unwrap_err();
+    assert!(!dir.exists(), "a failed clone must not look finished");
+    // A later run recovers once the fetch can succeed.
+    super::qedsvm::ensure_clone(&dir, &url, head).unwrap();
+    assert_eq!(check_checkout(&dir, Some(head), false).unwrap(), head);
+}

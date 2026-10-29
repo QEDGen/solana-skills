@@ -252,6 +252,52 @@ and `--cargo-build-sbf-args` values. For Anchor 0.32 and newer, `anchor
 verify` runs `solana-verify verify-from-repo` and passes those arguments
 through.
 
+### `lift`
+
+Prove a built program's success paths from its binary, with no `.qedspec`
+(#450). The input is the V0 `debug = 2` pair from `build`. A pinned qedsvm
+checkout then:
+
+1. reads the concept map from the pair (`qed-concept-map`),
+2. discovers the instructions from the dispatcher, each instruction's signer
+   and key checks, and DWARF field labels (`qed-discover`),
+3. generates Lean (`qed-success-proofs --bindings`),
+4. checks it, and prints the axioms of each readable theorem.
+
+The theorem for each success edge says: a run that reaches the edge started
+from an input that meets the edge's checks and one instruction's checks. It
+states the account data lengths it assumes. A length the program does not
+check is assumed to be 0, and the report lists it as a gap.
+
+Everything goes to `<workspace>/.qed/lift/<lib>/`: `report.txt`,
+`report.json`, `bindings.json`, `coverage.json` and the Lean modules. `lift`
+never writes `.qed/verify-evidence.json`. The checks still use
+`native_decide` (qedsvm#98), which `verify --strict` rejects. The gate allows
+the standard three axioms and the per-use `native_decide` axioms, and
+nothing else.
+
+Supported today: Pinocchio programs whose handlers are inlined into the
+entrypoint, sBPF V0. Loops on a success path are reported as unsupported.
+
+```bash
+$QEDGEN lift --program programs/my_program
+$QEDGEN lift --program . --skip-build --qedsvm ../qedsvm --qedsvm-dev --json
+```
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--program <dir>` | path | (required) | The program crate |
+| `--library <name>` | string | from the crate | Library name of the `.so` |
+| `--qedsvm <dir>` | path | clone of the pinned revision | A qedsvm checkout to use |
+| `--qedsvm-dev` | bool | false | Accept a `--qedsvm` checkout at any revision, with local changes. The report records the revision (`-dirty` when changed). |
+| `--skip-build` | bool | false | Use the existing build under `.qed/build/<lib>/` |
+| `--json` | bool | false | Print the report as JSON |
+
+Exit codes: 0 when every readable theorem checks with only allowed axioms; 1
+otherwise. Without `--qedsvm`, the lift clones the pinned qedsvm revision into
+the qedgen cache on first use. A `--qedsvm` checkout must be clean and at that
+revision unless `--qedsvm-dev` is given.
+
 ### `verify`
 Run the generated harnesses against the implementation. `check` validates
 the spec; `verify` validates the code the spec produced. With no backend
