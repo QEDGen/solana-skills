@@ -3,15 +3,23 @@ name: Label lift gate
 # Runs `qedgen lift` end to end on the label-vault fixture
 # (crates/qedgen/tests/label_lift_gate.rs, #450): a fresh `solana-verify` build must give
 # the committed binary pair byte for byte, and the lift of that build must pass.
-# On demand only until a qedsvm revision with the lift tools is pinned
-# (`QEDSVM_LIFT_REV` in crates/qedgen/src/lift/qedsvm.rs); then add PR triggers.
+# qedsvm is checked out at the pinned revision (`QEDSVM_LIFT_REV` in
+# crates/qedgen/src/lift/qedsvm.rs; a unit test keeps the two equal).
 on:
+  pull_request:
+    paths:
+      - "crates/qedgen/src/lift/**"
+      - "crates/qedgen/src/verifiable_build/**"
+      - "crates/qedgen/src/cli.rs"
+      - "crates/qedgen/src/run.rs"
+      - "crates/qedgen/Cargo.toml"
+      - "Cargo.lock"
+      - "crates/qedgen/tests/label_lift_gate.rs"
+      - "crates/qedgen/tests/fixtures/pinocchio-fixtures/label-vault/**"
+      - ".github/workflows/label-lift.yml"
+  push:
+    branches: [main]
   workflow_dispatch:
-    inputs:
-      qedsvm_ref:
-        description: qedsvm branch, tag or commit with the lift tools
-        required: true
-        default: main
 
 env:
   SOLANA_VERIFY_VERSION: "0.5.2"
@@ -27,7 +35,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: QEDGen/qedsvm
-          ref: ${{ inputs.qedsvm_ref }}
+          ref: c94a07da87184105bee7be45dfe8642231ef298f
           path: qedsvm
 
       - name: Free disk space

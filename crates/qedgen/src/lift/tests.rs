@@ -352,3 +352,13 @@ fn s2_instruction_facts_hold_on_every_route() {
     assert_eq!(r[0].routes[0].signers, vec![1, 2]);
     assert_eq!(r[0].routes[0].key_compares, vec!["k".to_string()]);
 }
+
+#[test]
+fn s2_gate_workflow_checks_out_the_pinned_qedsvm() {
+    let pin = super::qedsvm::QEDSVM_LIFT_REV.expect("a qedsvm revision is pinned");
+    let wf = include_str!("../../../../.github/workflows/label-lift.yml");
+    assert!(
+        wf.contains(&format!("ref: {pin}")),
+        "label-lift.yml must check out qedsvm at {pin}"
+    );
+}

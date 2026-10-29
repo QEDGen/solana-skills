@@ -4,9 +4,9 @@ use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The qedsvm revision whose `qed-discover` and Lean checkers the lift is tested against.
-/// `None` until those land on qedsvm `main`; until then only `--qedsvm-dev` works.
-pub const QEDSVM_LIFT_REV: Option<&str> = None;
+/// The qedsvm revision whose `qed-discover` and Lean checkers the lift is tested against
+/// (QEDGen/qedsvm#142). `.github/workflows/label-lift.yml` checks out the same revision.
+pub const QEDSVM_LIFT_REV: Option<&str> = Some("c94a07da87184105bee7be45dfe8642231ef298f");
 pub const QEDSVM_REPO: &str = "https://github.com/QEDGen/qedsvm.git";
 
 pub(crate) trait QedsvmTools {

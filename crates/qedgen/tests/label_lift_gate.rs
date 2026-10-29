@@ -1,6 +1,6 @@
 //! `qedgen lift` end to end on the label-vault fixture (#450). Ignored by default: it
-//! needs Docker, `solana-verify` 0.5.2+, elan, and a qedsvm checkout with the lift tools
-//! in `QEDSVM_DIR`. A cold Lean build of qedsvm takes about 30 minutes.
+//! needs Docker, `solana-verify` 0.5.2+, elan, and a clean qedsvm checkout at the pinned
+//! revision (`QEDSVM_LIFT_REV`) in `QEDSVM_DIR`. A cold Lean build of qedsvm takes about 30 minutes.
 //!
 //! ```bash
 //! QEDSVM_DIR=../qedsvm cargo test -p qedgen-solana-skills --test label_lift_gate -- --ignored --nocapture
@@ -67,16 +67,9 @@ fn sha256(path: &Path) -> String {
 fn s3_label_vault_lift_end_to_end() {
     let qedsvm = std::env::var("QEDSVM_DIR").expect("set QEDSVM_DIR to a qedsvm checkout");
     let repo = committed_copy();
-    // `--qedsvm-dev` until a qedsvm revision with the lift tools is pinned.
+    // No `--qedsvm-dev`: the checkout must be clean and at the pinned revision.
     let out = Command::new(env!("CARGO_BIN_EXE_qedgen"))
-        .args([
-            "lift",
-            "--json",
-            "--qedsvm-dev",
-            "--qedsvm",
-            &qedsvm,
-            "--program",
-        ])
+        .args(["lift", "--json", "--qedsvm", &qedsvm, "--program"])
         .arg(repo.path())
         .output()
         .unwrap();
