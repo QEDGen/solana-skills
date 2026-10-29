@@ -1,0 +1,76 @@
+{
+  "instructions": 3,
+  "success_edges": 1,
+  "proven_edges": 1,
+  "routes": 3,
+  "guards": 49,
+  "pinned_guards": 47,
+  "readable_facts": 47,
+  "field_labels": 5,
+  "refused_labels": 0,
+  "unchecked_lengths": 1,
+  "unsupported_edges": 0,
+  "native_decide_uses": 5,
+  "route_facts": [
+    {
+      "edge": 53,
+      "route": 35,
+      "discriminator": 0,
+      "proven_signers": [
+        1
+      ],
+      "proven_key_compares": [],
+      "unpinned": [],
+      "opaque_calls": []
+    },
+    {
+      "edge": 53,
+      "route": 54,
+      "discriminator": 1,
+      "proven_signers": [
+        1
+      ],
+      "proven_key_compares": [
+        "account 1 key == account 0 data[8..40]"
+      ],
+      "unpinned": [
+        {
+          "pc": 75,
+          "insn": "jle r3, 7, 110"
+        },
+        {
+          "pc": 84,
+          "insn": "jne r3, 0, 114"
+        }
+      ],
+      "opaque_calls": []
+    },
+    {
+      "edge": 53,
+      "route": 87,
+      "discriminator": 2,
+      "proven_signers": [
+        1
+      ],
+      "proven_key_compares": [
+        "account 1 key == account 0 data[8..40]"
+      ],
+      "unpinned": [],
+      "opaque_calls": []
+    }
+  ],
+  "assumed_lengths": [
+    {
+      "edge": 53,
+      "account": 0,
+      "value": 48,
+      "checked": true
+    },
+    {
+      "edge": 53,
+      "account": 1,
+      "value": 0,
+      "checked": false
+    }
+  ]
+}

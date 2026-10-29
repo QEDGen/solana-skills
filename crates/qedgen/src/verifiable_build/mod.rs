@@ -54,6 +54,8 @@ pub struct BuildOptions {
     pub library: Option<String>,
     pub arch: String,
     pub tools_version: String,
+    /// Echo `solana-verify` output to stderr instead of stdout.
+    pub progress_to_stderr: bool,
 }
 
 /// Where one program's binaries and record live: `.qed/build/<library>/`.
@@ -214,7 +216,7 @@ pub fn run_build(opts: &BuildOptions) -> Result<BuildRecord> {
         arch: opts.arch.clone(),
         tools_version: opts.tools_version.clone(),
     };
-    let output = solana_verify::run(&workspace, &args)?;
+    let output = solana_verify::run(&workspace, &args, opts.progress_to_stderr)?;
 
     let target = workspace.join("target");
     let deploy_path = target.join("deploy").join(format!("{library}.so"));

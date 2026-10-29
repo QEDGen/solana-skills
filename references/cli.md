@@ -28,7 +28,7 @@ definitions.
 |---|---|
 | [project-setup](cli/project-setup.md) | `init`, `setup`, `asm2lean` |
 | [spec-authoring](cli/spec-authoring.md) | `interface`, `spec`, `adapt`, `stamp` |
-| [validation](cli/validation.md) | `check`, `reconcile`, `build`, `verify` |
+| [validation](cli/validation.md) | `check`, `reconcile`, `build`, `lift`, `verify` |
 | [probe](cli/probe.md) | `probe`, `ratify` |
 | [codegen](cli/codegen.md) | `codegen` |
 | [proofs](cli/proofs.md) | `generate`, `fill-sorry`, `aristotle` (`submit`, `status`, `result`, `cancel`, `list`) |

@@ -21,6 +21,11 @@ toolchain on the eval host.
 | `ptoken-close-account/` | p-token `processor/close_account.rs` | `SetLamportsArith` (sweep), lifecycle state reset, mutable-borrow aliasing |
 | `pata-create/` | p-ata `processor/create.rs` | `IndexedAccountAccess`, missing PDA derivation, cross-program-invoke obligation |
 
+## Binary-lift fixture (not an audit fixture)
+
+`label-vault/` is the source of the binary pair that the label-driven lift
+(#450) verifies. It has no `expected_findings.json`. See its own README.
+
 ## Greenfield codegen example (not an audit fixture)
 
 `vault-greenfield/` is a different kind of fixture: a `.qedspec` that
