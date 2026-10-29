@@ -449,6 +449,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 library,
                 arch,
                 tools_version,
+                progress_to_stderr: false,
             })?;
         }
 

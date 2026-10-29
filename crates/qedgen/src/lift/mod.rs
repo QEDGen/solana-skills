@@ -67,8 +67,24 @@ pub(crate) fn lift_with(
     let build = verifiable_build::build_dir(workspace, library);
     let so = build.join(format!("{library}.so"));
     let debug = build.join(format!("{library}.debug.so"));
+    let so_bytes = std::fs::read(&so).with_context(|| format!("reading {}", so.display()))?;
+    let so_sha = verifiable_build::selfcheck::file_sha256(&so_bytes);
+    if so_sha != record.file_sha256 {
+        bail!(
+            "{} does not match its build record (sha256 {so_sha}, recorded {}); run `qedgen build` again",
+            so.display(),
+            record.file_sha256
+        );
+    }
     let out = workspace.join(LIFT_DIR).join(library);
     std::fs::create_dir_all(&out)?;
+    // A report from an earlier run must not sit beside this run's files if this run fails.
+    for stale in ["report.json", "report.txt"] {
+        match std::fs::remove_file(out.join(stale)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+            _ => {}
+        }
+    }
     let prefix = module_prefix(library)?;
     let concepts = out.join("concepts.json");
     let bindings_path = out.join("bindings.json");
@@ -123,6 +139,8 @@ pub fn run_lift(opts: &LiftOptions) -> Result<()> {
             library: Some(library.clone()),
             arch: "v0".into(),
             tools_version: verifiable_build::DEFAULT_TOOLS_VERSION.into(),
+            // Keep stdout for the JSON report alone.
+            progress_to_stderr: opts.json,
         })?;
     }
     let (root, rev) = qedsvm::resolve_checkout(opts.qedsvm.as_deref(), opts.qedsvm_dev)?;

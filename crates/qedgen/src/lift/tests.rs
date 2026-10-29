@@ -1,5 +1,5 @@
-use super::qedsvm::{check_checkout, QedsvmTools};
-use super::report::{axiom_allowed, parse_axioms, LiftReport};
+use super::qedsvm::{check_checkout, lift_tree, resolve_checkout, QedsvmTools};
+use super::report::{axiom_allowed, parse_axioms, InstructionReport, LiftReport};
 use super::*;
 use std::path::Path;
 use std::process::Command;
@@ -148,6 +148,7 @@ fn s2_dirty_checkout_is_refused() {
 
 struct Stub {
     axioms: String,
+    fail_discover: bool,
 }
 
 impl QedsvmTools for Stub {
@@ -162,6 +163,9 @@ impl QedsvmTools for Stub {
         _concepts: &Path,
         out: &Path,
     ) -> anyhow::Result<()> {
+        if self.fail_discover {
+            anyhow::bail!("discovery failed");
+        }
         std::fs::write(out, BINDINGS)?;
         Ok(())
     }
@@ -194,11 +198,11 @@ fn built_workspace() -> tempfile::TempDir {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("label_vault.so"), b"so").unwrap();
     std::fs::write(dir.join("label_vault.debug.so"), b"dbg").unwrap();
-    std::fs::write(
-        dir.join("build.json"),
-        include_str!("../../tests/fixtures/lift/label_vault.build.json"),
-    )
-    .unwrap();
+    let record = include_str!("../../tests/fixtures/lift/label_vault.build.json").replace(
+        "914f0f0e58ec5c19b7eaba9a0f7d9eb978f5053fcd2383db91985c63368dfc8d",
+        &crate::verifiable_build::selfcheck::file_sha256(b"so"),
+    );
+    std::fs::write(dir.join("build.json"), record).unwrap();
     ws
 }
 
@@ -210,6 +214,7 @@ fn run_stub(ws: &Path, axioms: &str) -> anyhow::Result<LiftReport> {
         "label_vault",
         &Stub {
             axioms: axioms.into(),
+            fail_discover: false,
         },
         "deadbeef".into(),
     )
@@ -283,4 +288,67 @@ fn s2_v3_build_is_refused() {
     std::fs::write(&p, text).unwrap();
     let err = run_stub(ws.path(), GOOD_AXIOMS).unwrap_err();
     assert!(err.to_string().contains("V0"), "{err}");
+}
+
+#[test]
+fn s2_replaced_deploy_binary_is_refused() {
+    let ws = built_workspace();
+    std::fs::write(
+        ws.path().join(".qed/build/label_vault/label_vault.so"),
+        b"another program",
+    )
+    .unwrap();
+    let err = run_stub(ws.path(), GOOD_AXIOMS).unwrap_err();
+    assert!(err.to_string().contains("does not match"), "{err}");
+}
+
+#[test]
+fn s2_relative_checkout_is_made_absolute() {
+    // The test runs inside this crate, which is a git checkout.
+    let (dir, _) = resolve_checkout(Some(Path::new(".")), true).unwrap();
+    assert!(dir.is_absolute(), "{}", dir.display());
+}
+
+#[test]
+fn s2_each_lean_check_gets_its_own_tree() {
+    let root = tempfile::tempdir().unwrap();
+    let a = lift_tree(root.path()).unwrap();
+    let b = lift_tree(root.path()).unwrap();
+    assert_ne!(a.path(), b.path());
+    assert!(a.path().starts_with(root.path().join(".lake/qedgen-lift")));
+}
+
+#[test]
+fn s2_failed_rerun_removes_the_old_report() {
+    let ws = built_workspace();
+    run_stub(ws.path(), GOOD_AXIOMS).unwrap();
+    let dir = ws.path().join(".qed/lift/label_vault");
+    assert!(dir.join("report.json").exists());
+    let failing = Stub {
+        axioms: GOOD_AXIOMS.into(),
+        fail_discover: true,
+    };
+    lift_with(ws.path(), "label_vault", &failing, "deadbeef".into()).unwrap_err();
+    assert!(!dir.join("report.json").exists());
+    assert!(!dir.join("report.txt").exists());
+}
+
+#[test]
+fn s2_instruction_facts_hold_on_every_route() {
+    let bindings = serde_json::json!({
+        "instructions": [{"discriminator": 1, "handler": "h", "success_edges": [53]}]
+    });
+    let coverage = serde_json::json!({"route_facts": [
+        {"edge": 53, "route": 10, "discriminator": 1, "proven_signers": [1, 2],
+         "proven_key_compares": ["k"]},
+        {"edge": 53, "route": 20, "discriminator": 1, "proven_signers": [2],
+         "proven_key_compares": []}
+    ]});
+    let r = InstructionReport::of(&bindings, &coverage);
+    assert_eq!(r[0].signers, vec![2]);
+    assert!(r[0].key_compares.is_empty());
+    assert_eq!(r[0].routes.len(), 2);
+    assert_eq!(r[0].routes[0].route, 10);
+    assert_eq!(r[0].routes[0].signers, vec![1, 2]);
+    assert_eq!(r[0].routes[0].key_compares, vec!["k".to_string()]);
 }

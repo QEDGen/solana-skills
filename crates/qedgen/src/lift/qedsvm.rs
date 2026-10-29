@@ -77,8 +77,12 @@ fn cache_dir() -> Result<PathBuf> {
 /// The checkout to use: the given one (checked), else a clone of the pinned revision.
 pub(crate) fn resolve_checkout(given: Option<&Path>, dev: bool) -> Result<(PathBuf, String)> {
     if let Some(dir) = given {
-        let rev = check_checkout(dir, QEDSVM_LIFT_REV, dev)?;
-        return Ok((dir.to_path_buf(), rev));
+        // Absolute, because the Lean check runs with the checkout as its working directory.
+        let dir = dir
+            .canonicalize()
+            .with_context(|| format!("qedsvm checkout {}", dir.display()))?;
+        let rev = check_checkout(&dir, QEDSVM_LIFT_REV, dev)?;
+        return Ok((dir, rev));
     }
     if dev {
         bail!("--qedsvm-dev needs --qedsvm <checkout>");
@@ -95,6 +99,18 @@ pub(crate) fn resolve_checkout(given: Option<&Path>, dev: bool) -> Result<(PathB
     }
     let rev = check_checkout(&dir, Some(pin), false)?;
     Ok((dir, rev))
+}
+
+/// A fresh module tree for one Lean check, inside the checkout (Lean only compiles files
+/// under its root). Each run gets its own, so parallel lifts never share files. Removed
+/// when dropped.
+pub(crate) fn lift_tree(root: &Path) -> Result<tempfile::TempDir> {
+    let base = root.join(".lake/qedgen-lift");
+    std::fs::create_dir_all(&base)?;
+    tempfile::Builder::new()
+        .prefix("run-")
+        .tempdir_in(&base)
+        .with_context(|| format!("creating a module tree under {}", base.display()))
 }
 
 pub(crate) struct RealTools {
@@ -198,9 +214,9 @@ impl QedsvmTools for RealTools {
                 String::from_utf8_lossy(&out.stdout)
             );
         }
-        // A private module tree inside the checkout (Lean only compiles files under its
-        // root): sources in `src/<Prefix>/`, oleans in `lib/<Prefix>/`.
-        let base = self.root.join(".lake/qedgen-lift");
+        // Sources in `src/<Prefix>/`, oleans in `lib/<Prefix>/`.
+        let tree = lift_tree(&self.root)?;
+        let base = tree.path();
         let src = base.join("src");
         let lib = base.join("lib");
         std::fs::create_dir_all(src.join(prefix))?;

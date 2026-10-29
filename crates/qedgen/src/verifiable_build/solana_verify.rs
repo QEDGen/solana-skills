@@ -231,9 +231,9 @@ fn remove_leftover_containers(before: Option<&[String]>, workspace: &Path) {
 }
 
 /// Run `solana-verify build` in `workspace`. Its output streams to the
-/// terminal and is also returned, so the caller can read the hash and the
-/// image version it printed.
-pub fn run(workspace: &Path, a: &BuildArgs) -> Result<String> {
+/// terminal (stdout, or stderr with `to_stderr`) and is also returned, so the
+/// caller can read the hash and the image version it printed.
+pub fn run(workspace: &Path, a: &BuildArgs, to_stderr: bool) -> Result<String> {
     let argv = build_argv(a);
     let mut cmd = Command::new("solana-verify");
     cmd.args(&argv)
@@ -252,7 +252,11 @@ pub fn run(workspace: &Path, a: &BuildArgs) -> Result<String> {
     if let Some(stdout) = child.stdout.take() {
         for line in BufReader::new(stdout).lines() {
             let line = line.context("reading solana-verify output")?;
-            println!("{line}");
+            if to_stderr {
+                eprintln!("{line}");
+            } else {
+                println!("{line}");
+            }
             captured.push_str(&line);
             captured.push('\n');
         }

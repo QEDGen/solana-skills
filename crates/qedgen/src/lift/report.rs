@@ -100,6 +100,18 @@ pub struct InstructionReport {
     pub discriminator: u64,
     pub handler: Option<String>,
     pub success_edges: Vec<u64>,
+    /// Signers proved on every route of this instruction.
+    pub signers: Vec<u64>,
+    /// Key compares proved on every route of this instruction.
+    pub key_compares: Vec<String>,
+    /// What each route proves on its own.
+    pub routes: Vec<RouteReport>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RouteReport {
+    pub edge: u64,
+    pub route: u64,
     pub signers: Vec<u64>,
     pub key_compares: Vec<String>,
 }
@@ -107,6 +119,8 @@ pub struct InstructionReport {
 impl InstructionReport {
     /// Handler labels and edges from the bindings; signers and key compares only as the
     /// generated theorems state them (`coverage.route_facts`), never from discovery alone.
+    /// The instruction-wide lists keep only facts every route proves, so a route that skips
+    /// a check is never hidden behind one that makes it.
     pub fn of(bindings: &serde_json::Value, coverage: &serde_json::Value) -> Vec<Self> {
         let facts: Vec<&serde_json::Value> = coverage["route_facts"]
             .as_array()
@@ -114,11 +128,26 @@ impl InstructionReport {
             .flatten()
             .collect();
         let nums = |v: &serde_json::Value| -> Vec<u64> {
-            v.as_array()
+            let mut n: Vec<u64> = v
+                .as_array()
                 .into_iter()
                 .flatten()
                 .filter_map(|x| x.as_u64())
-                .collect()
+                .collect();
+            n.sort_unstable();
+            n.dedup();
+            n
+        };
+        let strs = |v: &serde_json::Value| -> Vec<String> {
+            let mut s: Vec<String> = v
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|k| k.as_str().map(str::to_string))
+                .collect();
+            s.sort();
+            s.dedup();
+            s
         };
         bindings["instructions"]
             .as_array()
@@ -126,29 +155,39 @@ impl InstructionReport {
             .flatten()
             .map(|ix| {
                 let disc = ix["discriminator"].as_u64().unwrap_or(0);
-                let mine: Vec<_> = facts
+                let routes: Vec<RouteReport> = facts
                     .iter()
                     .filter(|r| r["discriminator"].as_u64() == Some(disc))
+                    .map(|r| RouteReport {
+                        edge: r["edge"].as_u64().unwrap_or(0),
+                        route: r["route"].as_u64().unwrap_or(0),
+                        signers: nums(&r["proven_signers"]),
+                        key_compares: strs(&r["proven_key_compares"]),
+                    })
                     .collect();
-                let mut signers: Vec<u64> = mine
-                    .iter()
-                    .flat_map(|r| nums(&r["proven_signers"]))
-                    .collect();
-                signers.sort_unstable();
-                signers.dedup();
-                let mut key_compares: Vec<String> = mine
-                    .iter()
-                    .flat_map(|r| r["proven_key_compares"].as_array().into_iter().flatten())
-                    .filter_map(|k| k.as_str().map(str::to_string))
-                    .collect();
-                key_compares.sort();
-                key_compares.dedup();
+                let signers = routes.first().map_or(Vec::new(), |first| {
+                    first
+                        .signers
+                        .iter()
+                        .filter(|s| routes.iter().all(|r| r.signers.contains(s)))
+                        .copied()
+                        .collect()
+                });
+                let key_compares = routes.first().map_or(Vec::new(), |first| {
+                    first
+                        .key_compares
+                        .iter()
+                        .filter(|k| routes.iter().all(|r| r.key_compares.contains(k)))
+                        .cloned()
+                        .collect()
+                });
                 InstructionReport {
                     discriminator: disc,
                     handler: ix["handler"].as_str().map(str::to_string),
                     success_edges: nums(&ix["success_edges"]),
                     signers,
                     key_compares,
+                    routes,
                 }
             })
             .collect()
@@ -246,7 +285,7 @@ impl LiftReport {
         for ix in &self.instructions {
             writeln!(
                 s,
-                "  {} {}: success edges {:?}; signers {:?}{}",
+                "  {} {}: success edges {:?}; signers on every route {:?}{}",
                 ix.discriminator,
                 ix.handler.as_deref().unwrap_or("(no label)"),
                 ix.success_edges,
@@ -258,6 +297,23 @@ impl LiftReport {
                 }
             )
             .unwrap();
+            if ix.routes.len() > 1 {
+                for r in &ix.routes {
+                    writeln!(
+                        s,
+                        "    route {} to edge {}: signers {:?}{}",
+                        r.route,
+                        r.edge,
+                        r.signers,
+                        if r.key_compares.is_empty() {
+                            String::new()
+                        } else {
+                            format!("; {}", r.key_compares.join(", "))
+                        }
+                    )
+                    .unwrap();
+                }
+            }
         }
         writeln!(s, "\nCoverage: {}", self.coverage).unwrap();
         writeln!(s, "\nTheorems: {}", self.theorems.join(", ")).unwrap();

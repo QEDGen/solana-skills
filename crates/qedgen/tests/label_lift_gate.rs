@@ -99,16 +99,33 @@ fn s3_label_vault_lift_end_to_end() {
         "debug .so drifted"
     );
 
-    let json_start = stdout.find('{').expect("no JSON report");
-    let report: serde_json::Value = serde_json::from_str(&stdout[json_start..]).unwrap();
+    // With --json, stdout is the report and nothing else.
+    let report: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("stdout is not one JSON report ({e}):\n{stdout}"));
     assert_eq!(report["passed"], true);
     assert_eq!(report["coverage"]["instructions"], 3);
     assert_eq!(report["coverage"]["proven_edges"], 1);
     assert_eq!(report["axioms"]["disallowed"], serde_json::json!([]));
     let gaps = report["gaps"].to_string();
     assert!(gaps.contains("native_decide"), "{gaps}");
-    let increment = &report["instructions"][1];
-    assert_eq!(increment["discriminator"], 1);
-    assert_eq!(increment["signers"], serde_json::json!([1]));
+    let authority = serde_json::json!(["account 1 key == account 0 data[8..40]"]);
+    let initialize = &report["instructions"][0];
+    assert_eq!(initialize["discriminator"], 0);
+    assert_eq!(initialize["signers"], serde_json::json!([1]));
+    assert_eq!(initialize["key_compares"], serde_json::json!([]));
+    for (i, disc) in [(1, 1), (2, 2)] {
+        let ix = &report["instructions"][i];
+        assert_eq!(ix["discriminator"], disc);
+        assert_eq!(ix["signers"], serde_json::json!([1]), "{ix}");
+        assert_eq!(ix["key_compares"], authority, "{ix}");
+    }
+    let facts = report["coverage"]["route_facts"].as_array().unwrap();
+    assert_eq!(facts.len(), 3, "{facts:?}");
+    let cov = &report["coverage"];
+    assert_eq!(cov["routes"], 3);
+    assert_eq!(cov["guards"], 49);
+    assert_eq!(cov["pinned_guards"], 47);
+    assert_eq!(cov["refused_labels"], 0);
+    assert_eq!(cov["unsupported_edges"], 0);
     assert!(!repo.path().join(".qed/verify-evidence.json").exists());
 }
